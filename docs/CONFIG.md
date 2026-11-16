@@ -11,6 +11,10 @@ This is the reference for every setting a server has, and for putting a changed 
 
 `[.env.example](../.env.example)` lists the same settings as a file you can copy to `.env`, and `[src/config.ts](../src/config.ts)` is where they are read and checked.
 
+## Configuration settings not descibed here.
+
+Please see separate documents for the languages the server answers in ([LANGUAGES.md](docs/LANGUAGES.md)) and the trust plugins that score posts ([TRUST_PLUGINS.md](docs/TRUST_PLUGINS.md)).
+
 ## How settings are read
 
 Methods of supplying configuration settings:
@@ -188,6 +192,20 @@ The server only writes records. Moving them to cold storage is the bucket's own 
 | `FEED_HEAD_CACHE_MS`         | `feed.headCacheMs`          | number | `1000`  | How long each node caches a hashtag's head, its related hashtags and publisher credits (0: no cache). The index keys a compactor run replaces are kept this long and a minute. |
 | `FEED_INDEX_CACHE_SIZE`      | `feed.indexCacheSize`       | number | `500`   | Hashtags whose manifest and day indexes each node keeps in memory.                                                                                                              |
 | `FEED_AUTHOR_CACHE_SIZE`     | `feed.authorIndexCacheSize` | number | `5000`  | The same for publishers' own indexes, which following feeds read: one per user followed.                                                                                        |
+
+
+### Monetization
+
+The server can show the ads its admins keep (`/monetization/ads`), each with the word "Sponsored". Both ways of showing them are off by default, and each has its own setting. Admins can keep ads whichever is on: with both off, the server shows none.
+
+
+| Variable                | File key               | Format     | Default | What it does                                                                                                                                                                       |
+| ----------------------- | ---------------------- | ---------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MONETIZATION_FEED_ADS` | `monetization.feedAds` | true/false | `false` | `true`: each page of a hashtag feed ([`GET /feed`](API.md#get-feed)) comes with ads to show before its 3rd, 10th and 17th post. Following feeds have none.                         |
+| `MONETIZATION_POST_ADS` | `monetization.postAds` | true/false | `false` | `true`: a post ([`GET /content/:contentId`](API.md#get-contentcontentid)) comes with an ad to show at its end.                                                                     |
+
+
+The compactor needs the same two settings as the API. It publishes the ads to Redis, where feeds and posts read them, and only where one of the two is on. With both off it skips that, and reads nothing for it. The compose files and the Terraform modules' `environment` give the API and the compactor the same settings. Where you run the compactor yourself, set them for it too: with them on for the API alone, a new ad isn't shown, and one that was changed or deleted shows as it last was.
 
 
 ### Compactor

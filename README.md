@@ -15,7 +15,7 @@ Provide an open source alternative to traditional social media that allows for:
 9. Pay-as-you-go architecture that scales effortlessly.
 10. Easy infrastructure-as-code cloud deployment, setup, database migrations, and updates.
 
-Evieverse is designed with the idea that clients will enable users to connect to multiple different Evieverse servers. Content is not federated from server-to-server, but from client to servers they have subscribed to.
+Evieverse is designed with the idea that clients will enable users to connect to multiple different Evieverse instances. Content is not federated from server-to-server, but from client to servers they have subscribed to.
 
 | To                                               | Read                                           |
 | ------------------------------------------------ | ---------------------------------------------- |
@@ -75,9 +75,7 @@ Registered evelynn (56243052-…).
 Their API key, shown this once: tu_cba15064d3f1_…
 ```
 
-The id and the key are the new account's, not the admin's. Keep the key: it's shown this once. An instance takes 10 registration requests an hour from one address by default, an admin's included.
-
-To make the new account an admin, and sign the CLI in as it:
+To make the new account an admin:
 
 ```sh
 evieverse admins grant <userId>                         # as the deployment's admin
@@ -103,8 +101,6 @@ Every instance serves the same API, so anyone can register on an instance direct
 ## User registration and API keys
 
 When a user registers using the register endpoint(`POST /register`), unless pre-existing admin credentials are supplied (the CLI does this automatically), the instance responds with a challenge. Once the challenge is solved, the instance returns the user's id and an API key. The key is shown once, and an instance has no way to show it again, so it's the client's job to keep it safe. A user who still has their key can replace it (`POST /users/:userId/key`, or `evieverse key rotate`): the old key stops working at once and a new one comes back, which is what to do when a key may have leaked. A key that's lost can't be replaced. The details are in [API.md](docs/API.md#post-usersuseridkey).
-
-If the characters were wrong, the answer is a new challenge instead, so run both requests again. An instance takes up to 10 registration requests an hour from one address by default.
 
 ## Content organization and moderation
 
@@ -133,6 +129,12 @@ If removing a tag would leave a post with no tags, the post itself is removed.
 
 All of the moderation functions are available via the CLI [CLI](docs/CLI.md).
 
+## Rules
+
+The CLI (and API) allows the admin to set the server rules, which come back in the public `GET /rules` endpoint. The rules also send the modification disclosure clause as appropriate. 
+
+The details are in [API.md](docs/API.md#rules) and [CONFIG.md](docs/CONFIG.md).
+
 ## Posts
 
 A post is one of five types:
@@ -150,7 +152,7 @@ To keep bots from flooding an instance, a user who posts again within a minute f
 A post takes comments if its publisher turns them on, which they do post by post, and can change later. They're off unless the publisher says.
 
 - A comment is text, of up to 2,000 characters, an image or a video
-- Comments are stored in a tree form on each post
+- Comments are stored in a tree form on each post (users may respond to other users comments)
 - Anyone can read a post's comments, oldest or newest first, and any user can add one, up to 10 a minute by default.
 - **Comments are moderated as posts are.** Each gets a trust score from the same checks, and by the same thresholds is published, held in the moderation queue or rejected outright. Held comments wait in the same queue as held posts, for a server moderator or an admin.
 - **Comments can be reported,** and then wait in the same report queue as reported posts.
@@ -185,7 +187,7 @@ A feed is what the reader asks for. The reader chooses:
 - **An algorithm:**
   - `popular` (the default) returns the window's most liked posts first. The tags asked for take turns, and some places go to new posts nobody has liked yet, so that new posts get seen.
   - `chronological` returns the window's posts in order of time, newest first.
-- **Filters:** only content declared as created with AI, or only content that wasn't. Only posts a tag's moderators have approved, or only posts they haven't.
+- **Filters:** AI-usage content filter. There is also a filter for only posts a tag's moderators have approved, or only posts they haven't.
 
 A second kind of feed returns the posts of the users someone follows, newest first.
 
@@ -216,27 +218,9 @@ Things to know:
 - **Redis.** Without `REDIS_URL`, the feed index lives inside the process, and the server rebuilds it from the database and the content store each time it starts. To keep it across restarts, point `REDIS_URL` at a local Redis or Valkey (`docker compose up -d redis`, then `REDIS_URL=redis://127.0.0.1:6379`).
 - **Browsers.** The API in Docker (`docker-compose.server.yml`) accepts browser requests from any origin. Set `CORS_ORIGINS` (e.g. `CORS_ORIGINS=http://localhost:5173`) to allow only your frontend's.
 
-### The first admin
-
-Making an admin takes an admin, so the first one comes from whoever runs the instance:
-
-- The [Terraform modules](docs/DEPLOY.md#the-admin-account) create an admin account with every deployment, and put its API key on the machine that applies.
-- Anywhere else, the operator makes one from the command line, with the server's configuration:
-  ```bash
-  npm run build
-  npm run admin -- grant alice      # a username or a userId
-  npm run admin -- revoke alice
-  npm run admin -- list
-  ```
-  In the Docker image, that's `node dist/moderation/admin.js grant alice` (with the testbed, `docker compose -f testbed/docker-compose.yml exec app node dist/moderation/admin.js grant alice`). Like the server, it applies the database migrations first. It writes to the database directly, so it also works when no admin's key is at hand.
-
-From then on, admins make more with the CLI (`evieverse admins grant <userId>`).
-
 ### Configuration
 
-Every setting is an environment variable, and each has a default, so an instance runs with none set. [CONFIG.md](docs/CONFIG.md) lists every setting, and says how to deploy a changed one. `[.env.example](.env.example)` is the same list as a file to copy to `.env`.
-
-Two things are files in the source rather than settings: the languages the server answers in ([LANGUAGES.md](docs/LANGUAGES.md)) and the trust plugins that score posts ([TRUST_PLUGINS.md](docs/TRUST_PLUGINS.md)).
+[CONFIG.md](docs/CONFIG.md) lists every setting, and says how to deploy a changed one.
 
 ## Development
 
@@ -249,8 +233,6 @@ TEST_REDIS_URL=redis://127.0.0.1:6379 npm test
 ```
 
 Each test against Redis uses its own key prefix and deletes its keys afterwards, so any Redis or Valkey will do. Tests against Postgres or MySQL recreate the database's tables, so give them a database of their own, and add `--no-file-parallelism` to run the test files one at a time.
-
-What the server doesn't do, or doesn't do yet, is listed in [APP.md](docs/APP.md#14-known-limits).
 
 ## AI-Usage Disclosure
 

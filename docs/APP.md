@@ -981,7 +981,7 @@ It also rewrites the Redis credit of users whose `updated_at` falls since the la
 - It's all of them, every run, as there are about 100 at most: one small query, with nothing to say which ad changed. An ad that was deleted, or has ended, is simply no longer among them.
 - The key is written only if what it holds isn't what the table says, and deleted when there are no ads. The ads are read in the same order every run, so the same ads are the same bytes.
 - If it fails, the run logs it and carries on, and the next run tries again. Until then ads are shown as they were last published, each still held to its schedule.
-- The compactor needs the two settings as the API has them: one with both off publishes nothing for an API that shows ads.
+- The compactor needs the two settings as the API has them: one with both off publishes nothing for an API that shows ads. The compose files and the Terraform modules give both the same settings.
 
 **Taking a removed hashtag off content** (`untag`) comes straight after the queue is read, and before anything else reads a meta file, since it writes them. For each piece of content with a removal to apply, the compactor reads its meta file and every removal recorded for it, and writes the summary and then the meta file again without those hashtags, with `updatedAt` set to the run's start.
 - The bytes aren't touched, and the content's other hashtags' indexes aren't rebuilt: they show the summary as it now is.
