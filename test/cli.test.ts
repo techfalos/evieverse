@@ -1065,10 +1065,19 @@ describe('the CLI', () => {
     expect((await cli(['--version'])).out).toBe(`evieverse dev (build ${BUILD})`);
   });
 
-  it('reposts a post by its id, and a post on another server by its address, which it reads from that server', async () => {
+  it('reposts a post by its id, and a post on another server by its address, whose attestation it gets from that server', async () => {
     const OTHER = 'https://other.example';
-    await setup();
-    const other = await createTestContext(TARGETS[0]!, { publicBaseUrl: OTHER });
+    // The other server signs its posts. The profile's own asks it for its keys, and for nothing else.
+    const other = await createTestContext(TARGETS[0]!, { publicBaseUrl: OTHER, reposts: { signingKeys: [Buffer.alloc(32, 7).toString('base64')] } });
+    const keysAsked: string[] = [];
+    await setup({
+      keyFetcher: async (address) => {
+        keysAsked.push(address);
+        const url = new URL(address);
+        expect(url.origin).toBe(OTHER);
+        return (await other.app.inject({ method: 'GET', url: url.pathname })).json();
+      },
+    });
     try {
       const [alice, bob, carol] = await Promise.all(['alice', 'bob', 'carol'].map((name) => ctx.register(name)));
       const [dana, erin] = await Promise.all(['dana', 'erin'].map((name) => other.register(name)));
@@ -1079,6 +1088,8 @@ describe('the CLI', () => {
       const fetch: Io['fetch'] = async (input, init) => {
         const url = new URL(String(input));
         if (url.origin === SERVER) return fetchFrom(ctx.app)(input, init);
+        // A server that signs nothing, as it answers for any post.
+        if (url.origin === 'https://plain.example') return Response.json({ error: "this server doesn't sign its posts, so they can't be reposted on other servers" }, { status: 400 });
         expect(url.origin).toBe(OTHER);
         const headers = (init?.headers ?? {}) as Record<string, string>;
         asked.push([init?.method ?? 'GET', url.pathname, Object.keys(headers).sort()]);
@@ -1105,13 +1116,14 @@ describe('the CLI', () => {
       expect(await by('bob', 'repost', contentId, '--tags', 'storms')).toMatchObject({ code: 1, err: 'evieverse: you already reposted this post' });
       expect(await by('bob', 'repost', NO_USER, '--tags', 'storms')).toMatchObject({ code: 1, err: 'evieverse: content not found' });
 
-      // A post on another server: the CLI reads it there, with no key, and sends what it read to its own server.
+      // A post on another server: the CLI gets its attestation there, with no key, and sends that to its own server, which checks who signed it.
       const original = await post(other, dana!, 'Sunset over the bay #pics');
       const address = `${OTHER}/content/${original}`;
       const made = /^Reposted (\S+) under #pics: it is (\S+) here\.$/.exec(await done('bob', 'repost', address, '--tags', 'pics'));
       expect(made?.[1]).toBe(address);
       const entry = made![2]!;
-      expect(asked).toEqual([['GET', `/content/${original}`, ['accept']]]);
+      expect(asked).toEqual([['GET', `/content/${original}/attestation`, ['accept']]]);
+      expect(keysAsked).toEqual([`${OTHER}/repost/keys`]);
       expect(await read(ctx, entry)).toMatchObject({
         publisher: { userId: bob!.userId, username: 'bob' },
         mimeType: 'text/plain',
@@ -1124,6 +1136,9 @@ describe('the CLI', () => {
       expect(await by('bob', 'repost', address, '--tags', 'art')).toMatchObject({ code: 1, err: 'evieverse: you already reposted this post' });
       const data = JSON.parse(await done('alice', 'repost', address, '--tags', 'sunsets', '--json'));
       expect(data).toMatchObject({ contentId: entry, tags: ['sunsets'] });
+      // Each of them carried an attestation of its own, and the other server's keys were asked for once.
+      expect(asked.map(([, path]) => path)).toEqual(Array(4).fill(`/content/${original}/attestation`));
+      expect(keysAsked).toHaveLength(1);
 
       // The entry's own address names the original, so that is what a repost of it from elsewhere is of: here, a post on erin's own server.
       asked.length = 0;
@@ -1131,13 +1146,36 @@ describe('the CLI', () => {
       expect(asked.map(([method, path]) => `${method} ${path}`)).toContain('POST /repost');
       await other.compact();
       expect((await read(other, original)).tags).toEqual(['pics', 'art']);
+      // From a third server, it is the original's server that is asked to sign: the entry's server only says where the original is.
+      await writeProfile(home, 'frank', { server: 'https://third.example', ...erin! });
+      asked.length = 0;
+      const third = await cli(['repost', `${SERVER}/content/${entry}`, '--tags', 'art', '--profile', 'frank'], {
+        fetch: async (input, init) => {
+          if (new URL(String(input)).origin !== 'https://third.example') return fetch(input, init);
+          // What the third server is sent is what the original's server signed.
+          const sent = JSON.parse(String(init?.body)) as { origin: { attestation: string } };
+          const said = JSON.parse(Buffer.from(sent.origin.attestation.split('.')[0]!, 'base64url').toString('utf8'));
+          expect(said).toMatchObject({ url: address, publisher: { userId: dana!.userId, username: 'dana' } });
+          return Response.json({ contentId: NO_USER, tags: ['art'], origin: { url: address } }, { status: 201 });
+        },
+      });
+      expect(third).toMatchObject({ code: 0, out: `Reposted ${address} under #art: it is ${NO_USER} here.` });
+      expect(asked.map(([method, path]) => `${method} ${path}`)).toEqual([`GET /content/${original}/attestation`]);
 
       // What isn't a post's address, or has no post at it, is said before the server is asked for anything.
       const NOT_AN_ADDRESS = (address: string) => `evieverse: "${address}" is not the address of a post, such as https://other.example/content/<id>`;
       for (const bad of [`${OTHER}/posts/${original}`, `${address}/raw`, `${address}?a=b`, `${OTHER}/content/1`]) {
         expect(await by('bob', 'repost', bad, '--tags', 'pics')).toMatchObject({ code: 2, err: NOT_AN_ADDRESS(bad) });
       }
-      expect(await by('bob', 'repost', `${OTHER}/content/${NO_USER}`, '--tags', 'pics')).toMatchObject({ code: 1, err: `evieverse: there is no post at ${OTHER}/content/${NO_USER}` });
+      expect(await by('bob', 'repost', `${OTHER}/content/${NO_USER}`, '--tags', 'pics')).toMatchObject({
+        code: 1,
+        err: `evieverse: there is no post at ${OTHER}/content/${NO_USER}, or its server doesn't sign its posts for reposts`,
+      });
+      // A server that gives no attestation says why, and the CLI says that.
+      expect(await by('bob', 'repost', `https://plain.example/content/${original}`, '--tags', 'pics')).toMatchObject({
+        code: 1,
+        err: `evieverse: could not repost the post at https://plain.example/content/${original}: this server doesn't sign its posts, so they can't be reposted on other servers`,
+      });
       expect(await by('bob', 'repost', `${OTHER}/users/../content/${NO_USER}`, '--tags', 'pics')).toMatchObject({ code: 1 });
       expect(await by('bob', 'repost', contentId)).toMatchObject({ code: 2, err: 'evieverse: name the hashtags the repost gives the post: --tags "news, mumbai"' });
       expect(await by('bob', 'repost', '--tags', 'pics')).toMatchObject({ code: 2, err: 'evieverse: usage: evieverse repost <post> --tags <tags>' });

@@ -11,7 +11,7 @@ locals {
   registry    = "${var.region}-docker.pkg.dev"
   image       = var.image != "" ? var.image : "${local.registry}/${var.project_id}/${google_artifact_registry_repository.app.repository_id}/app:${substr(local.source_hash, 0, 12)}"
   url         = "https://${google_api_gateway_gateway.main.default_hostname}"
-  secret_keys = nonsensitive(toset(keys(var.secrets)))
+  secret_keys = nonsensitive(toset(keys(local.secrets)))
 
   # The route groups of src/functions/groups.ts. Only instances of the groups that use the database
   # hold connections to it: see `max_instances`.
@@ -55,19 +55,22 @@ locals {
     } } }
   })
 
-  # With a key to sign with, /store takes files of any size from the bucket; without one, files
-  # arrive through Cloud Run, which caps HTTP/1.1 request bodies at 32 MiB. The first figure is an
-  # estimate of what /store can check within `request_timeout`, not a measurement.
-  max_upload_bytes = var.direct_uploads ? "1073741824" : "33000000"
-
-  env = merge({
-    DB_DIALECT         = "postgres"
-    CONTENT_SCHEME     = "gcs"
+  # A variable that `secrets` sets is left out here: it is the secret's to set, as CONTENT_OPTIONS
+  # is for a deployment that keeps its content somewhere of its own.
+  env = { for key, value in merge({
+    DB_DIALECT     = "postgres"
+    CONTENT_SCHEME = "gcs"
+    # The bucket and no key: the services and the compactor reach it as their own service account,
+    # and sign its links as that account too (see google_service_account_iam_member.sign).
+    CONTENT_OPTIONS    = jsonencode({ bucket = google_storage_bucket.content.name })
     PUBLIC_BASE_URL    = local.url
     SUPPORT_EMAIL      = var.support_email
     COMPACT_IN_PROCESS = "false"
-    MAX_UPLOAD_BYTES   = local.max_upload_bytes
-  }, var.environment)
+    # 1 GiB. Files go straight to the bucket with a signed link, so their size is not Cloud Run's
+    # to limit: this is an estimate of what /store can check within `request_timeout`, not a
+    # measurement.
+    MAX_UPLOAD_BYTES = "1073741824"
+  }, var.environment) : key => value if !contains(local.secret_keys, key) }
 
   # Every instance keeps up to this many database connections. See `max_instances`.
   function_env = merge({
@@ -85,10 +88,14 @@ locals {
   settings         = merge(var.environment, var.secrets)
   optional_plugins = regexall("[^\\s,]+", lookup(local.settings, "TRUST_OPTIONAL_PLUGINS", ""))
 
+  # `secrets`, and before them the secret settings this stack makes where the deployment sets none
+  # of that name itself (see random_bytes.repost_signing). They are kept and read as `secrets` are.
+  generated_names = [for name in ["REPOSTS_SIGNING_KEYS"] : name if !nonsensitive(contains(keys(local.settings), name))]
+  secrets         = merge({ for name in local.generated_names : name => random_bytes.repost_signing.base64 }, var.secrets)
+
   builtin_secrets = {
-    DATABASE_URL    = google_secret_manager_secret.db_url.secret_id
-    REDIS_URL       = google_secret_manager_secret.redis_url.secret_id
-    CONTENT_OPTIONS = google_secret_manager_secret.content_options.secret_id
+    DATABASE_URL = google_secret_manager_secret.db_url.secret_id
+    REDIS_URL    = google_secret_manager_secret.redis_url.secret_id
   }
   secret_env = merge(local.builtin_secrets, { for key in local.secret_keys : key => google_secret_manager_secret.extra[key].secret_id })
 
@@ -111,6 +118,7 @@ resource "google_project_service" "apis" {
     "artifactregistry.googleapis.com",
     "compute.googleapis.com",
     "iam.googleapis.com",
+    "iamcredentials.googleapis.com",
     "redis.googleapis.com",
     "run.googleapis.com",
     "secretmanager.googleapis.com",
@@ -211,15 +219,30 @@ resource "google_storage_bucket" "content" {
       type = "Delete"
     }
   }
+
+  # A request stages a post's file, or a comment's, under staged/, and the compactor's next run
+  # moves it to where it is kept and removes it. One left behind (a request that failed, a run
+  # that stopped) goes after a week: long enough that no write still waiting to be applied loses
+  # its file while the compactor is down for a while.
+  lifecycle_rule {
+    condition {
+      age            = 7
+      matches_prefix = ["staged/"]
+    }
+    action {
+      type = "Delete"
+    }
+  }
 }
 
 # ---------------------------------------------------------------- audit log
 
 # Every request that adds, updates or deletes something is written here, whole and gzipped, one
-# object each, as the response is sent (src/audit.ts); reads are not. The objects move to the
-# Archive storage class after `audit_archive_after_days`, which is the cold storage they end in. The
-# services can create objects here and do nothing else with it: not read, overwrite or delete one.
-# Cloud Logging, which keeps what the services print, has a line for each, naming its object.
+# object each, as the response is sent (src/audit.ts); reads are not. They stay in the Standard
+# storage class: `audit_archive_after_days` moves the ones over 128 KB to the Archive class, and is
+# off by default (see the lifecycle rule below). The services can create objects here and do
+# nothing else with it: not read, overwrite or delete one. Cloud Logging, which keeps what the
+# services print, has a line for each, naming its object.
 resource "google_storage_bucket" "audit" {
   name                        = "${var.project_id}-${var.name}-audit"
   location                    = var.region
@@ -227,13 +250,20 @@ resource "google_storage_bucket" "audit" {
   public_access_prevention    = "enforced"
   force_destroy               = !var.deletion_protection
 
-  lifecycle_rule {
-    condition {
-      age = var.audit_archive_after_days
-    }
-    action {
-      type          = "SetStorageClass"
-      storage_class = "ARCHIVE"
+  # Off by default, and for records of more than 128 KB only: each object moved is billed as a
+  # Class A operation of the Archive class ($0.05 per 1,000), which for a record of about 1 KB,
+  # as nearly all are, is more than keeping it in Standard for decades.
+  dynamic "lifecycle_rule" {
+    for_each = var.audit_archive_after_days == null ? [] : [var.audit_archive_after_days]
+    content {
+      condition {
+        age              = lifecycle_rule.value
+        size_above_bytes = 131072
+      }
+      action {
+        type          = "SetStorageClass"
+        storage_class = "ARCHIVE"
+      }
     }
   }
 }
@@ -242,30 +272,6 @@ resource "google_storage_bucket_iam_member" "audit" {
   bucket = google_storage_bucket.audit.name
   role   = "roles/storage.objectCreator"
   member = "serviceAccount:${google_service_account.app.email}"
-}
-
-# Links to the bucket are signed with a private key, and Cloud Run's own credentials have none.
-# This account can do nothing but read and write the bucket's objects, and its key is what the
-# functions use for the bucket, so they can sign upload and download links. The key does not
-# expire: it is kept in Secret Manager and in the Terraform state. `direct_uploads = false`
-# leaves the key out, and POST /uploads answers 501.
-resource "google_service_account" "storage" {
-  count        = var.direct_uploads ? 1 : 0
-  account_id   = "${var.name}-storage"
-  display_name = "Evieverse content bucket (signs upload links)"
-  depends_on   = [google_project_service.apis]
-}
-
-resource "google_storage_bucket_iam_member" "storage" {
-  count  = var.direct_uploads ? 1 : 0
-  bucket = google_storage_bucket.content.name
-  role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${google_service_account.storage[0].email}"
-}
-
-resource "google_service_account_key" "storage" {
-  count              = var.direct_uploads ? 1 : 0
-  service_account_id = google_service_account.storage[0].name
 }
 
 resource "random_password" "db" {
@@ -329,21 +335,18 @@ resource "google_secret_manager_secret_version" "redis_url" {
   secret_data = "redis://:${google_redis_instance.main.auth_string}@${google_redis_instance.main.host}:${google_redis_instance.main.port}"
 }
 
-resource "google_secret_manager_secret" "content_options" {
-  secret_id = "${var.name}-content-options"
-  replication {
-    auto {}
-  }
-  depends_on = [google_project_service.apis]
-}
-
-resource "google_secret_manager_secret_version" "content_options" {
-  secret = google_secret_manager_secret.content_options.id
-  secret_data = jsonencode(merge(
-    { bucket = google_storage_bucket.content.name },
-    # OpenDAL takes the key as base64 of its JSON, which is how the provider returns it.
-    var.direct_uploads ? { credential = google_service_account_key.storage[0].private_key } : {},
-  ))
+# The key the server signs the attestations of its posts with, which is what lets them be reposted
+# on other servers (src/attestation.ts): 32 random bytes, as REPOSTS_SIGNING_KEYS takes them. The
+# services sign with it, and publish its public half (GET /repost/keys). It is kept in Secret
+# Manager with `secrets`, so the compactor and the jobs are given it too, and use it for nothing.
+# To replace it:
+#   terraform apply -replace=random_bytes.repost_signing
+# Nothing of the old key has to be kept: an attestation is good for ten minutes, and another server
+# asks for this one's keys again when it meets a key it doesn't know. A deployment that sets
+# REPOSTS_SIGNING_KEYS itself is given none: in `secrets`, to sign with its own keys, or as "" in
+# `environment`, to sign nothing, so that its posts are reposted only here.
+resource "random_bytes" "repost_signing" {
+  length = 32
 }
 
 resource "google_secret_manager_secret" "extra" {
@@ -358,7 +361,7 @@ resource "google_secret_manager_secret" "extra" {
 resource "google_secret_manager_secret_version" "extra" {
   for_each    = local.secret_keys
   secret      = google_secret_manager_secret.extra[each.value].id
-  secret_data = var.secrets[each.value]
+  secret_data = local.secrets[each.value]
 
   # A new value is a new version, and the one before it is destroyed only once every service reads
   # the new one: the revisions that are running read theirs by its number (local.secret_versions),
@@ -381,6 +384,19 @@ resource "google_storage_bucket_iam_member" "content" {
   member = "serviceAccount:${google_service_account.app.email}"
 }
 
+# Links to the content bucket (the one POST /uploads gives to send a file with, and the ones
+# files are read at) are signed with a service account's private key, and Cloud Run gives a
+# service none. So the account signs as itself through IAM, with a key Google keeps and rotates
+# (src/storage/gcsSigner.ts): this lets it, and lets nothing else sign as it. There is no key of
+# any account to keep, in Secret Manager or in the Terraform state, which is also what an
+# organisation that forbids service account keys (iam.disableServiceAccountKeyCreation) needs.
+resource "google_service_account_iam_member" "sign" {
+  service_account_id = google_service_account.app.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:${google_service_account.app.email}"
+  depends_on         = [google_project_service.apis]
+}
+
 resource "google_project_iam_member" "sql" {
   project = var.project_id
   role    = "roles/cloudsql.client"
@@ -400,12 +416,11 @@ locals {
     terraform_data.image,
     google_project_iam_member.sql,
     google_storage_bucket_iam_member.content,
-    google_storage_bucket_iam_member.storage,
     google_storage_bucket_iam_member.audit,
+    google_service_account_iam_member.sign,
     google_secret_manager_secret_iam_member.app,
     google_secret_manager_secret_version.db_url,
     google_secret_manager_secret_version.redis_url,
-    google_secret_manager_secret_version.content_options,
     google_secret_manager_secret_version.extra,
   ]
 }

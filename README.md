@@ -15,7 +15,7 @@ Provide an open source alternative to traditional social media that allows for:
 9. Pay-as-you-go architecture that scales effortlessly.
 10. Easy infrastructure-as-code cloud deployment, setup, database migrations, and updates.
 
-Evieverse is designed with the idea that clients will enable users to connect to multiple different Evieverse instances. Content is not federated from server-to-server, but from client to servers they have subscribed to.
+Evieverse is designed with the idea that clients will enable users to connect to multiple different Evieverse instances. Content is not federated from server-to-server, but from client to servers they have subscribed to. The one thing an instance asks another for is the public key that instance signs its posts with, to check a repost.
 
 
 | To                                               | Read                                           |
@@ -155,7 +155,8 @@ Any content can be reposted to this server or to another server with additional 
 - A user cannot repost their own posts (but can change the tags by editing the post)
 - A repost still goes through tag moderation for its new tags
 - A repost to another server contains the URL to access the content, but it still lives on this instance of Evieverse
-- An instance can turn reposts off, or only those of posts on other instances (`REPOSTS`, `REPOSTS_REMOTE`).
+- A repost to another server is signed by this instance, and the other server checks the signature before it takes the repost. One that isn't signed by the post's own instance is refused, so nobody can repost a post that isn't there, or under someone else's name, or with other words.
+- An instance can turn reposts off, or only those of posts on other instances (`REPOSTS`, `REPOSTS_REMOTE`). For its posts to be reposted elsewhere it needs a signing key (`REPOSTS_SIGNING_KEYS`), which the Terraform modules make.
 
 ## Comments
 

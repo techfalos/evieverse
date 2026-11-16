@@ -1,11 +1,13 @@
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LightMyRequestResponse } from 'fastify';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { attest, readAttestation, signedBy, signingKeys, type Attestable } from '../src/attestation.js';
+import type { PublishedKey, SigningKey } from '../src/attestation.types.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import type { TrustPlugin } from '../src/moderation/trust.types.js';
 import { authorIndex } from '../src/tagfeed/layout.js';
-import { DAY, HOUR, utcDay } from '../src/time.js';
+import { DAY, HOUR, MINUTE, utcDay } from '../src/time.js';
 import { as, createTestContext, multipart, PNG, queued, requests, TARGETS, type FeedItem, type TestContext, type User } from './helpers.js';
 
 const NO_CONTENT = '00000000-0000-4000-8000-000000000000';
@@ -13,6 +15,19 @@ const OTHER = 'https://other.example';
 const ORIGINAL = '3f2b8c1e-9a4d-4e6f-8b7a-1c2d3e4f5a6b';
 const DANA = { userId: '11111111-1111-4111-8111-111111111111', username: 'Dana of the North' };
 
+/** A signing key as a setting writes it: 32 bytes, here all the same one. */
+const seed = (byte: number) => Buffer.alloc(32, byte).toString('base64');
+/** The key the other server signs with, the one it changes to, one that is no server's, and the ones this server is given. */
+const [KEY, NEXT_KEY, STRAY_KEY] = signingKeys([seed(1), seed(2), seed(9)]) as [SigningKey, SigningKey, SigningKey];
+const OWN_SEEDS = [seed(3), seed(4)];
+/** What a server answers GET /repost/keys with. */
+const published = (...keys: PublishedKey[]) => ({ keys: keys.map(({ id, publicKey }) => ({ id, publicKey, algorithm: 'ed25519' })) });
+const KEYS = `${OTHER}/repost/keys`;
+
+const INVALID = "origin.attestation must be the attestation of a post, as the post's own server gives it at GET /content/<id>/attestation";
+const EXPIRED = "the attestation is more than 10 minutes old, or from a clock that runs ahead of this server's: get a new one from the post's own server";
+const UNSIGNED = "the attestation isn't signed with a key of the post's own server, so the post wasn't reposted";
+const NO_KEYS = (server: string) => `${server} didn't give the keys it signs with, so the attestation can't be checked: try again in a minute`;
 const NO_TAGS_LEFT = "none of the repost's hashtags is one the post can have and doesn't have already, so it wasn't reposted";
 const ALREADY = 'you already reposted this post';
 
@@ -20,6 +35,20 @@ for (const target of TARGETS) {
   describe(`reposts (${target.name})`, () => {
     let ctx: TestContext;
     afterEach(() => ctx.close());
+
+    /** What the other servers answer when they are asked for their keys, by the address asked. One that isn't here gives no answer. */
+    let servers: Record<string, unknown>;
+    /** The addresses the server asked, in order. */
+    let asked: string[];
+    beforeEach(() => {
+      servers = { [KEYS]: published(KEY) };
+      asked = [];
+    });
+    const keyFetcher = async (address: string) => {
+      asked.push(address);
+      if (!(address in servers)) throw new Error('no answer');
+      return servers[address];
+    };
 
     const { post, store, storeText, like, feed, feedItems: feedOf } = requests(() => ctx);
     const req = (u: User | null, method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: Record<string, unknown>) =>
@@ -60,13 +89,12 @@ for (const target of TARGETS) {
         .filter((f) => f.isFile() && f.name === `${contentId}.br`)
         .map((f) => Number(f.parentPath.split('/').pop()))
         .sort((a, b) => a - b);
-    /** What a client sends of a post on another server: its address, who published it there, and its summary. */
-    const origin = (o: Record<string, unknown> = {}) => ({
-      url: `${OTHER}/content/${ORIGINAL}`,
-      publisher: DANA,
-      preview: { kind: 'text', text: 'Flooding closes the coast road.' },
-      ...o,
-    });
+    /** The attestation of a post on another server: its address, who published it there, and its summary, signed by that server just now, unless said otherwise. */
+    const attested = (o: Record<string, unknown> = {}, { key = KEY, at = ctx.clock.now }: { key?: SigningKey; at?: number } = {}) =>
+      attest(key, { url: `${OTHER}/content/${ORIGINAL}`, publisher: DANA, aiGenerated: false, preview: { kind: 'text', text: 'Flooding closes the coast road.' }, ...o } as Attestable, at);
+    /** What a client sends of a post on another server: the attestation that server gave it. */
+    const origin = (o: Record<string, unknown> = {}, signing: { key?: SigningKey; at?: number } = {}) => ({ attestation: attested(o, signing) });
+    const other = (n: number) => `${OTHER}/content/${ORIGINAL.slice(0, -1)}${n}`;
 
     it('gives a post more hashtags, under which it is a new post: placed at the repost, with the likes since', async () => {
       ctx = await createTestContext(target);
@@ -454,14 +482,15 @@ for (const target of TARGETS) {
     });
 
     it('keeps a post on another server as a link to it with its summary: one entry, which is then reposted like any post', async () => {
-      ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com' });
+      ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com', reposts: { signingKeys: OWN_SEEDS }, keyFetcher });
       const [alice, bob, carol, erin] = await Promise.all(['alice', 'bob', 'carol', 'erin'].map((name) => ctx.register(name)));
       await follow(erin!, bob!);
       const address = `${OTHER}/content/${ORIGINAL}`;
-      const sent = origin({ mimeType: 'image/PNG', aiGenerated: true, preview: { kind: 'image', url: 'https://elsewhere.example/ignored', text: 'Sunset over the bay' } });
+      // An attestation is good for minutes, so each repost carries one of its own.
+      const sent = () => origin({ mimeType: 'image/PNG', aiGenerated: true, preview: { kind: 'image', url: 'https://elsewhere.example/ignored', text: 'Sunset over the bay' } });
 
       const createdAt = ctx.clock.now;
-      const res = ok(await repost(bob!, { origin: sent, tags: ['Pics'] }), 201);
+      const res = ok(await repost(bob!, { origin: sent(), tags: ['Pics'] }), 201);
       const { contentId } = res;
       const stored = { url: address, publisher: DANA };
       // The image is the original's: the link is to the server that has it, not to this one.
@@ -496,36 +525,42 @@ for (const target of TARGETS) {
       expect((await content(contentId)).reposts).toEqual([{ by: { userId: carol!.userId, username: 'carol' }, tags: ['art'], at: iso(repostedAt) }]);
       // By its id too. Whoever made the entry reposted the original by making it.
       expect(ok(await repost(alice!, { contentId, tags: 'sunsets' }), 201).tags).toEqual(['sunsets']);
-      expect(refused(await repost(bob!, { origin: sent, tags: 'sunsets2' }))).toEqual([409, ALREADY]);
+      expect(refused(await repost(bob!, { origin: sent(), tags: 'sunsets2' }))).toEqual([409, ALREADY]);
       expect(refused(await repost(bob!, { contentId, tags: 'sunsets2' }))).toEqual([409, ALREADY]);
-      expect(refused(await repost(carol!, { origin: sent, tags: 'sunsets2' }))).toEqual([409, ALREADY]);
+      expect(refused(await repost(carol!, { origin: sent(), tags: 'sunsets2' }))).toEqual([409, ALREADY]);
 
       // It has nothing to update: it is a link. Its owner deletes it like any post, and the original can then be reposted anew.
       const update = await store(bob!, { contentId, type: 'image', text: 'Mine now', tags: ['pics'], content: PNG.toString('base64'), contentEncoding: 'base64', filename: 'pixel.png' });
       expect(refused(update)[0]).toBe(400);
       expect(refused(update)[1]).toMatch(/^a repost of a post on another server can't be updated/);
       ok(await req(bob!, 'DELETE', `/content/${contentId}`), 202);
-      expect(refused(await repost(alice!, { origin: sent, tags: 'pics' }))).toEqual([
+      expect(refused(await repost(alice!, { origin: sent(), tags: 'pics' }))).toEqual([
         409,
         "this server's entry for the original isn't published: it waits in the moderation queue, or is being deleted",
       ]);
       expect((await ctx.compact()).deleted).toEqual([contentId]);
       expect(await feedOf('art')).toEqual([]);
-      const anew = ok(await repost(alice!, { origin: sent, tags: 'pics' }), 201);
+      const anew = ok(await repost(alice!, { origin: sent(), tags: 'pics' }), 201);
       expect(anew.contentId).not.toBe(contentId);
 
+      // The other server was asked for its keys once, for all of these.
+      expect(asked).toEqual([KEYS]);
+
       // An address that is this server's own names a post of its own, and is reposted as one: nothing is made.
+      // Its attestation is this server's, checked with this server's keys, and nobody else's key signs for it.
       const own = await post(alice!, 'Written here #news');
-      const here = ok(await repost(carol!, { origin: origin({ url: `https://api.example.com/content/${own}` }), tags: 'local' }), 201);
+      const mine = ok(await req(null, 'GET', `/content/${own}/attestation`));
+      expect(refused(await repost(carol!, { origin: origin({ url: `https://api.example.com/content/${own}` }), tags: 'local' }))).toEqual([400, UNSIGNED]);
+      const here = ok(await repost(carol!, { origin: mine, tags: 'local' }), 201);
       expect(here).toMatchObject({ contentId: own, tags: ['local'] });
       expect(here).not.toHaveProperty('origin');
-      expect(refused(await repost(alice!, { origin: origin({ url: `https://api.example.com/content/${own}` }), tags: 'local' }))[0]).toBe(400);
+      expect(refused(await repost(alice!, { origin: mine, tags: 'local' }))[0]).toBe(400);
+      expect(asked).toEqual([KEYS]);
     });
 
     it('takes a text or a link from another server too, cut to its own previews, and nothing that is not the summary of a post', async () => {
-      ctx = await createTestContext(target, { feed: { previewWords: 5 }, postTypes: { video: false } });
+      ctx = await createTestContext(target, { feed: { previewWords: 5 }, postTypes: { video: false }, keyFetcher });
       const [bob] = await Promise.all(['bob'].map((name) => ctx.register(name)));
-      const other = (n: number) => `${OTHER}/content/${ORIGINAL.slice(0, -1)}${n}`;
 
       const text = ok(await repost(bob!, { origin: origin({ url: other(1), preview: { kind: 'text', text: 'One two three four five six seven' } }), tags: 'news' }), 201);
       expect(text.preview.kind).toBe('text');
@@ -539,27 +574,32 @@ for (const target of TARGETS) {
       expect((await content(text.contentId)).mimeType).toBe('text/plain');
       expect((await content(link.contentId)).mimeType).toBe('text/uri-list');
 
-      // What is refused: an address that isn't a post's, a publisher that isn't one, a summary that isn't of what it says it is.
+      // What is refused, signed or not: an address that isn't a post's, a publisher that isn't one, a summary that isn't of what it says it is.
       const invalid = async (o: Record<string, unknown>) => {
         const res = await repost(bob!, { origin: origin({ url: other(3), ...o }), tags: 'news' });
         expect(res.statusCode, res.body).toBe(400);
         return res.json();
       };
-      const ADDRESS = "origin.url must be the address of a post on its own server, with nothing after its id: https://other.example/content/<id>";
+      /** Refused as no attestation of a post, for what it says at `path`. */
+      const unreadable = async (o: Record<string, unknown>, path: string) => {
+        const { error, details } = await invalid(o);
+        expect([error, details[0].path.join('.')], JSON.stringify(o)).toEqual([INVALID, path]);
+      };
       for (const url of [`${OTHER}/content/${ORIGINAL}/raw`, `${OTHER}/content/${ORIGINAL}?a=b`, `${OTHER}/content/${ORIGINAL}#top`, `${OTHER}/posts/${ORIGINAL}`, `https://user:pass@other.example/content/${ORIGINAL}`]) {
-        expect((await invalid({ url })).details[0].message, url).toBe(ADDRESS);
+        await unreadable({ url }, 'url');
       }
-      for (const url of ['ftp://other.example/content/x', 'not a url', `javascript:alert(1)//content/${ORIGINAL}`]) await invalid({ url });
-      expect((await invalid({ publisher: { userId: DANA.userId, username: 'Dana\nof the North' } })).details[0].message).toBe('origin.publisher.username must be a single line of at most 64 characters');
-      await invalid({ publisher: { userId: 'dana', username: 'Dana' } });
-      await invalid({ publisher: { userId: DANA.userId, username: '' } });
-      await invalid({ preview: { kind: 'text', text: '  ' } });
-      await invalid({ preview: { kind: 'link', url: 'javascript:alert(1)' } });
-      await invalid({ preview: { kind: 'poll', text: 'Yes or no?' } });
-      await invalid({ mimeType: 'image/png\nx', preview: { kind: 'image' } });
+      for (const url of ['ftp://other.example/content/x', 'not a url', `javascript:alert(1)//content/${ORIGINAL}`]) await unreadable({ url }, 'url');
+      await unreadable({ publisher: { userId: DANA.userId, username: 'Dana\nof the North' } }, 'publisher.username');
+      await unreadable({ publisher: { userId: 'dana', username: 'Dana' } }, 'publisher.userId');
+      await unreadable({ publisher: { userId: DANA.userId, username: '' } }, 'publisher.username');
+      await unreadable({ preview: { kind: 'text', text: '  ' } }, 'preview.text');
+      await unreadable({ preview: { kind: 'link', url: 'javascript:alert(1)' } }, 'preview.url');
+      await unreadable({ preview: { kind: 'poll', text: 'Yes or no?' } }, 'preview.kind');
+      await unreadable({ mimeType: 'image/png\nx', preview: { kind: 'image' } }, 'mimeType');
+      await unreadable({ aiGenerated: 'no' }, 'aiGenerated');
       // An image, video or audio says what file it is, and it is that kind of file.
-      expect((await invalid({ preview: { kind: 'image' } })).error).toBe('the original is image, so origin.mimeType must be its image/* content type');
-      expect((await invalid({ mimeType: 'video/mp4', preview: { kind: 'audio' } })).error).toBe('the original is audio, so origin.mimeType must be its audio/* content type');
+      expect((await invalid({ preview: { kind: 'image' } })).error).toBe('the original is image, so its attestation must give its image/* content type');
+      expect((await invalid({ mimeType: 'video/mp4', preview: { kind: 'audio' } })).error).toBe('the original is audio, so its attestation must give its audio/* content type');
       // A type of post the server doesn't take, it doesn't take from another server either.
       expect((await invalid({ mimeType: 'video/mp4', preview: { kind: 'video' } })).error).toBe("this server doesn't take video posts: the types it takes are image, audio, text, link");
       expect(await ctx.db.selectFrom('content').select('id').execute()).toHaveLength(2);
@@ -574,12 +614,11 @@ for (const target of TARGETS) {
           return assessed.texts.some((t) => t.includes('scam')) ? { set: 50 } : assessed.texts.some((t) => t.includes('malware')) ? { set: 0 } : null;
         },
       };
-      ctx = await createTestContext(target, { trustPlugins: [wary] });
+      ctx = await createTestContext(target, { trustPlugins: [wary], keyFetcher });
       const root = await admin();
       const [bob, carol] = await Promise.all(['bob', 'carol'].map((name) => ctx.register(name)));
       ok(await req(root, 'POST', '/tags/health/blocked-words', { words: ['pills'] }));
       ok(await req(root, 'PUT', `/tags/deals/muted/${bob!.userId}`), 201);
-      const other = (n: number) => `${OTHER}/content/${ORIGINAL.slice(0, -1)}${n}`;
 
       // The trust plugins read its summary, where it is from and who by, and its hashtags' own rules apply.
       const fine = ok(await repost(bob!, { origin: origin({ url: other(1), preview: { kind: 'text', text: 'Cheap **pills** today' } }), tags: ['news', 'health', 'deals'] }), 201);
@@ -614,6 +653,204 @@ for (const target of TARGETS) {
       const scored = seen.length;
       ok(await repost(carol!, { contentId: fine.contentId, tags: 'local' }), 201);
       expect(seen).toHaveLength(scored);
+    });
+
+    it("takes a post on another server on that server's signature, and on nothing else", async () => {
+      ctx = await createTestContext(target, { keyFetcher });
+      const [bob, carol] = await Promise.all(['bob', 'carol'].map((name) => ctx.register(name)));
+      const entries = async () => (await ctx.db.selectFrom('content').select('id').execute()).length;
+      const send = async (user: User, attestation: unknown, tags = 'news') => refused(await repost(user, { origin: { attestation }, tags }));
+
+      // What a client says of a post itself is not what is asked for: it was all there was, once.
+      const said = { url: `${OTHER}/content/${ORIGINAL}`, publisher: DANA, preview: { kind: 'text', text: 'Flooding closes the coast road.' } };
+      expect((await repost(bob!, { origin: said, tags: 'news' })).statusCode).toBe(400);
+      expect((await repost(bob!, { origin: { ...said, attestation: '' }, tags: 'news' })).statusCode).toBe(400);
+      // Nor is what isn't written as an attestation, or says nothing as JSON.
+      const signature = attested().split('.')[1]!;
+      for (const attestation of ['abc', 'a.b', attested().split('.')[0]!, `${attested()}.x`, `${Buffer.from('not json').toString('base64url')}.${signature}`]) {
+        expect(await send(bob!, attestation), attestation).toEqual([400, INVALID]);
+      }
+      expect(asked).toEqual([]);
+
+      // Signed by somebody else, under the id of the server's key: the id is what is claimed, the signature what is checked.
+      const forger = { ...NEXT_KEY, id: KEY.id };
+      expect(await send(bob!, attested({}, { key: forger }))).toEqual([400, UNSIGNED]);
+      // The server's signature, moved to a payload it didn't sign.
+      const changed = attested({ publisher: { ...DANA, username: 'Mallory' } }, { key: forger }).split('.')[0]!;
+      expect(await send(bob!, `${changed}.${signature}`)).toEqual([400, UNSIGNED]);
+      // Signed with a key the server never had.
+      expect(await send(bob!, attested({}, { key: STRAY_KEY }))).toEqual([400, UNSIGNED]);
+      // One server's key signs nothing for another server's address.
+      servers['https://elsewhere.example/repost/keys'] = published(NEXT_KEY);
+      expect(await send(bob!, attested({ url: `https://elsewhere.example/content/${ORIGINAL}` }))).toEqual([400, UNSIGNED]);
+
+      // It is taken for ten minutes from when it was signed, and not from a clock far ahead.
+      const now = ctx.clock.now;
+      expect(await send(bob!, attested({}, { at: now - 10 * MINUTE - 1 }))).toEqual([400, EXPIRED]);
+      expect(await send(bob!, attested({}, { at: now + MINUTE + 1 }))).toEqual([400, EXPIRED]);
+      // Keys are asked for over https, so a post is reposted from an https address.
+      expect(await send(bob!, attested({ url: `http://other.example/content/${ORIGINAL}` }))).toEqual([400, 'a post on another server is reposted from an https address']);
+      expect(await entries()).toBe(0);
+
+      // What the server did sign, in time, is taken.
+      const made = ok(await repost(bob!, { origin: origin({}, { at: now - 10 * MINUTE }), tags: 'news' }), 201);
+      expect(made.origin).toEqual({ url: `${OTHER}/content/${ORIGINAL}`, publisher: DANA });
+      expect(ok(await repost(carol!, { origin: origin({ url: other(1) }, { at: now + MINUTE }), tags: 'news' }), 201).origin.url).toBe(other(1));
+
+      // An original the server has an entry of is no easier to forge a repost of: the signature is checked all the same.
+      expect(await send(carol!, attested({}, { key: forger }), 'weather')).toEqual([400, UNSIGNED]);
+      expect(await places(made.contentId)).toEqual([]);
+      expect(ok(await repost(carol!, { origin: origin(), tags: 'weather' }), 201)).toMatchObject({ contentId: made.contentId, tags: ['weather'] });
+      expect(await entries()).toBe(2);
+    });
+
+    it("keeps a server's keys, and asks again for one it doesn't know, at most once a minute", async () => {
+      ctx = await createTestContext(target, { keyFetcher });
+      const [bob, carol] = await Promise.all(['bob', 'carol'].map((name) => ctx.register(name)));
+      const from = (n: number, key: SigningKey, user = bob!) => repost(user, { origin: origin({ url: other(n) }, { key }), tags: 'news' });
+
+      ok(await from(1, KEY), 201);
+      ok(await from(2, KEY, carol!), 201);
+      expect(asked).toEqual([KEYS]);
+
+      // The server signs with a new key, and still publishes the old one. The new one isn't known here, so it is asked.
+      // Not within a minute of the last time, though: until then the key is taken for nobody's.
+      servers[KEYS] = published(NEXT_KEY, KEY);
+      expect(refused(await from(3, NEXT_KEY))).toEqual([400, UNSIGNED]);
+      expect(asked).toEqual([KEYS]);
+      ctx.clock.now += MINUTE;
+      ok(await from(3, NEXT_KEY), 201);
+      expect(asked).toEqual([KEYS, KEYS]);
+      // A key that is nobody's has the server asked again, but not twice in a minute.
+      expect(refused(await from(4, STRAY_KEY))).toEqual([400, UNSIGNED]);
+      expect(refused(await from(4, STRAY_KEY, carol!))).toEqual([400, UNSIGNED]);
+      expect(asked).toHaveLength(2);
+      ctx.clock.now += MINUTE;
+      expect(refused(await from(4, STRAY_KEY))).toEqual([400, UNSIGNED]);
+      expect(asked).toHaveLength(3);
+
+      // The server stops answering. The keys it gave are still its keys, for as long as they were kept for.
+      delete servers[KEYS];
+      ctx.clock.now += MINUTE;
+      expect(refused(await from(4, STRAY_KEY))).toEqual([400, UNSIGNED]);
+      expect(asked).toHaveLength(4);
+      ok(await from(4, KEY), 201);
+      expect(asked).toHaveLength(4);
+      // Three hours after it last gave them, they are not: until it answers, nothing from it is taken.
+      ctx.clock.now += 3 * HOUR;
+      expect(refused(await from(5, KEY))).toEqual([502, NO_KEYS(OTHER)]);
+      // It answers again, without the key it took out: what that key signs is no longer taken.
+      servers[KEYS] = published(NEXT_KEY);
+      expect(refused(await from(5, KEY))).toEqual([502, NO_KEYS(OTHER)]);
+      ctx.clock.now += MINUTE;
+      expect(refused(await from(5, KEY))).toEqual([400, UNSIGNED]);
+      ok(await from(5, NEXT_KEY), 201);
+
+      // A server that gives no keys isn't asked again for a minute, whoever reposts from it. Nothing says why it gave none.
+      const before = asked.length;
+      const gone = (user: User) => repost(user, { origin: origin({ url: `https://gone.example/content/${ORIGINAL}` }), tags: 'news' });
+      expect(refused(await gone(bob!))).toEqual([502, NO_KEYS('https://gone.example')]);
+      expect(refused(await gone(carol!))).toEqual([502, NO_KEYS('https://gone.example')]);
+      expect(asked.slice(before)).toEqual(['https://gone.example/repost/keys']);
+      // One that answers with something else gave none either, and one that signs nothing signed nothing.
+      servers['https://odd.example/repost/keys'] = { keys: 'none' };
+      servers['https://plain.example/repost/keys'] = { keys: [] };
+      servers['https://sly.example/repost/keys'] = { keys: [{ id: KEY.id, algorithm: 'ed25519', publicKey: NEXT_KEY.publicKey }, { id: KEY.id, publicKey: 'short' }, null] };
+      expect(refused(await repost(bob!, { origin: origin({ url: `https://odd.example/content/${ORIGINAL}` }), tags: 'news' }))).toEqual([502, NO_KEYS('https://odd.example')]);
+      expect(refused(await repost(bob!, { origin: origin({ url: `https://plain.example/content/${ORIGINAL}` }), tags: 'news' }))).toEqual([400, UNSIGNED]);
+      // A key's id is worked out from the key: a server doesn't publish its key under another's id.
+      expect(refused(await repost(bob!, { origin: origin({ url: `https://sly.example/content/${ORIGINAL}` }), tags: 'news' }))).toEqual([400, UNSIGNED]);
+      ok(await repost(bob!, { origin: origin({ url: `https://sly.example/content/${ORIGINAL}` }, { key: NEXT_KEY }), tags: 'news' }), 201);
+    });
+
+    it('limits how many servers a user has it ask in a minute', async () => {
+      ctx = await createTestContext(target, { keyFetcher });
+      const [bob, carol] = await Promise.all(['bob', 'carol'].map((name) => ctx.register(name)));
+      const from = (user: User, server: string, tags = 'news') => repost(user, { origin: origin({ url: `https://${server}/content/${ORIGINAL}` }), tags });
+      ok(await from(carol!, 'other.example'), 201);
+
+      for (let n = 0; n < 10; n++) expect(refused(await from(bob!, `nowhere${n}.example`))).toEqual([502, NO_KEYS(`https://nowhere${n}.example`)]);
+      const limited = await from(bob!, 'nowhere10.example');
+      expect(limited.statusCode, limited.body).toBe(429);
+      expect(limited.json().error).toMatch(/^too many reposts from servers this one had to ask for their keys; try again in \d+ seconds?$/);
+      expect(Number(limited.headers['retry-after'])).toBeGreaterThan(0);
+      expect(asked).toHaveLength(11);
+      // What needs nobody asked is not limited: a server whose keys are here, and one that was just asked.
+      ok(await from(bob!, 'other.example', 'weather'), 201);
+      expect(refused(await from(bob!, 'nowhere3.example'))).toEqual([502, NO_KEYS('https://nowhere3.example')]);
+      // The limit is each user's own.
+      expect(refused(await from(carol!, 'nowhere10.example'))).toEqual([502, NO_KEYS('https://nowhere10.example')]);
+      expect(asked).toHaveLength(12);
+    });
+
+    it('attests its own published posts, signed with its first key, and publishes its keys', async () => {
+      const wary: TrustPlugin = { name: 'wary', assess: (assessed) => (assessed.texts.some((t) => t.includes('scam')) ? { set: 50 } : null) };
+      ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com/', reposts: { signingKeys: OWN_SEEDS }, trustPlugins: [wary], keyFetcher });
+      const [alice, bob] = await Promise.all(['alice', 'bob'].map((name) => ctx.register(name)));
+      const [first, second] = signingKeys(OWN_SEEDS) as [SigningKey, SigningKey];
+      const attestation = (contentId: string, as: User | null = null) => req(as, 'GET', `/content/${contentId}/attestation`);
+
+      // The keys it publishes are the public halves, each under the id worked out from it.
+      const keys = await req(null, 'GET', '/repost/keys');
+      expect(ok(keys)).toEqual(published(first, second));
+      expect(keys.body).not.toContain(OWN_SEEDS[0]);
+
+      // A post's attestation says where it is, who published it, and its summary, as of now.
+      const contentId = await post(alice!, 'Flooding downtown #news');
+      const res = await attestation(contentId);
+      const read = readAttestation(ok(res).attestation)!;
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(read.payload).toEqual({
+        v: 1,
+        kid: first.id,
+        issuedAt: ctx.clock.now,
+        url: `https://api.example.com/content/${contentId}`,
+        publisher: { userId: alice!.userId, username: 'alice' },
+        mimeType: 'text/plain',
+        aiGenerated: false,
+        preview: { kind: 'text', text: 'Flooding downtown #news' },
+      });
+      expect([signedBy(first, read), signedBy(second, read)]).toEqual([true, false]);
+      // An image's says what file it is, and not where: that is the post's address.
+      const mp = multipart({ ...alice!, type: 'image', text: 'One pixel', tags: 'pics', aiGenerated: 'true' }, { name: 'pixel.png', type: 'image/png', data: PNG });
+      const image = ok(await ctx.app.inject({ method: 'POST', url: '/store', payload: mp.payload, headers: mp.headers }), 201).contentId;
+      expect(readAttestation(ok(await attestation(image)).attestation)!.payload).toMatchObject({ mimeType: 'image/png', aiGenerated: true, preview: { kind: 'image', text: 'One pixel' } });
+      // An update shows in the next one.
+      ok(await storeText(alice!, 'Flooding downtown, roads closed #news', { contentId }));
+      expect(readAttestation(ok(await attestation(contentId)).attestation)!.payload).toMatchObject({ preview: { kind: 'text', text: 'Flooding downtown, roads closed #news' } });
+
+      // Only of what is published: not of what waits in the moderation queue, even to its publisher, nor of what is being deleted.
+      const held = ok(await storeText(alice!, 'A scam, surely #news'), 202).contentId;
+      expect(refused(await attestation(held, alice!))).toEqual([404, 'content not found']);
+      expect(refused(await attestation(NO_CONTENT))).toEqual([404, 'content not found']);
+      ok(await req(alice!, 'DELETE', `/content/${image}`), 202);
+      expect(refused(await attestation(image))).toEqual([404, 'content not found']);
+
+      // And only of what is this server's to speak for: its entry for a post on another server names the original instead.
+      const entry = ok(await repost(bob!, { origin: origin(), tags: 'news' }), 201).contentId;
+      const not = await attestation(entry);
+      expect(not.statusCode, not.body).toBe(409);
+      expect(not.json()).toMatchObject({
+        error: `this is a repost of a post on another server, which is the one to repost: ${OTHER}/content/${ORIGINAL}`,
+        origin: { url: `${OTHER}/content/${ORIGINAL}` },
+      });
+      await ctx.close();
+
+      // A server with no key signs nothing: it has no keys to publish, and still says where the original of its entry is.
+      const OFF = "this server doesn't sign its posts, so they can't be reposted on other servers";
+      ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com', keyFetcher });
+      const [carol, dave] = await Promise.all(['carol', 'dave'].map((name) => ctx.register(name)));
+      const plain = await post(carol!, 'Flooding downtown #news');
+      expect(ok(await req(null, 'GET', '/repost/keys'))).toEqual({ keys: [] });
+      expect(refused(await attestation(plain))).toEqual([400, OFF]);
+      expect(refused(await attestation(NO_CONTENT))).toEqual([404, 'content not found']);
+      expect((await attestation(ok(await repost(dave!, { origin: origin(), tags: 'news' }), 201).contentId)).statusCode).toBe(409);
+      // It still takes reposts from servers that do sign. Nothing signs for its own address, though.
+      expect(refused(await repost(dave!, { origin: origin({ url: `https://api.example.com/content/${plain}` }), tags: 'local' }))).toEqual([400, UNSIGNED]);
+      await ctx.close();
+      // Nor does one that has a key and no address to say its posts are at.
+      ctx = await createTestContext(target, { reposts: { signingKeys: OWN_SEEDS } });
+      expect(refused(await attestation(await post(await ctx.register('erin'), 'Flooding downtown #news')))).toEqual([400, OFF]);
     });
 
     it('reposts an image, whose bytes stay the one file', async () => {

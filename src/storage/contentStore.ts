@@ -4,9 +4,28 @@ import { pipeline } from 'node:stream/promises';
 import type { Operator } from 'opendal';
 import type { Config } from '../config.js';
 import { commentMediaKey } from './commentStore.js';
-import type { ContentMeta, StoredBytes, UploadLink } from './contentStore.types.js';
+import type { ContentMeta, StagedBytes, StoredBytes, UploadLink } from './contentStore.types.js';
+import { linkSigner } from './linkSigner.js';
+import type { LinkSigner } from './linkSigner.types.js';
 import { createOperator, isNotFound, readObject, streamObject } from './opendal.js';
 import { UploadTooLargeError } from './spool.js';
+
+/**
+ * For how long no link is asked of a signer that has just failed (see LinkSigner): files go
+ * through the app meanwhile. Long enough that a service that is down isn't asked by every request,
+ * and short enough that links are back soon after it is.
+ */
+const SIGNER_PAUSE_MS = 30_000;
+
+/** How many of a signer's links to read with are kept: past that, the oldest goes. */
+const LINK_CACHE_SIZE = 10_000;
+
+/**
+ * Matches the key of a staged file, `staged/<writeId>`, where the id is written as a UUID is. A
+ * key that a row of `pending_writes` names is held to it before anything is read, copied or
+ * deleted by it.
+ */
+const STAGED_KEY = /^staged\/[0-9a-f-]{36}$/;
 
 /** Where a post's bytes are kept: an image's, video's or audio's file, a text post's text, or a link's URL. */
 const contentKey = (contentId: string) => `content/${contentId}`;
@@ -23,35 +42,131 @@ const uploadKey = (userId: string, uploadId: string) => `uploads/${userId}/${upl
 const adImageKey = (adId: string) => `ads/${adId}`;
 
 /**
- * Whose bytes a file in the store is: a post's, named by the post's id, those of the image or
- * video a comment came with, named by the comment and the post it is on, or the image of an ad,
- * named by the ad. They are written, read and linked to the same way; only where they are kept
- * differs.
+ * Where the file a write came with waits for the compactor: a post's image, video or audio, or
+ * a comment's image or video. The request that makes the write stores it here once, under an id
+ * of the write's own, and nothing writes it again: the compactor copies it to where the post's
+ * or the comment's bytes are kept, and deletes it, at once or, where the store signs links, when
+ * those given to it have expired (see linkMs). The bucket should expire what is left under
+ * `staged/` after a week: files of requests that died before they committed, or before they
+ * could take back what they staged. A week, not a day: a file that expired before a compactor
+ * that was down came back would be a write that is lost.
  */
-export type BytesOwner = string | { postId: string; commentId: string } | { adId: string };
-/** Where the bytes of `of` are kept: with the posts', with the comments of the post it is on, or with the ads' images. */
+export const stagedKey = (writeId: string) => `staged/${writeId}`;
+
+/** A staged file's key, as a row of `pending_writes` names it: throws for anything that isn't one. */
+function stagedObject(key: string): string {
+  if (!STAGED_KEY.test(key)) throw new Error(`"${key}" is not a staged file`);
+  return key;
+}
+
+/**
+ * Whose bytes a file in the store is: a post's, named by the post's id, those of the image or
+ * video a comment came with, named by the comment and the post it is on, the image of an ad,
+ * named by the ad, or a staged file's, named by its key (see stagedKey). They are written, read
+ * and linked to the same way; only where they are kept differs.
+ */
+export type BytesOwner = string | { postId: string; commentId: string } | { adId: string } | { staged: string };
+/** Where the bytes of `of` are kept: with the posts', with the comments of the post it is on, with the ads' images, or where staged files wait. */
 const bytesKey = (of: BytesOwner) =>
-  typeof of === 'string' ? contentKey(of) : 'adId' in of ? adImageKey(of.adId) : commentMediaKey(of.postId, of.commentId);
+  typeof of === 'string' ? contentKey(of) : 'adId' in of ? adImageKey(of.adId) : 'staged' in of ? stagedObject(of.staged) : commentMediaKey(of.postId, of.commentId);
 
 /**
  * Uploaded bytes and the meta file of each piece of content, the bytes of the images and videos
  * that comments come with, and the images of ads, on any Apache OpenDAL backend (fs, s3, gcs,
  * azblob, sftp, webdav, gdrive, onedrive, dropbox, hdfs, ...).
+ *
+ * Only the compactor writes or deletes a post's bytes and meta file, and a comment's image or
+ * video: `putBytes`, `adopt`, `putMeta` and `remove` are its own. What a request writes is a
+ * staged file (`stageFile`, `stageUpload`), once, which it alone knows of until it commits.
+ *
+ * Links to the bytes are signed by OpenDAL with the store's key, where it has one. A store that
+ * has none and runs where it needs none has a signer instead (see linkSigner), which asks a
+ * service of the cloud for each signature. So its links to read with are kept and given again for
+ * half the time they are good for, and a signature that fails stops links for half a minute and
+ * not for good: until then, files go through the app, as they do where no links are signed.
  */
 export class ContentStore {
   private readonly op: Operator;
   private readonly signedUrlSeconds: number;
   private presignSupported = true;
   private presignWriteSupported = true;
+  private readonly now: () => number;
+  private readonly signer: LinkSigner | null;
+  private signerPausedUntil = 0;
+  /** The signer's links to read with, by the object's key, each until half the time it is good for has passed. */
+  private readonly links = new Map<string, { url: Promise<string | null>; until: number }>();
 
-  constructor(cfg: Config['storage']['content']) {
+  /** `signer` is the store's own (see linkSigner) unless one is given, which only tests do. */
+  constructor(cfg: Config['storage']['content'], now: () => number = Date.now, signer: LinkSigner | null = linkSigner(cfg.scheme, cfg.options, now)) {
     this.op = createOperator(cfg.scheme, cfg.options);
     this.signedUrlSeconds = cfg.signedUrlSeconds;
+    this.now = now;
+    this.signer = signer;
   }
 
   async putFile(of: BytesOwner, localPath: string, mimeType: string): Promise<void> {
     const writer = await this.op.writer(bytesKey(of), { contentType: mimeType });
     await pipeline(createReadStream(localPath), writer.createWriteStream());
+  }
+
+  /** Writes bytes that are in memory as `of`'s, over the ones it had: a text post's text, a link's URL. */
+  async putBytes(of: BytesOwner, bytes: Buffer, mimeType: string): Promise<void> {
+    await this.op.write(bytesKey(of), bytes, { contentType: mimeType });
+  }
+
+  /** Stages a local file for the write `writeId` (see stagedKey), and returns the staged file's key. */
+  async stageFile(writeId: string, localPath: string, mimeType: string): Promise<string> {
+    const key = stagedKey(writeId);
+    await this.putFile({ staged: key }, localPath, mimeType);
+    return key;
+  }
+
+  /**
+   * Stages an upload for the write `writeId`: a copy of it, which its client can't write to as it
+   * can to the upload until its link expires. As adoptUpload makes it, with the same checks of
+   * its size.
+   */
+  async stageUpload(userId: string, uploadId: string, writeId: string, mimeType: string, maxBytes: number): Promise<StagedBytes> {
+    const key = stagedKey(writeId);
+    return { key, ...(await this.adoptUpload(userId, uploadId, { staged: key }, mimeType, maxBytes)) };
+  }
+
+  /**
+   * Makes a staged file `of`'s bytes, over the ones it had: copied within the backend where it
+   * can, else through this process. The staged file stays, so that this can be done again;
+   * `removeStaged` deletes it. Fails, with an error isNotFound knows, if there is no such file.
+   */
+  async adopt(staged: string, of: BytesOwner, mimeType: string): Promise<void> {
+    const from = stagedObject(staged);
+    const to = bytesKey(of);
+    if (
+      this.op.capability().copy &&
+      (await this.op.copy(from, to).then(
+        () => true,
+        () => false,
+      ))
+    ) {
+      return;
+    }
+    await pipeline(await streamObject(this.op, from), (await this.op.writer(to, { contentType: mimeType })).createWriteStream());
+  }
+
+  /** Deletes a staged file. One that isn't there is no error. */
+  async removeStaged(staged: string): Promise<void> {
+    this.links.delete(stagedObject(staged));
+    await this.op.delete(stagedObject(staged));
+  }
+
+  /**
+   * For how long a link to read a file with may be in use after it was given, in milliseconds: 0
+   * where the store gives none, and files are read through the app. A signer's link is given
+   * again for half the time it is good for (see signerUrl), so none outlasts the whole of it from
+   * when it was last given. What the compactor keeps an applied staged file for.
+   */
+  linkMs(): number {
+    // Whether it can sign at all, not whether it last could: a link given before a signature failed is still in use.
+    const signs = this.signer !== null || this.op.capability().presignRead;
+    return signs ? this.signedUrlSeconds * 1000 : 0;
   }
 
   async putMeta(meta: ContentMeta): Promise<void> {
@@ -69,11 +184,32 @@ export class ContentStore {
     return { size: Number(stat.contentLength ?? 0), contentType: stat.contentType || null };
   }
 
+  /** As `stat`, or null if `of` has no bytes: a staged file that the compactor has made its post's, or its comment's, since its key was read. */
+  async statIfThere(of: BytesOwner): Promise<{ size: number; contentType: string | null } | null> {
+    try {
+      return await this.stat(of);
+    } catch (err) {
+      if (isNotFound(err)) return null;
+      throw err;
+    }
+  }
+
   async stream(of: BytesOwner): Promise<Readable> {
     return streamObject(this.op, bytesKey(of));
   }
 
+  /** As `stream`, or null if `of` has no bytes (see statIfThere). */
+  async streamIfThere(of: BytesOwner): Promise<Readable | null> {
+    try {
+      return await this.stream(of);
+    } catch (err) {
+      if (isNotFound(err)) return null;
+      throw err;
+    }
+  }
+
   async remove(contentId: string): Promise<void> {
+    this.links.delete(contentKey(contentId));
     await Promise.all([
       this.op.delete(contentKey(contentId)).catch(() => {}),
       this.op.delete(metaKey(contentId)).catch(() => {}),
@@ -82,15 +218,20 @@ export class ContentStore {
 
   /** Deletes the image of an ad. One that isn't there is no error: a text ad has none. */
   async removeAdImage(adId: string): Promise<void> {
+    this.links.delete(adImageKey(adId));
     await this.op.delete(adImageKey(adId)).catch(() => {});
   }
 
   /**
    * A short-lived link to upload a file with, or null when the backend can't presign (fs, sftp,
-   * webdav, ...). The link can't hold the client to a size or a content type: adoptUpload checks
-   * the one and sets the other.
+   * webdav, ...) or its signer has just failed. The link can't hold the client to a size or a
+   * content type: adoptUpload checks the one and sets the other.
    */
   async presignUpload(userId: string, uploadId: string, mimeType: string): Promise<UploadLink | null> {
+    if (this.signer) {
+      const link = await this.signed((signer) => signer.upload(uploadKey(userId, uploadId), this.signedUrlSeconds));
+      return link && { ...link, headers: { ...link.headers, 'content-type': mimeType } };
+    }
     if (!this.presignWriteSupported) return null;
     // Tried rather than asked of capability(): azblob signs links with an account key yet says it can't.
     try {
@@ -115,8 +256,8 @@ export class ContentStore {
   }
 
   /**
-   * Makes an upload a piece of content's bytes, over the ones it had, or the image or video of a
-   * comment, and returns their size as stored. Copied within the backend where it can and the
+   * Makes an upload `of`'s bytes, over the ones it had, and returns their size as stored: a staged
+   * file's, for a post or a comment (see stageUpload). Copied within the backend where it can and the
    * upload was sent with the content's type, else through this process. Throws UploadTooLargeError
    * if the bytes are more than `maxBytes`.
    *
@@ -200,8 +341,9 @@ export class ContentStore {
     return { size };
   }
 
-  /** A short-lived direct download URL, or null when the backend can't presign (fs, sftp, webdav, ...). */
+  /** A short-lived direct download URL, or null when the backend can't presign (fs, sftp, webdav, ...) or its signer has just failed. */
   async signedUrl(of: BytesOwner): Promise<string | null> {
+    if (this.signer) return this.signerUrl(bytesKey(of));
     if (!this.presignSupported) return null;
     if (!this.op.capability().presignRead) {
       this.presignSupported = false;
@@ -213,5 +355,34 @@ export class ContentStore {
       this.presignSupported = false;
       return null;
     }
+  }
+
+  /**
+   * What the signer gives, or null where it fails or has just failed. The failure is logged here,
+   * as it is nobody's error to answer for: the request it was for is served without the link.
+   */
+  private async signed<T>(sign: (signer: LinkSigner) => Promise<T>): Promise<T | null> {
+    if (!this.signer || this.now() < this.signerPausedUntil) return null;
+    try {
+      return await sign(this.signer);
+    } catch (err) {
+      this.signerPausedUntil = this.now() + SIGNER_PAUSE_MS;
+      console.error(JSON.stringify({ level: 'error', msg: `could not sign a link to the content store: files go through the app for the next ${SIGNER_PAUSE_MS / 1000} seconds`, err: err instanceof Error ? err.message : String(err) }));
+      return null;
+    }
+  }
+
+  /** The signer's link to read the object `key` with: the one given before, until half its time has passed, or a new one. */
+  private async signerUrl(key: string): Promise<string | null> {
+    const now = this.now();
+    const kept = this.links.get(key);
+    if (kept && kept.until > now) return kept.url;
+    // Kept as it is asked for, so that requests for one object at one moment share one signature.
+    const link = { url: this.signed((signer) => signer.download(key, this.signedUrlSeconds)), until: now + (this.signedUrlSeconds * 1000) / 2 };
+    this.links.delete(key);
+    if (this.links.size >= LINK_CACHE_SIZE) this.links.delete(this.links.keys().next().value!);
+    this.links.set(key, link);
+    if ((await link.url) === null && this.links.get(key) === link) this.links.delete(key);
+    return link.url;
   }
 }

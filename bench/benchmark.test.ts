@@ -45,8 +45,13 @@ interface Scenario {
 const get = (path: string, as?: User): Request => ({ method: 'GET', path, ...(as && { headers: { authorization: `Bearer ${as.apiKey}`, 'x-user-id': as.userId } }) });
 const post = (path: string, payload: object): Request => ({ method: 'POST', path, body: JSON.stringify(payload) });
 
+/**
+ * What the server answers about itself. Asked a second time if the first fails: the server closes
+ * a connection it hasn't heard from in 5 seconds, and making the requests of the loads can keep
+ * this process busy for longer, which then finds out only as it sends on the one it had kept.
+ */
 const ask = async <T>(path: string): Promise<T> => {
-  const res = await fetch(`${SERVER}${path}`);
+  const res = await fetch(`${SERVER}${path}`).catch(() => fetch(`${SERVER}${path}`));
   if (!res.ok) throw new Error(`${SERVER}${path} -> ${res.status}`);
   return (await res.json()) as T;
 };

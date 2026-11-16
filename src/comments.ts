@@ -1,6 +1,10 @@
 import { randomBytes } from 'node:crypto';
-import type { CommentCounts, CommentRecord, CommentRemoval } from './comments.types.js';
+import type { Transaction } from 'kysely';
+import type { CommentCounts, CommentRecord } from './comments.types.js';
+import type { Database } from './db/schema.js';
 import type { AppDeps } from './deps.types.js';
+import { effectiveComment, insertPending, payloadOf, writePending } from './pending.js';
+import type { CommentPutPayload, EffectiveComment } from './pending.types.js';
 import type { Comment, Publisher } from './storage/index.js';
 import { iso } from './time.js';
 
@@ -22,6 +26,13 @@ import { iso } from './time.js';
  * the ones that wait in the moderation queue or the report queue (`comment_queue`,
  * `comment_reports`). The routes are in routes/comments.ts (and routes/like.ts), and the queues'
  * in routes/moderation.ts and routes/reports.ts.
+ *
+ * No request writes those objects. A comment, an edit, a like, a removal, an accept from the
+ * moderation queue: each commits a row of `pending_writes` under its post (src/pending.ts), and
+ * the compactor's next run writes the store from the rows, a post's in the order they committed.
+ * So a write to a comment never races another, nor the deletion of the comment or of its post.
+ * Until then the comment's own routes answer by the rows (see effectiveComment), and the lists
+ * and counts by the store: a comment is in its post's list once the compactor has run.
  */
 
 /** The longest a comment can be. */
@@ -113,28 +124,6 @@ export async function toCommentRecords({ config, publishers, comments: store }: 
   return comments.map((comment) => toCommentRecord(comment, authors.get(comment.userId) ?? { userId: comment.userId, username: '' }, config.publicBaseUrl, counts.get(comment.commentId)));
 }
 
-/**
- * Publishes a comment that waits in the moderation queue, as it is given: one that was accepted
- * there, or that its author edited into something the server publishes. Returns whether it was
- * published.
- *
- * A reply is published under the comment it replies to, or under the placeholder that stands in
- * its place: one that was deleted while the reply waited, or that itself waits in the queue by
- * now, taken back there by an edit. Only where nothing is left of that comment, not a placeholder
- * either, is there nowhere to list the reply, and it is removed. Nothing leaves a reply so but a
- * reply sent in the very moment its comment was being deleted, each before the other could see
- * it (see removeComment).
- */
-export async function publishComment({ comments }: Pick<AppDeps, 'comments'>, comment: Comment): Promise<boolean> {
-  const { contentId: postId, commentId, parentId } = comment;
-  if (parentId !== undefined && !(await comments.find(postId, parentId))) {
-    await comments.remove(postId, commentId, { comment });
-    return false;
-  }
-  await comments.publish(comment);
-  return true;
-}
-
 type RemovalDeps = Pick<AppDeps, 'db' | 'comments'>;
 
 /**
@@ -142,46 +131,45 @@ type RemovalDeps = Pick<AppDeps, 'db' | 'comments'>;
  * reply that waits in the moderation queue. One that waits is in no index, so those are found by
  * the post's rows in the queue, which are few. Not to be called inside a transaction: it reads
  * the database on its own.
+ *
+ * It reads the comment store, so it is the compactor's to ask, as it applies a removal: the
+ * post's comments that were written before the removal are in the store by then, or still among
+ * the post's pending writes, if one of theirs couldn't be applied; and none that committed after
+ * it is a new reply to the comment, which takes none once its removal has committed. A write
+ * that committed after it may still be of a reply it had: an edit of one, or a held one that a
+ * moderator accepted, which is then out of the queue and not published yet. So the post's
+ * pending writes are looked at as well.
+ *
+ * `without` is a comment whose own pending writes don't count: one that is being removed, and so
+ * replies to nothing any more, though its rows are still there.
  */
-async function hasReplies({ db, comments }: RemovalDeps, postId: string, commentId: string): Promise<boolean> {
+export async function hasReplies({ db, comments }: RemovalDeps, postId: string, commentId: string, without?: string): Promise<boolean> {
   if ((await comments.count(postId, commentId)) > 0) return true;
-  for (const { comment_id: id } of await db.selectFrom('comment_queue').select('comment_id').where('content_id', '=', postId).where('comment_id', '!=', commentId).execute()) {
-    if ((await comments.getHeld(postId, id))?.parentId === commentId) return true;
+  // The queue's rows before the pending writes: accepting a reply, or an edit of one, moves it from the one to the other in one commit, and so it is found in one of the two.
+  const queued = await db.selectFrom('comment_queue').select('comment_id').where('content_id', '=', postId).where('comment_id', '!=', commentId).execute();
+  const writes = await db.selectFrom('pending_writes').select('payload').where('content_id', '=', postId).where('kind', '=', 'comment_put').execute();
+  const replies = (write: (typeof writes)[number]) => {
+    const { comment } = payloadOf<CommentPutPayload>(write.payload);
+    return comment.parentId === commentId && comment.commentId !== without;
+  };
+  if (writes.some(replies)) return true;
+  for (const { comment_id: id } of queued) {
+    if (id !== without && (await comments.getHeld(postId, id))?.parentId === commentId) return true;
   }
   return false;
 }
 
 /**
- * Plans the removal of a comment, published or waiting in the moderation queue: that comment, its
- * likes and its image or video, and none of the comments that reply to it. If something replies
- * to it (see hasReplies), a placeholder is left in its place, which keeps its replies where they
- * are; if nothing does, nothing of it is left. Not to be called inside a transaction.
- *
- * `finish` then looks again, since the store has no transactions:
- * - a comment removed altogether that got a reply meanwhile is given a placeholder after all;
- * - a comment removed altogether may have been the last reply to a deleted comment, whose
- *   placeholder then stands for nothing: it is removed too, and so on up.
+ * Removes the placeholder of a deleted comment that nothing replies to any more, and then that of
+ * the comment it replied to, and so on up. The compactor's, after it removed a comment altogether:
+ * that may have been the last reply to a deleted comment, whose placeholder then stands for nothing.
+ * `without` is the comment that was removed (see hasReplies).
  */
-export async function commentRemoval(deps: RemovalDeps, postId: string, commentId: string): Promise<CommentRemoval> {
-  const { comments } = deps;
-  const comment = (await comments.find(postId, commentId)) ?? (await comments.getHeld(postId, commentId));
-  const keepPlace = await hasReplies(deps, postId, commentId);
-  return {
-    remove: () => comments.remove(postId, commentId, { keepPlace, comment }),
-    async finish() {
-      if (keepPlace) return;
-      if (comment && (await hasReplies(deps, postId, commentId))) await comments.remove(postId, commentId, { keepPlace: true, comment });
-      else await prune(deps, postId, comment?.parentId);
-    },
-  };
-}
-
-/** Removes the placeholder of a deleted comment that nothing replies to any more, and then that of the comment it replied to, and so on up. */
-async function prune(deps: RemovalDeps, postId: string, parentId: string | undefined): Promise<void> {
+export async function prune(deps: RemovalDeps, postId: string, parentId: string | undefined, without?: string): Promise<void> {
   const { comments } = deps;
   while (parentId !== undefined) {
     const parent: Comment | null = await comments.find(postId, parentId);
-    if (parent?.gone !== 'deleted' || (await hasReplies(deps, postId, parentId))) return;
+    if (parent?.gone !== 'deleted' || (await hasReplies(deps, postId, parentId, without))) return;
     await comments.remove(postId, parentId, { comment: parent });
     parentId = parent.parentId;
   }
@@ -189,19 +177,45 @@ async function prune(deps: RemovalDeps, postId: string, parentId: string | undef
 
 /**
  * Removes a comment for good, published or waiting in the moderation queue, and nothing that
- * replies to it (see commentRemoval): its rows in the two queues first, so neither lists a comment
- * that is gone, then the comment. Removing one that isn't there changes nothing. Not to be called
- * inside a transaction.
+ * replies to it. All of it is one commit, and nothing is written to the comment store: the
+ * removal is a row of `pending_writes`, in the order of the post's writes, and with it go the
+ * comment's rows in the two queues, so neither lists a comment that is gone. The compactor's next
+ * run removes the comment, its likes and its image or video; if something replies to it then, a
+ * placeholder is left in its place, which keeps its replies where they are, and if nothing does,
+ * nothing of it is left (see applyPending). From the commit on, the comment is gone to whoever
+ * asks for it, takes no reply, no like and no edit, and no later write brings it back.
+ *
+ * `post` is the post's row and `seen` the comment as the request read them, in that order (see
+ * writePending). `first`, if given, runs in the transaction before anything is written, and
+ * refuses the removal by throwing. Returns the comment that was removed, as it was when the
+ * removal committed, or null for one that was gone by then, which changes nothing. 404 for a
+ * post that is set for deletion: its comments go with it.
  */
-export async function removeComment(deps: RemovalDeps, postId: string, commentId: string): Promise<void> {
-  const removal = await commentRemoval(deps, postId, commentId);
-  await removeCommentRows(deps.db, postId, commentId);
-  await removal.remove();
-  await removal.finish();
+export async function removeComment(
+  { db, comments, now = Date.now }: Pick<AppDeps, 'db' | 'comments' | 'now'>,
+  post: { id: string; seq: number },
+  commentId: string,
+  seen: EffectiveComment | null,
+  first?: (trx: Transaction<Database>) => Promise<void>,
+): Promise<Comment | null> {
+  return writePending(
+    db,
+    post.id,
+    { seq: post.seq, state: seen },
+    (reader) => effectiveComment(reader, comments, post.id, commentId),
+    async (trx, seq, state) => {
+      await first?.(trx);
+      await removeCommentRows(trx, post.id, commentId);
+      if (!state) return null;
+      const { parentId } = state.comment;
+      await insertPending(trx, { contentId: post.id, seq, kind: 'comment_remove', commentId, payload: { ...(parentId !== undefined && { parentId }) }, at: now() });
+      return state.comment;
+    },
+  );
 }
 
 /** Takes a comment out of the two queues: the row that says it waits in one, and the reports of it. */
-export async function removeCommentRows(db: AppDeps['db'], postId: string, commentId: string): Promise<void> {
+export async function removeCommentRows(db: Pick<AppDeps['db'], 'deleteFrom'>, postId: string, commentId: string): Promise<void> {
   await db.deleteFrom('comment_queue').where('comment_id', '=', commentId).where('content_id', '=', postId).execute();
   await db.deleteFrom('comment_reports').where('comment_id', '=', commentId).where('content_id', '=', postId).execute();
 }

@@ -1,8 +1,8 @@
 export { AdStore } from './adStore.js';
-export { CommentStore } from './commentStore.js';
+export { CommentStore, placeholder as commentPlaceholder } from './commentStore.js';
 export type { Comment, CommentMedia, CommentPageQuery } from './commentStore.types.js';
-export { ContentStore, type BytesOwner } from './contentStore.js';
-export type { ContentMeta, Origin, Preview, StoredBytes, UploadLink } from './contentStore.types.js';
+export { ContentStore, stagedKey, type BytesOwner } from './contentStore.js';
+export type { ContentMeta, Origin, Preview, StagedBytes, StoredBytes, UploadLink } from './contentStore.types.js';
 export { FollowStore } from './followStore.js';
 export { createHotStore, MemoryHotStore } from './hotStore.js';
 export type { HotStore } from './hotStore.types.js';

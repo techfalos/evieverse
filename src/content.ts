@@ -4,6 +4,7 @@ import type { Db } from './db/index.js';
 import { HttpError, notFound } from './http/errors.js';
 import { msg } from './language.js';
 import { moderatesServer } from './moderation/policy.js';
+import { effectiveMeta, type PendingReader } from './pending.js';
 import { previewOf } from './posts.js';
 import type { ContentMeta, ContentStore, Publisher, Summary } from './storage/index.js';
 
@@ -72,9 +73,15 @@ export async function readsHeld(db: Db, req: FastifyRequest, ownerId: string): P
   return user !== null && (user.id === ownerId || moderatesServer(user));
 }
 
-/** The content's meta file, which all content has: it holds what the row doesn't (content type, size, text, hashtags). */
-export async function requireMeta(content: ContentStore, contentId: string): Promise<ContentMeta> {
-  const meta = await content.getMeta(contentId);
+/**
+ * The content's meta file, which all content has: it holds what the row doesn't (content type,
+ * size, text, hashtags). As it is with every write that has committed: the one the newest write
+ * made, where the compactor hasn't applied it yet, else the one in the content store (see
+ * effectiveMeta). So content just written is read as written, by its publisher and by the next
+ * write of it, before the compactor's next run.
+ */
+export async function requireMeta({ db, content }: { db: PendingReader; content: ContentStore }, contentId: string): Promise<ContentMeta> {
+  const meta = await effectiveMeta(db, content, contentId);
   if (!meta) throw new HttpError(500, msg('content.meta_missing'));
   return meta;
 }

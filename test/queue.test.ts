@@ -721,9 +721,7 @@ for (const target of TARGETS) {
       expect(await feedOf('deals')).toEqual([]);
       expect((await req(null, 'GET', `/content/${contentId}`)).statusCode).toBe(404);
       expect((await queue(root)).queue).toMatchObject([{ contentId, tags: ['news'], trustScore: 0, queuedAt: now() }]);
-      // The compactor takes its entries out of the indexes, and writes no summary for it. One that a run
-      // restored as the update went through, having read the post as published, is erased again.
-      await ctx.summaries.put(published!);
+      // The compactor takes its entries out of the indexes, and writes no summary for it.
       await ctx.compact();
       expect(await summaryOf()).toBeNull();
       expect(ids(await feedOf('news'))).toEqual([other]);
@@ -739,12 +737,12 @@ for (const target of TARGETS) {
       await ctx.compactor.runOnce();
       expect(ids(await feedOf('news')).sort()).toEqual([contentId, other].sort());
 
-      // Held again while an index holds it, and accepted before the compactor runs: it shows where it was
-      // at once, as accepted, and under the hashtag the update gave after the next run.
+      // Held again while an index holds it, and accepted before the compactor runs: its summary is the
+      // compactor's to write, so it is back in feeds with the next run, under the hashtag the update gave too.
       expect(ok(await store(alice, 'Spam again #news #deals', { contentId }), 202)).toMatchObject({ status: 'pending_review' });
       expect(ids(await feedOf('news'))).toEqual([other]);
       expect(ok(await decide(root, contentId, 'accept'), 200)).toMatchObject({ tags: ['news', 'deals'] });
-      expect((await feedOf('news')).map((i) => i.preview.text).sort()).toEqual(['Other news #news', 'Spam again #news #deals']);
+      expect((await feedOf('news')).map((i) => i.preview.text)).toEqual(['Other news #news']);
       expect(await feedOf('deals')).toEqual([]);
       await ctx.compact();
       expect(ids(await feedOf('news')).sort()).toEqual([contentId, other].sort());

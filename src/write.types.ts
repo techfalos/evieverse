@@ -1,5 +1,4 @@
-import type { Repost } from './reposts.js';
-import type { ContentMeta, Publisher, StoredBytes, Summary } from './storage/index.js';
+import type { ContentMeta, Publisher, StagedBytes, Summary } from './storage/index.js';
 
 /**
  * One write of content, new or an update, as contentWriter's `write` takes it. The routes make it:
@@ -7,24 +6,33 @@ import type { ContentMeta, Publisher, StoredBytes, Summary } from './storage/ind
  */
 export interface ContentWrite {
   publisher: Publisher;
-  /** The meta file an update writes over; absent for new content. */
+  /**
+   * The meta file an update writes over, as the request read it (see requireMeta); absent for new
+   * content. Its hashtags say which the update drops.
+   */
   previous?: ContentMeta;
-  /** Names the content id; `updatedAt` is when this write is made. */
+  /**
+   * An update: the content's write number (`content.seq`) as the request read it, before it read
+   * `previous`. If the write then takes another number than the one after it, something was
+   * written in between, and the content's hashtags are read again as it commits.
+   */
+  seenSeq?: number;
+  /** Names the content id; `updatedAt` is when this write is made. What the request answers with: nothing of it is stored here. */
   summary: Summary;
+  /** The meta file the write makes: the compactor writes it, with the size `stageBytes` returns in place of the one it has. */
   meta: ContentMeta;
-  /** Writes the content's bytes, and returns their size as stored, which is the one recorded in the meta file. */
-  putBytes: () => Promise<StoredBytes>;
+  /**
+   * Stages the file of an image, video or audio post for the write whose id it is given (see
+   * PostBytes.stage), and returns where it waits and its size as stored, which is the one
+   * recorded in the meta file. Absent for a text, a link and a repost of a post on another
+   * server: their bytes are in `meta`, and the compactor writes them from it (see payloadBytes).
+   */
+  stageBytes?: (writeId: string) => Promise<StagedBytes>;
   /**
    * The write's trust score sent it to the moderation queue: the content is stored, but has no
    * summary and is in no feed index until an admin accepts it. Absent: it is published.
    */
   queued?: { trustScore: number };
-  /**
-   * An update of content that was reposted: the places reposts gave it (see `reposts`), as the
-   * request read them. The hashtags among them are the content's like its publisher's own, and are
-   * in `summary.tags` and `meta.tags` unless `droppedReposts` names them.
-   */
-  reposts?: Repost[];
   /**
    * The hashtags a repost gave the content that this update is refused: its publisher is muted on
    * them now, or what it now says has their blocked words. They aren't the publisher's to send
@@ -43,6 +51,6 @@ export interface RepostWrite {
   userId: string;
   /** The hashtags the repost gives the content. */
   tags: string[];
-  /** The hashtags the content's meta file has. */
+  /** The hashtags the content's meta file has, as its newest write made it. */
   carried: string[];
 }

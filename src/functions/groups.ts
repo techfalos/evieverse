@@ -40,12 +40,14 @@ interface WithoutDatabase {
  *   feed     GET /feed                                        Redis and the summary store only
  *   content  GET /content/:id, /content/:id/raw,              one database read each, and the content store
  *            /content/:id/comments, /content/:id/comments/:id (and Redis, for comments)
- *            and /content/:id/comments/:id/replies, /raw
+ *            and /content/:id/comments/:id/replies, /raw,
+ *            /content/:id/attestation (signed, for a repost on another server)
  *   store    POST /uploads, /store                            writes posts
  *   api      everything else: register and users, challenges read out (/challenges/:id/audio,
  *            whichever group issued them: they are in Redis), languages, likes (of posts and of comments),
  *            reposts (POST /repost, which writes database rows, and a link to the original for a
- *            post on another server), follows and the following feed (GET /feed/following, which asks the database who may
+ *            post on another server, whose keys it asks that server for; GET /repost/keys, this
+ *            server's own), follows and the following feed (GET /feed/following, which asks the database who may
  *            read it), inboxes, messages and blocks, tagging and tags, moderation, reports, the
  *            server's rules and its modification disclosure (/rules),
  *            DELETE /content/:id, writing, editing and deleting comments, the server's ads,

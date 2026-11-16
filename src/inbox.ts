@@ -3,6 +3,7 @@ import type { AppDeps } from './deps.types.js';
 import { plainText } from './format.js';
 import type { Notice } from './inbox.types.js';
 import type { MessageKey } from './language.js';
+import { effectiveMeta } from './pending.js';
 import type { ContentMeta } from './storage/index.js';
 
 /**
@@ -80,8 +81,9 @@ export function excerptOf(meta: Pick<ContentMeta, 'preview'> | null): string | n
  * Leaves a notice in a user's inbox. It reports what a moderation request has already done, so it
  * never fails that request: a notice that can't be left is logged, and lost.
  *
- * A notice about a post quotes its start, read from the post's meta file, which is still there
- * when the post has just been set for deletion: the compactor removes it later. A notice about a
+ * A notice about a post quotes its start, read from the post's meta file (as its newest write
+ * made it: see effectiveMeta), which is still there when the post has just been set for
+ * deletion: the compactor removes it later. A notice about a
  * comment quotes the comment's, which whoever leaves the notice passes on: by then it may be gone.
  */
 export async function notify(
@@ -100,7 +102,7 @@ export async function notify(
         sender_id: null,
         content_id: contentId ?? null,
         tag: tag ?? null,
-        body: comment !== undefined ? excerpt(comment) : contentId ? excerptOf(await content.getMeta(contentId)) : null,
+        body: comment !== undefined ? excerpt(comment) : contentId ? excerptOf(await effectiveMeta(db, content, contentId)) : null,
         created_at: now(),
         read_at: null,
       })

@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { MAX_COMMENT_CHARS, newCommentId } from '../src/comments.js';
 import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
-import { commentIndexKey, commentKey, commentLikesKey, commentLikingKey } from '../src/storage/commentStore.js';
+import { commentIndexKey, commentKey, commentLikesKey } from '../src/storage/commentStore.js';
 import { HOUR } from '../src/time.js';
 import { as, createTestContext, JPEG, multipart, PNG, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
@@ -680,13 +680,11 @@ for (const target of TARGETS) {
       ok(await storeText(alice, text, { contentId, comments: true }), 200);
       expect(ok(await one(null, contentId, commentId), 200)).toEqual(again);
 
-      // A deleted comment isn't edited, nor brought back by an edit that was under way when it was deleted:
+      // A deleted comment isn't edited (see test/pending.test.ts for an edit under way as it is deleted):
       // not one that left its place to its reply,
-      const before = (await ctx.comments.get(contentId, commentId))!;
       ok(await remove(bob, contentId, commentId), 200);
       const gone = { ...sent, author: null, text: '', replies: 1, status: 'deleted' };
       expect(refusal(await edit(bob, contentId, commentId, 'Back'))).toEqual([404, NO_COMMENT]);
-      expect(await ctx.comments.update({ ...before, text: 'Back', editedAt: ctx.clock.now })).toBe(false);
       expect(await stored(contentId)).toEqual([`${commentId}.json`, `${answer.commentId}.json`, `${commentId}.${answer.commentId}.reply`].sort());
       for (let i = 0; i < 2; i++) {
         expect(await list(contentId)).toEqual({ contentId, count: 2, comments: [gone], nextCursor: null });
@@ -696,7 +694,7 @@ for (const target of TARGETS) {
       }
       // nor one of which nothing is left.
       ok(await remove(carol, contentId, answer.commentId), 200);
-      expect(await ctx.comments.update({ ...before, text: 'Back', editedAt: ctx.clock.now })).toBe(false);
+      expect(refusal(await edit(bob, contentId, commentId, 'Back'))).toEqual([404, NO_COMMENT]);
       expect(await stored(contentId)).toEqual([]);
       expect(await list(contentId)).toEqual({ contentId, count: 0, comments: [], nextCursor: null });
     });
@@ -984,7 +982,7 @@ for (const target of TARGETS) {
       expect(ok(await one(null, contentId, commentId), 200)).toMatchObject({ likes: 2 });
 
       // Redis has nothing of them: the likes are counted from the store, and a like made is still made.
-      await ctx.hot.del([count, commentLikingKey(commentId, carol.userId)]);
+      await ctx.hot.del([count]);
       expect(ok(await likeComment(carol, contentId, commentId), 200)).toEqual(liked(2, true));
       expect(await ctx.hot.exists([count])).toEqual([true]);
       await ctx.hot.del([count]);

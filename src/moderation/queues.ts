@@ -3,6 +3,7 @@ import { toCommentRecords } from '../comments.js';
 import type { CommentRecord } from '../comments.types.js';
 import { publisherOf, summaryOf } from '../content.js';
 import type { AppDeps } from '../deps.types.js';
+import { effectiveMeta, pendingComment } from '../pending.js';
 import { toFeedRecord } from '../tagfeed/layout.js';
 import type { FeedRecord } from '../tagfeed/layout.types.js';
 import type { QueueKind, QueueRow } from './queues.types.js';
@@ -21,11 +22,11 @@ type QueuedComment = { kind: 'comment' } & CommentRecord;
 /**
  * What each row of a page of a queue is, in the rows' order: a post as a feed record with its
  * whole text or caption, read from its meta file as for GET /content/:contentId, and a comment as
- * the comment store has it. Null for one that is gone though its row is still there.
+ * its newest write made it, or as the comment store has it once that is applied (see
+ * effectiveComment). Null for one that is gone though its row is still there.
  *
  * `held`: the comments wait in the moderation queue, so they are read from where held comments
- * are; one that isn't there any more (an accept that published it and then failed to take its row
- * out) is read from where published ones are, so it can be accepted again.
+ * are; one that isn't there is read from where published ones are.
  */
 export async function queueItems(
   deps: Pick<AppDeps, 'db' | 'config' | 'content' | 'comments' | 'publishers'>,
@@ -45,7 +46,11 @@ export async function queueItems(
       : [],
     Promise.all(
       rows.map(async (r) => {
-        if (r.kind === 'post') return { meta: await content.getMeta(r.id), comment: null };
+        if (r.kind === 'post') return { meta: await effectiveMeta(db, content, r.id), comment: null };
+        const pending = await pendingComment(db, r.content_id, r.id);
+        // A write of it that isn't applied yet says what it is: one that removes it, that it is gone, and
+        // one that takes it back to the moderation queue, that it is no published comment to list.
+        if (pending) return { meta: null, comment: pending.put && (held || !pending.put.held) ? pending.put.comment : null };
         return { meta: null, comment: (held ? await comments.getHeld(r.content_id, r.id) : null) ?? (await comments.get(r.content_id, r.id)) };
       }),
     ),

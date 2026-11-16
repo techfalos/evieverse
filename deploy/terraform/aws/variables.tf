@@ -63,12 +63,12 @@ variable "redis_replicas" {
 }
 
 variable "audit_archive_after_days" {
-  description = "Days after a record of the audit log (every request that added, updated or deleted something) is written that it moves to S3 Glacier Deep Archive, the cold storage it stays in. Restoring one takes hours."
+  description = "Days after a record of the audit log (every request that added, updated or deleted something) is written that it moves to S3 Glacier Deep Archive, if it is 128 KB or larger. null, the default: records stay in S3 Standard. Nearly every record is about 1 KB, and archiving one that small costs more than keeping it: Deep Archive bills 40 KB of overhead for each object and $0.05 per 1,000 objects moved. So smaller records stay where they are either way. Restoring an archived one takes hours."
   type        = number
-  default     = 30
+  default     = null
   validation {
-    condition     = var.audit_archive_after_days >= 0
-    error_message = "A number of days, 0 or more."
+    condition     = var.audit_archive_after_days == null ? true : var.audit_archive_after_days >= 0
+    error_message = "A number of days, 0 or more, or null to archive nothing."
   }
 }
 
@@ -89,7 +89,7 @@ variable "environment" {
 }
 
 variable "secrets" {
-  description = "Secret environment variables, e.g. storage credentials in SUMMARY_OPTIONS. Stored in Secrets Manager for the compactor and the rebuild task, and in the functions' encrypted environment."
+  description = "Secret environment variables, e.g. storage credentials in SUMMARY_OPTIONS. Stored in Secrets Manager, where the functions, the compactor and the rebuild task read them as they start: none is in a function's configuration."
   type        = map(string)
   default     = {}
   sensitive   = true

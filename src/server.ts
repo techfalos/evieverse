@@ -23,7 +23,8 @@ if (config.compact.inProcess) {
 
 /**
  * Stops the server on SIGINT or SIGTERM: the app first, so it takes no more requests, then the
- * compactor, whose run under way is waited for, then the connections. The process exits with 0.
+ * compactor, whose run under way finishes the writes it is making and is waited for, then the
+ * connections. The process exits with 0.
  */
 const shutdown = async () => {
   app.log.info('shutting down');

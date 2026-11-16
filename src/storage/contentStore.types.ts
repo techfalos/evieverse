@@ -34,8 +34,8 @@ export interface ContentMeta {
   updatedAt: number;
   /**
    * On a repost of a post that is on another server: the original. The content is then a link to
-   * it with its summary: `preview`, `mimeType` and `aiGenerated` are the original's, as the
-   * reposter's client sent them, and the content's bytes are the original's address.
+   * it with its summary: `preview`, `mimeType` and `aiGenerated` are the original's, as its
+   * own server attested them when it was reposted, and the content's bytes are the original's address.
    */
   origin?: Origin;
 }
@@ -67,4 +67,12 @@ export interface UploadLink {
 /** A piece of content's bytes as the store holds them. */
 export interface StoredBytes {
   size: number;
+}
+
+/**
+ * The file a write came with, staged for the compactor (see stagedKey): where it waits, and its
+ * size as stored there, which is the size the post's meta file, or the comment, then records.
+ */
+export interface StagedBytes extends StoredBytes {
+  key: string;
 }

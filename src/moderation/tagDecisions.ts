@@ -29,7 +29,7 @@ const notTagged = (tag: string) => notFound(msg('content.not_tagged', { tag }));
 async function tagged({ db, content }: Deps, contentId: string, tag: string) {
   const row = await loadPublished(db, contentId);
   const [meta, decisions] = await Promise.all([
-    requireMeta(content, contentId),
+    requireMeta({ db, content }, contentId),
     db.selectFrom('tag_moderation').select(['tag', 'decision']).where('content_id', '=', contentId).execute(),
   ]);
   const removed = new Set(decisions.filter((d) => d.decision === 'removed').map((d) => d.tag));

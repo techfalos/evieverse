@@ -43,10 +43,20 @@
     "repost.already": "you already reposted this post",
     "repost.too_many_tags": "reposts can give a post at most {max} hashtags",
     "repost.no_tags_left": "none of the repost's hashtags is one the post can have and doesn't have already, so it wasn't reposted",
-    "repost.origin_url": "origin.url must be the address of a post on its own server, with nothing after its id: https://other.example/content/<id>",
-    "repost.origin_username": "origin.publisher.username must be a single line of at most 64 characters",
-    "repost.origin_mime_type": "the original is {kind}, so origin.mimeType must be its {kind}/* content type",
+    "repost.attestation_invalid": "origin.attestation must be the attestation of a post, as the post's own server gives it at GET /content/<id>/attestation",
+    "repost.attestation_expired": "the attestation is more than {minutes} minutes old, or from a clock that runs ahead of this server's: get a new one from the post's own server",
+    "repost.attestation_unsigned": "the attestation isn't signed with a key of the post's own server, so the post wasn't reposted",
+    "repost.origin_not_https": "a post on another server is reposted from an https address",
+    "repost.origin_keys_unavailable": "{server} didn't give the keys it signs with, so the attestation can't be checked: try again in a minute",
+    "repost.origin_rate_limited": {
+      "one": "too many reposts from servers this one had to ask for their keys; try again in {count} second",
+      "other": "too many reposts from servers this one had to ask for their keys; try again in {count} seconds"
+    },
+    "repost.origin_mime_type": "the original is {kind}, so its attestation must give its {kind}/* content type",
     "repost.origin_unavailable": "this server's entry for the original isn't published: it waits in the moderation queue, or is being deleted",
+
+    "attestation.off": "this server doesn't sign its posts, so they can't be reposted on other servers",
+    "attestation.is_repost": "this is a repost of a post on another server, which is the one to repost: {url}",
 
     "post.type_off": "this server doesn't take {type} posts: the types it takes are {types}",
     "post.file_or_field": "Send content either as a file or as a field, not both",

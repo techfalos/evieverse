@@ -91,12 +91,12 @@ variable "redis_high_availability" {
 }
 
 variable "audit_archive_after_days" {
-  description = "Days after a record of the audit log (every request that added, updated or deleted something) is written that it moves to the Archive tier, the cold storage it stays in. Reading one means rehydrating it first, which takes hours."
+  description = "Days after a record of the audit log (every request that added, updated or deleted something) is written that it moves to the Archive tier. null, the default: records stay in the Hot tier. Setting it moves every record, whatever its size, as Azure's lifecycle rules can't filter by size, and for the usual record of about 1 KB that costs more than keeping it: each blob moved is billed as a write to the Archive tier (about $0.11 per 10,000, or $11 per million records), against about $0.02 a month to keep a million of them in the Hot tier. Reading an archived one means rehydrating it first, which takes hours."
   type        = number
-  default     = 30
+  default     = null
   validation {
-    condition     = var.audit_archive_after_days >= 0
-    error_message = "A number of days, 0 or more."
+    condition     = var.audit_archive_after_days == null ? true : var.audit_archive_after_days >= 0
+    error_message = "A number of days, 0 or more, or null to archive nothing."
   }
 }
 

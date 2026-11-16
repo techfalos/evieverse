@@ -109,6 +109,7 @@ for (const target of TARGETS) {
         created_at: ctx.clock.now,
         delete_requested_at: null,
         origin_hash: null,
+        seq: 1,
       });
       expect(await meta(contentId)).toEqual({
         contentId,

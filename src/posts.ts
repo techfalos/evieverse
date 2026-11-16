@@ -51,6 +51,23 @@ export function readPreview(stored: StoredPreview, bytesUrl: string): Preview {
   return { kind: stored.kind, url: bytesUrl, ...(stored.text ? { text: stored.text } : {}) };
 }
 
+/**
+ * This server's own address (PUBLIC_BASE_URL) as the URL parser writes it, with no slash at its
+ * end: what the address of each of its posts starts with. Null where the setting names none, and
+ * no address is then known to be the server's own.
+ */
+export function ownAddress(publicBaseUrl: string): string | null {
+  if (!publicBaseUrl) return null;
+  try {
+    return new URL(publicBaseUrl).href.replace(/\/+$/, '');
+  } catch {
+    return null;
+  }
+}
+
+/** A post's address on the server at `base`, where GET /content/:id reads it. */
+export const postAddress = (base: string, contentId: string) => `${base}/content/${contentId}`;
+
 /** Where the bytes of the original of a repost from another server are read: on that server. */
 export const originMediaUrl = (origin: { url: string }) => `${origin.url}/raw`;
 

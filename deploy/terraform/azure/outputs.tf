@@ -24,7 +24,7 @@ output "storage_account" {
 }
 
 output "audit_container" {
-  description = "The blob container, in the storage account, that every request that added, updated or deleted something is written to, and moved to cold storage from."
+  description = "The blob container, in the storage account, that every request that added, updated or deleted something is written to."
   value       = azurerm_storage_container.audit.name
 }
 

@@ -2,6 +2,7 @@ import { open, readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import type { Readable } from 'node:stream';
 import { Operator } from 'opendal';
+import { startTokenRelay, usesManagedIdentity } from './azureIdentity.js';
 
 /** The directory each local `fs` operator made here keeps its files in. */
 const roots = new WeakMap<Operator, string>();
@@ -11,13 +12,37 @@ export function isNotFound(err: unknown): boolean {
   return /NotFound/.test((err as Error)?.message ?? '');
 }
 
-/** Local `fs` roots are created on demand; temp-then-rename writes make overwrites atomic for readers. */
+/**
+ * `op`, with each of its calls to the store made once `ready` is done. What an operator says of
+ * itself without asking the store (`capability`), its blocking calls and `layer` are not held back.
+ */
+function after(ready: Promise<void>, op: Operator): Operator {
+  // What `ready` failed with is each call's own failure; with no call made it is nobody's, and not the process's end.
+  ready.catch(() => {});
+  return new Proxy(op, {
+    get(target, name) {
+      const value: unknown = Reflect.get(target, name, target);
+      if (typeof value !== 'function') return value;
+      if (typeof name !== 'string' || ['constructor', 'capability', 'layer'].includes(name) || name.endsWith('Sync')) return value.bind(target);
+      return (...args: unknown[]) => ready.then(() => value.apply(target, args));
+    },
+  });
+}
+
+/**
+ * Local `fs` roots are created on demand; temp-then-rename writes make overwrites atomic for readers.
+ *
+ * An `azblob` store with no key of its own, where the process has a managed identity, is reached
+ * as that identity, whose tokens OpenDAL gets through a relay in this process (azureIdentity.ts).
+ * The relay starts here and takes a moment to listen, and OpenDAL looks for it when it first needs
+ * a token, so the operator's calls wait for it: one made at once would look where no relay is yet.
+ */
 export function createOperator(scheme: string, options: Record<string, string>): Operator {
   const opts = { ...options };
   if (scheme === 'fs' && opts.root && !opts.atomic_write_dir) opts.atomic_write_dir = `${opts.root.replace(/\/+$/, '')}/.tmp`;
   const op = new Operator(scheme, opts);
   if (scheme === 'fs' && opts.root) roots.set(op, resolve(opts.root));
-  return op;
+  return scheme === 'azblob' && usesManagedIdentity(opts) ? after(startTokenRelay(), op) : op;
 }
 
 /** The file an object of a local `fs` operator is, or null for an operator of any other kind. */

@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { ATTESTATION_MAX_AGE_MS, ATTESTATION_SKEW_MS, AttestedPost, MAX_ATTESTATION_CHARS, POST_PATH, readAttestation, signedBy, signingKeys } from '../attestation.js';
+import type { PublishedKey } from '../attestation.types.js';
 import { authenticate } from '../auth/apiKey.js';
 import type { AuthUser } from '../auth/apiKey.types.js';
 import { ChallengeFields } from '../challenge/challenges.js';
@@ -8,71 +10,36 @@ import { loadPublished, PENDING_REVIEW, requireMeta } from '../content.js';
 import { isUniqueViolation } from '../db/index.js';
 import type { RouteDeps } from '../deps.types.js';
 import { plainText } from '../format.js';
-import { badRequest, conflict, unprocessable } from '../http/errors.js';
-import { Credentials, Flag } from '../http/schemas.js';
-import { messageKey, msg } from '../language.js';
+import { badRequest, conflict, HttpError, tooManyRequests, unprocessable } from '../http/errors.js';
+import { Credentials } from '../http/schemas.js';
+import { msg } from '../language.js';
 import { moderatePost, moderateRepost, refuseBanned } from '../moderation/policy.js';
 import type { RemovedTag } from '../moderation/policy.types.js';
-import { LINK_MIME, LinkUrl, MAX_TEXT_CHARS, mediaType, originMediaUrl, previewCutter, TEXT_MIME } from '../posts.js';
+import { LINK_MIME, mediaType, originMediaUrl, ownAddress, postAddress, previewCutter, TEXT_MIME } from '../posts.js';
 import { MAX_REPOSTED_TAGS, readableOf, repostedTags, repostsOf } from '../reposts.js';
 import type { Origin, Preview } from '../storage/index.js';
 import { authorIndex } from '../tagfeed/layout.js';
 import { allowedTags, parseTagList } from '../tags.js';
-import { iso } from '../time.js';
-import { requirePostType, spoolBytes } from '../upload.js';
+import { iso, MINUTE } from '../time.js';
+import { requirePostType } from '../upload.js';
 import { alreadyReposted, tooManyReposted } from '../write.js';
 
-/** A post's address on its own server ends with its id, as GET /content/:id reads it. */
-const ORIGIN_PATH = /\/content\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+/**
+ * How many times in a minute one user's reposts can have this server ask another for its keys. A
+ * server is asked once for many reposts from it (see OriginKeys), so this is reached only by
+ * reposts from many servers, or from ones that aren't there, which is how someone would have this
+ * server send requests for them.
+ */
+const ORIGIN_ASKS_PER_MINUTE = 10;
 
 /**
- * What a repost says of a post on another server (`origin` in POST /repost): its address there,
- * who published it, and its summary, all as the reposter's client read them on that server.
+ * What a repost says of a post on another server (`origin` in POST /repost): the post's
+ * attestation, as its own server gave it to the reposter's client (GET /content/:id/attestation
+ * there). Its address, who published it and its summary are read from that, once it is found to
+ * be signed by the server at the address it names (see attestedOrigin), and from nothing else:
+ * what the client says of the post itself is not asked for.
  */
-const OriginFields = z.object({
-  /**
-   * The address of the original of a repost: https://other.example/content/<id>, with nothing after
-   * the id and nobody's credentials in it. Its id is read in lower case, so that an original has one
-   * address here however it was sent (see `content.origin_hash`).
-   */
-  url: LinkUrl.refine(
-    (href) => {
-      const url = new URL(href);
-      return ORIGIN_PATH.test(url.pathname) && !url.search && !url.hash && !url.username && !url.password;
-    },
-    { message: messageKey('repost.origin_url') },
-  ).transform((href) => href.replace(ORIGIN_PATH, (path) => path.toLowerCase())),
-  /** Who published the original there. The name is one line: it is kept on a line of the summary. */
-  publisher: z.object({
-    userId: z.string().uuid(),
-    username: z
-      .string()
-      .trim()
-      .min(1)
-      .max(64)
-      .refine((name) => !/[\u0000-\u001f\u007f\u0085\u2028\u2029]/.test(name), { message: messageKey('repost.origin_username') }),
-  }),
-  /** The original's content type, as one line of a summary holds it. Needed of an image, video or audio; a text's and a link's are their own. */
-  mimeType: z
-    .string()
-    .trim()
-    .max(255)
-    .regex(/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/)
-    .transform((type) => type.toLowerCase())
-    .optional(),
-  aiGenerated: Flag.default(false),
-  /**
-   * The original's summary, as the reposter's client read it on the original's server (its feed
-   * record, or GET /content/:id there) and sends it on: this server never asks another. An image's,
-   * video's or audio's `url` isn't taken from it: the bytes are read at the original's address.
-   */
-  preview: z.discriminatedUnion('kind', [
-    z.object({ kind: z.literal('text'), text: z.string().trim().min(1).max(MAX_TEXT_CHARS) }),
-    z.object({ kind: z.enum(['image', 'video', 'audio']), text: z.string().trim().max(MAX_TEXT_CHARS).optional() }),
-    z.object({ kind: z.literal('link'), url: LinkUrl }),
-  ]),
-});
-type OriginFields = z.infer<typeof OriginFields>;
+const OriginFields = z.object({ attestation: z.string().min(1).max(MAX_ATTESTATION_CHARS) });
 
 /**
  * What POST /repost says: the post to repost, as `contentId` or as `origin` (the route refuses a
@@ -82,7 +49,7 @@ type OriginFields = z.infer<typeof OriginFields>;
 const Body = Credentials.extend({
   /** The post to repost, on this server. */
   contentId: z.string().uuid().optional(),
-  /** Or the post to repost, on another server, with its summary. */
+  /** Or the post to repost, on another server, as that server attests it. */
   origin: OriginFields.optional(),
   /** The hashtags the repost gives the post: a list, or one string of them separated by commas or spaces. */
   tags: z.union([z.array(z.string().max(100)).max(50), z.string().max(5000)]).optional(),
@@ -94,12 +61,21 @@ type Body = z.infer<typeof Body>;
  * Reposts (POST /repost, see src/reposts.ts): a user gives someone else's post more hashtags, a
  * post on this server or one on another, which the server then keeps an entry of its own for.
  */
-export function repostRoutes(app: FastifyInstance, { db, config, content, challenges, writer, trustPlugins, now = Date.now }: RouteDeps) {
+export function repostRoutes(app: FastifyInstance, { db, config, content, hot, challenges, writer, trustPlugins, originKeys, now = Date.now }: RouteDeps) {
   const cut = previewCutter(config.feed);
   const serverTags = allowedTags(config.tagging);
   const allowed = serverTags && new Set(serverTags);
   /** This server's own address, as an origin under it is told by. None: no address is known to be its own. */
-  const ownBase = config.publicBaseUrl ? config.publicBaseUrl.replace(/\/+$/, '') : null;
+  const ownBase = ownAddress(config.publicBaseUrl);
+  /** The keys this server signs the attestations of its own posts with, as it publishes them: no private key among them. */
+  const ownKeys: PublishedKey[] = signingKeys(config.reposts.signingKeys).map(({ id, publicKey }) => ({ id, publicKey }));
+
+  /**
+   * The keys this server signs the attestations of its posts with, for the servers its posts are
+   * reposted on, which check an attestation against them (see OriginKeys): each with its id, as
+   * an attestation names it. For anyone. A server that signs nothing has none.
+   */
+  app.get('/repost/keys', async () => ({ keys: ownKeys.map((key) => ({ ...key, algorithm: 'ed25519' })) }));
 
   /** The hashtags a repost gives, which it must name: held to the server's own in server tagging mode, as a post's are. */
   function repostTags(body: Body): string[] {
@@ -114,14 +90,51 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, challe
   /** The id of the post an address names, if the address is one of this server's. */
   function ownContentId(url: string): string | null {
     if (ownBase === null) return null;
-    let base: string;
-    try {
-      base = new URL(ownBase).href.replace(/\/+$/, '');
-    } catch {
-      return null;
+    const id = POST_PATH.exec(url)?.[1];
+    return id !== undefined && url === postAddress(ownBase, id) ? id : null;
+  }
+
+  /**
+   * The post an attestation is of, once the attestation is found to be what the post's own server
+   * said, a short while ago. Until then nothing in it is believed, and a request that fails here
+   * has changed nothing.
+   *
+   * - It is written as an attestation, and says what one says (400).
+   * - It was issued within ATTESTATION_MAX_AGE_MS, by a clock no more than ATTESTATION_SKEW_MS
+   *   ahead of this one (400): an old one says what the post was, and may no longer be.
+   * - It is signed with a key of the server at the address it names. That server is asked for its
+   *   keys, where Redis doesn't hold them (see OriginKeys): over https only (400), and no more
+   *   than ORIGIN_ASKS_PER_MINUTE times a minute on one user's account (429). A server that gives
+   *   no keys leaves the attestation unchecked, and so refused (502); a key that isn't among the
+   *   server's, or a signature that isn't that key's, is a forgery as far as anyone can tell (400).
+   *
+   * An address that is this server's own is checked with this server's own keys, and nobody is
+   * asked. A server that signs nothing attested nothing, so there it is refused like any forgery.
+   */
+  async function attestedOrigin(user: AuthUser, attestation: string): Promise<AttestedPost> {
+    const read = readAttestation(attestation);
+    if (!read) throw badRequest(msg('repost.attestation_invalid'));
+    const said = AttestedPost.safeParse(read.payload);
+    if (!said.success) throw badRequest(msg('repost.attestation_invalid'), said.error.issues);
+    const post = said.data;
+    const age = now() - post.issuedAt;
+    if (age > ATTESTATION_MAX_AGE_MS || age < -ATTESTATION_SKEW_MS) throw badRequest(msg('repost.attestation_expired', { minutes: ATTESTATION_MAX_AGE_MS / MINUTE }));
+
+    let key: PublishedKey | undefined;
+    if (ownContentId(post.url) !== null) key = ownKeys.find(({ id }) => id === post.kid);
+    else {
+      const server = post.url.replace(POST_PATH, '');
+      if (!server.startsWith('https://')) throw badRequest(msg('repost.origin_not_https'));
+      const found = await originKeys.find(server, post.kid, async () => {
+        const { count, ttlMs } = await hot.incr(`originasks:${user.id}`, MINUTE);
+        const seconds = Math.max(1, Math.ceil(ttlMs / 1000));
+        if (count > ORIGIN_ASKS_PER_MINUTE) throw tooManyRequests(msg('repost.origin_rate_limited', { count: seconds }), seconds);
+      });
+      if (found === 'unavailable') throw new HttpError(502, msg('repost.origin_keys_unavailable', { server }));
+      if (found !== 'unknown') key = found;
     }
-    const id = ORIGIN_PATH.exec(url)?.[1];
-    return id !== undefined && url === `${base}/content/${id}` ? id : null;
+    if (!key || !signedBy(key, read)) throw badRequest(msg('repost.attestation_unsigned'));
+    return post;
   }
 
   /**
@@ -132,10 +145,12 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, challe
    * With `contentId`, a post on this server. The post gets the hashtags; it stays one piece of
    * content, with one like count, credited to its publisher (see repostHere).
    *
-   * With `origin`, a post on another server: its address there, who published it, and its summary,
-   * all of which the reposter's client read on that server and sends on, since no server asks
-   * another. The server keeps one entry for an original: new content that is a link to it, with
-   * its summary (see repostFrom). An original it has an entry of already is reposted as that entry
+   * With `origin`, a post on another server: its attestation, which that server signed and the
+   * reposter's client carries here. It says the post's address there, who published it, and its
+   * summary, and it is checked before any of that is used (see attestedOrigin), whether or not the
+   * server has the original already: this server asks the other for its keys, and for nothing
+   * else. The server keeps one entry for an original: new content that is a link to it, with its
+   * summary (see repostFrom). An original it has an entry of already is reposted as that entry
    * is, like a post written here; and an address that is this server's own names a post of its
    * own, and is reposted as one.
    *
@@ -154,7 +169,8 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, challe
     const tags = repostTags(body);
 
     if (body.contentId !== undefined) return repostHere(req, reply, user, body.contentId, tags, body);
-    const origin = body.origin!;
+    // Checked whatever the server already holds of the original: nothing is reposted on a client's word.
+    const origin = await attestedOrigin(user, body.origin!.attestation);
     const local = ownContentId(origin.url);
     if (local !== null) return repostHere(req, reply, user, local, tags, body);
 
@@ -209,7 +225,7 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, challe
   async function repostHere(req: FastifyRequest, reply: FastifyReply, user: AuthUser, contentId: string, tags: string[], solution: Body) {
     const row = await loadPublished(db, contentId);
     if (row.user_id === user.id) throw row.origin_hash !== null ? alreadyReposted() : badRequest(msg('repost.own'));
-    const [meta, places] = await Promise.all([requireMeta(content, contentId), repostsOf(db, contentId)]);
+    const [meta, places] = await Promise.all([requireMeta({ db, content }, contentId), repostsOf(db, contentId)]);
     if (places.some((r) => r.tag === authorIndex(user.id))) throw alreadyReposted();
 
     const moderated = await moderateRepost({ db, log: req.log }, { userId: user.id, publisherId: row.user_id, contentId, tags, texts: readableOf(meta) });
@@ -234,7 +250,7 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, challe
    * link to the original with the original's summary. Nothing of the original is copied but the
    * summary: the content's bytes are the original's address, as a link post's are its URL, and an
    * image, video or audio is read where the original is (see ContentMeta.origin). The preview is
-   * the one the client sent, cut to the length of this server's.
+   * the one the original's server attested, cut to the length of this server's.
    *
    * It is a post in every other way, and passes what a new post does: its type must be one the
    * server takes, it is given a trust score and held to its hashtags' rules by what there is of it
@@ -243,9 +259,11 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, challe
    * comments, which are the original's to take, and has no update: its owner deletes it like any
    * post.
    *
-   * The summary is the client's word: the server doesn't read the original to check it.
+   * The summary is the original's server's word, as it signed it when the repost was made (see
+   * attestedOrigin): this server doesn't read the original, then or later, so what the original
+   * becomes afterwards isn't seen here.
    */
-  async function repostFrom(req: FastifyRequest, reply: FastifyReply, user: AuthUser, sent: OriginFields, hash: string, tags: string[], solution: Body) {
+  async function repostFrom(req: FastifyRequest, reply: FastifyReply, user: AuthUser, sent: AttestedPost, hash: string, tags: string[], solution: Body) {
     const { kind } = sent.preview;
     requirePostType(config.postTypes, kind);
     const mimeType = kind === 'text' ? TEXT_MIME : kind === 'link' ? LINK_MIME : sent.mimeType;
@@ -269,22 +287,16 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, challe
     const contentId = randomUUID();
     const ts = now();
     const { aiGenerated } = sent;
-    const file = await spoolBytes(Buffer.from(origin.url), config.storage);
-    try {
-      await challenges.admitting('post', user.id, solution, req.language, () =>
-        writer.write({
-          publisher: { userId: user.id, username: user.username },
-          summary: { contentId, createdAt: ts, updatedAt: ts, userId: user.id, mimeType, aiGenerated, comments: false, tags: moderated.tags, preview, origin },
-          meta: { contentId, mimeType, size: file.size, aiGenerated, comments: false, preview, tags: moderated.tags, updatedAt: ts, origin },
-          // The bytes are an address, whatever the original is: they are stored as a link's are.
-          putBytes: () => file.place(content, contentId, LINK_MIME),
-          queued: queued ? { trustScore: moderated.trustScore } : undefined,
-          originHash: hash,
-        }),
-      );
-    } finally {
-      await file.release(true);
-    }
+    await challenges.admitting('post', user.id, solution, req.language, () =>
+      writer.write({
+        publisher: { userId: user.id, username: user.username },
+        summary: { contentId, createdAt: ts, updatedAt: ts, userId: user.id, mimeType, aiGenerated, comments: false, tags: moderated.tags, preview, origin },
+        // The bytes are an address, whatever the original is: the compactor writes them from the meta file, as it does a link's (see payloadBytes).
+        meta: { contentId, mimeType, size: Buffer.byteLength(origin.url), aiGenerated, comments: false, preview, tags: moderated.tags, updatedAt: ts, origin },
+        queued: queued ? { trustScore: moderated.trustScore } : undefined,
+        originHash: hash,
+      }),
+    );
     reply.status(queued ? 202 : 201);
     return {
       contentId,

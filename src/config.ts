@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod';
+import { seedOf } from './attestation.js';
 import { loadLanguages, REFERENCE_LANGUAGE } from './language.js';
 import { parseTagList } from './tags.js';
 
@@ -48,6 +49,7 @@ const ENV_MAP: Record<string, string> = {
   POST_TYPE_LINK: 'postTypes.link',
   REPOSTS: 'reposts.enabled',
   REPOSTS_REMOTE: 'reposts.remote',
+  REPOSTS_SIGNING_KEYS: 'reposts.signingKeys',
   FEED_PAGE_SIZE: 'feed.pageSize',
   FEED_MAX_PAGE_SIZE: 'feed.maxPageSize',
   FEED_TAG_DAY_MAX_POSTS: 'feed.tagDayMaxPosts',
@@ -321,10 +323,30 @@ const ConfigSchema = z.object({
     enabled: bool(true),
     /**
      * Whether it takes reposts of posts on other servers. Such a repost is stored here as a link to
-     * the original with the original's summary, which the reposter's client sends: this server asks
-     * the other one nothing. Off: only posts on this server are reposted.
+     * the original with the original's summary, as the original's server attested it: the
+     * reposter's client sends the attestation, and this server asks the other one only for the
+     * keys it signs with (src/attestation.ts). Off: only posts on this server are reposted.
      */
     remote: bool(true),
+    /**
+     * The keys this server signs the attestations of its posts with, which is what lets them be
+     * reposted on other servers: each is 32 random bytes, in base64 or hex (`openssl rand -base64
+     * 32`), separated by commas or spaces in the environment. The first signs. All are published
+     * (GET /repost/keys), so a key is replaced by putting the new one first and taking the old one
+     * out later. They are secrets: whoever has one signs as this server. Empty: the server
+     * attests nothing, and its posts are reposted only here. It needs `publicBaseUrl` too, which
+     * is where an attestation says a post is.
+     */
+    signingKeys: z
+      .union([z.string(), z.array(z.string())])
+      .default([])
+      .transform((v, ctx) => {
+        const keys = (typeof v === 'string' ? v.split(/[\s,]+/) : v).map((key) => key.trim()).filter(Boolean);
+        if (keys.every((key) => seedOf(key) !== null)) return keys;
+        // Which one, by its place: a key is never put in an error.
+        ctx.addIssue({ code: 'custom', message: `key ${keys.findIndex((key) => seedOf(key) === null) + 1} of REPOSTS_SIGNING_KEYS is not 32 random bytes in base64 or hex, such as \`openssl rand -base64 32\` makes` });
+        return z.NEVER;
+      }),
   }),
 
   feed: z.object({
@@ -393,17 +415,19 @@ const ConfigSchema = z.object({
     intervalSeconds: int(5),
     /**
      * What a run leaves for a later one until it is this old: the hashtag counts related hashtags are
-     * worked out from (covers clock skew between nodes), and the rows an update queued before it
-     * wrote anything and hasn't committed (after this long, the update is taken to have stopped half way).
+     * worked out from, which covers clock skew between nodes. A write waits for nothing: a run takes
+     * every row of the feed queue and applies every pending write there is.
      */
     graceSeconds: z.coerce.number().int().min(0).default(30),
     /** Batches of indexes compacted at a time. A batch is a couple of hundred tags, read and written together. */
     concurrency: int(4),
     /**
      * Lifetime of the database lease that keeps the runs of two compactor processes from overlapping
-     * (a deploy replacing one, a rebuild started by hand). A run renews it as it goes; a process that
-     * stopped without releasing it delays the next run by up to this long. Keep it well above clock
-     * skew between nodes and the slowest single storage write.
+     * (a deploy replacing one, a rebuild started by hand). It is renewed for as long as a run holds
+     * it, by a timer and as the run goes, so a storage write can outlast it; a process that stopped
+     * without releasing it delays the next run by up to this long. Keep it well above clock skew
+     * between nodes, and above the longest the compactor's process may be frozen or cut off from
+     * the database.
      */
     leaseSeconds: z.coerce.number().int().min(30).default(60),
   }),

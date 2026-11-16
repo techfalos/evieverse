@@ -9,6 +9,7 @@ import { notFound } from '../http/errors.js';
 import { Credentials } from '../http/schemas.js';
 import { msg } from '../language.js';
 import { refuseBanned } from '../moderation/policy.js';
+import { effectiveComment, insertPending, pendingLikers, writePending, type PendingReader } from '../pending.js';
 
 /** The body of POST /like: who's asking, and the post to like, or the post and the comment on it to like. */
 const Body = Credentials.extend({
@@ -24,7 +25,12 @@ export function likeRoutes(app: FastifyInstance, { db, content, comments, now = 
    * twice succeeds without double-counting.
    *
    * A post's likes are rows in the database, and its count a column of the post's. A comment's are
-   * in the content store, as comments are (see CommentStore.like), and the database has none.
+   * in the content store, as comments are, where the compactor makes them (see CommentStore.addLike):
+   * the request commits the like as a write of the comment's post (`pending_writes`), in the
+   * order of the post's writes, so a like of a comment that was deleted, or of one under a post
+   * that is set for deletion, is refused (404) and never made. The count it answers with has the
+   * likes that wait to be made; a comment read before the compactor's next run has only the
+   * ones that were.
    *
    * A banned user is refused (403) either like, before anything is looked up: one they made before
    * the ban stays, and is answered the same way.
@@ -37,11 +43,30 @@ export function likeRoutes(app: FastifyInstance, { db, content, comments, now = 
 
     if (commentId !== undefined) {
       // A comment anyone can read: one of a published post that takes comments, and not one that waits in the moderation queue.
-      await loadPublished(db, contentId);
-      if (!takesComments(await requireMeta(content, contentId))) throw notFound(msg('comment.off'));
-      if (!(await comments.get(contentId, commentId))) throw notFound(msg('comment.not_found'));
-      const { likes, already } = await comments.like(contentId, commentId, user.id);
-      return reply.status(already ? 200 : 201).send({ contentId, commentId, likes, alreadyLiked: already });
+      const post = await loadPublished(db, contentId);
+      if (!takesComments(await requireMeta({ db, content }, contentId))) throw notFound(msg('comment.off'));
+      const gone = () => notFound(msg('comment.not_found'));
+      // Whether the user likes the comment already, by a like that was applied or one that waits to be; null for a comment that isn't there to like.
+      const read = async (reader: PendingReader) => {
+        if ((await effectiveComment(reader, comments, contentId, commentId))?.held !== false) return null;
+        // The rows first, then the store: the compactor makes a like there before it deletes the like's row.
+        return { liked: (await pendingLikers(reader, contentId, commentId)).has(user.id) || (await comments.liked(contentId, commentId, user.id)) };
+      };
+      const seen = await read(db);
+      if (!seen) throw gone();
+      const already =
+        seen.liked ||
+        (await writePending(db, contentId, { seq: post.seq, state: seen }, read, async (trx, seq, state) => {
+          // Deleted, or taken back to the queue, while this was under way; or liked, by the same user's other request.
+          if (!state) throw gone();
+          if (state.liked) return true;
+          await insertPending(trx, { contentId, seq, kind: 'comment_like', commentId, payload: { userId: user.id }, at: now() });
+          return false;
+        }));
+      // The likes the store has and the ones that wait to be made there, this one among them.
+      const waiting = await pendingLikers(db, contentId, commentId);
+      const [made = 0] = await comments.likes(contentId, [commentId]);
+      return reply.status(already ? 200 : 201).send({ contentId, commentId, likes: made + waiting.size, alreadyLiked: already });
     }
 
     let alreadyLiked = false;

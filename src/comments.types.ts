@@ -38,14 +38,3 @@ export interface CommentCounts {
   likes: number;
   replies: number;
 }
-
-/**
- * The removal of one comment, in the two steps a caller may have work to do between (see
- * removeComment, which is both).
- */
-export interface CommentRemoval {
-  /** Removes the comment from the store, leaving a placeholder if something replies to it. It touches no database. */
-  remove(): Promise<void>;
-  /** What follows: see commentRemoval. Not to be called inside a transaction. */
-  finish(): Promise<void>;
-}

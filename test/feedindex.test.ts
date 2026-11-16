@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { brotliDecompressSync } from 'node:zlib';
@@ -85,35 +84,29 @@ for (const target of TARGETS) {
       );
     };
     /**
-     * Pauses the /store request for `text` in the content store until released: just before it writes
-     * its bytes, or just after it writes its meta file (right before its commit).
+     * Pauses the next write just before its commit, which is all of a request's write (see
+     * contentWriter), until released: the request has read what it writes over by then.
      */
-    const pauseStore = (at: 'putFile' | 'putMeta', text: string) => {
+    const pauseCommit = () => {
       let reached!: () => void;
       let release!: () => void;
       const paused = new Promise<void>((r) => (reached = r));
       const released = new Promise<void>((r) => (release = r));
-      if (at === 'putFile') {
-        const putFile = ctx.content.putFile.bind(ctx.content);
-        vi.spyOn(ctx.content, 'putFile').mockImplementation(async (...args) => {
-          if (readFileSync(args[1], 'utf8') === text) {
-            reached();
-            await released;
-          }
-          return putFile(...args);
-        });
-      } else {
-        const putMeta = ctx.content.putMeta.bind(ctx.content);
-        vi.spyOn(ctx.content, 'putMeta').mockImplementation(async (meta) => {
-          await putMeta(meta);
-          if (meta.preview.kind === 'text' && meta.preview.text === text) {
-            reached();
-            await released;
-          }
-        });
-      }
+      const transaction = ctx.db.transaction.bind(ctx.db);
+      vi.spyOn(ctx.db, 'transaction').mockImplementationOnce(
+        () =>
+          ({
+            execute: async (fn: (trx: unknown) => Promise<unknown>) => {
+              reached();
+              await released;
+              return transaction().execute(fn);
+            },
+          }) as never,
+      );
       return { paused, release };
     };
+    /** The writes that wait for the compactor: the number of each, in order. */
+    const pending = async () => (await ctx.db.selectFrom('pending_writes').select('seq').orderBy('seq').execute()).map((r) => Number(r.seq));
     const storedFiles = async (contentId: string) => (await readdir(join(ctx.dir, 'content', 'content'))).filter((f) => f.startsWith(contentId)).sort();
     const summaryDir = (createdAt: number) => join(ctx.dir, 'summaries', 'summaries', String(utcDay(createdAt)).padStart(5, '0'));
     const storedSummaries = async (contentId: string, createdAt: number) => (await readdir(summaryDir(createdAt))).filter((f) => f.startsWith(contentId)).sort();
@@ -536,12 +529,16 @@ for (const target of TARGETS) {
       expect((await run).tags).toEqual([own(alice), 'news'].sort());
 
       // The update's rows are its own, not the ones the run took: all of them wait, the hashtags it kept too.
+      // So does the update itself, which the run didn't apply: feeds show the post as the run found it.
       expect(await queue()).toEqual(rowsOf(alice, id, 'news', 'sports').sort());
-      expect(await shown('news')).toEqual([[id, 'v2 #news #sports']]);
+      expect(await pending()).toEqual([2]);
+      expect(await shown('news')).toEqual([[id, 'v1 #news']]);
       expect(await shown('sports')).toEqual([]);
       await ctx.compactor.runOnce();
+      expect(await shown('news')).toEqual([[id, 'v2 #news #sports']]);
       expect(await shown('sports')).toEqual([[id, 'v2 #news #sports']]);
       expect(await queue()).toEqual([]);
+      expect(await pending()).toEqual([]);
     });
 
     it('publishes nothing for an update that leaves the index as it is', async () => {
@@ -561,7 +558,7 @@ for (const target of TARGETS) {
       expect(await queue()).toEqual([]);
     });
 
-    it('queues a write when the database commits it; an update whose commit failed is reported as failed, repaired after the grace period and completed by sending it again', async () => {
+    it('writes nothing for an update whose commit failed: the post, its feeds and the queue are as they were, and sending it again makes it', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const { contentId: id, createdAt } = await post(alice, 'v1 #news #old');
@@ -570,50 +567,53 @@ for (const target of TARGETS) {
       ctx.clock.now += 1000;
       failNextCommit(false);
       expect((await update(alice, id, 'v2 draft #news')).statusCode).toBe(500);
-      // It wrote over the post, which has one version: that can't be taken back.
-      expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}/raw` })).body).toBe('v2 draft #news');
-      expect(await shown('news')).toEqual([[id, 'v2 draft #news']]);
-      expect(await shown('old')).toEqual([]);
-      // The rows it queued before it wrote anything tell the compactor which indexes to look at again. They
-      // are not committed, so a run leaves them until the update has had the grace period to finish.
-      expect(await queue()).toEqual(rowsOf(alice, id, 'news', 'old').sort());
-      expect((await ctx.compactor.runOnce()).tags).toEqual([]);
-      expect(await queue()).toEqual(rowsOf(alice, id, 'news', 'old').sort());
-      expect(await indexIds('old')).toEqual([id]);
-      // Then it takes the post out of the hashtag it lost.
-      await ctx.compact();
-      expect(await shown('news')).toEqual([[id, 'v2 draft #news']]);
-      expect((await readManifest('old')).days).toEqual([]);
+      // The commit is all there is to a write: one that failed left the post as it was, everywhere.
+      expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}/raw` })).body).toBe('v1 #news #old');
+      expect(await ctx.content.getMeta(id)).toMatchObject({ text: 'v1 #news #old', tags: ['news', 'old'] });
+      expect(await shown('news')).toEqual([[id, 'v1 #news #old']]);
+      expect(await shown('old')).toEqual([[id, 'v1 #news #old']]);
       expect(await queue()).toEqual([]);
+      expect(await pending()).toEqual([]);
+      expect((await ctx.compactor.runOnce()).tags).toEqual([]);
+      expect(await indexIds('old')).toEqual([id]);
 
       ctx.clock.now += 1000;
       const retry = await update(alice, id, 'v2 #news');
       expect(retry.statusCode, retry.body).toBe(200);
-      expect(await shown('news')).toEqual([[id, 'v2 #news']]);
+      expect(await queue()).toEqual(rowsOf(alice, id, 'news', 'old').sort());
       await ctx.compactor.runOnce();
       expect(await shown('news')).toEqual([[id, 'v2 #news']]);
+      expect((await readManifest('old')).days).toEqual([]);
       expect(await storedFiles(id)).toEqual([id, `${id}.meta.json`]);
       expect(await storedSummaries(id, createdAt)).toEqual([`${id}.br`]);
       expect(await queue()).toEqual([]);
     });
 
-    it('leaves an update that could not be written as it was in feeds, and in the database', async () => {
-      ctx = await createTestContext(target);
+    it('keeps an update the compactor could not write for its next run: read by its id the post is the update, and feeds show it as it was until then', async () => {
+      ctx = await createTestContext(target, { settle: false });
       const alice = await ctx.register('alice');
       const id = await store(alice, 'v1 #news');
       await ctx.compact();
 
       ctx.clock.now += 1000;
-      vi.spyOn(ctx.content, 'putMeta').mockRejectedValueOnce(new Error('store unavailable'));
-      expect((await update(alice, id, 'v2 #news #tech')).statusCode).toBe(500);
-      // The meta file says what the post is, and feeds show what it says.
-      expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}` })).json()).toMatchObject({ preview: { kind: 'text', text: 'v1 #news' }, tags: ['news'] });
+      expect((await update(alice, id, 'v2 #news #tech')).statusCode).toBe(200);
+      vi.spyOn(ctx.content, 'putBytes').mockRejectedValueOnce(new Error('store unavailable'));
+      await ctx.compactor.runOnce();
+      // The update committed: it is what the post is to whoever reads it by its id.
+      expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}` })).json()).toMatchObject({ preview: { kind: 'text', text: 'v2 #news #tech' }, tags: ['news', 'tech'] });
+      // Nothing of it is in the stores yet, so feeds show what they showed, and its rows wait.
+      expect(await ctx.content.getMeta(id)).toMatchObject({ text: 'v1 #news', tags: ['news'] });
       expect(await shown('news')).toEqual([[id, 'v1 #news']]);
       expect(await shown('tech')).toEqual([]);
-      await ctx.compact();
-      expect(await shown('news')).toEqual([[id, 'v1 #news']]);
-      expect(await shown('tech')).toEqual([]);
+      expect(await queue()).toEqual(rowsOf(alice, id, 'news', 'tech').sort());
+      expect(await pending()).toEqual([2]);
+
+      await ctx.compactor.runOnce();
+      expect(await ctx.content.getMeta(id)).toMatchObject({ text: 'v2 #news #tech', tags: ['news', 'tech'] });
+      expect(await shown('news')).toEqual([[id, 'v2 #news #tech']]);
+      expect(await shown('tech')).toEqual([[id, 'v2 #news #tech']]);
       expect(await queue()).toEqual([]);
+      expect(await pending()).toEqual([]);
     });
 
     it('keeps and queues a write whose commit went through even though it reported an error', async () => {
@@ -630,49 +630,69 @@ for (const target of TARGETS) {
       expect(await queue()).toEqual([]);
     });
 
-    it('keeps the last of two overlapping updates to be written', async () => {
-      ctx = await createTestContext(target);
+    it('applies the last of two overlapping updates to commit, and that one alone', async () => {
+      ctx = await createTestContext(target, { settle: false });
       const alice = await ctx.register('alice');
       const { contentId: id, createdAt } = await post(alice, 'v1 #news');
       await ctx.compact();
+      const raw = async () => (await ctx.app.inject({ method: 'GET', url: `/content/${id}/raw` })).body;
 
-      // A client retries an update that timed out; the first attempt writes its bytes after the retry is done.
-      const first = pauseStore('putFile', 'first #news #sports');
+      // A client retries an update that timed out; the first attempt commits after the retry has.
+      const first = pauseCommit();
       const firstRes = update(alice, id, 'first #news #sports');
       await first.paused;
-      const retry = await update(alice, id, 'retry #news');
+      const retry = await update(alice, id, 'retry #news #tech');
       expect(retry.statusCode, retry.body).toBe(200);
-      expect(await shown('news')).toEqual([[id, 'retry #news']]);
+      expect(await raw()).toBe('retry #news #tech');
       first.release();
       expect((await firstRes).statusCode).toBe(200);
 
-      expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}/raw` })).body).toBe('first #news #sports');
+      // The post is the update that committed last, to whoever reads it by its id.
+      expect(await raw()).toBe('first #news #sports');
       expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}` })).json()).toMatchObject({
         preview: { kind: 'text', text: 'first #news #sports' },
         tags: ['news', 'sports'],
       });
-      expect(await shown('news')).toEqual([[id, 'first #news #sports']]);
-      expect(await storedFiles(id)).toEqual([id, `${id}.meta.json`]);
-      expect(await storedSummaries(id, createdAt)).toEqual([`${id}.br`]);
-      // The index follows the meta file, whichever update queued the rows last.
+      // Both wait, in the order they committed, with the hashtags of both in the queue: the one the retry gave is to be looked at again.
+      expect(await pending()).toEqual([2, 3]);
+      expect(await queue()).toEqual(rowsOf(alice, id, 'news', 'sports', 'tech').sort());
+      expect(await ctx.content.getMeta(id)).toMatchObject({ text: 'v1 #news' });
+
+      // The compactor writes the last one, and nothing of the other.
+      const putMeta = vi.spyOn(ctx.content, 'putMeta');
       await ctx.compactor.runOnce();
+      expect(putMeta.mock.calls.map(([meta]) => meta.text)).toEqual(['first #news #sports']);
+      expect(await raw()).toBe('first #news #sports');
       expect(await shown('news')).toEqual([[id, 'first #news #sports']]);
       expect(await shown('sports')).toEqual([[id, 'first #news #sports']]);
+      expect(await shown('tech')).toEqual([]);
+      expect(await storedFiles(id)).toEqual([id, `${id}.meta.json`]);
+      expect(await storedSummaries(id, createdAt)).toEqual([`${id}.br`]);
       expect(await queue()).toEqual([]);
+      expect(await pending()).toEqual([]);
     });
 
-    it('stores nothing when the summary cannot be written', async () => {
-      ctx = await createTestContext(target);
+    it('keeps a post whose summary could not be written for the next run, which puts it in feeds', async () => {
+      ctx = await createTestContext(target, { settle: false });
       const alice = await ctx.register('alice');
+      const { contentId, createdAt } = await post(alice, 'kept #news');
       const set = ctx.hot.set.bind(ctx.hot);
-      vi.spyOn(ctx.hot, 'set').mockImplementation((key, ...rest) => (key.startsWith('sum:') ? Promise.reject(new Error('redis unavailable')) : set(key, ...rest)));
-      const res = await ctx.app.inject({ method: 'POST', url: '/store', payload: { ...alice, type: 'text', text: 'lost #news', tags: ['news'] } });
-      expect(res.statusCode, res.body).toBe(500);
-      expect(await ctx.db.selectFrom('content').selectAll().execute()).toEqual([]);
+      const failing = vi.spyOn(ctx.hot, 'set').mockImplementation((key, ...rest) => (key.startsWith('sum:') ? Promise.reject(new Error('redis unavailable')) : set(key, ...rest)));
+      await ctx.compactor.runOnce();
+      // The post is there, and read by its id. It is in no feed, and its write and its rows wait.
+      expect((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}/raw` })).body).toBe('kept #news');
+      expect(await ctx.content.getMeta(contentId)).toBeNull();
+      expect(await shown('news')).toEqual([]);
+      expect(await queue()).toEqual(rowsOf(alice, contentId, 'news').sort());
+      expect(await pending()).toEqual([1]);
+
+      failing.mockRestore();
+      await ctx.compactor.runOnce();
+      expect(await shown('news')).toEqual([[contentId, 'kept #news']]);
+      expect(await storedFiles(contentId)).toEqual([contentId, `${contentId}.meta.json`]);
+      expect(await storedSummaries(contentId, createdAt)).toEqual([`${contentId}.br`]);
       expect(await queue()).toEqual([]);
-      const files = (dir: string) => readdir(dir).catch(() => []);
-      expect(await files(join(ctx.dir, 'content', 'content'))).toEqual([]);
-      expect(await files(summaryDir(ctx.clock.now))).toEqual([]);
+      expect(await pending()).toEqual([]);
     });
 
     it('keeps the row of an index it could not compact, for the next run, and deletes the rest of the write', async () => {
@@ -960,8 +980,8 @@ for (const target of TARGETS) {
         ctx.clock.now += 1000;
       }
       await ctx.compact();
-      // The post is stamped before its bytes are uploaded, and the first page is read during the upload.
-      const late = pauseStore('putFile', 'late #news');
+      // The post is stamped before its write commits, and the first page is read in between.
+      const late = pauseCommit();
       const stored = store(alice, 'late #news');
       await late.paused;
       ctx.clock.now += 1000;

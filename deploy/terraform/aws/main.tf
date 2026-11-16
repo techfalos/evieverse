@@ -258,15 +258,33 @@ resource "aws_s3_bucket_lifecycle_configuration" "content" {
       days_after_initiation = 1
     }
   }
+  # A request stages a post's file, or a comment's, under staged/, and the compactor's next run
+  # moves it to where it is kept and removes it. One left behind (a request that failed, a run
+  # that stopped) goes after a week: long enough that no write still waiting to be applied loses
+  # its file while the compactor is down for a while.
+  rule {
+    id     = "expire-staged-files"
+    status = "Enabled"
+    filter {
+      prefix = "staged/"
+    }
+    expiration {
+      days = 7
+    }
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
+    }
+  }
 }
 
 # ---------------------------------------------------------------- audit log
 
 # Every request that adds, updates or deletes something is written here, whole and gzipped, one
-# object each, as the response is sent (src/audit.ts); reads are not. The objects move to S3 Glacier
-# Deep Archive after `audit_archive_after_days`, which is the cold storage they end in. The functions
-# can put objects here and do nothing else with it: not read, overwrite or delete one. The
-# application's own log group (30 days) keeps a line for each, naming its object.
+# object each, as the response is sent (src/audit.ts); reads are not. They stay in S3 Standard:
+# `audit_archive_after_days` moves the ones of 128 KB or more to S3 Glacier Deep Archive, and is
+# off by default (see the lifecycle rule below). The functions can put objects here and do nothing
+# else with it: not read, overwrite or delete one. The application's own log group (30 days) keeps
+# a line for each, naming its object.
 resource "aws_s3_bucket" "audit" {
   bucket_prefix = "${var.name}-audit-"
   force_destroy = var.force_destroy
@@ -291,16 +309,22 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "audit" {
 
 resource "aws_s3_bucket_lifecycle_configuration" "audit" {
   bucket = aws_s3_bucket.audit.id
-  # Most records are well under 128 KB, which S3 doesn't transition by default. This setting lets it
-  # transition them to the Glacier classes (the default is the same for every class).
-  transition_default_minimum_object_size = "varies_by_storage_class"
+  # S3's own floor: no object under 128 KB is transitioned. Nearly every record is about 1 KB, and
+  # in Deep Archive each object is billed 40 KB of overhead (8 KB of it at Standard rates) on top
+  # of $0.05 per 1,000 moved, which is several times what the record costs left in Standard. This
+  # is what the provider sets when nothing is written here too; it is written so that the choice
+  # is on the page.
+  transition_default_minimum_object_size = "all_storage_classes_128K"
   rule {
     id     = "archive"
     status = "Enabled"
     filter {}
-    transition {
-      days          = var.audit_archive_after_days
-      storage_class = "DEEP_ARCHIVE"
+    dynamic "transition" {
+      for_each = var.audit_archive_after_days == null ? [] : [var.audit_archive_after_days]
+      content {
+        days          = transition.value
+        storage_class = "DEEP_ARCHIVE"
+      }
     }
     abort_incomplete_multipart_upload {
       days_after_initiation = 1
@@ -392,7 +416,19 @@ locals {
   proxy_database_url = "postgres://evieverse:${random_password.db.result}@${aws_db_proxy.main.endpoint}:5432/evieverse?sslmode=verify-full"
 }
 
-# Read by the compactor and the one-off rebuild task (the functions get these as environment variables, see below).
+# The secret settings are in two secrets of Secrets Manager, and in nobody's environment:
+#
+#   app        what the compactor, the one-off rebuild task and the migrate function read: the
+#              database's own address, Redis and `var.secrets`
+#   function   what the functions read as an instance starts (src/functions/secrets.ts): the
+#              database through the proxy, Redis, the edge secret, the key they sign reposts'
+#              attestations with (random_bytes.repost_signing) and `var.secrets`
+#
+# Each reader is told which version to read, by its id, and not "the current one". A changed value
+# is a new version here (the old one stays readable by its id), so what is running keeps the values
+# it has until the migrate function has checked the new ones: only then are the functions and the
+# compactor's task definition given the new version's id. A function instance or a compactor task
+# that starts in between, as they do at any time, reads the version it was deployed with.
 resource "aws_secretsmanager_secret" "app" {
   name_prefix             = "${var.name}-"
   recovery_window_in_days = 0
@@ -404,10 +440,48 @@ resource "aws_secretsmanager_secret_version" "app" {
     DATABASE_URL = local.database_url
     REDIS_URL    = local.redis_url
   }))
-  # The compactor reads these whenever its task starts, which ECS can do at any time. So they are
-  # written only once the migrate function has checked them: a task that restarts never finds
-  # secrets the server refuses.
-  depends_on = [aws_lambda_invocation.migrate]
+}
+
+resource "aws_secretsmanager_secret" "function" {
+  name_prefix             = "${var.name}-fn-"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "function" {
+  secret_id = aws_secretsmanager_secret.function.id
+  secret_string = jsonencode(merge({
+    REDIS_URL            = local.redis_url
+    FUNCTION_EDGE_SECRET = random_password.edge.result
+    }, local.generated_secrets, var.secrets, {
+    DATABASE_URL = local.proxy_database_url
+  }))
+}
+
+# Functions reach Secrets Manager here, inside the VPC, and not through the NAT gateway: an instance
+# reads its secrets as it starts, so a function could otherwise not start while the gateway's zone
+# is down. The compactor's task is given its secrets through it too.
+#
+# With the endpoint's private DNS on, Secrets Manager's name is the endpoint's address to everything
+# in the VPC. So the database proxy, which reads the database's credentials from Secrets Manager,
+# is let in as well: whether or not it asks from inside the VPC, it is not to be the one shut out.
+resource "aws_security_group" "endpoints" {
+  name   = "${var.name}-endpoints"
+  vpc_id = aws_vpc.main.id
+  ingress {
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.app.id, aws_security_group.proxy.id]
+  }
+}
+
+resource "aws_vpc_endpoint" "secretsmanager" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.region}.secretsmanager"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.endpoints.id]
+  private_dns_enabled = true
 }
 
 # ---------------------------------------------------------------- database proxy
@@ -494,25 +568,28 @@ locals {
     MAX_UPLOAD_BYTES = "268435456"
   }, var.environment)
 
-  # A Lambda function reads its settings from its configuration only, so the two URLs and
-  # `var.secrets` are environment variables there: encrypted at rest, but readable by anyone allowed
-  # lambda:GetFunctionConfiguration on these functions.
+  # A function's configuration can be read by anyone allowed lambda:GetFunctionConfiguration on it,
+  # so it holds no secret: the two URLs, the edge secret, the signing key and `var.secrets` are in Secrets Manager,
+  # and the configuration says which secret to read and which version of it (FUNCTION_SECRETS).
   function_env = merge(local.env, {
     # Only the functions answer requests, so only they write the audit log.
     AUDIT_SCHEME  = "s3"
     AUDIT_OPTIONS = jsonencode({ bucket = aws_s3_bucket.audit.id, region = var.region })
-    REDIS_URL     = local.redis_url
     # The address CloudFront saw is the last one in X-Forwarded-For once the gateway's own is dropped.
-    TRUST_PROXY          = "1"
-    FUNCTION_EDGE_SECRET = random_password.edge.result
-  }, var.secrets)
+    TRUST_PROXY = "1"
+  })
+  function_secret = { id = aws_secretsmanager_secret.function.arn, version = aws_secretsmanager_secret_version.function.version_id }
 
   # The migrate function is given what the functions are about to get, so that it can check that
-  # they start with it before any of them is updated (src/functions/deploy.ts). It goes straight to
-  # the database, where they go through the proxy.
+  # they start with it before any of them is updated (src/functions/deploy.ts): their settings, and
+  # the version of their secret they are about to be told to read. It reads the compactor's secret
+  # after that one, so it goes straight to the database, where they go through the proxy.
   migrate_env = merge(local.function_env, {
-    FUNCTION_GROUP  = "migrate"
-    DATABASE_URL    = local.database_url
+    FUNCTION_GROUP = "migrate"
+    FUNCTION_SECRETS = jsonencode([
+      local.function_secret,
+      { id = aws_secretsmanager_secret.app.arn, version = aws_secretsmanager_secret_version.app.version_id },
+    ])
     BOOTSTRAP_ADMIN = local.bootstrap_admin
   })
 
@@ -522,12 +599,30 @@ locals {
   # aws_lambda_invocation.migrate).
   settings         = merge(var.environment, var.secrets)
   optional_plugins = regexall("[^\\s,]+", lookup(local.settings, "TRUST_OPTIONAL_PLUGINS", ""))
+
+  # The secret settings this stack makes for the functions, where the deployment sets none of that
+  # name itself: see random_bytes.repost_signing.
+  generated_names   = [for name in ["REPOSTS_SIGNING_KEYS"] : name if !nonsensitive(contains(keys(local.settings), name))]
+  generated_secrets = { for name in local.generated_names : name => random_bytes.repost_signing.base64 }
 }
 
 # CloudFront sends this to the gateway, whose own address is public; functions refuse requests without it.
 resource "random_password" "edge" {
   length  = 40
   special = false
+}
+
+# The key the server signs the attestations of its posts with, which is what lets them be reposted
+# on other servers (src/attestation.ts): 32 random bytes, as REPOSTS_SIGNING_KEYS takes them. Only
+# the functions are given it: they sign with it, and publish its public half (GET /repost/keys).
+# To replace it:
+#   terraform apply -replace=random_bytes.repost_signing
+# Nothing of the old key has to be kept: an attestation is good for ten minutes, and another server
+# asks for this one's keys again when it meets a key it doesn't know. A deployment that sets
+# REPOSTS_SIGNING_KEYS itself is given none: in `secrets`, to sign with its own keys, or as "" in
+# `environment`, to sign nothing, so that its posts are reposted only here.
+resource "random_bytes" "repost_signing" {
+  length = 32
 }
 
 # ---------------------------------------------------------------- IAM
@@ -587,6 +682,20 @@ resource "aws_iam_role_policy" "function_audit" {
   policy = jsonencode({
     Version   = "2012-10-17"
     Statement = [{ Effect = "Allow", Action = ["s3:PutObject"], Resource = "${aws_s3_bucket.audit.arn}/*" }]
+  })
+}
+
+# The functions read their own secret as they start, and the migrate function, which has the same
+# role, the compactor's too.
+resource "aws_iam_role_policy" "function_secrets" {
+  role = aws_iam_role.function.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = [aws_secretsmanager_secret.function.arn, aws_secretsmanager_secret.app.arn]
+    }]
   })
 }
 
@@ -690,7 +799,8 @@ resource "aws_cloudwatch_log_group" "function" {
 # updating a function doesn't start it, so a setting the server refuses (a misspelt plugin name,
 # say) would otherwise pass the apply and then fail every request. The migrate function starts each
 # route group as its function would, and its failure stops the apply here, before the functions,
-# the compactor and the compactor's secrets, which all wait for it: they keep what they have.
+# the compactor and its task definitions, which all wait for it: they keep what they have, and
+# the versions of the secrets they were told to read.
 #
 # Functions never migrate when they start, as many start at once.
 resource "aws_lambda_function" "migrate" {
@@ -720,18 +830,22 @@ resource "aws_lambda_function" "migrate" {
     aws_ecr_repository_policy.lambda,
     aws_cloudwatch_log_group.function,
     aws_iam_role_policy_attachment.function_vpc,
+    aws_iam_role_policy.function_secrets,
+    aws_vpc_endpoint.secretsmanager,
+    aws_route_table_association.private,
   ]
 }
 
 resource "aws_lambda_invocation" "migrate" {
   function_name = aws_lambda_function.migrate.function_name
   input         = jsonencode({ image = local.image })
-  # `settings` is a hash of everything the function is given, so a change to `environment` or
-  # `secrets` alone invokes it again, and is checked before it reaches a function.
+  # `settings` is a hash of everything the function is given, the versions of the secrets among it,
+  # so a change to `environment` or `secrets` alone invokes it again, and is checked before it
+  # reaches a function.
   triggers = {
     image    = local.image
     admin    = local.bootstrap_admin
-    settings = nonsensitive(sha256(jsonencode(local.migrate_env)))
+    settings = sha256(jsonencode(local.migrate_env))
   }
   depends_on = [aws_db_instance.main]
 
@@ -775,8 +889,8 @@ resource "aws_lambda_function" "fn" {
   }
   environment {
     variables = merge(local.function_env, {
-      FUNCTION_GROUP = each.key
-      DATABASE_URL   = local.proxy_database_url
+      FUNCTION_GROUP   = each.key
+      FUNCTION_SECRETS = jsonencode([local.function_secret])
     })
   }
   depends_on = [
@@ -784,10 +898,12 @@ resource "aws_lambda_function" "fn" {
     aws_db_proxy_target.main,
     aws_route_table_association.private,
     aws_vpc_endpoint.s3,
+    aws_vpc_endpoint.secretsmanager,
     aws_cloudwatch_log_group.function,
     aws_iam_role_policy_attachment.function_vpc,
     aws_iam_role_policy.function,
     aws_iam_role_policy.function_audit,
+    aws_iam_role_policy.function_secrets,
   ]
 }
 
@@ -818,7 +934,9 @@ locals {
     image       = local.image
     essential   = true
     environment = [for k, v in local.env : { name = k, value = v }]
-    secrets     = [for k in local.secret_keys : { name = k, valueFrom = "${aws_secretsmanager_secret.app.arn}:${k}::" }]
+    # Each by the version this apply wrote (the last part), so a changed secret is a new task
+    # definition: the compactor is started again with it, and until then keeps the one it has.
+    secrets = [for k in local.secret_keys : { name = k, valueFrom = "${aws_secretsmanager_secret.app.arn}:${k}::${aws_secretsmanager_secret_version.app.version_id}" }]
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -847,7 +965,9 @@ resource "aws_ecs_task_definition" "compactor" {
     # SIGTERM lets the pass that is running finish; then ECS stops the task.
     stopTimeout = 120
   })])
-  depends_on = [terraform_data.image]
+  # It names the version of the secret to read, so it is made only once the migrate function has
+  # checked that version.
+  depends_on = [terraform_data.image, aws_lambda_invocation.migrate]
 }
 
 resource "aws_ecs_service" "compactor" {
@@ -895,7 +1015,7 @@ resource "aws_ecs_task_definition" "rebuild" {
   container_definitions = jsonencode([merge(local.compactor_container, {
     command = ["node", "dist/compact/main.js", "--once", "--rebuild"]
   })])
-  depends_on = [terraform_data.image]
+  depends_on = [terraform_data.image, aws_lambda_invocation.migrate]
 }
 
 # ---------------------------------------------------------------- gateway

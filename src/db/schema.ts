@@ -1,4 +1,4 @@
-import type { Generated, Selectable } from 'kysely';
+import type { ColumnType, Generated, Selectable } from 'kysely';
 
 /**
  * All timestamps are UTC epoch milliseconds stored as BIGINT, which behaves identically across dialects.
@@ -81,6 +81,50 @@ export interface ContentTable {
    * original's address: unique, so the server holds one entry per original.
    */
   origin_hash: string | null;
+  /**
+   * The number of the post's last write: every write of it, or of a comment on it, adds one with the
+   * row locked, and takes the number for its row in `pending_writes` (see nextSeq).
+   */
+  seq: Generated<number>;
+}
+
+/** What a row of `pending_writes` is: a post's write, or a comment's (as it now is, removed, or liked). */
+export type PendingKind = 'post' | 'comment_put' | 'comment_remove' | 'comment_like';
+
+/**
+ * A write that committed and that the compactor hasn't applied yet: requests write nothing of a
+ * post or a comment to the stores themselves. A run applies a post's rows in the order of `seq`,
+ * and deletes each as it does (src/compact/apply.ts).
+ */
+export interface PendingWritesTable {
+  content_id: string;
+  /** The write's number among the post's (see `content.seq`). */
+  seq: number;
+  kind: PendingKind;
+  /** The comment a comment's write is of; null on a post's. */
+  comment_id: string | null;
+  /**
+   * What the write says, as JSON (see PendingPayload). Written as a string; PostgreSQL and MySQL
+   * give it back parsed, and SQLite as the string, so it is read with `payloadOf`.
+   */
+  payload: ColumnType<unknown, string | null, string | null>;
+  /** The object under staged/ that holds the file the write came with, which the request wrote once; null on a write with none. */
+  staged_key: string | null;
+  /** When the write was made. */
+  created_at: number;
+}
+
+/**
+ * A staged file the compactor has applied and has yet to delete: it stays until the links that
+ * were given to it have expired (src/compact/apply.ts). Only where the content store signs links.
+ */
+export interface StagedRemovalsTable {
+  /** The object under staged/, as the write's row named it. */
+  staged_key: string;
+  /** The post the write was of, or was a comment on: the run that deletes the post deletes the file with it. */
+  content_id: string;
+  /** From when the compactor can delete it. */
+  remove_at: number;
 }
 
 /**
@@ -148,7 +192,7 @@ export interface FollowsTable {
 /**
  * The queue the feed index is written from: content whose entry in a tag's index the compactor
  * rebuilds, from the database and the meta file, on its next run. One row per content and tag, so
- * writes of the same content between two runs queue once.
+ * writes of the same content between two runs queue once. Every row is a committed write's.
  */
 export interface FeedQueueTable {
   content_id: string;
@@ -156,11 +200,6 @@ export interface FeedQueueTable {
   tag: string;
   /** Names the write that stamped the row last. A run deletes only the rows that still hold the token it read. */
   token: string;
-  /**
-   * 1 once the write committed. 0 on the rows an update queues before it writes anything: a run
-   * leaves those until they are COMPACT_GRACE_SECONDS old, when the update is taken to have stopped.
-   */
-  committed: number;
   /** When the row was stamped. */
   created_at: number;
 }
@@ -347,6 +386,8 @@ export interface Database {
   likes: LikesTable;
   follows: FollowsTable;
   feed_queue: FeedQueueTable;
+  pending_writes: PendingWritesTable;
+  staged_removals: StagedRemovalsTable;
   reposts: RepostsTable;
   compactor_lease: CompactorLeaseTable;
   tag_moderators: TagModeratorsTable;

@@ -13,8 +13,8 @@ import { msg } from '../language.js';
 import { moderatePost, refuseBanned } from '../moderation/policy.js';
 import type { RemovedTag } from '../moderation/policy.types.js';
 import { LinkUrl, MAX_TEXT_CHARS, mediaUrl, POST_TYPES, previewCutter } from '../posts.js';
-import { MAX_REPOSTED_TAGS, repostedTags, repostsOf, repostTimes, type Repost } from '../reposts.js';
-import type { ContentMeta, ContentStore, Preview, Publisher, Summary } from '../storage/index.js';
+import { MAX_REPOSTED_TAGS, repostedTags, repostsOf, type Repost } from '../reposts.js';
+import type { ContentMeta, Preview, Publisher, Summary } from '../storage/index.js';
 import { allowedTags, MAX_TAGS, parseTagList, sameTags } from '../tags.js';
 import { readMultipart, readPost, readUploaded, requirePostType, textOf, type Post } from '../upload.js';
 import type { Upload } from '../upload.types.js';
@@ -61,19 +61,14 @@ type PostFlags = { aiGenerated: boolean; comments: boolean };
  * video's or audio's caption and file. A file is the content's if its hash is the one the meta file
  * keeps (see ContentMeta.sha256). Where either has none, it isn't taken to be, and is stored again.
  *
- * The hash is the meta file's word for the bytes, and two updates sent at once can leave the bytes
- * of one with the meta file of the other (see contentWriter). So the bytes are looked at as well,
- * as far as that is cheap: they must be of the size the meta file says.
+ * The hash is the meta file's word for the bytes, and it is to be taken at it: the bytes and the
+ * meta file are one write's, written by the compactor alone, the meta file once the bytes are there.
  */
-async function sameBody(post: Post, meta: ContentMeta, content: ContentStore): Promise<boolean> {
+async function sameBody(post: Post, meta: ContentMeta): Promise<boolean> {
   if (post.type === 'text') return meta.preview.kind === 'text' && meta.text === post.text;
   if (post.type === 'link') return meta.preview.kind === 'link' && meta.preview.url === post.url;
   // The hash last: it can take reading the file (see PostBytes.hash).
-  if (meta.text !== post.text || meta.sha256 === undefined || (await post.file.hash()) !== meta.sha256) return false;
-  return content.stat(meta.contentId).then(
-    ({ size }) => size === meta.size,
-    () => false,
-  );
+  return meta.text === post.text && meta.sha256 !== undefined && (await post.file.hash()) === meta.sha256;
 }
 
 /** Writing posts (POST /store): a new post, or with `contentId`, an update of one of the publisher's own. */
@@ -114,8 +109,9 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
    * goes: refused (422), held in the moderation queue for a server moderator or an admin, or published. It also drops
    * some of its hashtags (see moderatePost). A post soon after the user's previous one is then
    * answered with a challenge, or two once the run is a few posts long, before anything is stored. The post is
-   * then written as contentWriter describes: an update writes over the content, which has one
-   * version, and the last write wins. An update that would change nothing writes nothing: the same
+   * then written as contentWriter describes: committed to the database, for the compactor's next
+   * run to write to the stores. An update writes over the content, which has one version, and the
+   * last write wins. An update that would change nothing writes nothing: the same
    * text or URL, or the same caption and file, with the same flags and hashtags. A file is told by
    * the hash of its bytes as stored, which the meta file keeps. A video or audio file sent with an
    * upload link has none, since the content store copies it itself, and is stored whenever it is sent.
@@ -179,14 +175,15 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
         ? await db.selectFrom('content').selectAll().where('id', '=', fields.contentId).executeTakeFirst()
         : undefined;
       if (fields.contentId && !row) throw contentNotFound();
-      // The content an update writes over: its row, its meta file, which says what it is now, and where reposts put it.
+      // The content an update writes over: its row, then its meta file, which says what it is now (as its
+      // newest write made it, applied or not), and where reposts put it.
       let existing: Existing | undefined;
       if (row) {
         if (row.user_id !== user.id) throw forbidden(msg('content.update_own_only'));
         // A repost of a post on another server is a link to it with its summary: there is nothing of it to write here.
         if (row.origin_hash !== null) throw badRequest(msg('content.is_repost'));
         const [meta, held, reposts] = await Promise.all([
-          requireMeta(content, row.id),
+          requireMeta({ db, content }, row.id),
           db.selectFrom('moderation_queue').select('content_id').where('content_id', '=', row.id).executeTakeFirst(),
           repostsOf(db, row.id),
         ]);
@@ -210,7 +207,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
       const sameFlags = existing !== undefined && aiGenerated === (existing.row.ai_generated === 1) && flags.comments === takesComments(existing.meta);
       // The post is the content as it is: its flags, its hashtags (the publisher's own make it an update only if
       // they aren't the content's own), and its body, compared last, since a file's can take reading it.
-      if (existing && sameFlags && sameTags(own(sent), own(existing.meta.tags)) && (await sameBody(post, existing.meta, content))) return unchanged(existing);
+      if (existing && sameFlags && sameTags(own(sent), own(existing.meta.tags)) && (await sameBody(post, existing.meta))) return unchanged(existing);
 
       // Before any challenge, so nobody solves one for a post that isn't stored. A text or caption is read as
       // its readers read it, without its formatting ("sp**am**" says spam), with where its links lead.
@@ -237,7 +234,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
         queued === existing.queued &&
         !droppedReposts.length &&
         sameTags(own(moderated.tags), own(existing.meta.tags)) &&
-        (await sameBody(post, existing.meta, content))
+        (await sameBody(post, existing.meta))
       ) {
         return unchanged(existing, removedTags);
       }
@@ -295,9 +292,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
     // A file's hash, of the bytes that are then stored, for a later update's file to be compared by (see sameBody).
     const sha256 = post.type === 'text' || post.type === 'link' ? null : await file.hash();
 
-    const reposts = existing?.reposts ?? [];
-    // Reposted content has its summary under the day of each repost too, which is where those entries look for it.
-    const repostedAt = repostTimes(reposts);
+    // What the write makes of the content. The compactor writes its summary, under the day of each repost too (see applyPending).
     const summary: Summary = {
       contentId,
       createdAt: existing?.row.created_at ?? ts,
@@ -308,13 +303,13 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
       comments,
       tags,
       preview,
-      ...(repostedAt.length > 0 && { repostedAt }),
     };
     await writer.write({
       publisher,
       previous: existing?.meta,
+      seenSeq: existing && Number(existing.row.seq),
       summary,
-      // The size recorded is that of the bytes as stored, which putBytes returns.
+      // The size recorded is that of the bytes as stored, which staging a file returns.
       meta: {
         contentId,
         mimeType,
@@ -327,9 +322,9 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
         tags,
         updatedAt: ts,
       },
-      putBytes: () => file.place(content, contentId, mimeType),
+      // A text's and a link's bytes are in the meta file, which is all the compactor needs to write them.
+      ...(post.type !== 'text' && post.type !== 'link' && { stageBytes: (writeId: string) => file.stage(content, writeId, mimeType) }),
       queued,
-      reposts,
       droppedReposts,
     });
     return summary;

@@ -42,6 +42,7 @@ const spooled = (file: SpooledFile, tmpPath?: string): PostBytes => {
       await content.putFile(of, file.path, mimeType);
       return { size: file.size };
     },
+    stage: async (content, writeId, mimeType) => ({ key: await content.stageFile(writeId, file.path, mimeType), size: file.size }),
     release: () => file.cleanup(),
   };
 };
@@ -68,10 +69,10 @@ export async function readUploaded(content: ContentStore, userId: string, upload
      * Only the upload's first bytes are read now, to say which image it is. The rest is read once
      * the post is to be stored, or once all that is left to tell an update from the content it has
      * is the image, when it comes through this process to a temp file, without its metadata. It is
-     * hashed there, and goes to the content store from there: nothing is fetched for a request that
-     * is refused or challenged before then, and nothing is written over the content unless the whole
-     * image is good. The temp file is read from the upload once, and is what is stored: whoever holds
-     * the upload link can replace the upload meanwhile, and the hash is of what the content gets.
+     * hashed there, and is staged from there: nothing is fetched for a request that is refused or
+     * challenged before then, and nothing is staged for the content unless the whole image is
+     * good. The temp file is read from the upload once, and is what is stored: whoever holds the
+     * upload link can replace the upload meanwhile, and the hash is of what the content gets.
      */
     async image() {
       const type = imageType(await content.uploadHead(userId, uploadId, Math.min(found.size, IMAGE_HEAD_BYTES)));
@@ -91,6 +92,10 @@ export async function readUploaded(content: ContentStore, userId: string, upload
             await content.putFile(of, path, type);
             return { size };
           },
+          async stage(_content, writeId) {
+            const { path, size } = await stripped();
+            return { key: await content.stageFile(writeId, path, type), size };
+          },
           async release(stored) {
             await fetched?.then(
               ({ cleanup }) => cleanup(),
@@ -103,6 +108,8 @@ export async function readUploaded(content: ContentStore, userId: string, upload
     },
     hash: async () => null,
     place: (_content, of, mimeType) => content.adoptUpload(userId, uploadId, of, mimeType, maxUploadBytes),
+    // Copied now, not by the compactor: whoever holds the upload link can replace the upload until the link expires.
+    stage: (_content, writeId, mimeType) => content.stageUpload(userId, uploadId, writeId, mimeType, maxUploadBytes),
     release: async (stored) => {
       if (stored) await content.removeUpload(userId, uploadId);
     },

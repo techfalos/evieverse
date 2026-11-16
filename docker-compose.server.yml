@@ -48,6 +48,9 @@ services:
       # Reposts (POST /repost), and reposts of posts on other servers: both on unless set to false.
       REPOSTS: ${REPOSTS:-true}
       REPOSTS_REMOTE: ${REPOSTS_REMOTE:-true}
+      # The keys the server signs its posts with for reposts on other servers (`openssl rand -base64 32`).
+      # None unless set: its posts are then reposted only here.
+      REPOSTS_SIGNING_KEYS: ${REPOSTS_SIGNING_KEYS:-}
       # The modification disclosure, which GET /rules gives beside the rules: true if this instance runs a
       # modified version of Evieverse, which then needs the address its source code can be obtained from.
       EVIEVERSE_MODIFIED: ${EVIEVERSE_MODIFIED:-false}

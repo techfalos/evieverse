@@ -14,6 +14,7 @@ import { notify } from '../inbox.js';
 import { msg } from '../language.js';
 import { moderatesServer } from '../moderation/policy.js';
 import { kindColumn, queueItems } from '../moderation/queues.js';
+import { effectiveComment } from '../pending.js';
 import { HOUR, iso, MINUTE } from '../time.js';
 
 /** The longest reason a report can give, which is what `reports.reason` holds. */
@@ -102,8 +103,8 @@ export function reportRoutes(app: FastifyInstance, deps: AppDeps) {
       return reply.status(already ? 200 : 201).send({ contentId, reportedAt: iso(at), alreadyReported: already });
     }
     // A comment anyone can read: one of a post that takes comments, and not one that waits in the moderation queue.
-    if (!takesComments(await requireMeta(content, contentId))) throw notFound(msg('comment.off'));
-    if (!(await comments.get(contentId, commentId))) throw notFound(msg('comment.not_found'));
+    if (!takesComments(await requireMeta({ db, content }, contentId))) throw notFound(msg('comment.off'));
+    if ((await effectiveComment(db, comments, contentId, commentId))?.held !== false) throw notFound(msg('comment.not_found'));
     const { at, already } = await addOnce(
       now,
       () => db.selectFrom('comment_reports').select('created_at').where('comment_id', '=', commentId).where('user_id', '=', user.id).executeTakeFirst(),
@@ -277,11 +278,11 @@ export function reportRoutes(app: FastifyInstance, deps: AppDeps) {
   app.post('/moderation/reports/:contentId/comments/:commentId/delete', async (req) => {
     const { contentId, commentId } = CommentParams.parse(req.params);
     const moderator = await asServerModerator(req);
-    await loadContent(db, contentId);
+    const post = await loadContent(db, contentId);
+    const seen = await effectiveComment(db, comments, contentId, commentId);
     if (!(await waitingOnComment(contentId, commentId).select('user_id').limit(1).executeTakeFirst())) throw commentNotReported();
-    // Read before it is removed, for the notice that quotes it.
-    const comment = await comments.get(contentId, commentId);
-    await removeComment(deps, contentId, commentId);
+    // The comment as it was when its removal committed, for the notice that quotes it.
+    const comment = await removeComment(deps, post, commentId, seen);
     req.log.info({ contentId, commentId, moderator: moderator.id }, 'deleted a comment from the report queue');
     if (comment) await notify(deps, { userId: comment.userId, kind: 'comment_deleted', contentId, comment: comment.text, by: moderator.id }, req.log);
     return { contentId, commentId, status: 'deleted' };

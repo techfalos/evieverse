@@ -2,6 +2,7 @@ import type { FastifyServerOptions } from 'fastify';
 import type { AuditLog } from './audit.types.js';
 import type { Languages } from './language.js';
 import type { TrustPlugin } from './moderation/trust.types.js';
+import type { KeyFetcher } from './originKeys.js';
 import type { CliRelease } from './routes/cli.types.js';
 
 /**
@@ -20,4 +21,6 @@ export interface AppOptions extends FastifyServerOptions {
   languages?: Languages;
   /** Where changes are written down, or null for nowhere. By default, the store `config.audit` names, if it names one (audit.ts). */
   audit?: AuditLog | null;
+  /** What asks another server for the keys it signs with. By default, a request over https to a public address (http/publicFetch.ts). */
+  keyFetcher?: KeyFetcher;
 }

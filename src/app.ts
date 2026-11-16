@@ -15,6 +15,7 @@ import { registerLanguages } from './http/language.js';
 import { rateLimitStore } from './http/rateLimitStore.js';
 import { loadLanguages, msg } from './language.js';
 import { loadTrustPlugins } from './moderation/trust.js';
+import { OriginKeys } from './originKeys.js';
 import { loadCliRelease, requireCliBuild } from './routes/cli.js';
 import { MINUTE } from './time.js';
 import { contentWriter } from './write.js';
@@ -25,7 +26,7 @@ import { contentWriter } from './write.js';
  */
 export async function buildApp(
   deps: StoreDeps & { db?: Db },
-  { edgeSecret, cli = loadCliRelease(), trustPlugins, languages, audit = createAuditLog(deps.config.audit), ...opts }: AppOptions = {},
+  { edgeSecret, cli = loadCliRelease(), trustPlugins, languages, audit = createAuditLog(deps.config.audit), keyFetcher, ...opts }: AppOptions = {},
   groups: readonly GroupName[] = GROUP_NAMES,
 ) {
   const { trustProxy } = deps.config;
@@ -96,6 +97,7 @@ export async function buildApp(
     writer: contentWriter({ ...deps, db }, app.log),
     // Loaded once, as the app starts: a plugin that can't be loaded stops it there, not at the first post.
     trustPlugins: trustPlugins ?? (await loadTrustPlugins(deps.config.trust.optionalPlugins)),
+    originKeys: new OriginKeys(deps.hot, keyFetcher, deps.now, app.log),
   };
   if (writing) app.log.info({ trustPlugins: writing.trustPlugins.map((plugin) => plugin.name) }, 'trust plugins loaded');
   for (const name of new Set(groups)) {

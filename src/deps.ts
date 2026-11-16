@@ -14,7 +14,7 @@ import { HOUR } from './time.js';
 export function createStores(config: Config, now: () => number = Date.now, hot: HotStore = createHotStore(config.redis, now)) {
   const { scheme, options } = config.storage.summaries;
   return {
-    content: new ContentStore(config.storage.content),
+    content: new ContentStore(config.storage.content, now),
     comments: new CommentStore(hot, config.storage.content, { hotMs: config.comments.hotHours * HOUR }),
     hot,
     summaries: new SummaryStore(

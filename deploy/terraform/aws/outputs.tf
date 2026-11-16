@@ -24,7 +24,7 @@ output "content_bucket" {
 }
 
 output "audit_bucket" {
-  description = "Where every request that added, updated or deleted something is written, and moved to cold storage from."
+  description = "Where every request that added, updated or deleted something is written."
   value       = aws_s3_bucket.audit.id
 }
 

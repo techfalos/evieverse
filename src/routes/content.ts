@@ -1,19 +1,21 @@
 import { randomInt } from 'node:crypto';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { attest, signingKeys } from '../attestation.js';
 import { authenticate } from '../auth/apiKey.js';
-import { contentNotFound, loadReadable, PENDING_REVIEW, publisherOf, requireMeta, takesComments } from '../content.js';
+import { contentNotFound, loadPublished, loadReadable, PENDING_REVIEW, publisherOf, requireMeta, takesComments } from '../content.js';
 import { setForDeletion } from '../deletion.js';
 import type { AppDeps } from '../deps.types.js';
-import { forbidden } from '../http/errors.js';
+import { badRequest, forbidden, HttpError } from '../http/errors.js';
 import { say } from '../http/language.js';
 import { Credentials } from '../http/schemas.js';
 import { notify } from '../inbox.js';
 import { msg } from '../language.js';
 import { adRecord, eligibleAds } from '../monetization.js';
 import type { PublishedAd } from '../monetization.types.js';
-import { originMediaUrl, previewOf } from '../posts.js';
-import type { Publisher } from '../storage/index.js';
+import { payloadBytes, pendingPost } from '../pending.js';
+import { originMediaUrl, ownAddress, postAddress, previewOf } from '../posts.js';
+import type { BytesOwner, ContentStore, Publisher } from '../storage/index.js';
 import { indexAuthor } from '../tagfeed/layout.js';
 import { iso } from '../time.js';
 
@@ -39,8 +41,42 @@ export function rawHeaders(contentType: string) {
   };
 }
 
+/**
+ * Answers with the bytes of `of`: a redirect to the store where it can sign links, else streamed
+ * from here, with the size the store gives for them, and the content type it keeps or, where it
+ * keeps none, the one `typeOf` gives. A user's file streamed from here goes out as something to
+ * show and nothing more (see rawHeaders).
+ *
+ * `staged`: the bytes are a staged file, which the compactor deletes once it has made it its
+ * post's or its comment's. They are looked for first, and false is returned, with nothing sent,
+ * if they are gone: they are then where the post's, or the comment's, are kept.
+ */
+export async function sendBytes(reply: FastifyReply, content: ContentStore, of: BytesOwner, typeOf: () => Promise<string> | string, { staged = false } = {}): Promise<boolean> {
+  const found = staged ? await content.statIfThere(of) : undefined;
+  if (found === null) return false;
+  const signed = await content.signedUrl(of);
+  if (signed) {
+    reply.redirect(signed, 302);
+    return true;
+  }
+  const { size, contentType } = found ?? (await content.stat(of));
+  const bytes = staged ? await content.streamIfThere(of) : await content.stream(of);
+  if (!bytes) return false;
+  const type = contentType ?? (await typeOf());
+  reply.headers(rawHeaders(type));
+  reply.header('content-type', type);
+  reply.header('content-length', String(size));
+  reply.send(bytes);
+  return true;
+}
+
 /** Reading content. Its deletion is a route of its own (deletionRoutes), so the two can be served apart. */
 export function contentRoutes(app: FastifyInstance, { db, config, content, ads, now = Date.now }: AppDeps) {
+  /** The key this server signs attestations with: the first of its keys. None: it attests nothing. */
+  const [signingKey] = signingKeys(config.reposts.signingKeys);
+  /** This server's own address, which the address an attestation gives a post starts with. */
+  const ownBase = ownAddress(config.publicBaseUrl);
+
   /**
    * The ad to show at the end of a post that carries `tags`, where the server shows ads there
    * (MONETIZATION_POST_ADS): any one of the ads the compactor published to Redis (AdStore) that
@@ -77,7 +113,7 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
     const { contentId } = Params.parse(req.params);
     const row = await loadReadable(db, req, contentId);
     // The row says whose the content is and how liked; what it is, is in the meta file beside its bytes.
-    const [meta, reposts] = await Promise.all([requireMeta(content, contentId), repostsMade(contentId)]);
+    const [meta, reposts] = await Promise.all([requireMeta({ db, content }, contentId), repostsMade(contentId)]);
     const ad = row.queued ? undefined : await postAd(req, meta.tags);
     return {
       publisher: publisherOf(row),
@@ -124,6 +160,44 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
   }
 
   /**
+   * The attestation of a post: what this server says the post is, signed with its key, for
+   * whoever reposts the post on another server to carry there (src/attestation.ts). It says the
+   * post's address here, its publisher, its content type, its AI declaration and its preview, as
+   * of now. For anyone, with no key: a post anyone can repost is one anyone can read. It is good
+   * for a few minutes, so it is asked for when it is used, and nothing in between keeps it.
+   *
+   * Only of a published post: one that waits in the moderation queue, or is set for deletion, is
+   * 404 here even to its publisher, since nobody else is to be told what it says. And only of a
+   * post that is this server's to speak for. A repost of a post on another server isn't: it is
+   * 409, with the original's address in `origin`, which is where its attestation is had.
+   *
+   * 400 on a server that signs nothing (it has no REPOSTS_SIGNING_KEYS, or no PUBLIC_BASE_URL to
+   * say where its posts are).
+   */
+  app.get('/content/:contentId/attestation', async (req, reply) => {
+    const { contentId } = Params.parse(req.params);
+    const row = await loadPublished(db, contentId);
+    const meta = await requireMeta({ db, content }, contentId);
+    if (meta.origin) throw new HttpError(409, msg('attestation.is_repost', { url: meta.origin.url }), undefined, { origin: { url: meta.origin.url } });
+    if (!signingKey || ownBase === null) throw badRequest(msg('attestation.off'));
+    const { preview } = meta;
+    reply.header('cache-control', 'no-store');
+    return {
+      attestation: attest(
+        signingKey,
+        {
+          url: postAddress(ownBase, row.id),
+          publisher: publisherOf(row),
+          mimeType: meta.mimeType,
+          aiGenerated: row.ai_generated === 1,
+          preview: preview.kind === 'text' ? { kind: 'text', text: preview.text } : preview.kind === 'link' ? { kind: 'link', url: preview.url } : { kind: preview.kind, ...(preview.text && { text: preview.text }) },
+        },
+        now(),
+      ),
+    };
+  });
+
+  /**
    * The content's bytes as they are now: an update writes over them. A redirect to the store where
    * it can sign links; else streamed from here, with the size the store gives for them, and the
    * content type it keeps or, where it keeps none, the meta file's. Who may read them is who may
@@ -135,22 +209,32 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    *
    * A repost of a post on another server has no bytes of its own here: it is a link to the
    * original, and this is a redirect to the original's bytes, on its own server.
+   *
+   * A write the compactor hasn't applied yet is served as written, like the content itself (see
+   * requireMeta): a file from where it is staged, and a text or a link's URL from the write's
+   * row, which holds it.
    */
   app.get('/content/:contentId/raw', { compress: false }, async (req, reply) => {
     const { contentId } = Params.parse(req.params);
-    if ((await loadReadable(db, req, contentId)).origin_hash !== null) {
-      const { origin } = await requireMeta(content, contentId);
+    const row = await loadReadable(db, req, contentId);
+    const pending = await pendingPost(db, contentId);
+    if (row.origin_hash !== null) {
+      const { origin } = pending?.meta ?? (await requireMeta({ db, content }, contentId));
       if (origin) return reply.redirect(originMediaUrl(origin), 302);
     }
 
-    const signed = await content.signedUrl(contentId);
-    if (signed) return reply.redirect(signed, 302);
-    const { size, contentType } = await content.stat(contentId);
-    const type = contentType ?? (await requireMeta(content, contentId)).mimeType;
-    reply.headers(rawHeaders(type));
-    reply.header('content-type', type);
-    reply.header('content-length', String(size));
-    return reply.send(await content.stream(contentId));
+    if (pending?.stagedKey) {
+      if (await sendBytes(reply, content, { staged: pending.stagedKey }, () => pending.meta.mimeType, { staged: true })) return reply;
+    } else if (pending) {
+      const { bytes, mimeType } = payloadBytes(pending.meta);
+      reply.headers(rawHeaders(mimeType));
+      reply.header('content-type', mimeType);
+      reply.header('content-length', String(bytes.length));
+      return reply.send(bytes);
+    }
+    // Applied, if it was pending a moment ago: the meta file in the store is the one to go by.
+    await sendBytes(reply, content, contentId, async () => (await requireMeta({ db, content }, contentId)).mimeType);
+    return reply;
   });
 }
 

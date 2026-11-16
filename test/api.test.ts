@@ -1,4 +1,4 @@
-import { readdir, writeFile } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
@@ -270,19 +270,6 @@ for (const target of TARGETS) {
       ctx.clock.now += 1000;
       expect((await clip(one, { contentId, tags: ['clips', 'travel'] })).json()).not.toHaveProperty('unchanged');
       expect(await meta(contentId)).toMatchObject({ sha256: sha256(one), updatedAt: ctx.clock.now });
-      expect((await clip(one, { contentId, tags: ['clips', 'travel'] })).json()).toEqual({ contentId, unchanged: true });
-
-      // An update that stops once its file is written leaves no hash of the file the post had: sent again, that file is stored.
-      vi.spyOn(ctx.summaries, 'put').mockRejectedValueOnce(new Error('store unavailable'));
-      expect((await clip(other, { contentId, tags: ['clips', 'travel'] })).statusCode).toBe(500);
-      expect((await raw(contentId)).equals(other)).toBe(true);
-      expect(await meta(contentId)).not.toHaveProperty('sha256');
-      expect((await clip(one, { contentId, tags: ['clips', 'travel'] })).json()).not.toHaveProperty('unchanged');
-      expect((await raw(contentId)).equals(one)).toBe(true);
-      // Nor are bytes of another size than the meta file says the file it hashed, as two updates at once can leave them.
-      await writeFile(join(ctx.dir, 'content', 'content', contentId), other);
-      expect((await clip(one, { contentId, tags: ['clips', 'travel'] })).json()).not.toHaveProperty('unchanged');
-      expect((await raw(contentId)).equals(one)).toBe(true);
       expect((await clip(one, { contentId, tags: ['clips', 'travel'] })).json()).toEqual({ contentId, unchanged: true });
 
       // A text or a link post is compared by what it says, and keeps no hash.
@@ -624,19 +611,27 @@ for (const target of TARGETS) {
       expect((await feed('tags=news')).tags).toEqual({});
     });
 
-    it('refuses an update when its content is set for deletion while the update is being written', async () => {
+    it('refuses an update when its content is set for deletion while the update is under way, and writes nothing of it', async () => {
       const alice = await ctx.register('alice');
       const { contentId } = (await storeText(alice, 'v1 #news')).json();
       await ctx.compact();
-      const putFile = ctx.content.putFile.bind(ctx.content);
-      vi.spyOn(ctx.content, 'putFile').mockImplementationOnce(async (...args) => {
-        await ctx.app.inject({ method: 'DELETE', url: `/content/${contentId}`, payload: { ...alice } });
-        return putFile(...args);
-      });
+      // The deletion commits once the update has read the post, and before the update commits.
+      const transaction = ctx.db.transaction.bind(ctx.db);
+      vi.spyOn(ctx.db, 'transaction').mockImplementationOnce(
+        () =>
+          ({
+            execute: async (fn: (trx: unknown) => Promise<unknown>) => {
+              await ctx.app.inject({ method: 'DELETE', url: `/content/${contentId}`, payload: { ...alice } });
+              return transaction().execute(fn);
+            },
+          }) as never,
+      );
 
       const refused = await storeText(alice, 'v2 #news', { contentId });
       expect([refused.statusCode, refused.json().error]).toEqual([409, 'content is set for deletion']);
-      // The next run deletes the post, whatever the update left in the queue.
+      expect(await ctx.db.selectFrom('pending_writes').selectAll().execute()).toEqual([]);
+      expect(await ctx.content.getMeta(contentId)).toMatchObject({ text: 'v1 #news' });
+      // The next run deletes the post.
       expect((await ctx.compactor.runOnce()).deleted).toEqual([contentId]);
       expect((await feed('tags=news')).tags).toEqual({});
       expect(await ctx.db.selectFrom('content').selectAll().execute()).toEqual([]);

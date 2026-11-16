@@ -3,17 +3,22 @@ import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
+import type { InjectOptions } from 'fastify';
 import { sql } from 'kysely';
 import { expect } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { AuditRecord } from '../src/audit.types.js';
 import { challengeKey, leadingZeroBits } from '../src/challenge/challenges.js';
 import type { Challenge } from '../src/challenge/challenges.types.js';
+import { applyPending } from '../src/compact/apply.js';
 import { createCompactor } from '../src/compact/compactor.js';
+import { CompactorLease } from '../src/compact/lease.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { createDb, type Db } from '../src/db/index.js';
 import { bootstrap } from '../src/deps.js';
 import type { Languages } from '../src/language.js';
+import type { KeyFetcher } from '../src/originKeys.js';
+import { repostsOf } from '../src/reposts.js';
 import type { HotStore } from '../src/storage/index.js';
 import type { TrustPlugin } from '../src/moderation/trust.types.js';
 import type { CliRelease } from '../src/routes/cli.types.js';
@@ -53,6 +58,8 @@ export const TABLES = [
   'follows',
   'likes',
   'reposts',
+  'staged_removals',
+  'pending_writes',
   'feed_queue',
   'compactor_lease',
   'tag_pairs',
@@ -93,7 +100,7 @@ export async function solution(hot: Pick<HotStore, 'get'>, challenge: Challenge)
 /** The #hashtags written in a post's text, which tests send as its tags. */
 export const hashtags = (text: string) => [...text.matchAll(/#(\w+)/g)].map((m) => m[1]!);
 
-/** The feed queue: "<contentId> <tag>" of every row, sorted. What the compactor's next run takes, once committed. */
+/** The feed queue: "<contentId> <tag>" of every row, sorted. What the compactor's next run takes. */
 export const queued = async (ctx: { db: Db }) =>
   (await ctx.db.selectFrom('feed_queue').select(['content_id', 'tag']).execute()).map((r) => `${r.content_id} ${r.tag}`).sort();
 
@@ -104,10 +111,18 @@ export const queued = async (ctx: { db: Db }) =>
  * turns it on, as the challenges for comments are, and so are the limits on posts and on comments a
  * minute. So is the limit on registrations from one address, which every test's are, unless
  * `registerRateLimitPerHour` sets one.
+ *
+ * A request commits what it writes of posts and comments to the database, and the compactor
+ * writes the stores (`pending_writes`). Here those writes are applied as soon as the request that
+ * made them is answered (see `apply`), as if a compactor ran just then, so a test reads what it
+ * wrote without running one: feeds still wait for `compact`. `settle: false` leaves them to the
+ * compactor, or to the test's own `apply`, which is how the time in between is tested.
  */
 export async function createTestContext(
   target: TestTarget,
   opts: {
+    /** Whether the writes a request committed are applied once it is answered. They are, unless this is false. */
+    settle?: boolean;
     feed?: Record<string, number>;
     /** Writes the audit log, to `audit/` in the test's directory (see readAudit). Off unless asked for. */
     audit?: boolean;
@@ -151,6 +166,10 @@ export async function createTestContext(
     trustPlugins?: TrustPlugin[];
     /** The languages the server answers in, in place of its own (the languages folder). */
     languages?: Languages;
+    /** Whether the server takes reposts, and the keys it signs its posts' attestations with: none, unless given. */
+    reposts?: Partial<Config['reposts']>;
+    /** What answers for the other servers this one asks for their keys. Nothing does unless given: a test reaches no other server. */
+    keyFetcher?: KeyFetcher;
   } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'evieverse-test-'));
@@ -173,6 +192,7 @@ export async function createTestContext(
       challenge: { postWindowSeconds: 0, commentsPerMinute: 0, powBits: 8, minSolveMs: 0, ...opts.challenge },
       ...(opts.tagging && { tagging: opts.tagging }),
       ...(opts.postTypes && { postTypes: opts.postTypes }),
+      ...(opts.reposts && { reposts: opts.reposts }),
       ...(opts.trust && { trust: opts.trust }),
       ...(opts.urlhaus && { urlhaus: opts.urlhaus }),
       registerRateLimitPerHour: opts.registerRateLimitPerHour ?? 1_000_000,
@@ -199,10 +219,46 @@ export async function createTestContext(
 
   const clock = { now: Date.UTC(2026, 10, 6, 12) };
   const { close, ...deps } = await bootstrap(config, () => clock.now);
-  const app = await buildApp(deps, { logger: false, cli: opts.cli ?? null, trustPlugins: opts.trustPlugins, languages: opts.languages });
+  const app = await buildApp(deps, {
+    logger: false,
+    cli: opts.cli ?? null,
+    trustPlugins: opts.trustPlugins,
+    languages: opts.languages,
+    keyFetcher: opts.keyFetcher ?? (async (address) => Promise.reject(new Error(`a test asked ${address}, and no test reaches another server`))),
+  });
 
   const compactor = createCompactor(deps);
   const graceMs = config.compact.graceSeconds * 1000;
+
+  // One at a time, in the order they were asked for, as a compactor's runs are.
+  let applying: Promise<unknown> = Promise.resolve();
+  /**
+   * Applies the writes that requests committed, as a compactor run starts by doing, and nothing
+   * else of a run: no index is built, and the clock stays where it is. Under the compactor's
+   * lease, as a run is. False, with nothing applied, if a run holds it.
+   */
+  const apply = (): Promise<boolean> => {
+    const run = applying.then(async () => {
+      const lease = new CompactorLease(deps.db, config.compact.leaseSeconds * 1000, () => clock.now);
+      if (!(await lease.acquire())) return false;
+      try {
+        await applyPending({ ...deps, lease, places: (id) => repostsOf(deps.db, id) });
+        return true;
+      } finally {
+        await lease.release();
+      }
+    });
+    applying = run.catch(() => {});
+    return run;
+  };
+  if (opts.settle !== false) {
+    const inject = app.inject.bind(app) as (o: InjectOptions) => ReturnType<typeof app.inject>;
+    (app as { inject: unknown }).inject = async (o: InjectOptions) => {
+      const res = await inject(o);
+      if ((o.method ?? 'GET').toUpperCase() !== 'GET') await apply();
+      return res;
+    };
+  }
 
   /**
    * What a person and their client send back: the characters (read from Redis here), and the proof of
@@ -230,11 +286,11 @@ export async function createTestContext(
     dir,
     ...deps,
     compactor,
+    apply,
     /**
      * Runs one compaction pass, which is what puts writes in feeds, with the clock moved past the
-     * grace period first: the run then takes everything there is to take, the hashtag counts and the
-     * updates that stopped half way too. A committed write needs no such wait: `compactor.runOnce()`
-     * takes it as it is.
+     * grace period first: the run then takes everything there is to take, the hashtag counts too.
+     * A write needs no such wait: `compactor.runOnce()` takes it as it is.
      */
     async compact(extraMs = 0) {
       clock.now += graceMs + 1000 + extraMs;

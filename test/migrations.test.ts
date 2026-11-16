@@ -4,8 +4,8 @@ import { createDb } from '../src/db/index.js';
 import { migrateToLatest, splitStatements, sqlMigrations } from '../src/db/migrator.js';
 
 describe('SQL migrations', () => {
-  it('has the portable schema migration', () => {
-    expect(Object.keys(sqlMigrations())).toEqual(['0001_initial']);
+  it('has the portable schema migrations, in order', () => {
+    expect(Object.keys(sqlMigrations())).toEqual(['0001_initial', '0002_pending_writes', '0003_staged_removals']);
   });
 
   it('splits scripts into statements, ignoring comment lines', () => {
@@ -31,9 +31,11 @@ describe('SQL migrations', () => {
         'likes',
         'moderation_queue',
         'monetization',
+        'pending_writes',
         'reports',
         'reposts',
         'server_rules',
+        'staged_removals',
         'tag_moderation',
         'tag_moderators',
         'tag_mutes',
@@ -63,10 +65,12 @@ describe('SQL migrations', () => {
       expect(await columns('inbox')).toEqual(['body', 'content_id', 'created_at', 'id', 'kind', 'read_at', 'sender_id', 'tag', 'user_id']);
       expect(await columns('user_blocks')).toEqual(['blocked_id', 'created_at', 'user_id']);
       expect(await columns('server_rules')).toEqual(['body', 'created_at', 'id', 'sort_order', 'updated_at']);
-      expect(await columns('content')).toEqual(['ai_generated', 'created_at', 'delete_requested_at', 'id', 'like_count', 'origin_hash', 'user_id']);
+      expect(await columns('content')).toEqual(['ai_generated', 'created_at', 'delete_requested_at', 'id', 'like_count', 'origin_hash', 'seq', 'user_id']);
+      expect(await columns('pending_writes')).toEqual(['comment_id', 'content_id', 'created_at', 'kind', 'payload', 'seq', 'staged_key']);
+      expect(await columns('staged_removals')).toEqual(['content_id', 'remove_at', 'staged_key']);
       expect(await columns('reposts')).toEqual(['content_id', 'created_at', 'likes_before', 'tag', 'user_id']);
       expect(await columns('api_keys')).toEqual(['created_at', 'id', 'key_hash', 'revoked_at', 'user_id']);
-      expect(await columns('feed_queue')).toEqual(['committed', 'content_id', 'created_at', 'tag', 'token']);
+      expect(await columns('feed_queue')).toEqual(['content_id', 'created_at', 'tag', 'token']);
       expect(await columns('tags')).toEqual(['created_at', 'last_appended_at', 'name']);
       expect(await columns('tag_pairs')).toEqual(['posts', 'tag_a', 'tag_b', 'updated_at']);
       expect(await columns('moderation_queue')).toEqual(['content_id', 'created_at', 'trust_score']);
@@ -103,13 +107,28 @@ describe('SQL migrations', () => {
       // A repost's rows go with the content, and outlast whoever reposted.
       await sql`INSERT INTO reposts (content_id, tag, user_id, likes_before, created_at) VALUES ('c1', 'news', 'u3', 2, 5), ('c2', 'news', 'u3', 0, 5)`.execute(db);
       await expect(sql`INSERT INTO reposts (content_id, tag, user_id, created_at) VALUES ('c1', 'news', 'u1', 6)`.execute(db)).rejects.toThrow(/UNIQUE/);
+      // A post's writes are numbered from the post's own count, which starts at nothing, and go with the post.
+      expect(await db.selectFrom('content').select(['id', 'seq']).orderBy('id').execute()).toEqual(['c1', 'c2', 'c3'].map((id) => ({ id, seq: 0 })));
+      await sql`INSERT INTO pending_writes (content_id, seq, kind, payload, created_at) VALUES ('c1', 1, 'post', '{"meta":{"tags":["news"]}}', 5), ('c2', 1, 'post', '{}', 5)`.execute(db);
+      await sql`INSERT INTO pending_writes (content_id, seq, kind, comment_id, staged_key, created_at) VALUES ('c1', 2, 'comment_remove', 'm1', NULL, 6)`.execute(db);
+      await expect(sql`INSERT INTO pending_writes (content_id, seq, kind, created_at) VALUES ('c1', 2, 'post', 7)`.execute(db)).rejects.toThrow(/UNIQUE/);
+      await expect(sql`INSERT INTO pending_writes (content_id, seq, kind, created_at) VALUES ('missing', 1, 'post', 7)`.execute(db)).rejects.toThrow(/FOREIGN KEY/);
+      // A staged file that is kept is named once, and outlasts its post: the run that deletes the post deletes it.
+      await sql`INSERT INTO staged_removals (staged_key, content_id, remove_at) VALUES ('staged/w1', 'c2', 9)`.execute(db);
+      await expect(sql`INSERT INTO staged_removals (staged_key, content_id, remove_at) VALUES ('staged/w1', 'c1', 9)`.execute(db)).rejects.toThrow(/UNIQUE/);
       await sql`DELETE FROM content WHERE id = 'c2'`.execute(db);
+      expect(await db.selectFrom('staged_removals').selectAll().execute()).toEqual([{ staged_key: 'staged/w1', content_id: 'c2', remove_at: 9 }]);
       await sql`DELETE FROM users WHERE id = 'u3'`.execute(db);
       expect(await db.selectFrom('reposts').selectAll().execute()).toEqual([{ content_id: 'c1', tag: 'news', user_id: null, likes_before: 2, created_at: 5 }]);
+      expect(await db.selectFrom('pending_writes').select(['content_id', 'seq', 'kind', 'comment_id']).orderBy('seq').execute()).toEqual([
+        { content_id: 'c1', seq: 1, kind: 'post', comment_id: null },
+        { content_id: 'c1', seq: 2, kind: 'comment_remove', comment_id: 'm1' },
+      ]);
 
       await sql`DELETE FROM users WHERE id = 'u1'`.execute(db);
       expect((await db.selectFrom('api_keys').select('id').execute()).length).toBe(0);
       expect((await db.selectFrom('reposts').select('tag').execute()).length).toBe(0);
+      expect((await db.selectFrom('pending_writes').select('seq').execute()).length).toBe(0);
     } finally {
       await db.destroy();
     }

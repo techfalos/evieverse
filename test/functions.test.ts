@@ -136,6 +136,9 @@ describe('functions', () => {
       // The following feed isn't the feed function's: it asks the database who may read it.
       ['api', 'GET', `/feed/following?userId=${alice.userId}`],
       ['content', 'GET', `/content/${contentId}`],
+      // What a repost on another server carries is read with the post, and the keys it is checked with are asked of the api function.
+      ['content', 'GET', `/content/${contentId}/attestation`],
+      ['api', 'GET', '/repost/keys'],
       ['store', 'POST', '/store'],
       ['store', 'POST', '/uploads'],
       ['api', 'POST', '/register'],

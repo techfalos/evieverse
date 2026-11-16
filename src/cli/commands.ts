@@ -298,29 +298,28 @@ const words = (verb: 'list' | 'add' | 'remove', method: Request['method'], summa
     text: (d) => (d.words.length ? d.words.join('\n') : `${d.tag ? `#${d.tag}` : 'The server'} has no blocked words.`),
   });
 
-/** A post as its own server gives it at GET /content/:id, as far as a repost of it sends on. */
-interface OriginalPost {
-  publisher: { userId: string; username: string };
-  preview: { kind: string; text?: string; url?: string };
-  mimeType: string;
-  aiGenerated: boolean;
-  /** On one that is itself a repost of a post on yet another server: the original, which is what gets reposted. */
-  origin?: { url: string; publisher: { userId: string; username: string } };
+/** What a post's own server answers GET /content/:id/attestation with, as far as a repost reads it. */
+interface Attested {
+  /** The post as the server signed it, which is what POST /repost takes for a post on another server. */
+  attestation?: string;
+  /** Of a post that is itself a repost of one on another server (409): the original, which is the one to repost. */
+  origin?: { url?: string };
+  /** Why there is no attestation, as the server says it. */
+  error?: string;
 }
-
-/** What POST /repost takes for a post on another server: its address, who published it, and its summary. */
-type RepostOrigin = Pick<OriginalPost, 'publisher' | 'preview' | 'mimeType' | 'aiGenerated'> & { url: string };
 
 /**
  * What to repost, for the address of a post: the post's id, if the address is on the profile's own
- * server, and otherwise the original with its summary, which is read here, from the server the
- * post is on, since servers don't ask each other. That request carries no key: the key is the
- * profile's server's, and a post anyone can repost is one anyone can read.
+ * server, and otherwise the post's attestation, which is asked for here, of the server the post is
+ * on: that server signs what the post is, and the profile's server checks the signature, so
+ * nothing the CLI could say of the post is taken on its word. The request carries no key: the key
+ * is the profile's server's, and a post anyone can repost is one anyone can read.
  *
  * A post that is itself a repost of one on another server names its original, and that is what is
- * reposted, so that a post has one address wherever it is reposted from.
+ * reposted, so that a post has one address wherever it is reposted from: the original's server is
+ * then the one asked.
  */
-async function repostSource(io: Io, server: string, address: string): Promise<{ contentId: string } | { origin: RepostOrigin }> {
+async function repostSource(io: Io, server: string, address: string): Promise<{ contentId: string } | { origin: { attestation: string } }> {
   let url: URL;
   try {
     url = new URL(address);
@@ -331,28 +330,29 @@ async function repostSource(io: Io, server: string, address: string): Promise<{ 
   if (!['http:', 'https:'].includes(url.protocol) || !at || url.search || url.hash) {
     throw new CliError(`"${address}" is not the address of a post, such as https://other.example/content/<id>`, 2);
   }
-  const own = (found: RegExpExecArray) => (found[1] === server ? { contentId: found[2]!.toLowerCase() } : null);
-  const here = own(at);
-  if (here) return here;
 
-  const where = `${at[1]}/content/${at[2]!.toLowerCase()}`;
-  let post: OriginalPost | null = null;
-  let status: number;
-  try {
-    const res = await io.fetch(where, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(60_000) });
-    status = res.status;
-    if (res.ok) post = (await res.json()) as OriginalPost;
-  } catch (err) {
-    const e = err as Error & { cause?: { message?: string } };
-    throw new CliError(`could not read the post at ${where}: ${e.name === 'TimeoutError' ? 'no answer in 60 seconds' : (e.cause?.message ?? e.message)}`);
+  // The post at the address, and then at most the original it names: an original is nobody's repost.
+  let found: RegExpExecArray | null = at;
+  for (const last of [false, true]) {
+    if (found[1] === server) return { contentId: found[2]!.toLowerCase() };
+    const where = `${found[1]}/content/${found[2]!.toLowerCase()}`;
+    let status: number;
+    let answer: Attested | null;
+    try {
+      const res = await io.fetch(`${where}/attestation`, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(60_000) });
+      status = res.status;
+      answer = (await res.json().catch(() => null)) as Attested | null;
+    } catch (err) {
+      const e = err as Error & { cause?: { message?: string } };
+      throw new CliError(`could not read the post at ${where}: ${e.name === 'TimeoutError' ? 'no answer in 60 seconds' : (e.cause?.message ?? e.message)}`);
+    }
+    if (status === 200 && typeof answer?.attestation === 'string') return { origin: { attestation: answer.attestation } };
+    if (status === 404) throw new CliError(`there is no post at ${where}, or its server doesn't sign its posts for reposts`);
+    const original = status === 409 && !last && typeof answer?.origin?.url === 'string' ? POST_ADDRESS.exec(answer.origin.url) : null;
+    if (!original) throw new CliError(`could not repost the post at ${where}: ${typeof answer?.error === 'string' ? answer.error : `its server answered ${status}`}`);
+    found = original;
   }
-  if (!post) throw new CliError(status === 404 ? `there is no post at ${where}` : `could not read the post at ${where}: its server answered ${status}`);
-  if (typeof post.publisher?.userId !== 'string' || typeof post.preview?.kind !== 'string') throw new CliError(`${where} did not answer with a post`);
-
-  const summary = { preview: post.preview, mimeType: post.mimeType, aiGenerated: post.aiGenerated === true };
-  if (!post.origin) return { origin: { url: where, publisher: post.publisher, ...summary } };
-  const original = POST_ADDRESS.exec(post.origin.url);
-  return (original && own(original)) ?? { origin: { url: post.origin.url, publisher: post.origin.publisher, ...summary } };
+  throw new CliError(`could not repost the post at ${address}`);
 }
 
 /** What POST /repost answers: the hashtags the post got, those it didn't with why, and for a post from another server, the entry made for it here. */
@@ -495,7 +495,7 @@ export const COMMANDS: Command[] = [
     flags: '--tags <tags>',
     role: 'anyone',
     summary:
-      "Reposts a post: gives it hashtags it doesn't have, under which it shows as a new post, as it does to those who follow you. Name the post by its id, or a post on another server by its address there (https://other.example/content/<id>), which is read from that server and reposted here as a link to it. Quote the hashtags: --tags \"news, mumbai\".",
+      "Reposts a post: gives it hashtags it doesn't have, under which it shows as a new post, as it does to those who follow you. Name the post by its id, or a post on another server by its address there (https://other.example/content/<id>): that server signs what the post is, and it is reposted here as a link to it. Quote the hashtags: --tags \"news, mumbai\".",
     async run(ctx, { positionals: [post], values }) {
       const { tags } = values;
       if (typeof tags !== 'string' || !tags.trim()) throw new CliError('name the hashtags the repost gives the post: --tags "news, mumbai"', 2);

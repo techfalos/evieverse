@@ -13,25 +13,35 @@ locals {
   url           = "https://${azurerm_cdn_frontdoor_endpoint.main.host_name}"
   blob_endpoint = trimsuffix(azurerm_storage_account.main.primary_blob_endpoint, "/")
 
+  # Where the storage account is, and no key to it: the apps, the compactor and the jobs reach
+  # its containers as the deployment's managed identity (see azurerm_user_assigned_identity.app).
   blob_options = {
     endpoint     = local.blob_endpoint
     account_name = azurerm_storage_account.main.name
-    account_key  = azurerm_storage_account.main.primary_access_key
   }
 
-  env = merge({
-    DB_DIALECT         = "postgres"
-    CONTENT_SCHEME     = "azblob"
+  # A variable that `secrets` sets is left out here: it is the secret's to set, as CONTENT_OPTIONS
+  # is for a deployment that keeps its content somewhere of its own.
+  env = { for key, value in merge({
+    DB_DIALECT      = "postgres"
+    CONTENT_SCHEME  = "azblob"
+    CONTENT_OPTIONS = jsonencode(merge(local.blob_options, { container = azurerm_storage_container.content.name }))
+    # Which identity the server is to act as: the one of the deployment (src/storage/azureIdentity.ts).
+    AZURE_CLIENT_ID    = azurerm_user_assigned_identity.app.client_id
     PUBLIC_BASE_URL    = local.url
     SUPPORT_EMAIL      = var.support_email
     COMPACT_IN_PROCESS = "false"
-  }, var.environment)
+    # /store makes an upload a post's bytes by copying it within the storage account, inside the
+    # `request_timeout` Front Door gives a request (240 seconds at most): 512 MiB. The server's own
+    # default (5 GiB) doesn't fit. An estimate of what does, not a measurement: raise it through
+    # `environment` after timing a large upload on your own deployment.
+    MAX_UPLOAD_BYTES = "536870912"
+  }, var.environment) : key => value if !contains(local.secret_names, key) }
 
   # Env var name -> secret value. Container Apps secret names are lowercase with hyphens.
   secret_env = merge({
-    DATABASE_URL    = "postgres://evieverse:${random_password.db.result}@${azurerm_postgresql_flexible_server.main.fqdn}:5432/evieverse?sslmode=require"
-    REDIS_URL       = "rediss://:${azurerm_managed_redis.main.default_database[0].primary_access_key}@${azurerm_managed_redis.main.hostname}:${azurerm_managed_redis.main.default_database[0].port}"
-    CONTENT_OPTIONS = jsonencode(merge(local.blob_options, { container = azurerm_storage_container.content.name }))
+    DATABASE_URL = "postgres://evieverse:${random_password.db.result}@${azurerm_postgresql_flexible_server.main.fqdn}:5432/evieverse?sslmode=require"
+    REDIS_URL    = "rediss://:${azurerm_managed_redis.main.default_database[0].primary_access_key}@${azurerm_managed_redis.main.hostname}:${azurerm_managed_redis.main.default_database[0].port}"
   }, var.secrets)
   secret_names = nonsensitive(toset(keys(local.secret_env)))
 
@@ -51,14 +61,14 @@ locals {
     DB_POOL_SIZE = tostring(var.db_pool_size)
     TRUST_PROXY  = tostring(var.trust_proxy)
     # Only the apps answer requests, so only they write the audit log.
-    AUDIT_SCHEME = "azblob"
+    AUDIT_SCHEME  = "azblob"
+    AUDIT_OPTIONS = jsonencode(merge(local.blob_options, { container = azurerm_storage_container.audit.name }))
   }, local.env)
   # Front Door sends this to the apps, whose own addresses are public; they refuse requests without it.
-  function_secret_env = merge(local.secret_env, {
+  function_secret_env = merge(local.secret_env, local.generated_secrets, {
     FUNCTION_EDGE_SECRET = random_password.edge.result
-    AUDIT_OPTIONS        = jsonencode(merge(local.blob_options, { container = azurerm_storage_container.audit.name }))
   })
-  function_secret_names = setunion(local.secret_names, ["FUNCTION_EDGE_SECRET", "AUDIT_OPTIONS"])
+  function_secret_names = setunion(local.secret_names, ["FUNCTION_EDGE_SECRET"], local.generated_names)
 
   # What `environment` and `secrets` set, and the optional trust plugins they turn on, read as the
   # server reads TRUST_OPTIONAL_PLUGINS (names separated by commas or spaces): for the one mistake
@@ -66,11 +76,29 @@ locals {
   # terraform_data.migrate).
   settings         = merge(var.environment, var.secrets)
   optional_plugins = regexall("[^\\s,]+", lookup(local.settings, "TRUST_OPTIONAL_PLUGINS", ""))
+
+  # The secret settings this stack makes for the apps that answer requests, where the deployment
+  # sets none of that name itself: see random_bytes.repost_signing.
+  generated_names   = [for name in ["REPOSTS_SIGNING_KEYS"] : name if !nonsensitive(contains(keys(local.settings), name))]
+  generated_secrets = { for name in local.generated_names : name => random_bytes.repost_signing.base64 }
 }
 
 resource "random_password" "edge" {
   length  = 40
   special = false
+}
+
+# The key the server signs the attestations of its posts with, which is what lets them be reposted
+# on other servers (src/attestation.ts): 32 random bytes, as REPOSTS_SIGNING_KEYS takes them. Only
+# the apps that answer requests are given it (and the migrate job, which checks that they start):
+# they sign with it, and publish its public half (GET /repost/keys). To replace it:
+#   terraform apply -replace=random_bytes.repost_signing
+# Nothing of the old key has to be kept: an attestation is good for ten minutes, and another server
+# asks for this one's keys again when it meets a key it doesn't know. A deployment that sets
+# REPOSTS_SIGNING_KEYS itself is given none: in `secrets`, to sign with its own keys, or as "" in
+# `environment`, to sign nothing, so that its posts are reposted only here.
+resource "random_bytes" "repost_signing" {
+  length = 32
 }
 
 resource "random_string" "suffix" {
@@ -103,6 +131,40 @@ resource "terraform_data" "image" {
   }
 }
 
+# ---------------------------------------------------------------- network
+
+# The apps, the compactor and the jobs run in one subnet, and the database's private endpoint is
+# in the other: it is how they reach the database, which has no public address.
+resource "azurerm_virtual_network" "main" {
+  name                = "${var.name}-net"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  address_space       = ["10.40.0.0/16"]
+}
+
+# The Container Apps environment's, and nothing else's: an environment takes a subnet whole.
+resource "azurerm_subnet" "apps" {
+  name                 = "apps"
+  resource_group_name  = azurerm_resource_group.main.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = ["10.40.0.0/23"]
+
+  delegation {
+    name = "container-apps"
+    service_delegation {
+      name    = "Microsoft.App/environments"
+      actions = ["Microsoft.Network/virtualNetworks/subnets/join/action"]
+    }
+  }
+}
+
+resource "azurerm_subnet" "endpoints" {
+  name                 = "endpoints"
+  resource_group_name  = azurerm_resource_group.main.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = ["10.40.2.0/24"]
+}
+
 # ---------------------------------------------------------------- storage
 
 resource "azurerm_storage_account" "main" {
@@ -113,6 +175,11 @@ resource "azurerm_storage_account" "main" {
   account_replication_type        = "LRS"
   min_tls_version                 = "TLS1_2"
   allow_nested_items_to_be_public = false
+  # The account's keys, which do everything to every container and never expire, open nothing:
+  # the server reaches the containers as the managed identity below, with the roles it is given
+  # there and no others, and whoever else needs to (you, in the portal) signs in.
+  shared_access_key_enabled       = false
+  default_to_oauth_authentication = true
 
   # Browsers send files straight to the container, with the link POST /uploads signs.
   blob_properties {
@@ -150,17 +217,40 @@ resource "azurerm_storage_management_policy" "uploads" {
       }
     }
   }
-  # The audit log moves to the Archive tier, its cold storage, once it is `audit_archive_after_days` old.
+  # A request stages a post's file, or a comment's, under staged/, and the compactor's next run
+  # moves it to where it is kept and removes it. One left behind (a request that failed, a run
+  # that stopped) goes after a week: long enough that no write still waiting to be applied loses
+  # its file while the compactor is down for a while.
   rule {
-    name    = "archive-audit-log"
+    name    = "expire-staged-files"
     enabled = true
     filters {
-      prefix_match = ["${azurerm_storage_container.audit.name}/"]
+      prefix_match = ["${azurerm_storage_container.content.name}/staged/"]
       blob_types   = ["blockBlob"]
     }
     actions {
       base_blob {
-        tier_to_archive_after_days_since_creation_greater_than = var.audit_archive_after_days
+        delete_after_days_since_creation_greater_than = 7
+      }
+    }
+  }
+  # Off by default: moving a blob to the Archive tier is billed as a write there (about $0.11 per
+  # 10,000), which for a record of about 1 KB, as nearly all are, is more than it costs to keep in
+  # the Hot tier for decades. These rules can't filter by size, so with `audit_archive_after_days`
+  # set, every record moves.
+  dynamic "rule" {
+    for_each = var.audit_archive_after_days == null ? [] : [var.audit_archive_after_days]
+    content {
+      name    = "archive-audit-log"
+      enabled = true
+      filters {
+        prefix_match = ["${azurerm_storage_container.audit.name}/"]
+        blob_types   = ["blockBlob"]
+      }
+      actions {
+        base_blob {
+          tier_to_archive_after_days_since_creation_greater_than = rule.value
+        }
       }
     }
   }
@@ -173,6 +263,62 @@ resource "azurerm_storage_container" "audit" {
   name                  = "audit"
   storage_account_id    = azurerm_storage_account.main.id
   container_access_type = "private"
+}
+
+# ---------------------------------------------------------------- identity
+
+# Who the apps, the compactor and the jobs are to blob storage: one managed identity, whose
+# tokens Container Apps gives them, so there is no credential for the deployment to keep
+# (src/storage/azureIdentity.ts). What it may do is the three roles below, and nothing else.
+#
+# Assigning a role takes more than Contributor: whoever applies needs Owner, or User Access
+# Administrator beside Contributor, on the subscription or on this resource group.
+resource "azurerm_user_assigned_identity" "app" {
+  name                = "${var.name}-app"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+}
+
+# Content and summaries: read, write and delete the blobs of the content container.
+resource "azurerm_role_assignment" "content" {
+  scope                = azurerm_storage_container.content.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = azurerm_user_assigned_identity.app.principal_id
+  principal_type       = "ServicePrincipal"
+}
+
+# The link POST /uploads gives is signed with a user delegation key, which the account gives an
+# identity that may ask for one. A link does no more than the identity itself may do.
+resource "azurerm_role_assignment" "delegator" {
+  scope                = azurerm_storage_account.main.id
+  role_definition_name = "Storage Blob Delegator"
+  principal_id         = azurerm_user_assigned_identity.app.principal_id
+  principal_type       = "ServicePrincipal"
+}
+
+# The audit log: the identity writes records and does nothing else with the container. It can
+# write over a record, as writing a blob is one permission whether or not the blob is there, but
+# it can't read a record, list them or delete one. (No built-in role is that: the narrowest that
+# writes, Storage Blob Data Contributor, also reads and deletes.)
+resource "azurerm_role_definition" "audit_writer" {
+  name        = "${var.name}-audit-writer-${random_string.suffix.result}"
+  scope       = azurerm_storage_account.main.id
+  description = "Write blobs, and nothing else: no reading, listing or deleting."
+
+  permissions {
+    data_actions = [
+      "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write",
+      "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action",
+    ]
+  }
+  assignable_scopes = [azurerm_storage_account.main.id]
+}
+
+resource "azurerm_role_assignment" "audit" {
+  scope              = azurerm_storage_container.audit.id
+  role_definition_id = azurerm_role_definition.audit_writer.role_definition_resource_id
+  principal_id       = azurerm_user_assigned_identity.app.principal_id
+  principal_type     = "ServicePrincipal"
 }
 
 # ---------------------------------------------------------------- redis
@@ -204,16 +350,19 @@ resource "random_password" "db" {
 }
 
 resource "azurerm_postgresql_flexible_server" "main" {
-  name                          = "${var.name}-${random_string.suffix.result}"
-  resource_group_name           = azurerm_resource_group.main.name
-  location                      = azurerm_resource_group.main.location
-  version                       = "16"
-  administrator_login           = "evieverse"
-  administrator_password        = random_password.db.result
-  sku_name                      = var.db_sku
-  storage_mb                    = 32768
-  backup_retention_days         = 7
-  public_network_access_enabled = true
+  name                   = "${var.name}-${random_string.suffix.result}"
+  resource_group_name    = azurerm_resource_group.main.name
+  location               = azurerm_resource_group.main.location
+  version                = "16"
+  administrator_login    = "evieverse"
+  administrator_password = random_password.db.result
+  sku_name               = var.db_sku
+  storage_mb             = 32768
+  backup_retention_days  = 7
+  # Reached through the private endpoint below and no other way: the server has no public address
+  # to try a password against. (A firewall rule of 0.0.0.0, "allow Azure services", would admit
+  # connections from every Azure customer's resources, not only this deployment's.)
+  public_network_access_enabled = false
   lifecycle {
     ignore_changes = [zone]
   }
@@ -226,12 +375,38 @@ resource "azurerm_postgresql_flexible_server_database" "main" {
   collation = "en_US.utf8"
 }
 
-# 0.0.0.0 - 0.0.0.0 admits Azure services only (Container Apps egress); TLS is required.
-resource "azurerm_postgresql_flexible_server_firewall_rule" "azure" {
-  name             = "allow-azure-services"
-  server_id        = azurerm_postgresql_flexible_server.main.id
-  start_ip_address = "0.0.0.0"
-  end_ip_address   = "0.0.0.0"
+# The server's address inside the virtual network, where the apps, the compactor and the jobs
+# are. Its name (<server>.postgres.database.azure.com) is an alias of one in the zone below,
+# which the network resolves to that address, so DATABASE_URL names the server as before. TLS is
+# still required.
+resource "azurerm_private_dns_zone" "postgres" {
+  name                = "privatelink.postgres.database.azure.com"
+  resource_group_name = azurerm_resource_group.main.name
+}
+
+resource "azurerm_private_dns_zone_virtual_network_link" "postgres" {
+  name                  = "${var.name}-postgres"
+  resource_group_name   = azurerm_resource_group.main.name
+  private_dns_zone_name = azurerm_private_dns_zone.postgres.name
+  virtual_network_id    = azurerm_virtual_network.main.id
+}
+
+resource "azurerm_private_endpoint" "postgres" {
+  name                = "${var.name}-postgres"
+  resource_group_name = azurerm_resource_group.main.name
+  location            = azurerm_resource_group.main.location
+  subnet_id           = azurerm_subnet.endpoints.id
+
+  private_service_connection {
+    name                           = "postgres"
+    private_connection_resource_id = azurerm_postgresql_flexible_server.main.id
+    subresource_names              = ["postgresqlServer"]
+    is_manual_connection           = false
+  }
+  private_dns_zone_group {
+    name                 = "postgres"
+    private_dns_zone_ids = [azurerm_private_dns_zone.postgres.id]
+  }
 }
 
 # ---------------------------------------------------------------- container apps
@@ -244,19 +419,34 @@ resource "azurerm_log_analytics_workspace" "main" {
   retention_in_days   = 30
 }
 
+# In the virtual network, so that what runs in it reaches the database at its private address.
+# The apps' own addresses stay public, for Front Door, and they reach Redis, blob storage and
+# the internet as before. A network of its own needs an environment with workload profiles; the
+# one profile here, Consumption, is billed as an environment without them is: by what the
+# replicas use, and nothing while there are none.
 resource "azurerm_container_app_environment" "main" {
   name                       = "${var.name}-env"
   resource_group_name        = azurerm_resource_group.main.name
   location                   = azurerm_resource_group.main.location
   log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
+  infrastructure_subnet_id   = azurerm_subnet.apps.id
+
+  workload_profile {
+    name                  = "Consumption"
+    workload_profile_type = "Consumption"
+  }
 }
 
 locals {
   # What every app and job waits for before it starts.
   ready = [
     terraform_data.image,
-    azurerm_postgresql_flexible_server_firewall_rule.azure,
+    azurerm_private_endpoint.postgres,
+    azurerm_private_dns_zone_virtual_network_link.postgres,
     azurerm_postgresql_flexible_server_database.main,
+    azurerm_role_assignment.content,
+    azurerm_role_assignment.delegator,
+    azurerm_role_assignment.audit,
   ]
 }
 
@@ -334,6 +524,12 @@ resource "azurerm_container_app_job" "migrate" {
   location                     = azurerm_resource_group.main.location
   replica_timeout_in_seconds   = 600
   replica_retry_limit          = 0
+  workload_profile_name        = "Consumption"
+
+  identity {
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.app.id]
+  }
 
   manual_trigger_config {
     parallelism              = 1
@@ -435,6 +631,12 @@ resource "azurerm_container_app" "group" {
   container_app_environment_id = azurerm_container_app_environment.main.id
   resource_group_name          = azurerm_resource_group.main.name
   revision_mode                = "Single"
+  workload_profile_name        = "Consumption"
+
+  identity {
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.app.id]
+  }
 
   registry {
     server               = azurerm_container_registry.main.login_server
@@ -524,6 +726,12 @@ resource "azurerm_container_app" "compactor" {
   container_app_environment_id = azurerm_container_app_environment.main.id
   resource_group_name          = azurerm_resource_group.main.name
   revision_mode                = "Single"
+  workload_profile_name        = "Consumption"
+
+  identity {
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.app.id]
+  }
 
   registry {
     server               = azurerm_container_registry.main.login_server
@@ -583,6 +791,12 @@ resource "azurerm_container_app_job" "rebuild" {
   location                     = azurerm_resource_group.main.location
   replica_timeout_in_seconds   = 86400
   replica_retry_limit          = 0
+  workload_profile_name        = "Consumption"
+
+  identity {
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.app.id]
+  }
 
   manual_trigger_config {
     parallelism              = 1

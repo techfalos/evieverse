@@ -15,12 +15,12 @@ Summaries share the content bucket, under `summaries/`, and so do comments, unde
 ## Route groups
 
 
-| Group     | Requests                                                                                                                                       | Uses                                              |
-| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| `feed`    | `GET /feed`                                                                                                                                    | Redis and the bucket only: no database connection |
-| `content` | `GET /content/:id`, `GET /content/:id/raw`, and reading a post's comments: `GET /content/:id/comments`, `GET /content/:id/comments/:commentId` | Database, bucket, and Redis for comments          |
-| `store`   | `POST /uploads`, `POST /store`                                                                                                                 | Database, Redis, bucket                           |
-| `api`     | Everything else                                                                                                                                | Database, Redis, bucket                           |
+| Group     | Requests                                                                                                                                                                       | Uses                                              |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------- |
+| `feed`    | `GET /feed`                                                                                                                                                                    | Redis and the bucket only: no database connection |
+| `content` | `GET /content/:id`, `GET /content/:id/raw`, `GET /content/:id/attestation`, and reading a post's comments: `GET /content/:id/comments`, `GET /content/:id/comments/:commentId` | Database, bucket, and Redis for comments          |
+| `store`   | `POST /uploads`, `POST /store`                                                                                                                                                 | Database, Redis, bucket                           |
+| `api`     | Everything else                                                                                                                                                                | Database, Redis, bucket                           |
 
 
 
@@ -67,7 +67,7 @@ The check is there because updating a function doesn't start it. Without it, a m
 
 **Settings**
 
-Settings are passed through `environment`, and credentials through `secrets`. On GCP and Azure, secrets go to Secret Manager and Container Apps secrets, never into plain environment variables. On AWS, a Lambda function can only take them as environment variables, which are encrypted at rest but shown to anyone allowed to read the function's configuration (`lambda:GetFunctionConfiguration`). The compactor's task reads them from Secrets Manager.
+Settings are passed through `environment`, and credentials through `secrets`. On GCP and Azure, secrets go to Secret Manager and Container Apps secrets, never into plain environment variables. On AWS they go to Secrets Manager, and none is in a function's configuration, which anyone allowed to read it (`lambda:GetFunctionConfiguration`) would see. A function reads them as an instance starts, and the compactor's task is given them as it starts, each by the version the apply wrote, so a new value waits for the settings check like any other change.
 
 ```hcl
 # terraform.tfvars (git-ignored)
@@ -90,6 +90,16 @@ secrets     = { URLHAUS_AUTH_KEY = "..." }
 - Set both in the same `apply`. The server doesn't start with `urlhaus` named and no key, so the modules check for it: the plan fails, before anything is changed, if `TRUST_OPTIONAL_PLUGINS` names `urlhaus` and `URLHAUS_AUTH_KEY` is missing or empty. The check is on the key being there, not on URLhaus accepting it. A name that isn't a plugin, such as `urlhouse`, gets past the plan and is refused by the [settings check](#deploy), which stops the `apply` before any function is updated.
 - Each function instance downloads URLhaus's list when it first has a link to check, and keeps it while it lives. A post with a link that reaches a new instance waits for that download, on top of the cold start.
 - The functions need a way out to `urlhaus-api.abuse.ch`, which the three modules give them: through the NAT gateway on AWS, and directly on GCP and Azure. If the list can't be downloaded, posts with a link fail with `500` on instances that have no list yet.
+
+**The signing key for reposts**
+
+Each module makes the key the instance signs its posts with, which is what lets them be [reposted on other servers](API.md#a-post-on-another-server): 32 random bytes, kept with the instance's other secrets as `REPOSTS_SIGNING_KEYS`. There's nothing to set.
+
+- **To replace the key,** run `terraform apply -replace=random_bytes.repost_signing`. Nothing of the old key has to be kept: an attestation is asked for when it's used, and is good for 10 minutes at most. A server that has the old key asks for the instance's keys again when it meets the new one, at most once a minute, so at worst it refuses reposts of the instance's posts for a minute after the change.
+- **To sign with keys of your own,** put `REPOSTS_SIGNING_KEYS` in `secrets`, and the module's key isn't used. Several keys, separated by commas or spaces, change the key with no gap: the first signs, and all are published.
+- **To sign nothing,** set `REPOSTS_SIGNING_KEYS = ""` in `environment`. The instance's posts are then reposted only on the instance itself.
+- **The key is in the Terraform state,** in plain text, like the other secrets these modules create.
+- To check a repost of a post on another server, the functions ask that server for its public keys over `https`. That takes the same way out as above: the NAT gateway on AWS, and directly on GCP and Azure.
 
 [CONFIG.md](CONFIG.md) lists all settings.
 
@@ -146,6 +156,16 @@ These modules used to run the server as long-running containers. Applying them t
 
 Run `terraform plan` first and read what it will destroy.
 
+## Upgrading to the compactor as the only writer
+
+In earlier versions the requests wrote posts and comments to the bucket themselves. Now they commit to the database, and the [compactor](#compactor) writes everything out. The two don't mix: a function or a node of the version before still writes the bucket itself, beside a compactor that now does. So every function and the compactor change version together, with the migrations that go with them (`0002_pending_writes`, which changes what requests write, and `0003_staged_removals`, which only adds a table):
+
+- **With these modules,** one `apply` does it. It adds the rule that expires `staged/` to the bucket, and runs the migrations in its [first step](#deploy), before it updates the functions and the compactor. Between the migrations and the update, which is a few minutes, the functions of the version before run on the migrated database: they write a column that `0002_pending_writes` drops, so posts and updates sent then fail with a `500`. The compactor of the version before fails its passes for as long. Apply when the server is quiet, and have clients send again what failed.
+- **Where you run it yourself,** stop every API node and the compactor, migrate, and start them all on the new version. A rolling restart leaves the two versions writing at once for its length. Give the bucket a rule that deletes objects under `staged/` after 7 days, as the modules do.
+- **There's no way back with the same database.** The version before doesn't run on the migrated one.
+
+This upgrade wasn't applied to a live deployment. The modules pass `terraform validate` with the new rule, and applying the writes that waited, and again after a pass that stopped, is covered by the server's tests, on SQLite.
+
 ## Uploads
 
 A request to a function can't carry a large file. The limits on a file sent in the request to `/store`:
@@ -161,22 +181,22 @@ A request to a function can't carry a large file. The limits on a file sent in t
 Larger files go straight to the bucket: the client asks `[POST /uploads](API.md#post-uploads)` for a link, sends the file to it, and posts it with `/store` by its `uploadId`. Every module sets the bucket up for that:
 
 - **CORS:** pages on `upload_origins` (any origin by default) may send files to the bucket from a browser. The link is the permission; this only tells browsers which pages may use one.
-- **Expiry:** an upload nobody posts is deleted after a day (`uploads/` in the bucket).
-- `MAX_UPLOAD_BYTES` is the largest file `/store` accepts either way. To post an upload, `/store` copies it within the bucket, inside the request's time limit: 30 seconds on AWS, `request_timeout` on GCP (300) and Azure (240). AWS is set to 256 MiB and GCP to 1 GiB. Those are estimates of what fits, not measurements; time a large upload on your own deployment before raising them through `environment`. Azure keeps the server's default (5 GiB), which is more than fits in its timeout.
+- **Expiry:** an upload nobody posts is deleted after a day (`uploads/` in the bucket). A file that waits for the [compactor](#compactor) to write it out is kept for a week (`staged/`).
+- `MAX_UPLOAD_BYTES` is the largest file `/store` accepts either way. To post an upload, `/store` copies it within the bucket, inside the request's time limit: 30 seconds on AWS, `request_timeout` on GCP (300) and Azure (240). AWS is set to 256 MiB, GCP to 1 GiB and Azure to 512 MiB. Those are estimates of what fits, not measurements; time a large upload on your own deployment before raising them through `environment`.
 
-On GCP, signing a link needs a private key, and Cloud Run's own credentials don't have one. The module therefore creates a service account that can only read and write the content bucket, and a key for it, which the functions use for the bucket (`direct_uploads`, on by default). The key doesn't expire, and is kept in Secret Manager and in the Terraform state. Organisations that forbid service account keys need `direct_uploads = false`: `/uploads` then answers `501`, and files are limited to 32 MiB.
+On GCP, signing a link needs a private key, and Cloud Run's own credentials don't have one. So the services sign as their own service account through IAM (`signBlob`), with a key Google keeps: the module lets the account sign as itself (`roles/iam.serviceAccountTokenCreator`) and turns on the IAM Credentials API. There's no service account key to keep, in Secret Manager or in the Terraform state, so this also works in organisations that forbid them. The `direct_uploads` variable is gone: take it out of your variables if you set it. Each signature is a call to IAM, so a link to read a file with is given again for half the time it's good for, and if IAM can't be reached, `/uploads` answers `501` and files are read through the service for 30 seconds before it's asked again.
 
 ## Audit log
 
-Every request that adds, updates or deletes something (a `POST`, `PUT`, `PATCH` or `DELETE` that succeeded) is logged, these logs are eventually moved into cold storage. 
+Every request that adds, updates or deletes something (a `POST`, `PUT`, `PATCH` or `DELETE` that succeeded) is logged. The records stay where they were written unless you turn on cold storage.
 
-| Cloud | Where                                    | Cold storage          | Written by                                        |
-| ----- | ---------------------------------------- | --------------------- | ------------------------------------------------- |
-| AWS   | S3 bucket `<name>-audit-…`               | Glacier Deep Archive  | Lambda functions (`s3:PutObject` only)            |
-| GCP   | GCS bucket `<project>-<name>-audit`      | Archive storage class | Cloud Run services (`storage.objectCreator` only) |
-| Azure | Container `audit` of the storage account | Archive tier          | Container Apps (the account key, as for content)  |
+| Cloud | Where                                    | Cold storage, if turned on | Written by                                                        |
+| ----- | ---------------------------------------- | -------------------------- | ----------------------------------------------------------------- |
+| AWS   | S3 bucket `<name>-audit-…`               | Glacier Deep Archive       | Lambda functions (`s3:PutObject` only)                            |
+| GCP   | GCS bucket `<project>-<name>-audit`      | Archive storage class      | Cloud Run services (`storage.objectCreator` only)                 |
+| Azure | Container `audit` of the storage account | Archive tier               | Container Apps (a managed identity that may only write blobs)     |
 
-Records stay as they were written for `audit_archive_after_days` (30 by default; the same variable on every cloud), then the bucket's lifecycle rule moves them. A record is one small object, so on AWS and Azure the archive tiers' per-object charges and minimum storage durations (180 days) are worth a look at your volume. Reading an archived record takes hours to restore. Nothing deletes records. The bucket is named in the `audit_bucket` output (`audit_container` on Azure).
+Nothing moves records by default: `audit_archive_after_days` is unset (the same variable on every cloud). A record is one object of about 1 KB, and moving one that small costs more than keeping it. Each object moved is charged for ($0.05 per 1,000 on AWS and GCP, about $0.11 per 10,000 on Azure), and Deep Archive bills 40 KB of overhead on top of each, against about $0.02 a month to keep a million records where they are. So with the variable set to a number of days, AWS and GCP move only the records larger than 128 KB once they're that old. Azure's lifecycle rules can't filter by size, so there it moves every record. On AWS and Azure the archive tiers also have a minimum storage duration (180 days), and reading an archived record takes hours to restore. Nothing deletes records. The bucket is named in the `audit_bucket` output (`audit_container` on Azure).
 
 The audit log is written by the functions that answer requests, in each request, before it is answered: a failed write is logged as an error and doesn't fail the request. The log of the functions themselves (CloudWatch, Cloud Logging, Log Analytics) also gets a line for each record, naming its object, for as long as that log is kept.
 
@@ -192,7 +212,7 @@ On GCP and Azure the number of proxies (`trust_proxy`, 2) wasn't checked against
 
 ## Compactor
 
-The compactor is one container that's always up, and makes pass after pass over the feed index. It isn't a function and nothing calls it: it has no address, and reaches Redis, the database and the bucket from inside the network, as the functions do.
+The compactor is one container that's always up, and makes pass after pass. Each pass writes out the posts and comments that requests committed since the one before, to the bucket and Redis, and then brings the feed index up to date. It isn't a function and nothing calls it: it has no address, and reaches Redis, the database and the bucket from inside the network, as the functions do.
 
 
 | Cloud | What runs it                                                                | Kept at one by                                                                    |
@@ -205,13 +225,19 @@ The compactor is one container that's always up, and makes pass after pass over 
 How it's paced:
 
 - **Never two passes at once, and never more than one in 5 seconds.** A pass starts `COMPACT_INTERVAL_SECONDS` (5) after the previous one started, or as soon as that one ends if it took longer. Being one process, it can't overlap itself. To change the pace, set `COMPACT_INTERVAL_SECONDS` through `environment`.
-- **Two containers still can't overlap.** Each pass takes the compactor's lease in the database, and a pass that finds it held is skipped. That covers the moments when two are up: a deploy that starts the new one before the old has gone (GCP and Azure can), or a rebuild started by hand.
+- **Two containers still can't overlap.** Each pass takes the compactor's lease in the database, and a pass that finds it held is skipped. That covers the moments when two are up: a deploy that starts the new one before the old has gone (GCP and Azure can), or a rebuild started by hand. A pass renews the lease for as long as it runs, so a slow write to the bucket doesn't let a second container in.
 - **If it stops, the platform starts it again.** A container that's killed mid-pass leaves the lease held until it expires (`COMPACT_LEASE_SECONDS`, 60), and the next pass after that carries on from where the index was: what the killed pass wrote but hadn't published expires by itself.
-- **A deploy lets a pass finish where it can.** On being told to stop, the compactor ends the pass it's making and exits. AWS and Azure are set to give it two minutes for that. Cloud Run gives a container about ten seconds, and a pass cut short there is a killed pass, as above.
+- **A deploy ends a pass cleanly where it can.** On being told to stop, the compactor finishes the writes it's making, starts no more, frees the lease and exits. That takes as long as the writes under way do, not the rest of the pass, and the next pass, of the container that replaces it, does what was left. AWS and Azure are set to give it two minutes for that. Cloud Run gives a container about ten seconds, and a compactor that hasn't exited by then is killed mid-pass, as above.
+
+What waits for it:
+
+- **Only the compactor writes posts and comments to the bucket.** A request commits its write to the database, and stores a file it came with under `staged/` in the bucket. The next pass writes it out where it's kept (`content/`, `comments/`, `summaries/`), each post and each comment as the newest write of it has it. The staged file is deleted once it's copied, or where the store signs links to its files, once a link given to it can no longer be in use: `CONTENT_SIGNED_URL_SECONDS` (900) and a minute later, by a pass after that. [APP.md](APP.md#what-it-does-each-run) has the details.
+- **While it's down, writes are taken and wait.** A post, a comment or a like is answered as ever, and a post or a comment can be read by its id. No feed gets a new post or an update, and no list a new comment, until a pass has run. The passes after it's back write out everything that waited.
+- **A staged file is kept for a week.** Every module's bucket deletes what's under `staged/` after 7 days, which clears the files of requests that failed after storing one. A file that waited that long for the compactor goes too, so don't leave the compactor stopped for a week: a post whose file is gone can't be written out until it's next updated, a comment whose file is gone is published with its text alone, or removed if the file was all there was to it, and [APP.md](APP.md#11-consistency-failure-and-recovery) says what that leaves.
 
 Its size is `compactor_cpu` and `compactor_memory` (half a CPU and 1 GB on AWS and Azure, one CPU and 1 GiB on GCP). It runs all the time, so unlike the functions it costs the same with or without traffic: about $18 a month on AWS at the default size, from Fargate's list prices in `us-east-1`. `terraform output compactor` names it, for finding its logs (on AWS, the log group too).
 
-None of this was applied to a live account for this change: the modules pass `terraform validate`, and the pacing and the lease are covered by the server's tests.
+None of this was applied to a live account for this change: the modules pass `terraform validate`, and the pacing, the lease and stopping mid-pass are covered by the server's tests.
 
 ## Scaling and the database
 
@@ -228,7 +254,7 @@ Measured for this change, with the limits of each measurement:
 
 - **Latency once warm:** on one machine (1 vCPU and 1 GB per container; Valkey, Postgres and an S3-compatible store beside them), a 10-hashtag feed took 6 ms at the median from a group's own container and 10 ms through the Lambda runtime, against 6 ms from the whole server. A text post took 41 ms from either, against 44 ms. This compares the function code with the server, not one cloud's network with another's.
 - **Cold starts:** on AWS Lambda in `us-east-1`, a new instance took 1.0 to 1.6 seconds to start at 1,024 MB (the feed function; 1.1 to 2.3 for the store function), almost all of it loading the server's code, then answered in 30 to 60 ms. More memory made little difference. This was measured outside a VPC with no Redis or database to connect to, so a real cold start adds those connections. Cloud Run and Container Apps weren't measured; Container Apps starting from zero also pulls the image, which usually takes much longer.
-- **Cost:** functions swap the cost of containers that run all the time for a cost per request, plus the address in front. From list prices, with the database, Redis, bucket and data transfer left out as they don't change: AWS costs about $55 a month before any traffic (NAT gateway $33, RDS Proxy $22) and about $1.45 per million requests after (API Gateway $1.00, Lambda $0.45), which is less than two always-on containers and a load balancer up to roughly 40 million requests a month and more beyond. On GCP the functions themselves are cheap, but API Gateway is $3.00 per million calls after the first 2 million. On Azure, Front Door adds $35 a month and $0.90 per million requests, and four apps that each stay up for five minutes after a request cost more than one container until there's enough traffic to need several. For a busy server, compare a load balancer with path rules (GCP), or setting `min_replicas` and sizing by hand (Azure).
+- **Cost:** functions swap the cost of containers that run all the time for a cost per request, plus the address in front. From list prices, with the database, Redis, bucket and data transfer left out as they don't change: AWS costs about $70 a month before any traffic (NAT gateway $33, RDS Proxy $22, the Secrets Manager endpoint $15) and about $1.45 per million requests after (API Gateway $1.00, Lambda $0.45), which is less than two always-on containers and a load balancer up to roughly 30 million requests a month and more beyond. On GCP the functions themselves are cheap, but API Gateway is $3.00 per million calls after the first 2 million. On Azure, Front Door adds $35 a month and $0.90 per million requests, the database's private endpoint about $7 a month, and four apps that each stay up for five minutes after a request cost more than one container until there's enough traffic to need several. For a busy server, compare a load balancer with path rules (GCP), or setting `min_replicas` and sizing by hand (Azure).
 
 
 
@@ -262,7 +288,7 @@ It runs beside the compactor. If the compactor is mid-pass, the rebuild waits fo
 
 - CloudFront supplies HTTPS with its default certificate, and is the only way in: the functions refuse requests that don't carry the secret header it adds.
 - API Gateway gives a function 30 seconds, so a post whose AI analysis takes longer gets a 503. This limit can't be raised on an HTTP API.
-- The functions run in the VPC's private subnets, next to Redis and the database. They reach the internet (AI services) through one NAT gateway, and S3 through a gateway endpoint, which is free. If the NAT gateway's availability zone fails, the functions lose the internet until it's back, but not Redis, the database or S3.
+- The functions run in the VPC's private subnets, next to Redis and the database. They reach the internet (AI services) through one NAT gateway, S3 through a gateway endpoint, which is free, and Secrets Manager through an interface endpoint in both zones, which isn't (about $15 a month). If the NAT gateway's availability zone fails, the functions lose the internet until it's back, but not Redis, the database, S3 or their secrets, so new instances still start.
 - A Lambda response can be at most 6 MB. Feed pages are far smaller, and `/content/:id/raw` answers with a redirect to a signed S3 link rather than the bytes.
 - ElastiCache runs a primary plus `redis_replicas` replicas (default 1) on `redis_node_type` (default `cache.t4g.small`, about 1.4 GB). With a replica, failover is automatic and the nodes span availability zones. It requires TLS and an AUTH token, and keeps a daily snapshot for one day.
 - `function_memory` (1,024 MB) also sets a function's share of CPU. The store function gets `store_function_memory` (2,048 MB), since it takes uploads.
@@ -282,8 +308,9 @@ It runs beside the compactor. If the compactor is mid-pass, the rebuild waits fo
 - Front Door sends requests by path only, so a rule on `/content/*` sends everything but `GET`, `HEAD` and `OPTIONS` to the api group, which is where `DELETE /content/:id` belongs, and writing and deleting comments.
 - A group at zero replicas takes its next request only after a replica has started, which includes pulling the image. Set `min_replicas = 1` if that wait matters more than the cost.
 - Azure Managed Redis uses `redis_sku` (default `Balanced_B1`) and `redis_high_availability` (default `true`). Its Enterprise cluster policy presents one endpoint, so the app connects as it would to a single Redis, over TLS on port 10000 with an access key.
-- The storage account key and the Redis access key reach the containers only as Container Apps secrets. Upload links are signed with the storage account key. Downloads aren't signed links: `/content/:id/raw` streams the bytes through the Container App and Front Door, where on AWS and GCP it redirects to the bucket.
-- PostgreSQL accepts connections only from Azure services (the `0.0.0.0` firewall rule), and TLS is required.
+- The Redis access key reaches the containers only as a Container Apps secret. Blob Storage takes no account key at all: shared keys are turned off on the account, and the apps, the compactor and the jobs reach it as one managed identity. That identity may read, write and delete blobs in the content container, only write them in the audit container, and ask the account for the key upload links are signed with (a user delegation key, good for an hour at a time). Downloads aren't signed links: `/content/:id/raw` streams the bytes through the Container App and Front Door, where on AWS and GCP it redirects to the bucket.
+- Giving the identity its roles takes more than Contributor: whoever applies needs Owner, or User Access Administrator beside Contributor, on the subscription or the resource group.
+- PostgreSQL has no public address. The apps, the compactor and the jobs run in a virtual network, and reach the database through a private endpoint in it. TLS is required.
 
 
 
@@ -292,6 +319,8 @@ It runs beside the compactor. If the compactor is mid-pass, the rebuild waits fo
 Without these modules, the server runs on any of each cloud's services below, as long-running API nodes with one compactor (`node dist/server.js`, `node dist/compact/main.js`), or as functions (`node dist/functions/http.js` for containers that scale with traffic, `node dist/functions/lambda.js` on Lambda, with `FUNCTION_GROUP` naming the group). The rules that apply on every cloud, and the ones functions add, are in [APP.md](APP.md#13-deployment-topology).
 
 With functions, run the step the modules run before you update them, with the settings they're about to get: `node dist/functions/migrate.js` as a job, or the Lambda entry point with `FUNCTION_GROUP=migrate`. It checks that the functions start with those settings, and then migrates the database. Nothing else tells you about a setting the server refuses until requests fail, since updating a function doesn't start it.
+
+For the instance's posts to be reposted on other servers, give it a signing key and its public address (`REPOSTS_SIGNING_KEYS` and `PUBLIC_BASE_URL`, in [CONFIG.md](CONFIG.md#reposts)), and a way out to the internet over `https`, to ask other servers for their keys.
 
 **AWS**
 

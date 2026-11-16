@@ -12,8 +12,9 @@ import type { DayRef, Head, IndexEntry, Manifest } from '../tagfeed/layout.types
 import { readJson } from '../tagfeed/read.js';
 import { DAY, HOUR, MINUTE, utcDay, wholeSeconds } from '../time.js';
 import { mapLimit } from '../util.js';
+import { applyPending } from './apply.js';
 import type { RunOptions, RunResult } from './compactor.types.js';
-import { CompactorLease, LeaseLostError } from './lease.js';
+import { CompactorLease, LeaseLostError, RunStoppedError } from './lease.js';
 
 /**
  * The most values a run names in the `in (...)` list of one database statement (content ids, user
@@ -128,12 +129,6 @@ interface RunContext {
   reposts: Map<string, Repost[]>;
   /** The places in the own index of a reposter whose account is gone, by `decidedKey`: they count as not there. */
   gone: Set<string>;
-  /**
-   * Hashtags a moderator removed from content, and a run took off it, that an index still had an
-   * entry of the content for: a write that was under way when the hashtag was removed may have
-   * written it back to the meta file, so the removal is applied again by the next run.
-   */
-  strays: { id: string; tag: string }[];
   /** Tags whose head this run didn't swap: what waits on them waits for a later run. */
   failed: Set<string>;
 }
@@ -151,7 +146,7 @@ interface ContentRow {
 }
 
 /** What hashtags' moderators decided about content under them, by `decidedKey`. */
-type Decided = Map<string, { decision: TagDecision; applied: boolean }>;
+type Decided = Map<string, TagDecision>;
 /** A tag and a piece of content as one string, which `Decided` and `RunContext.gone` are keyed by. */
 const decidedKey = (tag: string, contentId: string) => `${tag} ${contentId}`;
 
@@ -264,10 +259,18 @@ const addTo = (ids: Map<number, Set<string>>, day: number, id: string) => {
  * are never blocked: a request under way keeps reading the keys it started with, which only expire
  * a minute after no node can still hold the head that named them.
  *
+ * It is also the only thing that writes posts and comments to the stores. A request commits what
+ * it writes to the database and nothing else (`pending_writes`, src/pending.ts), and each run
+ * starts by applying those writes (see applyPending): a post's bytes, summary and meta file, and
+ * a comment, its likes and its image or video. So one process writes them all, each post and
+ * each comment as its newest write has it, and nothing is written to content that is set for
+ * deletion, which the same run then deletes: no update, comment or like can bring back what was
+ * deleted, or write over what a moderator removed.
+ *
  * An entry is never copied from what a write says: it is built from the database and the content's
- * meta file as they are when the run reads them. The queue is read before any meta file is, and a
- * write stores its meta file before it commits its rows, so what a run reads of the content of a
- * row it took is that write's, or a later one's.
+ * meta file as they are when the run reads them. The queue is read before the pending writes are
+ * applied, and a write commits its rows in the queue with the write itself, so what a run reads
+ * of the content of a row it took is that write's, or a later one's.
  *
  * Should two compactor processes be up at once (a deploy replacing one, a rebuild started by hand),
  * their runs still never overlap: each holds a lease in the database (see CompactorLease), since a
@@ -285,8 +288,7 @@ const addTo = (ids: Map<number, Set<string>>, day: number, id: string) => {
  * where it places the content, and rows in the feed queue for those indexes. The next run writes
  * the hashtags the repost added into the content's meta file and summary (see applyReposts), and
  * builds the content's entry in each of those indexes at the time of the repost (see Placement).
- * Nothing else writes a repost's hashtags to the content, so a write of the content that went on
- * meanwhile is put right by the run that takes its rows.
+ * An update of the content that committed meanwhile is applied with them too (see applyPending).
  *
  * And it keeps each hashtag's related hashtags in Redis, where feeds asked to add them read them:
  * those of the hashtags whose counts in `tag_pairs` changed since its last run are worked out again
@@ -301,6 +303,8 @@ const addTo = (ids: Map<number, Set<string>>, day: number, id: string) => {
  */
 export class Compactor {
   private readonly now: () => number;
+  /** The lease of the run this process is making, if it is making one: what stops the run (see `start`). */
+  private current: CompactorLease | null = null;
 
   constructor(private readonly deps: CompactorDeps) {
     this.now = deps.now ?? Date.now;
@@ -334,16 +338,24 @@ export class Compactor {
    * `rebuild` also re-admits every content within retention from the database and the meta files,
    * restoring summaries and publisher credits: run it after Redis lost data. Skipped while another
    * run, in this process or any other, holds the lease.
+   *
+   * The lease is held until nothing of the run is under way: what a run does several of at once it
+   * waits for before it fails (see mapLimit), so the run after it, here or anywhere, starts with
+   * no write of this one still to land. `stopped` says whether the compactor was told to stop
+   * (see `start`): a run that finds it so makes no write, and throws RunStoppedError.
    */
-  async runOnce(opts: RunOptions = {}): Promise<RunResult & { skipped: boolean }> {
+  async runOnce(opts: RunOptions = {}, stopped: () => boolean = () => false): Promise<RunResult & { skipped: boolean }> {
     const lease = new CompactorLease(this.deps.db, this.cfg.compact.leaseSeconds * 1000, this.now);
     if (!(await lease.acquire())) {
       this.deps.log?.info({}, 'another compactor run holds the lease; skipping this run');
       return { tags: [], deleted: [], skipped: true };
     }
+    if (stopped()) lease.stop();
+    this.current = lease;
     try {
       return { ...(await this.run(lease, opts)), skipped: false };
     } finally {
+      this.current = null;
       await lease.release().catch((err) => this.deps.log?.error({ err }, 'could not release the compactor lease; it expires on its own'));
     }
   }
@@ -352,7 +364,7 @@ export class Compactor {
     const { db, hot, content, summaries } = this.deps;
     const runStart = this.now();
     const state = (await readJson<State>(hot, COMPACTOR_STATE_KEY)) ?? { through: 0 };
-    const ctx: RunContext = { rebuild: !!opts.rebuild, ensured: new Map(), metas: new Map(), reposts: new Map(), gone: new Set(), strays: [], failed: new Set() };
+    const ctx: RunContext = { rebuild: !!opts.rebuild, ensured: new Map(), metas: new Map(), reposts: new Map(), gone: new Set(), failed: new Set() };
 
     const work = new Map<string, TagWork>();
     const workFor = (tag: string) => {
@@ -360,13 +372,26 @@ export class Compactor {
       if (!w) work.set(tag, (w = { days: new Set(), readmit: new Map(), recheck: new Map(), all: false }));
       return w;
     };
-    // The queue first, before this run reads any meta file: a write stores its meta file before it
-    // commits its rows, so every meta file read from here on is at least as new as the rows taken.
+    // The queue first, before the pending writes are applied: a write commits its rows in the queue
+    // with the write itself, so every write whose rows are taken here is applied below, or was
+    // before, and every meta file read from then on is at least as new as the rows taken.
     // The same goes for the places of reposts, which a repost commits with its rows.
-    const queue = await this.readQueue(runStart);
+    const taken = await this.readQueue();
     if (opts.all) for (const r of await db.selectFrom('tags').select('name').execute()) workFor(r.name).all = true;
     // Before any place is read: the ones it finds count as not there for the rest of the run.
     const gone = await this.markGoneReposters(workFor, ctx);
+    // The writes requests committed: this is what writes them to the stores, before anything below reads those.
+    const applied = await applyPending({
+      ...this.deps,
+      lease,
+      places: async (id) => {
+        await this.loadReposts([id], ctx);
+        return this.placed(id, ctx);
+      },
+    });
+    for (const [id, meta] of applied.metas) ctx.metas.set(id, Promise.resolve(meta));
+    // A post whose write couldn't be applied keeps its rows: the meta file they are to be rebuilt from isn't written yet.
+    const queue = taken.filter((r) => !applied.failed.has(r.id));
     await this.loadReposts(queue.map((r) => r.id), ctx);
     // Next, as they write meta files: everything below reads them as these left them.
     const decisions = await this.applyDecisions(workFor, runStart, lease, ctx);
@@ -395,10 +420,9 @@ export class Compactor {
     await hot.set(COMPACTOR_STATE_KEY, JSON.stringify(next));
 
     // Everything below relies on the heads this run published still being the current ones.
-    const unerased = await this.eraseHeld(queue, lease, ctx);
-    // The rows of content whose summary couldn't be erased, or that a repost's hashtags couldn't be written to, stay for the next run.
-    await this.settleQueue(queue.filter((r) => !unerased.has(r.id) && !unapplied.has(r.id)), failed, lease);
-    await this.settleDecisions(decisions, failed, runStart, lease, ctx);
+    // The rows of content that a repost's hashtags couldn't be written to stay for the next run.
+    await this.settleQueue(queue.filter((r) => !unapplied.has(r.id)), failed, lease);
+    await this.settleDecisions(decisions, failed, runStart, lease);
     await this.settleGoneReposters(gone, failed, lease);
     const deleted: string[] = [];
     for (const d of deletions) {
@@ -406,7 +430,15 @@ export class Compactor {
       await lease.check();
       // The post's comments, which only the content store lists by post: while the row is still there, so a run that fails here finds them again.
       await this.deps.comments.removeAll(d.id);
-      // Likes, feed_queue rows and the places of reposts cascade, and so do the rows of the comments that waited in a queue.
+      // The files of its writes that were never applied, and never will be: while the rows that name them are still there, for the same reason.
+      for (const { staged_key: staged } of await db.selectFrom('pending_writes').select('staged_key').where('content_id', '=', d.id).where('staged_key', 'is not', null).execute()) {
+        await content.removeStaged(staged!);
+      }
+      // And the files of the writes that were applied, kept for the links that were given to them (see applyPending): gone with the post, whatever time they had left.
+      const kept = await db.selectFrom('staged_removals').select('staged_key').where('content_id', '=', d.id).execute();
+      for (const { staged_key: staged } of kept) await content.removeStaged(staged);
+      if (kept.length) await db.deleteFrom('staged_removals').where('content_id', '=', d.id).execute();
+      // Likes, feed_queue rows, pending writes and the places of reposts cascade, and so do the rows of the comments that waited in a queue.
       await db.deleteFrom('content').where('id', '=', d.id).where('delete_requested_at', 'is not', null).execute();
       await summaries.remove([{ contentId: d.id, createdAt: d.createdAt, repostedAt: d.repostedAt }]);
       await content.remove(d.id);
@@ -647,17 +679,14 @@ export class Compactor {
   }
 
   /**
-   * The feed queue's rows this run takes: every one a write committed, and those an update queued
-   * before it wrote anything and never committed, once the grace period has given it the time to
-   * (the update stopped half way, or its node did). In one statement, so the rows of a write are
-   * taken together or not at all.
+   * The feed queue's rows this run takes: all of them, as every one is a write's that committed.
+   * In one statement, so the rows of a write are taken together or not at all.
    */
-  private readQueue(until: number): Promise<QueueRow[]> {
+  private readQueue(): Promise<QueueRow[]> {
     return this.deps.db
       .selectFrom('feed_queue')
       .innerJoin('content', 'content.id', 'feed_queue.content_id')
       .select(['content.id', 'feed_queue.tag', 'feed_queue.token', 'feed_queue.created_at as queued_at', 'content.created_at'])
-      .where((eb) => eb.or([eb('feed_queue.committed', '=', 1), eb('feed_queue.created_at', '<', until - this.cfg.compact.graceSeconds * 1000)]))
       .execute();
   }
 
@@ -789,9 +818,9 @@ export class Compactor {
    * the content carry the hashtags, which is when it has an entry under them (see placement) and
    * feeds show it there. Not a hashtag a moderator removed from the content, which stays off it.
    *
-   * It is also what puts back a hashtag that a write of the content left out: an update that was
-   * under way when the repost committed wrote the meta file as it knew it, and queued the content
-   * for this (see contentWriter).
+   * An update of the content that this run applied has them already: applying a post's write
+   * settles its hashtags by the places reposts gave it (see applyPending), whatever the update
+   * knew of them.
    *
    * Content that waits in the moderation queue has no summary, and gets none here. Returns the
    * content it couldn't write: its rows stay in the queue, so the next run tries again.
@@ -851,40 +880,8 @@ export class Compactor {
   }
 
   /**
-   * Erases the summary of queued content that waits in the moderation queue, which has none. The
-   * update that sent it there erased it, but a run that was rebuilding an entry of the content just
-   * then read it as published, and may have restored the summary afterwards (see compactChunk): the
-   * run that takes the update's rows, which this is, puts that right. Read after the tags are
-   * compacted, so after anything this run restored. Content accepted, or updated into being
-   * published, since this was read has a row in the queue this run didn't take, and the next run
-   * restores its summary. Returns the content whose summary couldn't be erased: its rows stay.
-   */
-  private async eraseHeld(rows: QueueRow[], lease: CompactorLease, ctx: RunContext): Promise<Set<string>> {
-    const { db, summaries, log } = this.deps;
-    const createdAt = new Map(rows.map((r) => [r.id, r.created_at]));
-    const ids = [...createdAt.keys()];
-    const unerased = new Set<string>();
-    for (let i = 0; i < ids.length; i += BATCH) {
-      const held = await db.selectFrom('moderation_queue').select('content_id').where('content_id', 'in', ids.slice(i, i + BATCH)).execute();
-      if (!held.length) continue;
-      await lease.check();
-      await mapLimit(held, 16, async ({ content_id: contentId }) => {
-        try {
-          // Every copy of it: content that was reposted has one under the day of each repost.
-          await summaries.erase({ contentId, createdAt: createdAt.get(contentId)!, repostedAt: repostTimes(this.placed(contentId, ctx)) });
-        } catch (err) {
-          unerased.add(contentId);
-          log?.error({ err, contentId }, 'could not erase the summary of content that waits in the moderation queue');
-        }
-      });
-    }
-    return unerased;
-  }
-
-  /**
    * Deletes the rows this run took whose tag it compacted. By the token it read: a row a write has
-   * stamped again since holds another, and is the next run's, as that write may have changed the
-   * meta file after this run read it.
+   * stamped again since holds another, and is the next run's, which applies that write.
    */
   private async settleQueue(rows: QueueRow[], failed: Set<string>, lease: CompactorLease) {
     const { db } = this.deps;
@@ -978,7 +975,7 @@ export class Compactor {
     ctx: RunContext,
   ): Promise<void> {
     const { db, content, summaries } = this.deps;
-    // All of them, not only this run's: a write under way when one was removed may have written it back.
+    // All of them, not only this run's: the meta file carries none that was removed.
     const removed = new Set((await db.selectFrom('tag_moderation').select('tag').where('content_id', '=', row.id).where('decision', '=', 'removed').execute()).map((r) => r.tag));
     const meta = await content.getMeta(row.id);
     if (!meta) return;
@@ -993,13 +990,12 @@ export class Compactor {
 
   /**
    * Records as applied the decisions whose hashtag this run compacted, so the next run doesn't apply
-   * them again. A removal that an index turned out to still hold an entry for (see RunContext.strays)
-   * is recorded as not applied instead, so the next run does.
+   * them again.
    *
    * A removed hashtag that a repost had given the content loses its place with it (`reposts`): the
    * entry is gone from the hashtag's index, and the removal keeps the hashtag off the content.
    */
-  private async settleDecisions(decisions: Decision[], failed: Set<string>, runStart: number, lease: CompactorLease, ctx: RunContext) {
+  private async settleDecisions(decisions: Decision[], failed: Set<string>, runStart: number, lease: CompactorLease) {
     const { db } = this.deps;
     for (const d of decisions) {
       if (failed.has(d.tag)) continue;
@@ -1015,17 +1011,14 @@ export class Compactor {
         .execute();
       if (d.decision === 'removed') await db.deleteFrom('reposts').where('content_id', '=', d.id).where('tag', '=', d.tag).execute();
     }
-    for (const s of ctx.strays) {
-      await db.updateTable('tag_moderation').set({ applied_at: null }).where('content_id', '=', s.id).where('tag', '=', s.tag).where('decision', '=', 'removed').execute();
-    }
   }
 
   /**
-   * Content set for deletion, all of it: no write of it commits once the deletion is set, and the
-   * index holds no entry this run can't rebuild, so nothing has to be waited for. Marked under its
-   * hashtags and under those a write of it left a row in the feed queue for (whether this run took
-   * the row or not: a hashtag an update dropped, or one of an update that stopped half way), so each
-   * of its entries is dropped. Returns the rows with the tags whose compaction must succeed before
+   * Content set for deletion, all of it: no write of it commits once the deletion is set, none
+   * that committed before is applied any more (see applyPending), and the index holds no entry
+   * this run can't rebuild, so nothing has to be waited for. Marked under its hashtags and under
+   * those a write of it left a row in the feed queue for (whether this run took the row or not: a
+   * hashtag an update dropped), so each of its entries is dropped. Returns the rows with the tags whose compaction must succeed before
    * the content is deleted.
    */
   private async markDeletions(workFor: (tag: string) => TagWork, ctx: RunContext) {
@@ -1316,11 +1309,11 @@ export class Compactor {
     for (let i = 0; i < ids.length; i += BATCH) {
       for (const r of await this.deps.db
         .selectFrom('tag_moderation')
-        .select(['content_id', 'tag', 'decision', 'applied_at'])
+        .select(['content_id', 'tag', 'decision'])
         .where('content_id', 'in', ids.slice(i, i + BATCH))
         .where('tag', 'in', hashtags)
         .execute())
-        out.set(decidedKey(r.tag, r.content_id), { decision: r.decision, applied: r.applied_at !== null });
+        out.set(decidedKey(r.tag, r.content_id), r.decision);
     }
     return out;
   }
@@ -1358,7 +1351,7 @@ export class Compactor {
         if (!place || wholeSeconds(place.created_at) !== e.createdAt) continue;
         likes = Math.max(0, likes - place.likes_before);
       }
-      const moderated = this.moderated(tag, e.contentId, decided, ctx);
+      const moderated = this.moderated(tag, e.contentId, decided);
       if (moderated === null) continue;
       out.push({ ...e, likes, aiGenerated: row.ai_generated === 1, moderated });
     }
@@ -1387,7 +1380,7 @@ export class Compactor {
     if (!meta) return null;
     const place = this.placement(plan, row, meta, ctx);
     if (!place || utcDay(place.at) !== day || place.at <= runStart - this.retentionDays * DAY) return null;
-    const moderated = this.moderated(plan.tag, row.id, decided, ctx);
+    const moderated = this.moderated(plan.tag, row.id, decided);
     if (moderated === null) return null;
     const summary = summaryOf(row, meta, this.cfg.publicBaseUrl, repostTimes(this.placed(row.id, ctx)));
     return {
@@ -1458,14 +1451,10 @@ export class Compactor {
   /**
    * Whether the content's entry in a hashtag's index is flagged as moderated: its moderators
    * approved it. null if they removed the hashtag from the content, which then has no entry there.
-   * An index that still has one after a run took the hashtag off the content is how a hashtag
-   * written back to it shows (see RunContext.strays).
    */
-  private moderated(tag: string, id: string, decided: Decided, ctx: RunContext): boolean | null {
-    const d = decided.get(decidedKey(tag, id));
-    if (d?.decision !== 'removed') return d?.decision === 'approved';
-    if (d.applied) ctx.strays.push({ id, tag });
-    return null;
+  private moderated(tag: string, id: string, decided: Decided): boolean | null {
+    const decision = decided.get(decidedKey(tag, id));
+    return decision === 'removed' ? null : decision === 'approved';
   }
 
   /**
@@ -1484,6 +1473,12 @@ export class Compactor {
    * Runs for as long as the process is up, until stopped: a run starts `intervalSeconds` after the
    * previous one started, or as soon as that one ends if it took longer. So runs never overlap, and
    * there is never more than one in `intervalSeconds`.
+   *
+   * Stopping it starts no other run, and has the one under way stop at its next step (see
+   * CompactorLease.stop): it finishes the writes it is making, makes no more, and frees the lease.
+   * What it returns resolves once that is done, so a process that waits for it before it exits
+   * leaves no write half made. What the run hadn't got to, the next run does: every step of a run
+   * can be made again.
    */
   start(): () => Promise<void> {
     const intervalMs = this.cfg.compact.intervalSeconds * 1000;
@@ -1492,8 +1487,11 @@ export class Compactor {
     let running: Promise<unknown> = Promise.resolve();
     const tick = () => {
       const startedAt = Date.now();
-      running = this.runOnce()
-        .catch((err) => this.deps.log?.error({ err }, 'compactor run failed'))
+      running = this.runOnce({}, () => stopped)
+        .catch((err) => {
+          if (err instanceof RunStoppedError) this.deps.log?.info({}, 'the compactor was stopped during a run, which the next run makes again');
+          else this.deps.log?.error({ err }, 'compactor run failed');
+        })
         .finally(() => {
           if (!stopped) timer = setTimeout(tick, Math.max(0, intervalMs - (Date.now() - startedAt)));
         });
@@ -1502,6 +1500,7 @@ export class Compactor {
     return async () => {
       stopped = true;
       clearTimeout(timer);
+      this.current?.stop();
       await running;
     };
   }

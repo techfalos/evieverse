@@ -61,12 +61,6 @@ variable "gateway_region" {
   default     = ""
 }
 
-variable "direct_uploads" {
-  description = "Create a service account key for the content bucket so the server can sign upload links (POST /uploads) and download links. The key does not expire and is kept in Secret Manager and the Terraform state. false: files up to 32 MiB only, sent through the server."
-  type        = bool
-  default     = true
-}
-
 variable "upload_origins" {
   description = "Origins whose pages may send files straight to the content bucket with an upload link. The link itself is the permission; this only tells browsers which pages may use one."
   type        = list(string)
@@ -132,12 +126,12 @@ variable "deletion_protection" {
 }
 
 variable "audit_archive_after_days" {
-  description = "Days after a record of the audit log (every request that added, updated or deleted something) is written that it moves to the Archive storage class, the cold storage it stays in."
+  description = "Days after a record of the audit log (every request that added, updated or deleted something) is written that it moves to the Archive storage class, if it is larger than 128 KB. null, the default: records stay in the Standard class. Nearly every record is about 1 KB, and moving one that small costs more than keeping it: each object moved is billed as a Class A operation of the Archive class ($0.05 per 1,000). So smaller records stay where they are either way."
   type        = number
-  default     = 30
+  default     = null
   validation {
-    condition     = var.audit_archive_after_days >= 0
-    error_message = "A number of days, 0 or more."
+    condition     = var.audit_archive_after_days == null ? true : var.audit_archive_after_days >= 0
+    error_message = "A number of days, 0 or more, or null to archive nothing."
   }
 }
 

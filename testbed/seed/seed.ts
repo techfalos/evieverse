@@ -1,16 +1,18 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { InjectOptions, LightMyRequestResponse } from 'fastify';
 import pino from 'pino';
 import { buildApp } from '../../src/app.js';
+import { attest, signingKeys } from '../../src/attestation.js';
 import { issueApiKey } from '../../src/auth/apiKey.js';
 import { createCompactor } from '../../src/compact/compactor.js';
 import { loadConfig } from '../../src/config.js';
 import { bootstrap, createStores } from '../../src/deps.js';
 import { setAdmin } from '../../src/moderation/policy.js';
+import { keysAddress, type KeyFetcher } from '../../src/originKeys.js';
 import { DAY, HOUR, iso } from '../../src/time.js';
 import { mapLimit } from '../../src/util.js';
 import {
@@ -79,9 +81,25 @@ if (Number(existingUsers) > 0) {
   process.exit(1);
 }
 
+/**
+ * The other servers some reposts are of posts on. They are made up, so each is given a key here to sign its
+ * posts' attestations with, and the app asks this file for their keys where it would ask them over https.
+ * The keys are made anew on every run, and kept nowhere: nothing signs for these servers once the seed is done.
+ */
+const OTHER_SERVERS = [
+  { host: 'harbor-dispatch.example.org', username: 'Harbor Dispatch' },
+  { host: 'northline.example.org', username: 'Northline Wire' },
+  { host: 'lantern.example.org', username: 'The Daily Lantern' },
+].map((server) => ({ ...server, key: signingKeys([randomBytes(32).toString('base64')])[0]! }));
+const keyFetcher: KeyFetcher = async (address) => {
+  const server = OTHER_SERVERS.find(({ host }) => address === keysAddress(`https://${host}`));
+  if (!server) throw new Error(`the seed has no server at ${address}`);
+  return { keys: [{ id: server.key.id, algorithm: 'ed25519', publicKey: server.key.publicKey }] };
+};
+
 // Summaries are written on the real clock, whatever the request's.
 const { summaries } = createStores(config, Date.now, deps.hot);
-const app = await buildApp({ ...deps, summaries }, { logger: { level: 'error' } });
+const app = await buildApp({ ...deps, summaries }, { logger: { level: 'error' }, keyFetcher });
 await app.ready();
 
 async function call<T>(time: number, opts: InjectOptions): Promise<T> {
@@ -228,26 +246,30 @@ for (const p of shuffle(rRepost, posts.filter((p) => p.time < start - 6 * HOUR))
 }
 
 // And a few readers repost a post that is on another server: the server keeps a link to it with its summary,
-// which the reader's client sends. The other servers are made up, so these are text posts: there are no bytes to read there.
-const OTHER_SERVERS = [
-  { host: 'harbor-dispatch.example.org', username: 'Harbor Dispatch' },
-  { host: 'northline.example.org', username: 'Northline Wire' },
-  { host: 'lantern.example.org', username: 'The Daily Lantern' },
-];
+// as that server signed it (its attestation), which the reader's client sends. The other servers are made up
+// (see OTHER_SERVERS), so these are text posts: there are no bytes to read there.
 const remoteReposts = Array.from({ length: REMOTE_REPOSTS }, () => {
   const user = pick(rRepost, readerIdx);
   const beat = pick(rRepost, pick(rRepost, PUBLISHERS).beats);
   const tags = [topicOf(beat), beat];
   const from = pick(rRepost, OTHER_SERVERS);
+  const time = start - Math.round((0.05 + rRepost() * 5) * DAY);
   return {
     user,
     tags,
-    time: start - Math.round((0.05 + rRepost() * 5) * DAY),
+    time,
+    // Signed as of the repost's own time: an attestation is good for minutes.
     origin: {
-      url: `https://${from.host}/content/${randomUUID()}`,
-      publisher: { userId: randomUUID(), username: from.username },
-      preview: { kind: 'text', text: articleText(article(rRepost, beat, tags)) },
-      aiGenerated: false,
+      attestation: attest(
+        from.key,
+        {
+          url: `https://${from.host}/content/${randomUUID()}`,
+          publisher: { userId: randomUUID(), username: from.username },
+          preview: { kind: 'text', text: articleText(article(rRepost, beat, tags)) },
+          aiGenerated: false,
+        },
+        time,
+      ),
     },
   };
 });

@@ -10,6 +10,8 @@ import type { Challenge } from '../src/challenge/challenges.types.js';
 import { ALPHABET, ANSWER_LENGTH, challengeText, HEIGHT, renderChallenge, WIDTH } from '../src/challenge/image.js';
 import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
+import { payloadOf } from '../src/pending.js';
+import type { CommentPutPayload, PostPayload } from '../src/pending.types.js';
 import { as, createTestContext, multipart, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 /** The pixels of an 8-bit grayscale PNG. */
@@ -183,23 +185,38 @@ describe('CHALLENGE_COMMENTS_PER_MINUTE', () => {
 for (const target of TARGETS) {
   describe(`challenges (${target.name})`, () => {
     let ctx: TestContext;
-    /** The texts of posts that got as far as writing their bytes. */
+    /** The texts of the posts and comments that got as far as their commit, which is all of a request's write. */
     let written: string[];
-    /** Writes wait for this, while set. */
+    /** Writes wait for this before they commit, while set. */
     let hold: Promise<void> | null;
     beforeEach(async () => {
       written = [];
       hold = null;
       // As a server has them: a post window of a minute, and no answer accepted within 2 seconds.
       ctx = await createTestContext(target, { challenge: { postWindowSeconds: 60, minSolveMs: 2000 } });
-      const putFile = ctx.content.putFile.bind(ctx.content);
-      vi.spyOn(ctx.content, 'putFile').mockImplementation(async (...args) => {
-        const text = await readFile(args[1], 'utf8');
-        written.push(text);
-        await hold;
-        if (text.startsWith('fail')) throw new Error('storage unavailable');
-        return putFile(...args);
-      });
+      // A write whose text starts with "fail" fails as its commit would: nothing of it is kept.
+      const transaction = ctx.db.transaction.bind(ctx.db);
+      const seen = new Set<string>();
+      vi.spyOn(ctx.db, 'transaction').mockImplementation(
+        () =>
+          ({
+            execute: async (fn: (trx: Parameters<Parameters<ReturnType<typeof transaction>['execute']>[0]>[0]) => Promise<unknown>) => {
+              await hold;
+              return transaction().execute(async (trx) => {
+                const out = await fn(trx);
+                for (const row of await trx.selectFrom('pending_writes').select(['content_id', 'seq', 'kind', 'payload']).where('kind', 'in', ['post', 'comment_put']).execute()) {
+                  const key = `${row.content_id}:${row.seq}`;
+                  if (seen.has(key)) continue;
+                  const text = row.kind === 'post' ? payloadOf<PostPayload>(row.payload).meta.text! : payloadOf<CommentPutPayload>(row.payload).comment.text;
+                  written.push(text);
+                  if (text.startsWith('fail')) throw new Error('storage unavailable');
+                  seen.add(key);
+                }
+                return out;
+              });
+            },
+          }) as never,
+      );
     });
     afterEach(async () => {
       vi.restoreAllMocks();
@@ -481,9 +498,10 @@ for (const target of TARGETS) {
       // Two are answered while one is still being written.
       for (let i = 0; i < 400 && answered < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
       expect(answered).toBe(2);
-      expect(written).toHaveLength(3);
+      expect(written).toHaveLength(2);
       release();
       expect((await Promise.all(posts)).map((r) => r.statusCode).sort()).toEqual([201, 428, 428]);
+      expect(written).toHaveLength(3);
     });
 
     /** Stores `text`, solving every challenge it's answered with, 10 seconds each; returns the last answer, and each challenge's step. */
@@ -763,11 +781,6 @@ for (const target of TARGETS) {
 
     it('counts only comments that are stored, and passes only three of concurrent comments without a challenge', async () => {
       const { bob, contentId } = await commented();
-      const put = ctx.comments.put.bind(ctx.comments);
-      vi.spyOn(ctx.comments, 'put').mockImplementation(async (c, opts) => {
-        if (c.text.startsWith('fail')) throw new Error('storage unavailable');
-        return put(c, opts);
-      });
 
       // One that fails gives its place in the minute back, and one that is refused never took one.
       for (const text of ['fail', 'fail again', 'fail once more']) expect((await comment(bob, contentId, text)).statusCode).toBe(500);

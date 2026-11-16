@@ -34,7 +34,7 @@ const LIKE_FILE = new RegExp(`^${ID}$`);
  * reply to it stay where they are, and nothing of what the comment was: not its author, its text,
  * or its image or video.
  */
-const placeholder = ({ commentId, contentId, parentId, createdAt }: Pick<Comment, 'commentId' | 'contentId' | 'parentId' | 'createdAt'>, gone: NonNullable<Comment['gone']>): Comment => ({
+export const placeholder = ({ commentId, contentId, parentId, createdAt }: Pick<Comment, 'commentId' | 'contentId' | 'parentId' | 'createdAt'>, gone: NonNullable<Comment['gone']>): Comment => ({
   commentId,
   contentId,
   ...(parentId !== undefined && { parentId }),
@@ -83,8 +83,6 @@ export const commentIndexKey = (postId: string) => `cmtidx:${postId}`;
 export const commentKey = (commentId: string) => `cmt:${commentId}`;
 /** How many likes a comment has. */
 export const commentLikesKey = (commentId: string) => `cmtl:${commentId}`;
-/** Says, for a moment, that a user's like of a comment is being made (see like). */
-export const commentLikingKey = (commentId: string, userId: string) => `cmtlk:${commentId}:${userId}`;
 
 /**
  * A comment in its post's index: the id of the comment it replies to (nothing, for a comment on
@@ -117,8 +115,9 @@ function parse(blob: Buffer): Comment | null {
 
 /**
  * The comments on posts. Each is one object in the content store, `comments/<postId>/<commentId>.json`:
- * the store is the only record of a published comment, and the database holds none. The object is
- * written again when its author edits the comment.
+ * the store is the only record of a published comment, and the database holds none but the
+ * writes of it that are yet to be applied. The object is written again when its author edits the
+ * comment.
  *
  * A comment replies to the post, or to another comment on it, which makes a post's comments a
  * tree. A reply has a second object, `comments/<postId>/<parentId>.<commentId>.reply`, which holds
@@ -157,6 +156,13 @@ function parse(blob: Buffer): Comment | null {
  * (`gone`) and nothing else of it. A comment an edit took back to the queue always leaves one,
  * until it is published again; a removed comment leaves one where its caller says so, which is
  * where something replies to it.
+ *
+ * Only the compactor writes any of it: `put`, `publish`, `hold`, `addLike`, `remove` and
+ * `removeAll` are its own, called as it applies the writes requests committed (`pending_writes`,
+ * see applyPending): all the writes of one comment together, a reply after the comment it
+ * replies to, and removals one after another. Different comments are written at once. So no two
+ * writes of a comment's own objects are ever under way at once (its likes, which are an object
+ * each, are), and none is ever made to a post that is being deleted. Requests read.
  */
 export class CommentStore {
   private readonly op: Operator;
@@ -218,9 +224,9 @@ export class CommentStore {
 
   /**
    * Deletes the bytes of the image or video a comment came with; nothing, for a comment that came
-   * with none. For a comment that is being removed, and for a file whose comment was never stored.
+   * with none. For a comment that is being removed.
    */
-  async discardMedia(postId: string, commentId: string): Promise<void> {
+  private async discardMedia(postId: string, commentId: string): Promise<void> {
     await this.op.delete(commentMediaKey(postId, commentId));
   }
 
@@ -270,9 +276,9 @@ export class CommentStore {
    * likes and its image or video stay too: they are its own again once it is published, and go
    * with it if it is removed.
    *
-   * Redis first: an edit that is writing the comment at the same moment finds the placeholder
-   * there, and puts it back over what it wrote (see update). If the store then can't be written,
-   * Redis is left nothing of the comment, to be read from the store again, where it still is.
+   * Redis first, so that no reader finds the comment there once the store says it waits. If the
+   * store then can't be written, Redis is left nothing of the comment, to be read from the store
+   * again, where it still is.
    */
   async hold(comment: Comment): Promise<void> {
     const { contentId: postId, commentId } = comment;
@@ -286,38 +292,6 @@ export class CommentStore {
   private async forget(commentId: string, err: unknown): Promise<never> {
     await this.hot.del([commentKey(commentId)]).catch(() => {});
     throw err;
-  }
-
-  /**
-   * Writes a published comment again, as an edit made it. Returns false for a comment that was
-   * deleted meanwhile, or taken back to the moderation queue: what that left in Redis, an empty
-   * value or a placeholder, is never written over, and what this wrote to the store is undone, so
-   * the edit doesn't bring the comment back.
-   */
-  async update(comment: Comment): Promise<boolean> {
-    const { contentId: postId, commentId } = comment;
-    const key = commentKey(commentId);
-    await this.write(commentObjectKey(postId, commentId), comment);
-    const json = JSON.stringify(comment);
-    // An edit tries this many times to put its comment in Redis over what is there, before it leaves that to the next reader.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const blob = await this.hot.get(key);
-      const cached = blob?.toString('utf8') ?? null;
-      if (cached === '') {
-        await this.op.delete(commentObjectKey(postId, commentId)).catch(() => {});
-        return false;
-      }
-      const there = blob ? parse(blob) : null;
-      if (there?.gone) {
-        await this.write(commentObjectKey(postId, commentId), there).catch(() => {});
-        return false;
-      }
-      // Only over what was just read: a deletion or a hold that comes between the two keeps what it left.
-      if (await this.hot.swap(key, cached, json, this.opts.hotMs)) return true;
-    }
-    // Other edits kept getting there first. The next reader reads the store.
-    await this.hot.del([key]);
-    return true;
   }
 
   /** A comment that waits in the moderation queue; null if the post has none by that id. */
@@ -474,31 +448,27 @@ export class CommentStore {
     return out.map((likes) => likes ?? 0);
   }
 
+  /** Whether the store has the user's like of the comment: one that was applied (see addLike). */
+  async liked(postId: string, commentId: string, userId: string): Promise<boolean> {
+    return this.op.exists(likeObjectKey(postId, commentId, userId));
+  }
+
   /**
-   * A user's like of a published comment, which is made once: liking again changes nothing.
-   * Returns how many likes the comment has, and whether the user had liked it already.
+   * Makes a user's like of a published comment, which is made once: one that is there already is
+   * left as it is. The compactor's, which applies a like a request committed (`comment_like`).
    *
-   * Of two of the same like sent at once, the first to say so in Redis makes it and the other
-   * finds it made, so the two count once.
+   * A number of likes that Redis has is then one more; one it doesn't have is counted when it is
+   * next read, from a list that has this like. A like that is found made may be one this made
+   * before and stopped short of counting, so the number is then left to be counted again.
    */
-  async like(postId: string, commentId: string, userId: string): Promise<{ likes: number; already: boolean }> {
+  async addLike(postId: string, commentId: string, userId: string): Promise<void> {
     const key = likeObjectKey(postId, commentId, userId);
-    const liking = commentLikingKey(commentId, userId);
-    // For 10 seconds, a user's like of a comment keeps another of theirs, sent at the same moment, from counting too.
-    const already = !(await this.hot.swap(liking, null, MARK, 10_000)) || (await this.op.exists(key));
-    if (!already) {
-      try {
-        await this.op.write(key, MARK);
-      } catch (err) {
-        // Not made: the user's next attempt is the first again.
-        await this.hot.del([liking]).catch(() => {});
-        throw err;
-      }
-      // A number Redis has is one more; one it doesn't have is counted below, from a list that has this like.
-      const likes = await this.hot.bump(commentLikesKey(commentId));
-      if (likes !== null) return { likes, already };
+    if (await this.op.exists(key)) {
+      await this.hot.del([commentLikesKey(commentId)]);
+      return;
     }
-    return { likes: (await this.likes(postId, [commentId]))[0]!, already };
+    await this.op.write(key, MARK);
+    await this.hot.bump(commentLikesKey(commentId));
   }
 
   /**
@@ -510,9 +480,9 @@ export class CommentStore {
    *
    * Redis goes first, before the store: it is left the placeholder, or an empty value, in place of
    * the comment's JSON. An empty value says the comment is gone to whoever still finds it in the
-   * index. A reader that had just read the comment from the store writes over neither, and nor
-   * does an edit (see update). If the store then can't be written, Redis is left nothing of the
-   * comment, to be read from the store again: a removal that failed can be made again.
+   * index. A reader that had just read the comment from the store writes over neither. If the
+   * store then can't be written, Redis is left nothing of the comment, to be read from the store
+   * again: a removal that failed can be made again.
    */
   async remove(postId: string, commentId: string, { keepPlace = false, comment }: { keepPlace?: boolean; comment?: Comment | null } = {}): Promise<void> {
     const was = comment ?? (await this.find(postId, commentId)) ?? (await this.getHeld(postId, commentId));

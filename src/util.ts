@@ -36,12 +36,59 @@ export class TtlCache<V> {
   }
 }
 
-/** Runs `fn` over `items` with at most `limit` running at once. */
+/**
+ * Runs `fn` over `items` with at most `limit` running at once. If one fails, no more are started,
+ * the ones under way are waited for, and the first failure is thrown. So nothing of it is still
+ * running once it has returned or thrown: a caller that gives something up then (the compactor
+ * its lease) gives it up with no write of its own under way.
+ */
 export async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
   let next = 0;
+  let failed = false;
+  let failure: unknown;
   await Promise.all(
     Array.from({ length: Math.min(limit, items.length) }, async () => {
-      while (next < items.length) await fn(items[next++]!);
+      while (!failed && next < items.length) {
+        try {
+          await fn(items[next++]!);
+        } catch (err) {
+          if (!failed) failure = err;
+          failed = true;
+        }
+      }
     }),
   );
+  if (failed) throw failure;
+}
+
+/**
+ * Gives what runs the functions it is handed with at most `limit` of them running at once: the
+ * others wait their turn, in the order they were handed over. A function that waits for one it
+ * handed over itself holds its place meanwhile, so it should hand over none.
+ */
+export function limiter(limit: number): <T>(fn: () => Promise<T>) => Promise<T> {
+  let running = 0;
+  const waiting: (() => void)[] = [];
+  return async (fn) => {
+    // One that waited is given the place of the one that woke it, which is why that one doesn't count itself out.
+    if (running >= limit) await new Promise<void>((resolve) => waiting.push(resolve));
+    else running++;
+    try {
+      return await fn();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else running--;
+    }
+  };
+}
+
+/**
+ * Waits for every one of `tasks`, whatever becomes of each, and then throws the first failure
+ * among them, in the order they are given, if there is one. So, as with mapLimit, none is still
+ * running once it has returned or thrown.
+ */
+export async function allDone(tasks: Promise<unknown>[]): Promise<void> {
+  const failed = (await Promise.allSettled(tasks)).find((task) => task.status === 'rejected');
+  if (failed) throw failed.reason;
 }

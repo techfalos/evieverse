@@ -3,6 +3,7 @@ import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setAdmin } from '../src/moderation/policy.js';
 import { MAX_LIST_PATTERNS, normalizeWord, PATTERN_BUDGET_MS, scanTexts, WordScanner } from '../src/moderation/words.js';
+import { insertPending, nextSeq } from '../src/pending.js';
 import { touchTags } from '../src/tags.js';
 import { as, createTestContext, multipart, PNG, queued, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
@@ -482,7 +483,7 @@ for (const target of TARGETS) {
       expect(await feedOf('news')).toEqual([]);
     });
 
-    it("applies a removal again when a write that was under way gave the hashtag back, and keeps a post two removals leave with no hashtag", async () => {
+    it("keeps a removed hashtag off a post whose write, under way as it was removed, says it still, and keeps a post two removals leave with no hashtag", async () => {
       ctx = await createTestContext(target);
       const root = await admin();
       const alice = await ctx.register('alice');
@@ -496,18 +497,18 @@ for (const target of TARGETS) {
       expect(await tagsOf(contentId)).toEqual(['mumbai']);
       expect(await applied()).toBe(ctx.clock.now);
 
-      // An update that passed moderation before the removal, and wrote the post and queued it after the compactor ran.
-      await ctx.content.putMeta({ ...before, updatedAt: ctx.clock.now });
+      // An update that passed moderation before the removal, and committed after the compactor applied it: its write says the hashtag still.
+      await ctx.db.transaction().execute(async (trx) => {
+        const seq = (await nextSeq(trx, contentId))!;
+        await insertPending(trx, { contentId, seq, kind: 'post', payload: { meta: { ...before, updatedAt: ctx.clock.now } }, at: ctx.clock.now });
+      });
       await touchTags(ctx.db, ctx.config.db.dialect, ['news'], ctx.clock.now);
-      await ctx.db.insertInto('feed_queue').values({ content_id: contentId, tag: 'news', token: randomUUID(), committed: 1, created_at: ctx.clock.now }).execute();
-      // The run that takes the row leaves the post out of the index, and has the next one take the hashtag off again.
+      await ctx.db.insertInto('feed_queue').values({ content_id: contentId, tag: 'news', token: randomUUID(), created_at: ctx.clock.now }).execute();
+      // The run that applies the write leaves the hashtag off the post, whatever the write says, and the post out of the index.
       await ctx.compact();
       expect(await feedOf('news')).toEqual([]);
-      expect(await applied()).toBeNull();
-      ctx.clock.now += 1000;
-      await ctx.compactor.runOnce();
       expect(await tagsOf(contentId)).toEqual(['mumbai']);
-      expect(await applied()).toBe(ctx.clock.now);
+      expect(await applied()).not.toBeNull();
       expect((await feedOf('mumbai')).map((i) => i.tags)).toEqual([['mumbai']]);
 
       // Two moderators each remove one of a post's last two hashtags at once: each sees the other still there.

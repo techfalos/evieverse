@@ -3,6 +3,7 @@ import { migrateDeployment } from './deploy.js';
 import { isGroup } from './groups.js';
 import { createFunction, functionConfig, requireRedis } from './handler.js';
 import { httpApiHandler, runLambda } from './lambdaRuntime.js';
+import { loadSecrets } from './secrets.js';
 
 /**
  * The entry point of every AWS Lambda function, which all run the one image (`node dist/functions/lambda.js`).
@@ -17,6 +18,10 @@ import { httpApiHandler, runLambda } from './lambdaRuntime.js';
  * The compactor isn't a function: it is a process that stays up (`node dist/compact/main.js`), which
  * a deployment runs from the same image as a container of its own.
  *
+ * FUNCTION_SECRETS, if set, names the secrets of AWS Secrets Manager that hold the settings a
+ * function's configuration must not: they are read before any setting is, into the environment the
+ * rest are in (secrets.ts).
+ *
  * FUNCTION_EDGE_SECRET, if set, is what the CDN in front of the gateway sends as X-Origin-Secret.
  */
 
@@ -24,10 +29,16 @@ import { httpApiHandler, runLambda } from './lambdaRuntime.js';
 const group = process.env.FUNCTION_GROUP;
 
 if (group === 'migrate') {
-  // The settings are read inside the invocation, not as the instance starts: what refuses them is
-  // then the invocation's error, which is what the deploy that invoked it is told.
-  await runLambda(() => migrateDeployment());
+  // The settings are read inside the invocation, not as the instance starts, and so are the
+  // secrets that hold some of them: what refuses them, or a secret that can't be read, is then
+  // the invocation's error, which is what the deploy that invoked it is told. The deploy may have
+  // let the function read the secrets only seconds ago, so a refusal is waited out for a while.
+  await runLambda(async () => {
+    await loadSecrets(process.env, { permissionWaitMs: 30_000 });
+    return migrateDeployment();
+  });
 } else if (isGroup(group)) {
+  await loadSecrets();
   const config = functionConfig();
   requireRedis(config);
   // Read once, for the app and for what the handler answers without it.

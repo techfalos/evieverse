@@ -2,6 +2,7 @@ import type { Challenges } from './challenge/challenges.js';
 import type { Config } from './config.js';
 import type { Db } from './db/index.js';
 import type { TrustPlugin } from './moderation/trust.types.js';
+import type { OriginKeys } from './originKeys.js';
 import type { CliRelease } from './routes/cli.types.js';
 import type { AdStore, CommentStore, ContentStore, FollowStore, HotStore, PublisherStore, RelatedTagStore, SummaryStore } from './storage/index.js';
 import type { TagFeedReader } from './tagfeed/reader.js';
@@ -40,4 +41,6 @@ export interface RouteDeps extends AppDeps {
   cli: CliRelease | null;
   /** The algorithms that give each post its trust score, in the order they run (src/plugins/trust). */
   trustPlugins: TrustPlugin[];
+  /** The keys other servers sign their posts' attestations with, which a repost of a post on another server is checked by. */
+  originKeys: OriginKeys;
 }

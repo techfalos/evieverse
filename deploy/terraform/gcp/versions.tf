@@ -3,13 +3,14 @@ terraform {
   required_providers {
     google = {
       source = "hashicorp/google"
-      # The first with Cloud Run worker pools as they are now, which the compactor runs in.
-      version = "~> 6.50"
+      # The first with a size condition on a bucket's lifecycle rules, which keeps small audit
+      # records out of the Archive class.
+      version = "~> 7.38"
     }
     # API Gateway's resources are only in the beta provider.
     google-beta = {
       source  = "hashicorp/google-beta"
-      version = "~> 6.50"
+      version = "~> 7.38"
     }
     local = {
       source  = "hashicorp/local"

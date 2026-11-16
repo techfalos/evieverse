@@ -27,6 +27,8 @@ Names in capitals, such as `FEED_PAGE_SIZE`, are an instance's settings ([`.env.
 | [`GET /content/:contentId/raw`](#get-contentcontentid) | Anyone | A post's bytes. |
 | [`DELETE /content/:contentId`](#delete-contentcontentid) | The publisher, or an admin | Deletes a post. |
 | [`POST /repost`](#post-repost) | Any user | Reposts someone else's post: gives it more hashtags, under which it shows as a new post, as it does to the reposter's followers. |
+| [`GET /content/:contentId/attestation`](#attestations) | Anyone | A post as the instance signs it, for a repost of it on another server. |
+| [`GET /repost/keys`](#attestations) | Anyone | The public keys the instance signs its posts' attestations with. |
 | [`POST /like`](#post-like) | Any user | Likes a post, or a comment on one. |
 | [`POST /report`](#post-report) | Any user | Reports a post, or a comment on one, to the server's moderators. |
 | [`GET /content/:contentId/comments`](#reading-comments) | Anyone | The comments on a post, a page at a time. |
@@ -329,7 +331,7 @@ A server takes all five types unless its operator turned some off (`POST_TYPE_TE
 | `content` | An image's, video's or audio's file: a file part (multipart), or a string in JSON with `contentEncoding: "base64"` (a JSON request can be at most 32 MB). Required for those types unless `uploadId` is given; a text or link post has none (`400`). A file larger than `MAX_UPLOAD_BYTES` (5 GiB) gets `413`. |
 | `uploadId` | In place of `content`: a file already sent with an upload link from [`POST /uploads`](#post-uploads). Not together with `content` (`400`). |
 | `contentType`, `filename` | Optional hints for the file. Otherwise its content type comes from the upload or the file extension, and it must match the post's `type`: an `image` post of a PDF gets `400`. An image's content type is then read from the file itself. |
-| `contentId` | Optional. If set, updates content you own (otherwise 403). Content has one version: the update writes over it, and what it was before isn't kept. Feeds that already list it show it as it now is straight away. The update must have the same type and content type as the original (a PNG image stays a PNG), otherwise `400`. Content set for deletion can't be updated (`409`). Of two updates of the same content sent at once, the last to be written wins. |
+| `contentId` | Optional. If set, updates content you own (otherwise 403). Content has one version: the update writes over it, and what it was before isn't kept. Read by its id it's as it now is straight away, and feeds that already list it show it as it now is after the compactor's next run. The update must have the same type and content type as the original (a PNG image stays a PNG), otherwise `400`. Content set for deletion can't be updated (`409`). Of two updates of the same content sent at once, the last to commit wins, whole: the content is never parts of both. |
 | `tags` | Your hashtags. Required. A list (`["news", "mumbai"]`), or one string separated by commas or spaces (`"news, #Mumbai"`, as in a form field). Each is normalised (`#Central-Mumbai` becomes `centralmumbai`); one with nothing usable left, or more than 10, gets `400`. In `server` [tagging mode](#hashtags), so does one that isn't among the server's ([`GET /tagging`](#get-tagging) lists them). On an update, hashtags that aren't the content's change it, even when nothing else did. |
 | `aiGenerated` | Optional. The publisher's declaration that the content was created with AI: `true` or `false` (a JSON boolean, or the string in a form field). Defaults to `false` for new content. An update that leaves it out keeps the content's value, and changing only this is an update too. Feeds return it on every record and can filter on it. |
 | `comments` | Optional. Whether the post takes [comments](#comments): `true` or `false` (a JSON boolean, or the string in a form field). Defaults to `false` for new content. An update that leaves it out keeps the content's value, and changing only this is an update too. Turning it off closes and hides the post's comments without deleting them: they're back when it's turned on again. |
@@ -339,19 +341,19 @@ The request is synchronous:
 1. **The post is [moderated](#moderation).** It gets a trust score, which says where it goes. With the default thresholds, a post containing a word or phrase the server blocks is refused with `422`, and so is one that none of its hashtags is allowed on: nothing is stored. Otherwise it keeps the hashtags that are allowed, and is either published or, if its score is between the thresholds, held in the [moderation queue](#the-moderation-queue).
 2. **If you already posted 3 times in the last minute** (`POST_RATE_LIMIT_PER_MINUTE`), the request is refused with `429` and when to try again ([above](#challenges)), and nothing else is done.
 3. **If you posted, or were challenged to, less than a minute ago** (`CHALLENGE_POST_WINDOW_SECONDS`), the request is answered with a [challenge](#challenges) before anything else, and nothing is stored. Send it again with the solution, once per challenge: a post needs one, or two after a few posts in a row, and never more. New content and updates are posts; storing the same content again unchanged isn't. A post that fails doesn't count either, towards the run or the limit. Posts claim their place atomically, in Redis. So of several sent at once, only one gets through without a challenge, only one of several runs of challenges solved at once gets through, and no more get through than the limit allows.
-4. The post's bytes (its file, a text post's text in UTF-8, or a link's URL) are written to `content/<id>`, the summary, with the [preview](#previews), to the summary store and Redis, and then the meta file. An update writes over what was there.
-5. The database row is written and committed. If this fails, the request fails and nothing is added to any feed. New content's bytes, meta file and summary are removed. An update is already in the stores by then, and can't be taken back: send it again to complete it.
-6. The same commit queues the post for the feed index: one row for each of its hashtags, and one for its publisher's own index. The request is then done, and the post can be read at `GET /content/:contentId`.
-7. The [compactor](APP.md#8-the-compactor) puts the post in its hashtags' feeds, and its publisher's followers', on its next run: `COMPACT_INTERVAL_SECONDS` later at most (5 by default), plus the time the run takes. Until then no feed has it, so a client that wants to show a new post at once shows it from the response.
+4. An image's, video's or audio's file is written to the content store, under a name of the request's own (`staged/<writeId>`), where it waits. The request writes nothing else of the post there, nor to the summary store or Redis.
+5. The post is committed to the database: its row, and the post as this request makes it (its description, with a text post's text or a link's URL), for the compactor to write out. If this fails, the request fails, the file of step 4 is removed, and nothing is added to any feed. An update that fails changed nothing: the content is as it was.
+6. The same commit queues the post for the feed index: one row for each of its hashtags, and one for its publisher's own index. The request is then done, and the post can be read at `GET /content/:contentId`, and its bytes at `/raw`.
+7. The [compactor](APP.md#8-the-compactor) writes the post out on its next run: its bytes to `content/<id>`, its summary, with the [preview](#previews), to the summary store and Redis, and then its meta file, over what was there for an update. The same run puts the post in its hashtags' feeds, and its publisher's followers'. That's `COMPACT_INTERVAL_SECONDS` later at most (5 by default), plus the time the run takes. Until then no feed has it, so a client that wants to show a new post at once shows it from the response.
 
-An update is in feeds the same way:
-- Where a feed already lists the content, it shows as it now is straight away, in its original place.
-- A hashtag the update dropped stops returning the content straight away.
-- A hashtag the update added returns it after the compactor's next run.
+An update is in feeds the same way, after the compactor's next run. Until then feeds show the content as it was:
+- Where a feed already lists the content, it then shows as it now is, in its original place.
+- A hashtag the update dropped then stops returning the content.
+- A hashtag the update added then returns it.
 
 The response is `201` for new content and `200` for an update, with `{ contentId, tags, preview, aiGenerated, comments }`, plus `removedTags` when moderation dropped some of the post's hashtags. An update that changes nothing (the same AI flag, comments flag and hashtags as the content has, and the same text or URL, or the same caption and file) stores nothing, and returns `{ contentId, unchanged: true }`, with `status: "pending_review"` for content that waits in the moderation queue. A file is the content's if its bytes as stored are the same, which the server tells by their SHA-256: for an image, that's the image without its metadata, so the same picture sent with other metadata is the same file. A video or audio file sent with an upload link (`uploadId`) isn't compared, and is stored again whenever it's sent.
 
-A post held in the [moderation queue](#the-moderation-queue) is answered `202` instead, with `status: "pending_review"` beside the same fields. It's stored (steps 4 and 5), but nothing is queued for the feed index, so it's in no feed until a server moderator or an admin accepts it. A held update of published content erases the content's summary, which feeds render from, so they stop returning it at once.
+A post held in the [moderation queue](#the-moderation-queue) is answered `202` instead, with `status: "pending_review"` beside the same fields. It's stored (steps 4 and 5), but nothing is queued for the feed index, so it's in no feed until a server moderator or an admin accepts it. A held update of published content is `404` by its id at once, to everyone but those who can read it in the queue. Feeds stop returning it after the compactor's next run, which erases the content's summary, which they render from.
 
 ```bash
 curl -X POST localhost:3000/store -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID" \
@@ -474,7 +476,7 @@ Nothing is copied. The post stays one post, with one like count, credited to its
 | field | notes |
 | --- | --- |
 | `contentId` | The post to repost, on this instance. A request names one post: `contentId` or `origin`, and not both (`400`). |
-| `origin` | In place of `contentId`: a post on another server, with what the client read of it there ([below](#a-post-on-another-server)). |
+| `origin` | In place of `contentId`: a post on another server, as that server signed it: `{ attestation }` ([below](#a-post-on-another-server)). |
 | `tags` | Required: the hashtags the repost gives the post, at least one and at most 10, written as a post's are: a list, or one string separated by commas or spaces. In `server` [tagging mode](#hashtags) they must be among the server's. Otherwise `400`. |
 | `challengeId`, `challengeAnswer`, `challengeNonce` | The solution of a [challenge](#challenges), when the previous attempt was answered with one. |
 
@@ -523,42 +525,103 @@ How a repost shows:
 
 #### A post on another server
 
-A post on another server is reposted by its address, in `origin`. Servers don't ask each other anything, so it's the client that reads the original, from the server it's on ([`GET /content/:contentId`](#get-contentcontentid) there, which needs no key), and sends on what it read:
+A post on another server is reposted with its **attestation**: what that server says the post is, signed by it. The client gets it from the server the post is on ([`GET /content/:contentId/attestation`](#attestations) there, which needs no key), and sends it on as it is, in `origin`:
 
 ```json
 { "userId": "...", "apiKey": "...", "tags": ["travel"],
-  "origin": { "url": "https://other.example/content/0b7c0f5e-…",
-              "publisher": { "userId": "…", "username": "Bob" },
-              "mimeType": "image/jpeg", "aiGenerated": false,
-              "preview": { "kind": "image", "text": "Sunrise over the harbour" } } }
+  "origin": { "attestation": "eyJ2IjoxLCJraWQiOiI…" } }
 ```
 
 | field | notes |
 | --- | --- |
-| `origin.url` | Required: the original's address on its own server. `http` or `https`, ending in `/content/<contentId>`, with no query, fragment or credentials, and at most 2,048 characters. Otherwise `400`. |
-| `origin.publisher` | Required: `{ userId, username }`, who published the original there. The name is one line of 1 to 64 characters. |
-| `origin.mimeType` | The original's content type. Required for an image, video or audio, and it must be of that kind (`400`). A text or a link post needs none. |
-| `origin.aiGenerated` | Optional: the original's AI declaration. Defaults to `false`. |
-| `origin.preview` | Required: the original's [preview](#previews), as read there. `{ kind: "text", text }`, `{ kind: "image", text }` (or `video`, `audio`, with `text` only if it has a caption), or `{ kind: "link", url }`. An image's, video's or audio's `url` isn't taken from it: the file is read at the original's address. |
+| `origin.attestation` | Required: the attestation, exactly as the post's own server gave it, at most 400,000 characters. It says the original's address there, who published it, its content type, its AI declaration and its [preview](#previews), and the instance takes all of that from it. |
 
-An original that is itself a repost of a post elsewhere has an `origin` of its own. Send that one, so a post has one address wherever it's reposted from.
+The original's address, publisher and summary aren't fields of the request: what a client says of the post itself isn't taken. An `origin` without an `attestation` gets `400`.
+
+The instance checks the attestation before it uses anything in it, whether or not it has the original already. Nothing is reposted if it's refused:
+
+| Status | When |
+| --- | --- |
+| `400` | It isn't written as an attestation, or doesn't say what one says of a post: `details` names the part. The original's address must end in `/content/<contentId>`, with no query, fragment or credentials. |
+| `400` | It was signed more than 10 minutes ago, or by a clock more than a minute ahead of the instance's. Get a new one, and send it straight away. |
+| `400` | The original's address isn't an `https` one. |
+| `400` | It isn't signed with a key of the server at the address it names. A server signs only for its own address, so an attestation made up by a client, changed on the way, or signed by another server, is refused here. |
+| `400` | It's signed, and says of an image, a video or an audio no content type of that kind. |
+| `502` | The original's server didn't give its keys, so the signature couldn't be checked. The instance doesn't ask that server again for a minute. |
+| `429` | Your reposts had the instance ask other servers for their keys more than 10 times in a minute. `Retry-After` says when to try again. Reposts from servers whose keys the instance already has aren't counted. |
+
+To check the signature, the instance asks the original's server for its public keys ([`GET /repost/keys`](#attestations) there, over `https`), and keeps them for 3 hours. That's the one request an instance makes of another server: everything else of a repost between servers is carried by the client. When an attestation names a key the instance doesn't have, it asks again, at most once a minute. So an attestation signed with a key its server has just changed to can be refused (`400`) for up to a minute.
+
+An original that is itself a repost of a post elsewhere isn't its server's to attest: `GET /content/:contentId/attestation` answers `409` for it, with the address of the post it reposts in `origin.url`. Ask that post's server instead, so a post has one address wherever it's reposted from.
 
 The first repost of an original makes the instance's entry for it: a post of the reposter's that is a link to the original, with the original's summary.
 - **It's a new post, and passes what a new post does.** Its type must be one the instance [takes](#post-store) (`400`). It's [moderated](#moderation): it gets a trust score from what there is of it to read (the preview's text or link, the original's address, its publisher's name), which can refuse it (`422`) or hold it in the [moderation queue](#the-moderation-queue), and its hashtags follow their rules. It's a post as far as [challenges](#challenges) and the limit on posts a minute go.
-- **The response** is `201` with `{ contentId, tags, preview, aiGenerated, origin }`, plus `removedTags` when moderation dropped some of its hashtags, or `202` with `status: "pending_review"` beside them when it's held. `contentId` is the entry's id here, and `preview` is the one sent, cut to this instance's [preview](#previews) length.
+- **The response** is `201` with `{ contentId, tags, preview, aiGenerated, origin }`, plus `removedTags` when moderation dropped some of its hashtags, or `202` with `status: "pending_review"` beside them when it's held. `contentId` is the entry's id here, and `preview` is the original's, as its server attested it, cut to this instance's [preview](#previews) length.
 - **It shows like any post, with `origin`.** Feed records and `GET /content/:contentId` carry `origin: { url, publisher: { userId, username } }`: the original's address, and who published it there. Their `publisher` is the user who reposted it here, whose post the entry is.
 - **Its bytes stay where the original is.** An image's, video's or audio's `preview.url` is the original's, `<origin.url>/raw`, and `GET /content/:contentId/raw` redirects there (`302`). `GET /content/:contentId` has no `size` for it, and no whole `text`.
 - **It takes no comments, and has no update** (`400`): what it shows is the original's. Its owner deletes it like any post.
-- **The summary is the client's word.** The instance doesn't read the original to check it.
+- **The summary is the original's server's word, as of the repost.** The instance checks who signed it, and doesn't read the original, then or later: an edit or a deletion there doesn't show here, and a server is free to say what it likes of its own posts. An image's, video's or audio's bytes aren't signed: they're read at the original's address.
 
 An instance holds one entry per original, however many users repost it:
 - **A repost of an original the instance already has an entry for is a repost of that entry,** exactly as if it had named the entry's `contentId`: it gives the entry hashtags, shows it to the reposter's followers, and is answered as [above](#post-repost), with `repostedAt`. The user who made the entry has reposted the original already (`409`).
 - **While the entry waits in the moderation queue, or is set for deletion,** the original can't be reposted (`409`). Once it's deleted, the next repost makes a new entry.
-- **An address on this instance** names a post of its own, and is reposted as one, as if by its `contentId`.
+- **An address on this instance** names a post of its own, and is reposted as one, as if by its `contentId`. Its attestation is this instance's own, and is checked with this instance's own keys.
 
-An instance can refuse reposts by address alone (`REPOSTS_REMOTE=false`): they get `400`, and reposts of its own posts stay on.
+An instance can refuse reposts of posts on other servers alone (`REPOSTS_REMOTE=false`): they get `400`, and reposts of its own posts stay on.
 
-The [CLI](CLI.md) does both steps with `evieverse repost https://other.example/content/<contentId> --tags travel`: it reads the post from the other server, and sends it here.
+The [CLI](CLI.md) does both steps with `evieverse repost https://other.example/content/<contentId> --tags travel`: it gets the post's attestation from the other server, and sends it here.
+
+#### Attestations
+
+Two requests serve reposts between servers. Neither needs a key.
+
+`GET /content/:contentId/attestation` returns a post as the instance signs it, for a client to send to another server with [`POST /repost`](#a-post-on-another-server):
+
+```bash
+curl localhost:3000/content/$CONTENT_ID/attestation
+```
+
+```json
+{ "attestation": "eyJ2IjoxLCJraWQiOiI….k3VwR2…" }
+```
+
+- **Ask for it when you use it.** It's signed as of the request, and other servers take it for 10 minutes. It comes with `Cache-Control: no-store`.
+- **Send it on whole.** A client has no need to read it, and a change to it makes the signature wrong.
+- **Only a published post has one.** A post that isn't there, is set for deletion, or waits in the [moderation queue](#the-moderation-queue) gets `404`, to its publisher too.
+- **Only a post that is the instance's own has one.** Its entry for a [post on another server](#a-post-on-another-server) gets `409`, with `origin: { url }` beside the `error`: the address of the original, whose server is the one to ask.
+- **An instance that signs nothing gives none** (`400`): one with no signing key (`REPOSTS_SIGNING_KEYS`), or no address of its own (`PUBLIC_BASE_URL`). Its posts are reposted only on the instance itself. It still takes reposts of posts on servers that sign.
+
+An attestation is two parts in base64url with a dot between them: a JSON payload, and its Ed25519 signature. The payload:
+
+```json
+{ "v": 1, "kid": "9f2c4e1a7b3d5c60", "issuedAt": 1794319320000,
+  "url": "https://other.example/content/0b7c0f5e-…",
+  "publisher": { "userId": "…", "username": "Bob" },
+  "mimeType": "image/jpeg", "aiGenerated": false,
+  "preview": { "kind": "image", "text": "Sunrise over the harbour" } }
+```
+
+| field | notes |
+| --- | --- |
+| `v` | The format's version: `1`. |
+| `kid` | The id of the key that signed, which is one of those `GET /repost/keys` lists. |
+| `issuedAt` | When it was signed, in milliseconds since the Unix epoch, by the instance's clock. |
+| `url` | The post's address on the instance: its `PUBLIC_BASE_URL`, then `/content/<contentId>`. |
+| `publisher` | `{ userId, username }`: who published the post here. |
+| `mimeType`, `aiGenerated` | The post's content type and AI declaration. |
+| `preview` | The post's [preview](#previews). An image's, video's or audio's has its caption, if it has one, and no `url`: the file is read at the post's address. |
+
+What is signed is the payload's part exactly as it's written, in base64url, after the prefix `evieverse-repost-attestation-v1.`.
+
+`GET /repost/keys` returns the public keys the instance signs with, which is what other servers check its attestations by:
+
+```json
+{ "keys": [{ "id": "9f2c4e1a7b3d5c60", "publicKey": "…", "algorithm": "ed25519" }] }
+```
+
+- `publicKey` is the key's 32 bytes in base64url, and `id` the first 16 hex digits of their SHA-256. A server that reads the list works the id out from the key itself, and takes the first 16 keys of it.
+- The first key is the one that signs now. An instance that is changing its key lists the old one after it for a while, so that what the old one signed is still taken.
+- An instance that signs nothing returns `{ "keys": [] }`.
 
 ### `POST /like`
 
@@ -574,7 +637,7 @@ Each user can like a piece of content once, and likes are permanent. Returns `{ 
 { "userId": "...", "apiKey": "...", "contentId": "...", "commentId": "..." }
 ```
 
-It returns `{ contentId, commentId, likes, alreadyLiked }`, with the same two statuses, and a comment's likes are permanent and once per user too. `likes` is the comment's, which every record of the comment gives as well. The comment must be published, on a published post that takes comments: one that isn't there gets `404`, and so does one that waits in the moderation queue, or a [placeholder](#placeholders). A comment's likes go with it when it's deleted.
+It returns `{ contentId, commentId, likes, alreadyLiked }`, with the same two statuses, and a comment's likes are permanent and once per user too. `likes` is the comment's, with this like counted. Every record of the comment gives the number as well, with this like in it after the compactor's next run. The comment must be published, on a published post that takes comments: one that isn't there gets `404`, and so does one that waits in the moderation queue, or a [placeholder](#placeholders). A comment's likes go with it when it's deleted.
 
 ### `POST /report`
 
@@ -674,8 +737,9 @@ What they count and list:
 - A post's `count` is every published comment on it, replies included, not just the ones on the page or at that level. A reply list's `count` is the replies to that comment alone, not the replies to those.
 - A placeholder is listed, and counted, as the comment it stands for.
 - A comment that waits in the moderation queue is in neither a list nor a count, unless it was published before: then its placeholder is.
+- **The lists and the counts show what the compactor has written.** A new comment, an edit, a like, a deletion and a moderator's decision are in the lists, in `count` and `replies`, and in a listed record's `likes`, after the [compactor](APP.md#8-the-compactor)'s next run: `COMPACT_INTERVAL_SECONDS` later at most (5 by default), plus the time the run takes. Until then they show the comments as they were. A client that wants a new comment in the list at once puts the record the request returned there itself.
 
-`GET /content/:contentId/comments/:commentId` returns one comment, or the placeholder in its place. A comment that waits in the [moderation queue](#the-moderation-queue) is returned whole, with `status: "pending_review"`, to its author, to server moderators and to admins, who send their credentials in the headers (`Authorization: Bearer <apiKey>` and `X-User-Id`). Anyone else gets `404` for it, or its placeholder if it was published before an edit took it back to the queue.
+`GET /content/:contentId/comments/:commentId` returns one comment, or the placeholder in its place, as it is with every write the server has answered: a new comment can be read this way at once, an edit shows at once, and a deleted comment is gone at once, or is its placeholder if it has replies. A comment that waits in the [moderation queue](#the-moderation-queue) is returned whole, with `status: "pending_review"`, to its author, to server moderators and to admins, who send their credentials in the headers (`Authorization: Bearer <apiKey>` and `X-User-Id`). Anyone else gets `404` for it, or its placeholder if it was published before an edit took it back to the queue.
 
 `GET /content/:contentId/comments/:commentId/raw` returns the bytes of the image or video a comment came with, as [`GET /content/:contentId/raw`](#get-contentcontentid) returns a post's: streamed with their content type and the same headers, or a redirect to a presigned URL on stores that support them. Whoever can read the comment can read its file. A comment that is only text gets `404`, and so does a placeholder.
 
@@ -709,7 +773,7 @@ The response is the comment:
 
 | Status | What happened |
 | --- | --- |
-| `201` | The comment is published. |
+| `201` | The comment is published. It can be read by its id at once, and is in the post's [lists and counts](#reading-comments) after the compactor's next run. |
 | `202` | The comment is held in the [moderation queue](#the-moderation-queue), and has `status: "pending_review"`. Only its author, server moderators and admins can read it until one of them accepts it. |
 | `422` | The server doesn't trust the comment enough to keep it: nothing is stored. With the default thresholds, that's a comment containing a word or phrase [the server blocks](#blocked-words). |
 | `428` | The user sent 3 comments or more in the last minute (`CHALLENGE_COMMENTS_PER_MINUTE`), edits among them, so this one needs a [challenge](#challenges) solved, or two after a few such comments in a row. Nothing is stored: send the request again with the solution, once per challenge. |
@@ -734,6 +798,8 @@ Edits a comment: its author gives it another text. Nobody else can, an admin inc
 
 - **Only the text is edited.** The image or video a comment came with is neither replaced nor taken away, and a comment that came without one is given none. A comment that has a file can be left with no text (`"text": ""`); one that hasn't needs one (`400`).
 - **The comment stays where it is.** It keeps its `commentId`, its `createdAt`, its place among the others, its replies and its likes. `editedAt` says when it was last edited. What it said before isn't kept.
+- **The edit shows by the comment's id at once, and in the [lists](#reading-comments) after the compactor's next run.** That goes for a held edit too: the lists show the comment as it was until that run, and its placeholder from then on.
+- **Of two edits sent at once, the last to commit wins.** An edit is of the comment as it is when the edit commits: one that was deleted meanwhile gets `404`, and one that another edit changed meanwhile is edited as that left it.
 - **The text it already has changes nothing.** The response is `200` with `{ contentId, commentId, unchanged: true }`, plus `status: "pending_review"` for a comment that waits in the moderation queue. It isn't scored, isn't counted and needs no challenge.
 - **An edit counts as a comment.** It's scored by [moderation](#moderation) as a new comment is, then counted with the user's comments of the last minute, and needs a [challenge](#challenges) where a new comment would. Send the edit again with the solution in `challengeId`, `challengeAnswer` and `challengeNonce`.
 - A [banned](#bans) user is refused (`403`). The post must be published and take comments, otherwise `404`. A comment that isn't there gets `404`, and so does a [placeholder](#placeholders), and a comment that waits in the moderation queue for anyone who can't read it there.
@@ -755,7 +821,7 @@ curl -X PATCH "localhost:3000/content/$CONTENT_ID/comments/$COMMENT_ID" -H "Auth
 
 ### `DELETE /content/:contentId/comments/:commentId`
 
-Authenticated. Deletes a comment, at once and for good, and returns `{ contentId, commentId, status: "deleted" }`. Who can:
+Authenticated. Deletes a comment, for good, and returns `{ contentId, commentId, status: "deleted" }`. By its id the comment is gone at once, or is its placeholder, and takes no reply, like or edit from then on; the post's [lists and counts](#reading-comments) show that after the compactor's next run. A comment that isn't there, or that another request deleted first, gets `404`. Who can:
 - **Its author**, whether it's published or waits in the moderation queue.
 - **The publisher of the post it's on**, if it's published. A comment that waits in the moderation queue isn't theirs to read, so it's `404` to them.
 - **An admin.**
@@ -966,7 +1032,7 @@ The response is `{ count, truncated, nextCursor, records: [record, ...] }`, with
 
 What it shows:
 - Every post of each user followed, up to `FEED_AUTHOR_DAY_MAX_POSTS` (1,000) of them per UTC day: the newest, whatever their likes.
-- A new post after the compactor's next run, as on `/feed`. An updated post shows as it now is at once, in its original place.
+- A new post after the compactor's next run, as on `/feed`. An updated post shows as it now is after that run too, in its original place.
 - Deletions and like counts after the next compactor run, as on `/feed`.
 
 **Pagination:** the cursor names the last post the page returned, and the next page starts just after it. So pages never repeat a post, or skip one that was there when the previous page was read, even while new posts arrive and the compactor runs. Posts newer than the first page show when the reader starts over. A cursor doesn't expire. One that isn't valid, including a cursor from `/feed`, gets `400`.
@@ -1208,16 +1274,16 @@ Server moderators and admins read the queue with `GET /moderation/queue`, longes
 The publisher can update a held post, or delete it. Each update is scored again:
 - One that's held too keeps the post's place in the queue.
 - One that scores high enough to be published is published, with nobody's decision.
-- An update of *published* content that's held takes the content out of every feed at once, until it's accepted. What the content was before isn't kept: content has one version.
+- An update of *published* content that's held takes the content out of every feed on the compactor's next run, until it's accepted, and makes it `404` by its id at once to everyone who can't read it in the queue. What the content was before isn't kept: content has one version.
 
 **Comments wait in the same queue.** A [comment](#comments) whose trust score is between the thresholds is stored, but not published: `POST /content/:contentId/comments` answers `202` with `status: "pending_review"`, and the comment is neither in the post's list of comments nor in its count. Only its author, server moderators and admins can read it. `GET /moderation/queue` lists it among the posts, in the one order, and each item's `kind` says which it is: `"post"` or `"comment"`. They decide on it as on a post:
-- **Accept** (`POST /moderation/queue/:contentId/comments/:commentId/accept`) publishes it at once, among the post's comments where it was sent, not where it was accepted: its `createdAt` doesn't change. A reply is published under the comment it replies to, or under that comment's [placeholder](#placeholders) if it was deleted meanwhile.
-- **Reject** (`POST /moderation/queue/:contentId/comments/:commentId/reject`) deletes it, at once and for good: that comment, and none of the replies it may have.
+- **Accept** (`POST /moderation/queue/:contentId/comments/:commentId/accept`) publishes it, among the post's comments where it was sent, not where it was accepted: its `createdAt` doesn't change. Anyone can read it by its id at once, and it's in the post's [lists and counts](#reading-comments) after the compactor's next run. A reply is published under the comment it replies to, or under that comment's [placeholder](#placeholders) if it was deleted meanwhile. If nothing is left of that comment, not a placeholder, the reply has nowhere to go: it's deleted, and the request gets `404`, "the comment it replies to is gone, so this comment was deleted".
+- **Reject** (`POST /moderation/queue/:contentId/comments/:commentId/reject`) deletes it, for good: that comment, and none of the replies it may have. It's gone by its id at once. Where an edit had left its placeholder in the lists, they change after the compactor's next run.
 
 Its author is told of either with a [notice](#notices). The author can delete a comment that waits, which takes it out of the queue, or [edit](#patch-contentcontentidcommentscommentid) it. Each edit is scored again, as an update of a post is:
 - One that's held too keeps the comment's place in the queue.
 - One that scores high enough to be published is published, with nobody's decision.
-- An edit of a *published* comment that's held takes the comment off the post at once, until it's accepted, and leaves a placeholder with `status: "pending_review"` in its place, which keeps its replies where they are. What the comment said before isn't kept. Accepted, it's published as edited, where it was, with the replies and likes it had. Rejected, it's deleted, and its placeholder says `deleted` if it has replies.
+- An edit of a *published* comment that's held takes the comment off the post, until it's accepted: by its id at once, and in the lists after the compactor's next run. It leaves a placeholder with `status: "pending_review"` in its place, which keeps its replies where they are. What the comment said before isn't kept. Accepted, it's published as edited, where it was, with the replies and likes it had. Rejected, it's deleted, and its placeholder says `deleted` if it has replies.
 
 A comment that waits on a post that is deleted leaves the queue with the post.
 
@@ -1236,7 +1302,7 @@ What happens next:
 
 **Comments wait in the same queue.** A published [comment](#comments) that a user reported ([`POST /report`](#post-report) with `commentId`) is listed by `GET /moderation/reports` among the posts, in the one order, with the same `reports` and `reportedAt`, and each item's `kind` says which it is: `"post"` or `"comment"`. `GET /moderation/reports/:contentId/comments/:commentId` lists a comment's reports. They decide on it as on a post:
 - **Accept** (`POST /moderation/reports/:contentId/comments/:commentId/accept`) leaves the comment as it is, and settles the reports it had.
-- **Delete** (`POST /moderation/reports/:contentId/comments/:commentId/delete`) deletes it, at once and for good, with its reports. Its author gets a [notice](#notices), which doesn't mention the reports.
+- **Delete** (`POST /moderation/reports/:contentId/comments/:commentId/delete`) deletes it, for good, with its reports: it's gone by its id at once, and from the post's lists and counts after the compactor's next run. Its author gets a [notice](#notices), which doesn't mention the reports.
 
 A comment that its author, the post's publisher or an admin deletes leaves the queue, and so do the comments of a post that is deleted. A post's reports and its comments' are decided on apart: accepting a post settles none of its comments' reports.
 
