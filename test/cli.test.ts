@@ -642,7 +642,7 @@ describe('the CLI', () => {
     expect(await by('carol', 'tag', 'queue', 'news', '--limit', '1')).toMatch(/\nThere are more: --cursor \S+$/);
     expect(await by('carol', 'tag', 'approve', first, 'news')).toBe(`Approved ${first} under #news.`);
     expect(await by('carol', 'tag', 'approve', first, 'news')).toBe(`${first} was already approved under #news.`);
-    expect(await refused('carol', 'tag', 'approve', first, 'mumbai')).toMatchObject({ code: 1, err: 'evieverse: only an admin or a moderator of #mumbai can do this' });
+    expect(await refused('carol', 'tag', 'approve', first, 'mumbai')).toMatchObject({ code: 1, err: 'evieverse: only an admin, a server moderator or a moderator of #mumbai can do this' });
     expect(await by('carol', 'tag', 'remove', second, 'news')).toBe(`Removed #news from ${second}: it's now under #mumbai.`);
     await ctx.compact();
     expect(await by('carol', 'tag', 'queue', 'news')).toBe('Nothing under #news waits for a moderator.');
@@ -1016,18 +1016,21 @@ describe('the CLI', () => {
     // A moderator of #news: that hashtag's commands, and no other's or an admin's.
     expect(await by('carol', 'mute', 'add', 'news', dave.userId)).toMatchObject({ code: 0 });
     expect(await by('carol', 'words', 'add', '--tag', 'news', 'rumour')).toMatchObject({ code: 0, out: 'rumour' });
-    expect(await by('carol', 'mute', 'add', 'sports', dave.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin or a moderator of #sports can do this' });
+    expect(await by('carol', 'mute', 'add', 'sports', dave.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin, a server moderator or a moderator of #sports can do this' });
     expect(await by('carol', 'words', 'list', '--server')).toMatchObject({ code: 1, err: 'evieverse: only an admin can do this' });
     expect(await by('carol', 'admins', 'grant', carol.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin can do this' });
     expect(await by('carol', 'queue', 'list')).toMatchObject({ code: 1, err: 'evieverse: only an admin or a server moderator can do this' });
-    // A server moderator: the moderation queue, and no hashtag's commands or an admin's.
+    // A server moderator: the moderation queue, and every hashtag's commands, but not an admin's.
     expect(await by('erin', 'queue', 'list')).toMatchObject({ code: 0, out: 'The moderation queue is empty.' });
-    expect(await by('erin', 'mute', 'add', 'news', dave.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin or a moderator of #news can do this' });
+    expect(await by('erin', 'mute', 'add', 'sports', dave.userId)).toMatchObject({ code: 0, out: `${dave.userId} is muted on #sports.` });
+    expect(await by('erin', 'mute', 'remove', 'news', dave.userId)).toMatchObject({ code: 0, out: `${dave.userId} is no longer muted on #news.` });
+    expect(await by('erin', 'words', 'add', '--tag', 'sports', 'doping')).toMatchObject({ code: 0, out: 'doping' });
+    expect(await by('erin', 'moderators', 'add', 'sports', erin.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin can do this' });
     expect(await by('erin', 'words', 'list', '--server')).toMatchObject({ code: 1, err: 'evieverse: only an admin can do this' });
     expect(await by('erin', 'server-moderators', 'add', dave.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin can do this' });
     expect(await by('erin', 'admins', 'grant', erin.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin can do this' });
     // Someone with no role: neither, and only their own content.
-    expect(await by('dave', 'mute', 'list', 'news')).toMatchObject({ code: 1, err: 'evieverse: only an admin or a moderator of #news can do this' });
+    expect(await by('dave', 'mute', 'list', 'news')).toMatchObject({ code: 1, err: 'evieverse: only an admin, a server moderator or a moderator of #news can do this' });
     expect(await by('dave', 'admins', 'list')).toMatchObject({ code: 1, err: 'evieverse: only an admin can do this' });
     const contentId = await post(ctx, carol, "carol's #sports");
     expect(await by('dave', 'content', 'delete', contentId)).toMatchObject({ code: 1, err: 'evieverse: only the original publisher or an admin can delete this content' });
@@ -1040,13 +1043,13 @@ describe('the CLI', () => {
     };
     expect(await marks('root')).toEqual({ profile: `Profile "root": root on ${SERVER}, an admin`, marks: '+++++' });
     expect(await marks('carol')).toEqual({ profile: `Profile "carol": carol on ${SERVER}, moderator of #news`, marks: '++---' });
-    expect(await marks('erin')).toEqual({ profile: `Profile "erin": erin on ${SERVER}, a server moderator`, marks: '+-+--' });
+    expect(await marks('erin')).toEqual({ profile: `Profile "erin": erin on ${SERVER}, a server moderator`, marks: '+++--' });
     expect(await marks('dave')).toEqual({ profile: `Profile "dave": dave on ${SERVER}, no moderation role`, marks: '+----' });
-    // The two kinds of moderator are apart, and one user can be both.
+    // A server moderator moderates every hashtag, and can be a hashtag's own moderator too.
     await ran('--profile', 'root', 'moderators', 'add', 'sports', erin.userId);
     expect(await marks('erin')).toEqual({ profile: `Profile "erin": erin on ${SERVER}, a server moderator, and moderator of #sports`, marks: '+++--' });
     const help = (await by('erin', 'help')).out;
-    expect(help.indexOf('For server moderators, and admins')).toBeGreaterThan(help.indexOf("For a hashtag's moderators (you moderate #sports), and admins on every hashtag"));
+    expect(help.indexOf('For server moderators, and admins')).toBeGreaterThan(help.indexOf("For a hashtag's moderators (you moderate #sports), and server moderators and admins on every hashtag"));
     expect(help.indexOf('For admins')).toBeGreaterThan(help.indexOf('For server moderators, and admins'));
 
     // With no profile to ask about, the commands are listed unmarked; and a command that isn't one says how it's used.

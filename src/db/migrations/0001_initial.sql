@@ -23,8 +23,9 @@
 -- moderator: 1 for the server's moderators, whom admins appoint (/moderators). A server moderator
 -- works through the moderation queue (see moderation_queue): reads it and the content that waits in
 -- it, and accepts or rejects that content. And through the report queue (see reports): accepts or
--- deletes the content users reported. Nothing else an admin can do comes with it. The two roles
--- are set apart: an admin needs no 1 here, and losing the admin role leaves this as it is.
+-- deletes the content users reported. And can do whatever a tag moderator can on every hashtag,
+-- with no row in tag_moderators. Nothing else an admin can do comes with it. The two roles are set
+-- apart: an admin needs no 1 here, and losing the admin role leaves this as it is.
 --
 -- language: the code of the language the server answers the user in, which is the name of a file
 -- of the languages folder (en, pt-BR). The user registers in it, and can change it (PATCH /users/:userId).
@@ -250,7 +251,8 @@ CREATE INDEX reposts_created_idx ON reposts (created_at);
 -- the feed index, so feeds never read the next six tables.
 --
 -- tag_moderators: who moderates which hashtag. A moderator can approve content under the hashtag or
--- remove the hashtag from it, mute users on it and keep its blocked words.
+-- remove the hashtag from it, mute users on it and keep its blocked words. Admins and server
+-- moderators can on every hashtag, and have no rows here for it.
 CREATE TABLE tag_moderators (
   tag         varchar(64) NOT NULL,
   user_id     varchar(36) NOT NULL,

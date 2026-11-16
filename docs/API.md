@@ -519,7 +519,7 @@ How a repost shows:
 - **After the compactor's next run,** as a new post does ([`POST /store`](#post-store)): from then on the post carries the hashtags, [`GET /content/:contentId`](#get-contentcontentid) lists them in `tags`, and the feeds show the post there.
 - **In a feed,** a record that is there because of a repost has `repost`: `{ at }`, the time of the repost, which is where the record is placed. In a [following feed](#get-feedfollowing) it also says who reposted: `{ at, by: { userId, username } }`. On such a record `likes` counts the likes since the repost, while `createdAt` and `publisher` are still the post's own.
 - **On the post,** `GET /content/:contentId` has `reposts`: one item per repost, oldest first, each `{ by: { userId, username }, tags, at }`. `tags` are the hashtags that repost gave and the post still has, and `by` is left out once the reposter's account is deleted. The post's `likes` is its whole count, wherever the likes were made.
-- **A hashtag a repost gave is the post's from then on.** An update's `tags` are the publisher's own, so the publisher keeps the reposted hashtags through updates and can't drop them. It takes a moderator of the hashtag, or an admin, to [remove](#a-hashtags-queue) one, and it stays when the reposter deletes their account. The hashtag's rules still apply: an update can lose the post a reposted hashtag its publisher is muted on, or whose blocked words the post now has.
+- **A hashtag a repost gave is the post's from then on.** An update's `tags` are the publisher's own, so the publisher keeps the reposted hashtags through updates and can't drop them. It takes a moderator of the hashtag, a server moderator or an admin to [remove](#a-hashtags-queue) one, and it stays when the reposter deletes their account. The hashtag's rules still apply: an update can lose the post a reposted hashtag its publisher is muted on, or whose blocked words the post now has.
 
 #### A post on another server
 
@@ -1124,10 +1124,9 @@ There are three queues to decide on. The first two hold [comments](#comments) as
 
 **Admins** can delete any content (`DELETE /content/:contentId`) and any comment, accept or reject the posts and comments in the moderation queue, appoint and remove server moderators and tag moderators, keep the server's list of blocked words, and make other users admins or revoke the role. They can also do whatever a server moderator can, and whatever a tag moderator can on every hashtag, and they [register users](#post-register) without a challenge.
 
-**Server moderators** are appointed by an admin (`PUT /moderators/:userId`) to work through [the moderation queue](#the-moderation-queue) and [the report queue](#the-report-queue), so that doesn't take an admin. They can read the moderation queue and the posts and comments waiting in it, and accept or reject each; and read the report queue and the reports of each post or comment in it, and accept or delete each. That's all the role gives:
+**Server moderators** are appointed by an admin (`PUT /moderators/:userId`) to work through [the moderation queue](#the-moderation-queue) and [the report queue](#the-report-queue), so that doesn't take an admin. They can read the moderation queue and the posts and comments waiting in it, and accept or reject each; and read the report queue and the reports of each post or comment in it, and accept or delete each. They can also do whatever a tag moderator can, on every hashtag, without being appointed to any. That's all the role gives:
 - They can't delete published content or a published comment that nobody has reported, or anyone else's outside the two queues.
-- They can't keep the server's blocked words, or appoint anyone.
-- They have no say over a hashtag unless they're also one of its moderators. A user can be both.
+- They can't keep the server's blocked words, or appoint anyone, a hashtag's moderators included.
 
 Admins and moderators can do all of it with the [CLI](CLI.md) the server ships, which signs in with their own API key.
 
@@ -1138,9 +1137,11 @@ Admins and moderators can do all of it with the [CLI](CLI.md) the server ships, 
 - mute users on the hashtag, so that the user's new posts and updates don't get it;
 - work through [the hashtag's queue](#a-hashtags-queue): approve the content under it, or remove the hashtag from content.
 
+Server moderators and admins can do all of that on every hashtag, without being appointed to it.
+
 A tag moderator has no say over comments. A hashtag's blocked words and mutes apply to posts alone, and a comment on a post under the hashtag isn't its moderators' to accept, reject or delete.
 
-A user's profile (`GET /users/:userId`) shows whether they're an `admin` or a server moderator (`moderator`), and the hashtags they moderate (`moderates`).
+A user's profile (`GET /users/:userId`) shows whether they're an `admin` or a server moderator (`moderator`), and the hashtags they moderate (`moderates`). `moderates` lists the hashtags a user was appointed to, so it's empty for an admin or a server moderator who was appointed to none, though they moderate every hashtag.
 
 **Server moderators and admins can [ban](#bans) a user**, and admins can delete any [account](#delete-usersuserid).
 
@@ -1249,7 +1250,7 @@ curl "localhost:3000/feed?tags=news&moderated=false&hours=2160"
 
 A feed is of its window, which is the past day unless it says. So a queue asks for the widest one, `hours=2160` (90 days), to get every post that waits and not only the last day's.
 
-A moderator of the hashtag takes a post out of its queue in one of two ways:
+A moderator of the hashtag, a server moderator or an admin takes a post out of its queue in one of two ways:
 - **Approve it** (`PUT /content/:contentId/tags/:tag`). Its records under that hashtag are `moderated: true` from then on. The approval is of the post as it was, so an update of the post puts it back in the queue.
 - **Remove the hashtag from it** (`DELETE /content/:contentId/tags/:tag`). The post leaves the hashtag's feeds, and loses the hashtag for good: the publisher's updates don't get it back (`removedTags` gives the reason `removed`).
 
@@ -1261,7 +1262,7 @@ Later pages of a [feed session](#get-feed) are of the queue as it is by then: a 
 
 ### Blocked words
 
-The server has a list of blocked words, which its admins keep, and so has each hashtag, kept by its moderators. A post containing one of the server's isn't published, and a post containing one of a hashtag's doesn't get that hashtag ([above](#moderation)).
+The server has a list of blocked words, which its admins keep, and so has each hashtag, kept by its moderators, and by server moderators and admins. A post containing one of the server's isn't published, and a post containing one of a hashtag's doesn't get that hashtag ([above](#moderation)).
 
 **What's checked for blocked words:** the post's hashtags, its whole text (a text post's text, or an image's, video's or audio's caption), a link's URL, and a file's filename. A text or caption is read as its readers read it: without its [formatting](TEXT_EDITORS.md), so `sp**am**` is the word "spam", and with each link's address after its label, so a link is checked for where it leads too. A comment's text is read the same way. What's in an image, video or audio file isn't checked.
 
@@ -1292,15 +1293,15 @@ They authenticate as the other write endpoints do. `:tag` is a hashtag as `/feed
 | `PUT /banned/:userId` | Server moderators, and admins | [Bans](#bans) a user, with `{ "reason": "..." }` if there's one to give: `201` with `{ userId, username, bannedAt, reason, alreadyBanned: false }`, or `200` with `alreadyBanned: true` and the first ban's `bannedAt` and `reason`. Not an admin or a server moderator (`403`), or yourself (`400`). |
 | `DELETE /banned/:userId` | Server moderators, and admins | Ends a ban: `{ userId, wasBanned }`. |
 | `GET`, `POST`, `DELETE /moderation/blocked-words` | Admins | Lists, adds or removes the server's blocked words. `POST` and `DELETE` take `{ "words": [...] }`, 1 to 1,000 words, phrases or patterns at a time. Each returns the whole list: `{ words }`. `400` for an entry that can't be blocked: one with no letters or digits, one that's too long, or a pattern that isn't a regular expression or matches empty text. `409` if the list would hold more than 10,000 entries, or more than 100 patterns. |
-| `GET`, `POST`, `DELETE /tags/:tag/blocked-words` | The hashtag's moderators, and admins | The same, for the hashtag's list: `{ tag, words }`. |
+| `GET`, `POST`, `DELETE /tags/:tag/blocked-words` | The hashtag's moderators, server moderators, and admins | The same, for the hashtag's list: `{ tag, words }`. |
 | `GET /tags/:tag/moderators` | Anyone | `{ tag, moderators: [{ userId, username, since }] }` |
 | `PUT /tags/:tag/moderators/:userId` | Admins | Appoints a moderator: `201` with `{ tag, userId, since, alreadyModerator: false }`, or `200` with `alreadyModerator: true` if they already were. |
 | `DELETE /tags/:tag/moderators/:userId` | Admins | `{ tag, userId, wasModerator }` |
-| `GET /tags/:tag/muted` | The hashtag's moderators, and admins | Users muted on the hashtag, most recently muted first: `{ tag, muted: [{ userId, username, mutedAt }], nextCursor }`. Takes `limit` (100 by default, at most 1,000) and `cursor`. |
-| `PUT /tags/:tag/muted/:userId` | The hashtag's moderators, and admins | Mutes a user on the hashtag: `201` with `{ tag, userId, mutedAt, alreadyMuted: false }`, or `200` with `alreadyMuted: true`. |
-| `DELETE /tags/:tag/muted/:userId` | The hashtag's moderators, and admins | `{ tag, userId, wasMuted }` |
-| `PUT /content/:contentId/tags/:tag` | The hashtag's moderators, and admins | Approves the content under the hashtag: `201` with `{ contentId, tag, moderated: true, alreadyApproved: false }`, or `200` with `alreadyApproved: true`. |
-| `DELETE /content/:contentId/tags/:tag` | The hashtag's moderators, and admins | Removes the hashtag from the content (below). With `{ "mute": true }`, it also mutes the content's publisher on the hashtag. |
+| `GET /tags/:tag/muted` | The hashtag's moderators, server moderators, and admins | Users muted on the hashtag, most recently muted first: `{ tag, muted: [{ userId, username, mutedAt }], nextCursor }`. Takes `limit` (100 by default, at most 1,000) and `cursor`. |
+| `PUT /tags/:tag/muted/:userId` | The hashtag's moderators, server moderators, and admins | Mutes a user on the hashtag: `201` with `{ tag, userId, mutedAt, alreadyMuted: false }`, or `200` with `alreadyMuted: true`. |
+| `DELETE /tags/:tag/muted/:userId` | The hashtag's moderators, server moderators, and admins | `{ tag, userId, wasMuted }` |
+| `PUT /content/:contentId/tags/:tag` | The hashtag's moderators, server moderators, and admins | Approves the content under the hashtag: `201` with `{ contentId, tag, moderated: true, alreadyApproved: false }`, or `200` with `alreadyApproved: true`. |
+| `DELETE /content/:contentId/tags/:tag` | The hashtag's moderators, server moderators, and admins | Removes the hashtag from the content (below). With `{ "mute": true }`, it also mutes the content's publisher on the hashtag. |
 | `GET /moderation/queue` | Server moderators, and admins | The posts and comments in the moderation queue, longest waiting first: `{ queue: [...], nextCursor }`. Each has a `kind`. A `"post"` is a feed record (without `moderated`), with `text` (the whole text or caption); a `"comment"` is a [comment](#comments) as its post's list gives it. Both have `trustScore` and `queuedAt`. Takes `limit` (50 by default, at most 100) and `cursor`. |
 | `POST /moderation/queue/:contentId/accept` | Server moderators, and admins | Publishes the post: `{ contentId, status: "published", tags }`. |
 | `POST /moderation/queue/:contentId/reject` | Server moderators, and admins | Takes the post down: `202` with `{ contentId, status: "pending_deletion", requestedAt }`. |

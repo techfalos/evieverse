@@ -19,7 +19,7 @@ export interface UsersTable {
   updated_at: number;
   /** 1 for the server's admins, else 0: set by an admin (/admins), a deployment (BOOTSTRAP_ADMIN) or the operator (`npm run admin`). */
   admin: Generated<number>;
-  /** 1 for the server's moderators, else 0: set by an admin (/moderators). They work through the moderation queue and the report queue, and nothing else of an admin's. */
+  /** 1 for the server's moderators, else 0: set by an admin (/moderators). They work through the moderation queue and the report queue, and moderate every hashtag: nothing else of an admin's. */
   moderator: Generated<number>;
   /**
    * The code of the language the server answers the user in (a file of the languages folder): the one they
@@ -165,7 +165,7 @@ export interface FeedQueueTable {
   created_at: number;
 }
 
-/** Who moderates which hashtag. Admins moderate every hashtag without a row. */
+/** Who moderates which hashtag. Admins and server moderators moderate every hashtag without a row. */
 export interface TagModeratorsTable {
   tag: string;
   user_id: string;

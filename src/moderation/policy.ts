@@ -8,18 +8,22 @@ import type { Moderated, ModerationDeps, RemovedTag } from './policy.types.js';
 import { routeOf, trustOf, type TrustRoute } from './trust.js';
 import { scanTexts } from './words.js';
 
-/** Whether `user` can moderate `tag`: an admin, or one of the tag's moderators. */
-export async function moderates(db: Db, user: AuthUser, tag: string): Promise<boolean> {
-  if (user.admin) return true;
-  return (await db.selectFrom('tag_moderators').select('tag').where('tag', '=', tag).where('user_id', '=', user.id).executeTakeFirst()) !== undefined;
-}
-
 /**
  * Whether `user` works through the server's moderation queue: reads it and the content that waits
  * in it, and accepts or rejects that content. And through its report queue: accepts or deletes the
- * content users reported. A server moderator, or an admin.
+ * content users reported. A server moderator, or an admin. Both moderate every hashtag too (see
+ * moderates).
  */
 export const moderatesServer = (user: AuthUser): boolean => user.admin || user.moderator;
+
+/**
+ * Whether `user` can moderate `tag`: an admin or a server moderator, who moderate every hashtag
+ * and need no row for it, or one of the tag's moderators.
+ */
+export async function moderates(db: Db, user: AuthUser, tag: string): Promise<boolean> {
+  if (moderatesServer(user)) return true;
+  return (await db.selectFrom('tag_moderators').select('tag').where('tag', '=', tag).where('user_id', '=', user.id).executeTakeFirst()) !== undefined;
+}
 
 /**
  * Refuses (403) a user who was banned: what writes a post, a comment or a message, likes a post or

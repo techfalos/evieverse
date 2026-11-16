@@ -190,7 +190,7 @@
     "moderation.not_queued": "the content is not in the moderation queue",
     "moderation.admin_only": "only an admin can do this",
     "moderation.server_moderator_only": "only an admin or a server moderator can do this",
-    "moderation.tag_moderator_only": "only an admin or a moderator of #{tag} can do this",
+    "moderation.tag_moderator_only": "only an admin, a server moderator or a moderator of #{tag} can do this",
     "moderation.only_admin": "this is the only admin: make another user an admin first",
     "moderation.ban_yourself": "you can't ban yourself",
     "moderation.ban_staff": "admins and server moderators can't be banned: end their role first",

@@ -256,7 +256,7 @@ for (const target of TARGETS) {
       expect(ids((await queue(mod)).queue)).toEqual([third]);
       expect(ids((await queue(root)).queue)).toEqual([third]);
 
-      // Nothing else that takes an admin, or a hashtag's moderator.
+      // Nothing else that takes an admin. What takes a hashtag's moderator is theirs, on every hashtag (see moderation.test.ts).
       const published = ok(await store(bob, 'An honest post #news')).contentId;
       const notTheirs: [method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: Record<string, unknown>][] = [
         ['DELETE', `/content/${published}`],
@@ -267,10 +267,7 @@ for (const target of TARGETS) {
         ['PUT', `/admins/${mod.userId}`],
         ['DELETE', `/admins/${root.userId}`],
         ['PUT', `/tags/news/moderators/${mod.userId}`],
-        ['PUT', `/content/${published}/tags/news`],
-        ['DELETE', `/content/${published}/tags/news`],
-        ['GET', '/tags/news/muted'],
-        ['POST', '/tags/news/blocked-words', { words: ['honest'] }],
+        ['DELETE', `/tags/news/moderators/${mod.userId}`],
       ];
       for (const [method, url, payload] of notTheirs) expect((await req(mod, method, url, payload)).statusCode, `${method} ${url}`).toBe(403);
       await ctx.compactor.runOnce();

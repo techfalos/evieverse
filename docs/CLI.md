@@ -111,7 +111,7 @@ A command exits with:
 
 ### For a hashtag's moderators
 
-Admins can run these on every hashtag.
+Server moderators and admins can run these on every hashtag.
 
 
 | Command                                             | What it does                                                                                                                 |
@@ -130,6 +130,8 @@ Admins can run these on every hashtag.
 
 
 ### For server moderators
+
+Server moderators can also run the commands [for a hashtag's moderators](#for-a-hashtags-moderators), on every hashtag.
 
 Both queue and reports contain posts and comments. Each line starts with `post` or `comment`. A comment's line also contains the ID of the post it's on. The commands that decide on a post decide on a comment with `--comment`, given the post's id and the comment's.
 
@@ -160,7 +162,7 @@ Both queue and reports contain posts and comments. Each line starts with `post` 
 | `admins grant <userId>`                   | Makes a user an admin.                                                                                                                                                                                                                                                          |
 | `admins revoke <userId>`                  | Revokes a user's admin role. The server refuses to revoke its only admin's.                                                                                                                                                                                                     |
 | `server-moderators list`                  | Lists the server moderators.                                                                                                                                                                                                                                                    |
-| `server-moderators add <userId>`          | Makes a user a server moderator.                                                                                                                                                                                                                                                |
+| `server-moderators add <userId>`          | Makes a user a server moderator: they can work through the moderation queue and the report queue, and moderate every hashtag.                                                                                                                                                   |
 | `server-moderators remove <userId>`       | Ends a user's time as a server moderator.                                                                                                                                                                                                                                       |
 | `moderators add <tag> <userId>`           | Appoints a moderator of a hashtag.                                                                                                                                                                                                                                              |
 | `moderators remove <tag> <userId>`        | Ends a user's moderation of a hashtag.                                                                                                                                                                                                                                          |
@@ -204,7 +206,7 @@ Appoint a moderator of `#news`, who then blocks a word, a phrase and a pattern t
 
 ```bash
 evieverse moderators add news 3f6c2c0e-…                 # as an admin
-evieverse words add --tag news spam "buy now"            # as the moderator, or an admin
+evieverse words add --tag news spam "buy now"            # as the moderator, a server moderator or an admin
 evieverse words add --tag news '/垃圾|广告/'              # a pattern, in single quotes
 ```
 

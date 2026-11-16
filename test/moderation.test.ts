@@ -292,6 +292,93 @@ for (const target of TARGETS) {
       expect(await post(alice, 'Another rumour #news')).toMatchObject({ tags: ['news'] });
     });
 
+    it("lets a server moderator do whatever a hashtag's moderator can, on every hashtag, with no row for any", async () => {
+      ctx = await createTestContext(target);
+      const root = await admin();
+      const mod = await ctx.register('mod');
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const TAGS = ['news', 'sports'];
+      const decisions = () => ctx.db.selectFrom('tag_moderation').select(['content_id', 'tag', 'decision', 'moderator_id']).orderBy('decided_at').orderBy('decision').execute();
+      /** Everything a hashtag's moderator can ask for, on `tag` and on content under it. */
+      const theirs = (tag: string, contentId: string): [method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: Record<string, unknown>][] => [
+        ['GET', `/tags/${tag}/blocked-words`],
+        ['POST', `/tags/${tag}/blocked-words`, { words: ['rumour'] }],
+        ['DELETE', `/tags/${tag}/blocked-words`, { words: ['rumour'] }],
+        ['GET', `/tags/${tag}/muted`],
+        ['PUT', `/tags/${tag}/muted/${bob.userId}`],
+        ['DELETE', `/tags/${tag}/muted/${bob.userId}`],
+        ['PUT', `/content/${contentId}/tags/${tag}`],
+        ['DELETE', `/content/${contentId}/tags/${tag}`],
+      ];
+      /** Whether all of that is refused `u`, with the reason: nothing of it was done. */
+      const refused = async (u: User, tag: string, contentId: string) => {
+        for (const [method, url, payload] of theirs(tag, contentId)) {
+          const res = await req(u, method, url, payload);
+          expect([res.statusCode, res.json().error], `${method} ${url}`).toEqual([403, `only an admin, a server moderator or a moderator of #${tag} can do this`]);
+        }
+      };
+
+      // With no role, none of it is theirs.
+      const untouched = Object.fromEntries(await Promise.all(TAGS.map(async (tag) => [tag, (await post(alice, `Left alone #${tag}`)).contentId] as const)));
+      for (const tag of TAGS) await refused(mod, tag, untouched[tag]!);
+
+      // A server moderator: all of it, under whatever hashtag, and no hashtag lists them as its moderator.
+      ok(await req(root, 'PUT', `/moderators/${mod.userId}`));
+      expect(await profile(mod)).toMatchObject({ admin: false, moderator: true, moderates: [] });
+      const approved: Record<string, string> = {};
+      for (const tag of TAGS) {
+        expect(ok(await req(null, 'GET', `/tags/${tag}/moderators`), 200)).toEqual({ tag, moderators: [] });
+        const first = (await post(alice, `To approve #${tag}`)).contentId;
+        const second = (await post(alice, `To remove #${tag}`)).contentId;
+        approved[tag] = first;
+
+        // Its blocked words.
+        expect(ok(await req(mod, 'POST', `/tags/${tag}/blocked-words`, { words: ['Rumour'] }), 200)).toEqual({ tag, words: ['rumour'] });
+        expect(ok(await req(mod, 'GET', `/tags/${tag}/blocked-words`), 200)).toEqual({ tag, words: ['rumour'] });
+        expect(await post(alice, `A rumour #${tag} #elsewhere`)).toMatchObject({ tags: ['elsewhere'], removedTags: [{ tag, reason: 'blocked_word' }] });
+        expect(ok(await req(mod, 'DELETE', `/tags/${tag}/blocked-words`, { words: ['rumour'] }), 200)).toEqual({ tag, words: [] });
+
+        // Its mutes.
+        expect(ok(await req(mod, 'PUT', `/tags/${tag}/muted/${bob.userId}`))).toEqual({ tag, userId: bob.userId, mutedAt: now(), alreadyMuted: false });
+        expect(ok(await req(mod, 'GET', `/tags/${tag}/muted`), 200)).toEqual({ tag, muted: [{ userId: bob.userId, username: 'bob', mutedAt: now() }], nextCursor: null });
+        expect((await store(bob, `Breaking #${tag}`)).json()).toEqual({ error: NO_TAGS_LEFT, removedTags: [{ tag, reason: 'muted' }] });
+        expect(ok(await req(mod, 'DELETE', `/tags/${tag}/muted/${bob.userId}`), 200)).toEqual({ tag, userId: bob.userId, wasMuted: true });
+
+        // Its queue: approving content under it, and removing it from content, with a mute of the publisher.
+        expect(ok(await req(mod, 'PUT', `/content/${first}/tags/${tag}`))).toEqual({ contentId: first, tag, moderated: true, alreadyApproved: false });
+        expect(ok(await req(mod, 'DELETE', `/content/${second}/tags/${tag}`, { mute: true }), 200)).toEqual({ contentId: second, tag, tags: [], muted: true });
+        expect(ok(await req(mod, 'GET', `/tags/${tag}/muted`), 200).muted.map((u: { username: string }) => u.username)).toEqual(['alice']);
+        ok(await req(mod, 'DELETE', `/tags/${tag}/muted/${alice.userId}`), 200);
+        ctx.clock.now += 1000;
+      }
+      // The decisions are theirs, and the compactor applies them as it does any moderator's.
+      expect((await decisions()).map((d) => [d.tag, d.decision, d.moderator_id])).toEqual(TAGS.flatMap((tag) => [[tag, 'approved', mod.userId], [tag, 'removed', mod.userId]]));
+      await ctx.compact();
+      for (const tag of TAGS) {
+        expect(Object.fromEntries((await feedOf(tag)).map((i) => [i.contentId, i.moderated]))).toEqual({ [untouched[tag]!]: false, [approved[tag]!]: true });
+      }
+
+      // What takes an admin still does: the server's blocked words, who moderates a hashtag, and content that isn't theirs.
+      const notTheirs: [method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: Record<string, unknown>][] = [
+        ['GET', '/moderation/blocked-words'],
+        ['POST', '/moderation/blocked-words', { words: ['rumour'] }],
+        ['PUT', `/tags/news/moderators/${bob.userId}`],
+        ['DELETE', `/tags/news/moderators/${bob.userId}`],
+        ['DELETE', `/content/${untouched.news}`],
+      ];
+      for (const [method, url, payload] of notTheirs) expect((await req(mod, method, url, payload)).statusCode, `${method} ${url}`).toBe(403);
+
+      // No longer one: every hashtag is closed to them at once, and what they decided stays decided.
+      ok(await req(root, 'DELETE', `/moderators/${mod.userId}`), 200);
+      for (const tag of TAGS) await refused(mod, tag, untouched[tag]!);
+      expect(await decisions()).toHaveLength(4);
+      // Unless they moderate the hashtag itself, which is that hashtag's alone.
+      await appoint(root, 'news', mod);
+      expect(ok(await req(mod, 'PUT', `/content/${untouched.news}/tags/news`))).toMatchObject({ alreadyApproved: false });
+      await refused(mod, 'sports', untouched.sports!);
+    });
+
     it('blocks what a pattern matches, for the server and for a hashtag, and keeps patterns beside the words', async () => {
       ctx = await createTestContext(target);
       const root = await admin();

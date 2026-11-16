@@ -44,7 +44,7 @@ const SECTIONS: { role: Role; title: (me?: WhoAmI) => string }[] = [
   { role: 'anyone', title: () => 'For everyone' },
   {
     role: 'moderator',
-    title: (me) => `For a hashtag's moderators${me?.moderates.length ? ` (you moderate ${hashtags(me.moderates)})` : ''}, and admins on every hashtag`,
+    title: (me) => `For a hashtag's moderators${me?.moderates.length ? ` (you moderate ${hashtags(me.moderates)})` : ''}, and server moderators and admins on every hashtag`,
   },
   { role: 'serverModerator', title: () => 'For server moderators, and admins' },
   { role: 'admin', title: () => 'For admins' },
@@ -898,7 +898,7 @@ export const COMMANDS: Command[] = [
     name: 'server-moderators add',
     positionals: ['userId'],
     role: 'admin',
-    summary: 'Makes a user a server moderator: they can work through the moderation queue and the report queue.',
+    summary: 'Makes a user a server moderator: they can work through the moderation queue and the report queue, and moderate every hashtag.',
     request: ({ positionals: [userId] }) => ({ method: 'PUT', path: path`/moderators/${userId!}` }),
     text: (d) => (d.alreadyModerator ? `${d.username} (${d.userId}) was already a server moderator.` : `${d.username} (${d.userId}) is now a server moderator.`),
   }),
@@ -1109,7 +1109,8 @@ export async function helpText(ctx: Context): Promise<string> {
     for (const c of COMMANDS.filter((command) => command.role === role)) {
       lines.push(
         `  ${
-          me ? (role === 'anyone' || me.admin || (role === 'moderator' && me.moderates.length > 0) || (role === 'serverModerator' && me.moderator) ? '+ ' : '- ') : ''
+          // A server moderator may use a hashtag's moderator's commands too, on every hashtag.
+          me ? (role === 'anyone' || me.admin || (role === 'moderator' && (me.moderator || me.moderates.length > 0)) || (role === 'serverModerator' && me.moderator) ? '+ ' : '- ') : ''
         }${usage(c).padEnd(width)}  ${c.summary}`,
       );
     }

@@ -7,7 +7,7 @@ export interface AuthUser {
   id: string;
   username: string;
   admin: boolean;
-  /** A server moderator: one who works through the moderation queue. An admin does too, without being one. */
+  /** A server moderator: one who works through the moderation queue and the report queue, and moderates every hashtag. An admin does too, without being one. */
   moderator: boolean;
   /** The code of the language the server answers the user in (see languageOf). */
   language: string;

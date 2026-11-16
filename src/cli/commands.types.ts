@@ -36,7 +36,8 @@ export interface Context {
 /**
  * Who a command is for. The server decides, by the key, whether a request is allowed; this only sorts
  * the help, and marks there what the key in use may do. `moderator` is a hashtag's moderator, and
- * `serverModerator` the server's: one who works through its moderation queue and its report queue.
+ * `serverModerator` the server's: one who works through its moderation queue and its report queue,
+ * and may use a hashtag's moderator's commands on every hashtag, as an admin may.
  */
 export type Role = 'anyone' | 'moderator' | 'serverModerator' | 'admin';
 

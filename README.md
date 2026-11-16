@@ -116,7 +116,7 @@ In both modes, a post with no valid tags is rejected.
 **Moderators** 
 
 - **Admins** can delete any post, comment or account, ban users, accept or reject held posts and comments, keep the instance's blocked words, and appoint the other two roles.
-- **Server moderators** accept or reject the posts and comments held in the moderation queue, accept or delete the posts and comments users reported, and ban users.
+- **Server moderators** accept or reject the posts and comments held in the moderation queue, accept or delete the posts and comments users reported, perform any operations a tag moderator could on any tag, and ban users.
 - **Tag moderators** look after one or more tags. Under their tag, they can remove a tag from a post and mute a user, whose later posts then don't get the tag. They have no say over comments.
 
 **Bans.** A server moderator or an admin can ban a user (`evieverse bans add <userId>`). A banned user can't post, comment or send messages, but can still read, receive messages, and delete their own posts and account. The user is told, with a notice, and again when the ban ends. Admins and server moderators can't be banned until their role ends. See [API.md](docs/API.md#bans).

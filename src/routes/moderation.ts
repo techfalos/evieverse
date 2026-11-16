@@ -60,8 +60,9 @@ const adminOnly = () => forbidden(msg('moderation.admin_only'));
 /**
  * Moderation: admins make and revoke admins, appoint server moderators and tag moderators, and keep
  * the server's blocked words; server moderators and admins ban users; server moderators (and admins) accept or reject the posts and the
- * comments their trust score sent to the moderation queue; a tag's moderators (and admins) keep its
- * blocked words, mute users on it, and approve the content under it or remove it from content.
+ * comments their trust score sent to the moderation queue; a tag's moderators (and server moderators
+ * and admins, on every tag) keep its blocked words, mute users on it, and approve the content under
+ * it or remove it from content.
  * Mutes and blocked words apply to what is written from then on; what a tag's moderator decides
  * about content shows in the tag's feeds at once, and the compactor applies it. A tag's moderators
  * have no say over comments.
@@ -86,6 +87,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     return user;
   }
 
+  /** For what a hashtag's moderators do: one of them, or a server moderator or an admin, who moderate every hashtag. */
   async function asModerator(req: FastifyRequest, tag: string, body: Credentials): Promise<AuthUser> {
     const user = await authenticate(db, req, body);
     if (!(await moderates(db, user, tag))) throw forbidden(msg('moderation.tag_moderator_only', { tag }));
@@ -153,7 +155,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     throw conflict(msg('moderation.admins_changed'));
   });
 
-  // Server moderators: who works through the moderation queue without being an admin.
+  // Server moderators: who works through the moderation queue, and moderates every hashtag, without being an admin.
 
   /** The server's moderators. Admins only. */
   app.get('/moderators', async (req) => {
@@ -337,7 +339,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
 
   /**
    * The server's blocked words, which admins keep: a post containing one isn't published. And each
-   * hashtag's, which its moderators and admins keep: a post containing one doesn't get the hashtag.
+   * hashtag's, which its moderators, server moderators and admins keep: a post containing one doesn't get the hashtag.
    * An entry is a word, a phrase, or a pattern written between slashes (src/moderation/words.ts).
    */
   const wordLists = [
@@ -426,7 +428,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
       (createdAt) => db.insertInto('tag_mutes').values({ user_id: userId, tag, created_at: createdAt }).execute(),
     );
 
-  /** Users muted on a hashtag, most recently muted first, a page at a time. Its moderators and admins. */
+  /** Users muted on a hashtag, most recently muted first, a page at a time. Its moderators, server moderators and admins. */
   app.get('/tags/:tag/muted', async (req) => {
     const { tag } = TagParams.parse(req.params);
     const page = listQuery(req.query);
@@ -443,7 +445,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     return { tag, muted: rows.map((r) => ({ userId: r.id, username: r.username, mutedAt: iso(r.created_at) })), nextCursor };
   });
 
-  /** Mutes a user on a hashtag: their new posts and updates don't get it. Its moderators and admins. The user is told, once. */
+  /** Mutes a user on a hashtag: their new posts and updates don't get it. Its moderators, server moderators and admins. The user is told, once. */
   app.put('/tags/:tag/muted/:userId', async (req, reply) => {
     const { tag, userId } = TagUserParams.parse(req.params);
     const moderator = await asModerator(req, tag, Credentials.parse(req.body ?? {}));
@@ -465,7 +467,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   // A hashtag's moderation queue: every post under the hashtag that none of its moderators has decided on.
   // It is read from the feed (GET /feed?tags=<tag>&moderated=false); these two routes are the decisions.
 
-  /** Approves content under a hashtag (see approveTag), which takes it out of the hashtag's queue. Its moderators and admins. */
+  /** Approves content under a hashtag (see approveTag), which takes it out of the hashtag's queue. Its moderators, server moderators and admins. */
   app.put('/content/:contentId/tags/:tag', async (req, reply) => {
     const { contentId, tag } = ContentTagParams.parse(req.params);
     const { alreadyApproved } = await approveTag(deps, contentId, tag, (await asModerator(req, tag, Credentials.parse(req.body ?? {}))).id);
@@ -474,7 +476,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
 
   /**
    * Removes a hashtag from content (see removeTag), and with `mute`, mutes its publisher on it too.
-   * Its moderators and admins. The publisher is told of the removal, which may have left the post
+   * Its moderators, server moderators and admins. The publisher is told of the removal, which may have left the post
    * with no hashtag and so in no hashtag's feed, and of a mute it brought them.
    */
   app.delete('/content/:contentId/tags/:tag', async (req) => {
