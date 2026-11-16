@@ -10,3 +10,5 @@ coverage/
 *.tfstate.*
 *.tfvars
 !*.tfvars.example
+.DS_Store
+.cursor/

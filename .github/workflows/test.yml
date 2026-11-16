@@ -29,5 +29,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      # The conventions of src that the compiler doesn't check (scripts/check-conventions.mjs).
+      - run: npm run check
       # SQLite with the in-process store: the suite as `npm test` runs it with no TEST_*_URL set.
       - run: npm test
+      # What a deployment runs: the server compiled without its tests, and the CLI bundled.
+      - run: npm run build
