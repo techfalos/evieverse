@@ -1,87 +1,11 @@
 import { readFile, stat } from 'node:fs/promises';
 import { basename } from 'node:path';
-import { ApiError, apiClient, BUILD, CliError, serverUrl, VERSION, type Api } from './client.js';
-import { DEFAULT_PROFILE, listProfiles, readProfile, removeProfile, writeProfile, type Profile } from './profiles.js';
+import { ApiError, apiClient, BUILD, CliError, serverUrl, VERSION } from './client.js';
+import type { Args, Command, Context, Io, Role, WhoAmI } from './commands.types.js';
+import { DEFAULT_PROFILE, listProfiles, readProfile, removeProfile, writeProfile } from './profiles.js';
 import { installRelease, latestRelease } from './update.js';
 
-/** What the CLI reaches the world through, so tests can stand in for it. */
-export interface Io {
-  fetch: typeof fetch;
-  env: NodeJS.ProcessEnv;
-  /** A command's result, to stdout. */
-  out(text: string): void;
-  /** Errors and notices, to stderr. */
-  err(text: string): void;
-  /** Where profiles are kept: ~/.evieverse, or EVIEVERSE_HOME. */
-  home: string;
-  /** The CLI's own file, which an update replaces; null for a copy run from source. */
-  selfPath: string | null;
-  /** Asks for a secret without showing it. */
-  readSecret(prompt: string): Promise<string>;
-  /** Runs the CLI's file again with the same arguments, after an update replaced it; resolves with its exit code. */
-  rerun(argv: string[]): Promise<number>;
-}
-
-export interface Context {
-  io: Io;
-  /** The profile named by --profile or EVIEVERSE_PROFILE. */
-  profileName: string | undefined;
-  /** The profile to use (see pickProfile). */
-  profile(): Promise<{ name: string; profile: Profile }>;
-  /** Requests to that profile's server, with its key. */
-  api(): Promise<Api>;
-}
-
-/**
- * Who a command is for. The server decides, by the key, whether a request is allowed; this only sorts
- * the help, and marks there what the key in use may do. `moderator` is a hashtag's moderator, and
- * `serverModerator` the server's: one who works through its moderation queue and its report queue.
- */
-type Role = 'anyone' | 'moderator' | 'serverModerator' | 'admin';
-
-interface Args {
-  positionals: string[];
-  values: Record<string, string | boolean | undefined>;
-}
-
-interface Result {
-  /** What `--json` prints. */
-  data: unknown;
-  text: string;
-}
-
-export interface Command {
-  /** One or two words: "whoami", "admins grant". */
-  name: string;
-  /** The arguments it takes, in order... */
-  positionals?: string[];
-  /** ...and then one or more of these. */
-  rest?: string;
-  options?: Record<string, { type: 'string' | 'boolean' }>;
-  /** The options, as the usage line shows them. */
-  flags?: string;
-  role: Role;
-  summary: string;
-  run(ctx: Context, args: Args): Promise<Result>;
-}
-
-export interface WhoAmI {
-  userId: string;
-  username: string;
-  admin: boolean;
-  /** A server moderator. */
-  moderator: boolean;
-  /** The hashtags they moderate. */
-  moderates: string[];
-  /** Whether they take part in messages between users. */
-  messages: boolean;
-  /** Whether anyone can list whom they follow, and who follows them. */
-  showFollowing: boolean;
-  showFollowers: boolean;
-  /** Whether a moderator banned them: they can't post, comment, like or send messages. */
-  banned?: boolean;
-}
-
+/** The one request a command made with `endpoint` or `own` sends: its method, its path with any query, and its body if it has one. */
 interface Request {
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   path: string;
@@ -91,6 +15,7 @@ interface Request {
 /** A path with each value encoded as one segment. */
 const path = (parts: TemplateStringsArray, ...values: string[]) => parts.reduce((out, part, i) => out + encodeURIComponent(values[i - 1]!) + part);
 
+/** Hashtags as people read them: ["news", "mumbai"] -> "#news #mumbai". */
 const hashtags = (tags: string[]) => tags.map((t) => `#${t}`).join(' ');
 
 /** Rows in columns as wide as their longest cell. */
@@ -152,6 +77,7 @@ interface CommentRecord {
   status?: string;
 }
 
+/** A count with its noun, which is `one` for 1 and `many` for any other: "1 like", "0 likes". */
 const counted = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 /**
@@ -161,16 +87,6 @@ const counted = (n: number, one: string, many: string) => `${n} ${n === 1 ? one 
 const commentLine = ({ author, media, text, status }: CommentRecord): string =>
   author === null ? (status === 'deleted' ? '[deleted]' : '[waits for moderators]') : oneLine([media && `[${media.kind}]`, text].filter(Boolean).join(' '));
 
-/** A comment's row in a list of comments: its id (to reply to it, or to list its replies), who wrote it and when, its likes and replies, and what it says. */
-const commentRow = (c: CommentRecord): string[] => [
-  c.commentId,
-  c.author?.username ?? '',
-  c.createdAt,
-  counted(c.likes, 'like', 'likes'),
-  counted(c.replies, 'reply', 'replies'),
-  `${commentLine(c)}${c.editedAt ? ' (edited)' : ''}`,
-];
-
 /** The largest file `comments add --file` sends: it goes inside the request, which a server takes 32 MB of, a third of that being what base64 adds. */
 const MAX_INLINE_FILE_BYTES = 20 * 1024 * 1024;
 
@@ -178,8 +94,7 @@ const MAX_INLINE_FILE_BYTES = 20 * 1024 * 1024;
 async function inlineFile(file: string): Promise<{ content: string; contentEncoding: 'base64'; filename: string }> {
   let bytes: Buffer;
   try {
-    const { size } = await stat(file);
-    if (size > MAX_INLINE_FILE_BYTES) throw new CliError(`${file} is larger than the ${MAX_INLINE_FILE_BYTES / 1024 / 1024} MB this command can send`, 2);
+    if ((await stat(file)).size > MAX_INLINE_FILE_BYTES) throw new CliError(`${file} is larger than the ${MAX_INLINE_FILE_BYTES / 1024 / 1024} MB this command can send`, 2);
     bytes = await readFile(file);
   } catch (err) {
     if (err instanceof CliError) throw err;
@@ -203,7 +118,9 @@ const queueRow = (item: QueueItem, facts: string[]): string[] =>
 
 /** The option that makes a command about a post one about a comment on it. */
 const COMMENT_OPTION = { comment: { type: 'string' } } as const;
+/** `COMMENT_OPTION`, as the usage line of a command that takes it shows it. */
 const COMMENT_FLAG = '[--comment <commentId>]';
+/** The id of the comment `--comment` names; undefined for a command about the post itself. */
 const commentOf = ({ values }: Args) => (typeof values.comment === 'string' ? values.comment : undefined);
 
 /** Where a queue's request about a post goes, or with --comment, the one about a comment on it. */
@@ -214,13 +131,16 @@ function queuePath(queue: 'queue' | 'reports', args: Args, decision?: string): s
   return decision ? `${about}/${decision}` : about;
 }
 
-/** The options of a command that lists a page at a time, as the query of its request. */
+/** The options of a command that lists a page at a time. */
 const PAGE_OPTIONS = { limit: { type: 'string' }, cursor: { type: 'string' } } as const;
+/** `PAGE_OPTIONS`, as the usage line of a command that takes them shows them. */
 const PAGE_FLAGS = '[--limit <n>] [--cursor <cursor>]';
+/** The page options a command was given, as the query of its request, after what `query` already asks; "" if neither asks anything. */
 function pageQuery({ values }: Args, query = new URLSearchParams()): string {
   for (const name of ['limit', 'cursor']) if (typeof values[name] === 'string') query.set(name, values[name]);
   return query.size ? `?${query}` : '';
 }
+/** The line that ends a list which has another page, with the cursor that asks for it; "" after the last page. */
 const more = (nextCursor: string | null) => (nextCursor ? `\nThere are more: --cursor ${nextCursor}` : '');
 
 /** What deleting an account answers: gone, or on its way out while the compactor deletes its posts. */
@@ -235,6 +155,7 @@ function confirmed({ values }: Args, what: string): void {
   if (values.yes !== true) throw new CliError(`${what} can't be undone: run the command again with --yes to go ahead`, 2);
 }
 
+/** What the CLI says of an account's deletion: that the account is gone, or that it goes once the last of its posts is removed. */
 const deletedText = (d: AccountDeleted) =>
   d.status === 'deleted' ? `Deleted account ${d.userId}.` : `Deleted account ${d.userId}: its posts are being removed, and the account goes with the last of them.`;
 
@@ -255,14 +176,6 @@ interface ModificationDisclosure {
   sourceUrl: string | null;
 }
 
-const disclosed = ({ modified, release, sourceUrl }: ModificationDisclosure): string =>
-  [
-    modified
-      ? `Modification disclosure: this server runs a modified version of Evieverse, based on release ${release}.`
-      : `Modification disclosure: this server runs Evieverse ${release}, unmodified.`,
-    ...(sourceUrl ? [`Its source code: ${sourceUrl}`] : []),
-  ].join('\n');
-
 /** The body of a request that adds or changes a rule: the text it was given, and the place, each only if named. */
 function ruleBody({ values }: Args, text?: string): { text?: string; position?: number } {
   const { position } = values;
@@ -270,6 +183,7 @@ function ruleBody({ values }: Args, text?: string): { text?: string; position?: 
   return { ...(text !== undefined && { text }), ...(typeof position === 'string' && { position: Number(position) }) };
 }
 
+/** How many reports of a post or a comment there are, in words: "1 report", "3 reports". */
 const reportCount = (reports: number) => `${reports} ${reports === 1 ? 'report' : 'reports'}`;
 
 /** A command that is one request to the server, with the profile's key. */
@@ -311,10 +225,14 @@ interface InboxItem {
 
 /** An inbox's row: what it is, when it came, whether it was read, who sent it (to answer or block them), and what it says, on one line. */
 function inboxRow(m: InboxItem): string[] {
-  const sender = m.kind !== 'message' ? 'the server' : m.from ? `${m.from.username} (${m.from.userId})` : '(an account that is gone)';
-  // A notice about a comment (comment_accepted, comment_deleted, ...) quotes the comment.
-  const said = m.excerpt ? `${m.text} The ${m.kind.startsWith('comment_') ? 'comment' : 'post'}: "${m.excerpt}"` : m.text;
-  return [m.messageId, m.sentAt, m.readAt ? 'read' : 'new', sender, said.replace(/\s+/g, ' ').trim()];
+  return [
+    m.messageId,
+    m.sentAt,
+    m.readAt ? 'read' : 'new',
+    m.kind !== 'message' ? 'the server' : m.from ? `${m.from.username} (${m.from.userId})` : '(an account that is gone)',
+    // A notice about a comment (comment_accepted, comment_deleted, ...) quotes the comment.
+    (m.excerpt ? `${m.text} The ${m.kind.startsWith('comment_') ? 'comment' : 'post'}: "${m.excerpt}"` : m.text).replace(/\s+/g, ' ').trim(),
+  ];
 }
 
 /** Turns messages between users on or off for the profile's account. */
@@ -337,6 +255,10 @@ function wordList({ values }: Args): string {
   return typeof tag === 'string' ? path`/tags/${tag}/blocked-words` : '/moderation/blocked-words';
 }
 
+/**
+ * A `words` command: lists a list of blocked words (see `wordList`), adds to it or removes from it,
+ * and prints the list as the server answers it. `add` and `remove` take the words as arguments.
+ */
 const words = (verb: 'list' | 'add' | 'remove', method: Request['method'], summary: string) =>
   endpoint<{ tag?: string; words: string[] }>({
     name: `words ${verb}`,
@@ -427,38 +349,10 @@ const NOT_GIVEN: Record<string, string> = {
   blocked_word: 'the post has a word it blocks',
 };
 
-const repost: Command = {
-  name: 'repost',
-  positionals: ['post'],
-  options: { tags: { type: 'string' } },
-  flags: '--tags <tags>',
-  role: 'anyone',
-  summary:
-    "Reposts a post: gives it hashtags it doesn't have, under which it shows as a new post, as it does to those who follow you. Name the post by its id, or a post on another server by its address there (https://other.example/content/<id>), which is read from that server and reposted here as a link to it. Quote the hashtags: --tags \"news, mumbai\".",
-  async run(ctx, { positionals: [post], values }) {
-    const { tags } = values;
-    if (typeof tags !== 'string' || !tags.trim()) throw new CliError('name the hashtags the repost gives the post: --tags "news, mumbai"', 2);
-    const api = await ctx.api();
-    const source = /^https?:\/\//i.test(post!) ? await repostSource(ctx.io, api.server, post!) : { contentId: post! };
-    const d = await api.request<Reposted>('POST', '/repost', { ...source, tags }).catch((err: unknown) => {
-      // A repost is a post as far as challenges go, and a challenge's image takes a client to show.
-      if (err instanceof ApiError && err.status === 428) {
-        throw new CliError(`${err.message}. The CLI can't show a challenge: repost again later, or with a client that shows its image`);
-      }
-      throw err;
-    });
-    const what = d.origin ? d.origin.url : d.contentId;
-    const notGiven = (d.removedTags ?? []).map((r) => `\nNot #${r.tag}: ${NOT_GIVEN[r.reason] ?? r.reason}.`).join('');
-    const done =
-      d.status === 'pending_review'
-        ? `Your repost of ${what} waits for the server's moderators: ${d.contentId}`
-        : d.origin
-          ? `Reposted ${what} under ${hashtags(d.tags)}: it is ${d.contentId} here.`
-          : `Reposted ${what} under ${hashtags(d.tags)}.`;
-    return { data: d, text: `${done}${notGiven}` };
-  },
-};
-
+/**
+ * Every command the CLI has. The arguments name one by its `name` (see `findCommand` in main.ts),
+ * and `helpText` lists them by `role`, in the order they have here.
+ */
 export const COMMANDS: Command[] = [
   {
     name: 'login',
@@ -493,9 +387,8 @@ export const COMMANDS: Command[] = [
     role: 'anyone',
     summary: 'Lists the profiles on this machine.',
     async run({ io }) {
-      const names = await listProfiles(io.home);
       const found = await Promise.all(
-        names.map(async (name) => {
+        (await listProfiles(io.home)).map(async (name) => {
           const p = await readProfile(io.home, name).catch(() => null);
           return { profile: name, server: p?.server ?? null, userId: p?.userId ?? null, username: p?.username ?? null };
         }),
@@ -579,7 +472,40 @@ export const COMMANDS: Command[] = [
       };
     },
   },
-  repost,
+  {
+    name: 'repost',
+    positionals: ['post'],
+    options: { tags: { type: 'string' } },
+    flags: '--tags <tags>',
+    role: 'anyone',
+    summary:
+      "Reposts a post: gives it hashtags it doesn't have, under which it shows as a new post, as it does to those who follow you. Name the post by its id, or a post on another server by its address there (https://other.example/content/<id>), which is read from that server and reposted here as a link to it. Quote the hashtags: --tags \"news, mumbai\".",
+    async run(ctx, { positionals: [post], values }) {
+      const { tags } = values;
+      if (typeof tags !== 'string' || !tags.trim()) throw new CliError('name the hashtags the repost gives the post: --tags "news, mumbai"', 2);
+      const api = await ctx.api();
+      const d = await api
+        .request<Reposted>('POST', '/repost', { ...(/^https?:\/\//i.test(post!) ? await repostSource(ctx.io, api.server, post!) : { contentId: post! }), tags })
+        .catch((err: unknown) => {
+          // A repost is a post as far as challenges go, and a challenge's image takes a client to show.
+          if (err instanceof ApiError && err.status === 428) {
+            throw new CliError(`${err.message}. The CLI can't show a challenge: repost again later, or with a client that shows its image`);
+          }
+          throw err;
+        });
+      const what = d.origin ? d.origin.url : d.contentId;
+      return {
+        data: d,
+        text: `${
+          d.status === 'pending_review'
+            ? `Your repost of ${what} waits for the server's moderators: ${d.contentId}`
+            : d.origin
+              ? `Reposted ${what} under ${hashtags(d.tags)}: it is ${d.contentId} here.`
+              : `Reposted ${what} under ${hashtags(d.tags)}.`
+        }${(d.removedTags ?? []).map((r) => `\nNot #${r.tag}: ${NOT_GIVEN[r.reason] ?? r.reason}.`).join('')}`,
+      };
+    },
+  },
   endpoint<{ contentId: string; requestedAt: string }>({
     name: 'content delete',
     positionals: ['contentId'],
@@ -621,12 +547,29 @@ export const COMMANDS: Command[] = [
     request: (args) => {
       const parentId = args.values['replies-to'];
       const contentId = args.positionals[0]!;
-      const list = typeof parentId === 'string' ? path`/content/${contentId}/comments/${parentId}/replies` : path`/content/${contentId}/comments`;
-      return { method: 'GET', path: `${list}${pageQuery(args, new URLSearchParams(args.values.newest === true ? { order: 'newest' } : {}))}` };
+      return {
+        method: 'GET',
+        path: `${
+          typeof parentId === 'string' ? path`/content/${contentId}/comments/${parentId}/replies` : path`/content/${contentId}/comments`
+        }${pageQuery(args, new URLSearchParams(args.values.newest === true ? { order: 'newest' } : {}))}`,
+      };
     },
     text: (d) =>
-      (d.comments.length ? table(d.comments.map(commentRow)) : d.commentId === undefined ? `${d.contentId} has no comments.` : `Comment ${d.commentId} has no replies.`) +
-      more(d.nextCursor),
+      (d.comments.length
+        ? table(
+            // A comment's row in a list of comments: its id (to reply to it, or to list its replies), who wrote it and when, its likes and replies, and what it says.
+            d.comments.map((c: CommentRecord): string[] => [
+              c.commentId,
+              c.author?.username ?? '',
+              c.createdAt,
+              counted(c.likes, 'like', 'likes'),
+              counted(c.replies, 'reply', 'replies'),
+              `${commentLine(c)}${c.editedAt ? ' (edited)' : ''}`,
+            ]),
+          )
+        : d.commentId === undefined
+          ? `${d.contentId} has no comments.`
+          : `Comment ${d.commentId} has no replies.`) + more(d.nextCursor),
   }),
   {
     name: 'comments add',
@@ -643,10 +586,15 @@ export const COMMANDS: Command[] = [
         ...(typeof values.file === 'string' && (await inlineFile(values.file))),
       };
       const d = await (await ctx.api()).request<CommentRecord>('POST', path`/content/${contentId!}/comments`, body);
-      const what = d.parentId === null ? `comment on ${d.contentId}` : `reply to comment ${d.parentId}`;
-      const done = d.parentId === null ? `Commented on ${d.contentId}` : `Replied to comment ${d.parentId}`;
-      const withFile = d.media ? ` with ${d.media.kind === 'image' ? 'an image' : 'a video'}` : '';
-      return { data: d, text: d.status === 'pending_review' ? `Your ${what} waits for the server's moderators: ${d.commentId}` : `${done}${withFile}: ${d.commentId}` };
+      return {
+        data: d,
+        text:
+          d.status === 'pending_review'
+            ? `Your ${d.parentId === null ? `comment on ${d.contentId}` : `reply to comment ${d.parentId}`} waits for the server's moderators: ${d.commentId}`
+            : `${d.parentId === null ? `Commented on ${d.contentId}` : `Replied to comment ${d.parentId}`}${
+                d.media ? ` with ${d.media.kind === 'image' ? 'an image' : 'a video'}` : ''
+              }: ${d.commentId}`,
+      };
     },
   },
   endpoint<{ contentId: string; commentId: string; unchanged?: boolean; status?: string }>({
@@ -699,7 +647,12 @@ export const COMMANDS: Command[] = [
         '',
         `Support: ${d.supportEmail}`,
         '',
-        disclosed(d.modificationDisclosure),
+        [
+          d.modificationDisclosure.modified
+            ? `Modification disclosure: this server runs a modified version of Evieverse, based on release ${d.modificationDisclosure.release}.`
+            : `Modification disclosure: this server runs Evieverse ${d.modificationDisclosure.release}, unmodified.`,
+          ...(d.modificationDisclosure.sourceUrl ? [`Its source code: ${d.modificationDisclosure.sourceUrl}`] : []),
+        ].join('\n'),
       ].join('\n'),
   }),
   own<{ unread: number; inbox: InboxItem[]; nextCursor: string | null }>({
@@ -854,14 +807,15 @@ export const COMMANDS: Command[] = [
     summary:
       'Registers a user, and prints their userId and their API key, which is shown this once. With --language, the language the server answers them in, instead of yours.',
     async run(ctx, { positionals: [username], values }) {
-      const body = { username, ...(typeof values.language === 'string' && { language: values.language }) };
-      const user = await (await ctx.api()).request<{ userId: string; username: string; apiKey: string }>('POST', '/register', body).catch((err: unknown) => {
-        // The server asks anyone but an admin to solve a challenge first, whose image takes a client to show.
-        if (err instanceof ApiError && err.status === 428) {
-          throw new CliError('only an admin registers a user with the CLI: the server asks anyone else to solve a challenge, which takes a client that shows its image');
-        }
-        throw err;
-      });
+      const user = await (await ctx.api())
+        .request<{ userId: string; username: string; apiKey: string }>('POST', '/register', { username, ...(typeof values.language === 'string' && { language: values.language }) })
+        .catch((err: unknown) => {
+          // The server asks anyone but an admin to solve a challenge first, whose image takes a client to show.
+          if (err instanceof ApiError && err.status === 428) {
+            throw new CliError('only an admin registers a user with the CLI: the server asks anyone else to solve a challenge, which takes a client that shows its image');
+          }
+          throw err;
+        });
       return { data: user, text: `Registered ${user.username} (${user.userId}).\nTheir API key, shown this once: ${user.apiKey}` };
     },
   },
@@ -1109,6 +1063,10 @@ export const COMMANDS: Command[] = [
 export const usage = (c: Command) =>
   [c.name, ...(c.positionals ?? []).map((p) => `<${p}>`), c.flags, c.rest && `<${c.rest}>...`].filter(Boolean).join(' ');
 
+/**
+ * The sections of `help`, in the order it shows them: the role whose commands each one lists, and
+ * its title, which names the hashtags `me` moderates if the server said who the key's user is.
+ */
 const SECTIONS: { role: Role; title: (me?: WhoAmI) => string }[] = [
   { role: 'anyone', title: () => 'For everyone' },
   {
@@ -1119,9 +1077,6 @@ const SECTIONS: { role: Role; title: (me?: WhoAmI) => string }[] = [
   { role: 'admin', title: () => 'For admins' },
 ];
 
-/** How long `help` waits for the server to say what the key may do, before it shows the commands unmarked. */
-const HELP_TIMEOUT_MS = 5000;
-
 /**
  * Every command, by who it is for. With a profile whose server answers, the ones its key may use are
  * marked, from the roles /whoami gives; the server still decides each request.
@@ -1131,13 +1086,12 @@ export async function helpText(ctx: Context): Promise<string> {
   try {
     const { name } = await ctx.profile();
     const api = await ctx.api();
-    who = { name, server: api.server, me: await api.request<WhoAmI>('GET', '/whoami', undefined, HELP_TIMEOUT_MS) };
+    // `help` waits 5 seconds for the server to say what the key may do, before it shows the commands unmarked.
+    who = { name, server: api.server, me: await api.request<WhoAmI>('GET', '/whoami', undefined, 5000) };
   } catch {
     // No profile, or no answer: the commands are shown all the same.
   }
   const me = who?.me;
-  const allowed = (role: Role) =>
-    role === 'anyone' || me!.admin || (role === 'moderator' && me!.moderates.length > 0) || (role === 'serverModerator' && me!.moderator);
   const width = Math.max(...COMMANDS.map((c) => usage(c).length));
 
   const lines = [
@@ -1151,7 +1105,11 @@ export async function helpText(ctx: Context): Promise<string> {
   for (const { role, title } of SECTIONS) {
     lines.push(title(me));
     for (const c of COMMANDS.filter((command) => command.role === role)) {
-      lines.push(`  ${me ? (allowed(role) ? '+ ' : '- ') : ''}${usage(c).padEnd(width)}  ${c.summary}`);
+      lines.push(
+        `  ${
+          me ? (role === 'anyone' || me.admin || (role === 'moderator' && me.moderates.length > 0) || (role === 'serverModerator' && me.moderator) ? '+ ' : '- ') : ''
+        }${usage(c).padEnd(width)}  ${c.summary}`,
+      );
     }
     lines.push('');
   }

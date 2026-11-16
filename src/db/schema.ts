@@ -5,6 +5,10 @@ import type { Generated, Selectable } from 'kysely';
  * The schema is defined by the portable SQL in ./migrations; keep these types in sync with it.
  */
 
+/**
+ * The server's users, one row per account: publishers and readers, each with their roles, their
+ * settings, and whether they are banned or deleted. Every other table names a user by `id` alone.
+ */
 export interface UsersTable {
   /** UUID; the only user identifier used in relations and lookups. */
   id: string;
@@ -48,6 +52,12 @@ export interface UsersTable {
   deleted_at: number | null;
 }
 
+/**
+ * The API keys users were given (src/auth/apiKey.ts). A key is never stored: its row holds the
+ * SHA-256 (hex) of it, which a request's key is looked up by. A key works until it is revoked,
+ * which replacing it or deleting the account does. The row is kept: revoked, it is what says the
+ * key was replaced (see ensureAdmin).
+ */
 export interface ApiKeysTable {
   id: string;
   user_id: string;
@@ -90,6 +100,12 @@ export interface RepostsTable {
   created_at: number;
 }
 
+/**
+ * The tags posts were published or reposted under: one row per hashtag, and per user's own index.
+ * Which content carries a tag isn't here: that is in the content's meta file, and in the tag's
+ * index. The rows are what /tags lists hashtags from, and how a compactor run asked to rebuild
+ * every index (`--all`) finds them all.
+ */
 export interface TagsTable {
   /** A single hashtag word, e.g. "mumbai", or "@<userId>": a publisher's own index. */
   name: string;
@@ -111,6 +127,11 @@ export interface TagPairsTable {
   updated_at: number;
 }
 
+/**
+ * A user's like of a post: one row per user and post, as a like is given once and not taken back.
+ * `content.like_count` is the running total, and `created_at` is how the compactor finds the
+ * content liked since its last run. Likes of comments aren't here: they are in the content store.
+ */
 export interface LikesTable {
   user_id: string;
   content_id: string;
@@ -316,6 +337,7 @@ export interface CompactorLeaseTable {
   expires_at: number;
 }
 
+/** The database's tables by name, each with the type of its rows: what Kysely checks every query against (`Db`). */
 export interface Database {
   users: UsersTable;
   api_keys: ApiKeysTable;

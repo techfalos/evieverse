@@ -1,13 +1,21 @@
-import type { FeedAd } from '../monetization.js';
+import type { FeedAd } from '../monetization.types.js';
 import type { Publisher, PublisherStore, Summary, SummaryStore } from '../storage/index.js';
-import { toFeedRecord, type FeedRecord } from '../tagfeed/layout.js';
-import type { Candidate } from '../tagfeed/reader.js';
+import { toFeedRecord } from '../tagfeed/layout.js';
+import type { FeedRecord } from '../tagfeed/layout.types.js';
+import type { Candidate } from '../tagfeed/reader.types.js';
 import { iso } from '../time.js';
-import type { FollowingPick } from './following.js';
-import type { FeedPlan } from './plan.js';
+import type { FollowingPick } from './following.types.js';
+import type { FeedPlan } from './plan.types.js';
 
+/** What a picked record's summary is kept under in `FeedBodies`: its content id, so the entries of one piece of content share a summary. */
 const refKey = (c: { contentId: string }) => c.contentId;
 
+/**
+ * What a page's picked records are shown with: their summaries, by content id, and the credits of
+ * their publishers (and of those who reposted them, in a following feed), by user id. `loadBodies`
+ * makes it, and `renderFeed` and `followingRecords` read it. Content whose summary wasn't found
+ * isn't in `summaries`.
+ */
 interface FeedBodies {
   summaries: Map<string, Summary>;
   publishers: Map<string, Publisher>;
@@ -28,9 +36,16 @@ export async function loadBodies(picked: (Candidate & { by?: string })[], summar
   refs.forEach((c, i) => {
     if (found[i]) byRef.set(refKey(c), found[i]!);
   });
-  // And the credits of those who reposted them, where a following feed says who did.
-  const reposters = picked.flatMap((c) => (c.by !== undefined && byRef.has(refKey(c)) ? [c.by] : []));
-  return { summaries: byRef, publishers: await publishers.getMany([...new Set([...[...byRef.values()].map((s) => s.userId), ...reposters])]) };
+  return {
+    summaries: byRef,
+    publishers: await publishers.getMany([
+      ...new Set([
+        ...[...byRef.values()].map((s) => s.userId),
+        // And the credits of those who reposted them, where a following feed says who did.
+        ...picked.flatMap((c) => (c.by !== undefined && byRef.has(refKey(c)) ? [c.by] : [])),
+      ]),
+    ]),
+  };
 }
 
 /**
@@ -75,15 +90,16 @@ export function* renderFeed(
     }),
   );
   const count = records.reduce((n, list) => n + list.length, 0);
-  const head = {
-    window: { from: iso(plan.window.from), to: iso(plan.window.to) },
-    count,
-    truncated: plan.truncated,
-    nextCursor,
-    ...(related && { related }),
-    ...(ads && { ads: ads(count) }),
-  };
-  yield Buffer.from(`${JSON.stringify(head).slice(0, -1)},"tags":{`);
+  yield Buffer.from(
+    `${JSON.stringify({
+      window: { from: iso(plan.window.from), to: iso(plan.window.to) },
+      count,
+      truncated: plan.truncated,
+      nextCursor,
+      ...(related && { related }),
+      ...(ads && { ads: ads(count) }),
+    }).slice(0, -1)},"tags":{`,
+  );
 
   let firstTag = true;
   for (let t = 0; t < tags.length; t++) {
@@ -102,7 +118,14 @@ export function followingRecords(picks: FollowingPick[], bodies: FeedBodies): Fe
   return picks.flatMap((c) => {
     const s = bodies.summaries.get(refKey(c));
     if (!s) return [];
-    const repost = c.repost ? { at: c.createdAt, by: c.by === undefined ? undefined : bodies.publishers.get(c.by) } : undefined;
-    return [toFeedRecord(s, c.likes, bodies.publishers.get(s.userId)!, undefined, repost)];
+    return [
+      toFeedRecord(
+        s,
+        c.likes,
+        bodies.publishers.get(s.userId)!,
+        undefined,
+        c.repost ? { at: c.createdAt, by: c.by === undefined ? undefined : bodies.publishers.get(c.by) } : undefined,
+      ),
+    ];
   });
 }

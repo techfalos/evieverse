@@ -1,39 +1,9 @@
 import type { HotStore } from '../storage/index.js';
 import { Lru, TtlCache } from '../util.js';
-import { dayKey, manifestKey, unpackDay, type DayRef, type Head, type IndexEntry, type Manifest } from './layout.js';
+import { dayKey, manifestKey, unpackDay } from './layout.js';
+import type { DayRef, Head, IndexEntry, Manifest } from './layout.types.js';
 import { readHead, readJson } from './read.js';
-
-/** One post available to the feed: an entry of a day index. Never mutated once built. */
-export interface Candidate {
-  contentId: string;
-  /** When the content was placed in the index: its creation, or the repost that put it there (see IndexEntry). */
-  createdAt: number;
-  /** For a repost's entry, the likes since the repost. */
-  likes: number;
-  aiGenerated: boolean;
-  /** Approved by a moderator of the hashtag whose index this is: flagged in its day index. */
-  moderated: boolean;
-  /** A repost put the content in this index, at `createdAt`. */
-  repost: boolean;
-}
-
-const toCandidate = ({ contentId, createdAt, likes, aiGenerated, moderated, repost }: IndexEntry): Candidate => ({ contentId, createdAt, likes, aiGenerated, moderated, repost });
-
-export interface TagView {
-  tag: string;
-  /** Every day index's entries in index order (newest day first). */
-  candidates: Candidate[];
-}
-
-/** A tag's head and manifest, read; `TagFeedReader.loadDays` loads the day indexes it needs. */
-export interface OpenTag {
-  tag: string;
-  /** Every UTC day's index the manifest names, newest first. */
-  days: DayRef[];
-}
-
-/** Day indexes kept per cached tag (a tag holds up to one per retained day). */
-const DAYS_PER_TAG = 100;
+import type { Candidate, OpenTag, TagView } from './reader.types.js';
 
 /**
  * Read side of the feed index. Uses only Redis: no database access. Everything it reads but the
@@ -54,7 +24,7 @@ export class TagFeedReader {
   ) {
     this.heads = new TtlCache(opts.headCacheMs, now);
     this.manifests = new Lru(opts.indexCacheSize);
-    this.days = new Lru(opts.indexCacheSize * DAYS_PER_TAG);
+    this.days = new Lru(opts.indexCacheSize * 100); // 100 day indexes kept per cached tag (a tag holds up to one per retained day)
   }
 
   /** A tag that was never compacted reads as empty. */
@@ -84,7 +54,13 @@ export class TagFeedReader {
       keys.map((key, i) => {
         if (cached[i]) return cached[i]!;
         const j = next++;
-        const p = loaded.then((bufs) => (bufs[j] ? unpackDay(bufs[j]!).map(toCandidate) : null));
+        const p = loaded.then((bufs) =>
+          bufs[j]
+            ? unpackDay(bufs[j]!).map(
+                ({ contentId, createdAt, likes, aiGenerated, moderated, repost }: IndexEntry): Candidate => ({ contentId, createdAt, likes, aiGenerated, moderated, repost }),
+              )
+            : null,
+        );
         void p.then((v) => v ?? this.days.delete(key), () => this.days.delete(key));
         this.days.set(key, p);
         return p;

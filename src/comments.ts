@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
-import type { AppDeps } from './deps.js';
-import type { Comment, CommentMedia, Publisher } from './storage/index.js';
+import type { CommentCounts, CommentRecord, CommentRemoval } from './comments.types.js';
+import type { AppDeps } from './deps.types.js';
+import type { Comment, Publisher } from './storage/index.js';
 import { iso } from './time.js';
 
 /**
@@ -26,9 +27,6 @@ import { iso } from './time.js';
 /** The longest a comment can be. */
 export const MAX_COMMENT_CHARS = 2000;
 
-/** The most `seq` holds: the 12 bits a UUIDv7 has between its time and its random part. */
-const MAX_SEQ = 0xfff;
-
 /** The time and sequence of the last id this process made, so its ids only go up. */
 let last = { ms: 0, seq: 0 };
 
@@ -44,7 +42,8 @@ let last = { ms: 0, seq: 0 };
 export function newCommentId(now: number): string {
   let ms = Math.max(now, last.ms);
   let seq = ms === last.ms ? last.seq + 1 : 0;
-  if (seq > MAX_SEQ) {
+  // The most `seq` holds: the 12 bits a UUIDv7 has between its time and its random part.
+  if (seq > 0xfff) {
     ms += 1;
     seq = 0;
   }
@@ -59,48 +58,15 @@ export function newCommentId(now: number): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-/**
- * A comment as responses give it: its author's credit first, as a post's publisher's is.
- *
- * A placeholder (see above) is given as a comment too, in the place its comment had:
- * with `status`, no author, no text, no image or video and no likes, and with the replies it has.
- */
-export interface CommentRecord {
-  commentId: string;
-  /** The post it is on. */
-  contentId: string;
-  /** The comment it replies to; null for a comment on the post itself. */
-  parentId: string | null;
-  /** Who wrote it; null on a placeholder. */
-  author: Publisher | null;
-  /** What it says; empty for one that is only its image or video. */
-  text: string;
-  /** The image or video it came with, and where its bytes are read; null for one that is only text. */
-  media: (CommentMedia & { url: string }) | null;
-  /** How many users liked it. */
-  likes: number;
-  /** How many comments reply to it: to it, not to its replies. */
-  replies: number;
-  createdAt: string;
-  /** When its author last changed its text; null for one that was never edited. */
-  editedAt: string | null;
-  /**
-   * Absent on a published comment. On a placeholder, why the comment isn't there: `deleted`, or
-   * `pending_review` for one an edit took back to the moderation queue. Also `pending_review` on
-   * a comment that waits there, as its author and the queue's moderators read it: whole.
-   */
-  status?: 'deleted' | 'pending_review';
-}
-
-/** What a comment's record says that the comment itself doesn't hold; a comment just sent has none of either. */
-export interface CommentCounts {
-  likes: number;
-  replies: number;
-}
-
 /** Where the bytes of a comment's image or video are read, as a post's are at /content/:contentId/raw. */
 export const commentMediaUrl = (publicBaseUrl: string, postId: string, commentId: string) => `${publicBaseUrl}/content/${postId}/comments/${commentId}/raw`;
 
+/**
+ * A comment as responses give it: with `author` as its credit, and the link to its image or video
+ * built from `publicBaseUrl`. A placeholder is given without author, text, media or likes, and
+ * with the `status` that says why the comment isn't there. Without counts, it has no likes and no
+ * replies, as a comment just sent has.
+ */
 export function toCommentRecord(comment: Comment, author: Publisher, publicBaseUrl: string, { likes, replies }: CommentCounts = { likes: 0, replies: 0 }): CommentRecord {
   const place = { commentId: comment.commentId, contentId: comment.contentId, parentId: comment.parentId ?? null };
   const createdAt = iso(comment.createdAt);
@@ -179,22 +145,10 @@ type RemovalDeps = Pick<AppDeps, 'db' | 'comments'>;
  */
 export async function hasReplies({ db, comments }: RemovalDeps, postId: string, commentId: string): Promise<boolean> {
   if ((await comments.count(postId, commentId)) > 0) return true;
-  const waiting = await db.selectFrom('comment_queue').select('comment_id').where('content_id', '=', postId).where('comment_id', '!=', commentId).execute();
-  for (const { comment_id: id } of waiting) {
+  for (const { comment_id: id } of await db.selectFrom('comment_queue').select('comment_id').where('content_id', '=', postId).where('comment_id', '!=', commentId).execute()) {
     if ((await comments.getHeld(postId, id))?.parentId === commentId) return true;
   }
   return false;
-}
-
-/**
- * The removal of one comment, in the two steps a caller may have work to do between (see
- * removeComment, which is both).
- */
-export interface CommentRemoval {
-  /** Removes the comment from the store, leaving a placeholder if something replies to it. It touches no database. */
-  remove(): Promise<void>;
-  /** What follows: see commentRemoval. Not to be called inside a transaction. */
-  finish(): Promise<void>;
 }
 
 /**

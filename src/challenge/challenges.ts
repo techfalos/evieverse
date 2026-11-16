@@ -2,10 +2,12 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { z } from 'zod';
 import type { Config } from '../config.js';
 import { challengeRequired, notFound, tooManyRequests } from '../http/errors.js';
-import { msg, type Message, type MessageKey } from '../language.js';
+import { msg, type MessageKey } from '../language.js';
+import type { Message } from '../language.types.js';
 import type { HotStore } from '../storage/index.js';
 import { iso } from '../time.js';
 import { renderSpoken, shippedVoices, type Voices } from './audio.js';
+import type { Challenge, ChallengeSolution } from './challenges.types.js';
 import { challengeText, renderChallenge } from './image.js';
 
 /** Fields of a request that answers a challenge; form fields arrive as strings. */
@@ -14,27 +16,6 @@ export const ChallengeFields = {
   challengeAnswer: z.string().max(64).optional(),
   challengeNonce: z.union([z.string().max(64), z.number().int().min(0)]).transform(String).optional(),
 };
-export interface ChallengeSolution {
-  challengeId?: string;
-  challengeAnswer?: string;
-  challengeNonce?: string;
-}
-
-/** What a 428 response carries. */
-export interface Challenge {
-  id: string;
-  /** A PNG of the characters that are the answer. */
-  image: string;
-  /** Where the same characters are read out, for whoever can't read the image: a WAV, for as long as the challenge can be answered. */
-  audio: string;
-  expiresAt: string;
-  expiresInSeconds: number;
-  /** This is challenge `step` of the `steps` the request needs, solved one after another. */
-  step: number;
-  steps: number;
-  /** The nonce is any string that makes the SHA-256 of `prefix + nonce` start with `bits` zero bits. */
-  proofOfWork: { algorithm: 'SHA-256'; prefix: string; bits: number };
-}
 
 /** Where a challenge stands in the run a request needs; for a post or a comment, `streak` is what set `steps`. */
 interface Step {
@@ -43,6 +24,10 @@ interface Step {
   streak?: number;
 }
 
+/**
+ * A challenge as the hot store keeps it until it is answered: `issue` writes it, `audio` reads it,
+ * and `check` takes it to compare an answer with.
+ */
 interface Issued extends Step {
   /** 'register', 'post:<userId>' or 'comment:<userId>'. */
   scope: string;
@@ -56,8 +41,10 @@ interface Issued extends Step {
   seed: string;
 }
 
+/** A challenge as it was issued (see Issued), as JSON. Kept until an answer takes it, or a minute past its expiry. */
 export const challengeKey = (id: string) => `chal:${id}`;
 
+/** How many zero bits `hash` starts with, which is what a proof of work is measured by: all of its bits, if every byte is zero. */
 export function leadingZeroBits(hash: Buffer): number {
   let bits = 0;
   for (const byte of hash) {
@@ -92,14 +79,7 @@ const WORDS = {
   comment: { atOnce: 'comment.too_many_at_once', overtaken: 'challenge.comment_overtaken', toSend: 'challenge.to_comment', toSendNew: 'challenge.to_comment_new' },
 } as const satisfies Record<Sent, Record<string, MessageKey>>;
 
-/**
- * How many challenges a post or a comment needs after `streak` in a row with challenges: 1, 1, then
- * 2 for as long as the run goes on. Nobody is asked to solve more than two one after another.
- */
-const runSteps = (streak: number) => (streak < 2 ? 1 : 2);
-
-const normalizeAnswer = (s: string) => s.toUpperCase().replace(/[\s-]/g, '');
-
+/** A minute, in milliseconds: what the limits on posts and on comments count over, and how long a run of challenged comments lasts. */
 const MINUTE = 60_000;
 
 /** When a user's posts in the last minute were: epoch ms separated by spaces, oldest first. Kept a minute. */
@@ -136,33 +116,14 @@ interface Cell<T> {
   write(value: T): string | null;
 }
 
-const runCell = (sent: Sent, userId: string, ttlMs: number): Cell<Run | null> => ({
-  key: sent === 'post' ? postRunKey(userId) : commentRunKey(userId),
-  ttlMs,
-  sent,
-  read(stored) {
-    if (!stored) return null;
-    const [last, streak] = stored.split(' ').map(Number);
-    return { last: last!, streak: streak! };
-  },
-  write: (run) => run && `${run.last} ${run.streak}`,
-});
-
-/** The times of what a user sent in the minute before `at`: epoch ms, oldest first. */
-const recentCell = (sent: Sent, userId: string, at: number): Cell<number[]> => ({
-  key: sent === 'post' ? recentPostsKey(userId) : recentCommentsKey(userId),
-  ttlMs: MINUTE,
-  sent,
-  read: (stored) => (stored ? stored.split(' ').map(Number) : []).filter((t) => t > at - MINUTE),
-  write: (times) => times.join(' ') || null,
-});
-
 /** Throws 429 if `times`, what the user sent in the minute before `at`, are already `limit`. */
 function refuseOverLimit(sent: Sent, times: number[], at: number, limit: number) {
   if (times.length < limit) return;
   const seconds = Math.max(1, Math.ceil((times[times.length - limit]! + MINUTE - at) / 1000));
-  const text = sent === 'post' ? msg('post.rate_limited', { rate: msg('post.rate', { count: limit }), count: seconds }) : msg('comment.rate_limited', { count: seconds });
-  throw tooManyRequests(text, seconds);
+  throw tooManyRequests(
+    sent === 'post' ? msg('post.rate_limited', { rate: msg('post.rate', { count: limit }), count: seconds }) : msg('comment.rate_limited', { count: seconds }),
+    seconds,
+  );
 }
 
 /** Gives back what a post or a comment claimed, when it then fails. */
@@ -200,8 +161,7 @@ export class Challenges {
     const id = randomUUID();
     const answer = challengeText();
     const issuedAt = this.now();
-    const seed = randomBytes(16).toString('base64');
-    const issued: Issued = { scope, answer, issuedAt, expiresAt: issuedAt + ttlSeconds * 1000, bits, language, seed, step, steps, streak };
+    const issued: Issued = { scope, answer, issuedAt, expiresAt: issuedAt + ttlSeconds * 1000, bits, language, seed: randomBytes(16).toString('base64'), step, steps, streak };
     // Kept a minute past expiresAt, so a late answer is told it was late.
     await this.deps.hot.set(challengeKey(id), JSON.stringify(issued), (ttlSeconds + 60) * 1000);
     return {
@@ -248,9 +208,10 @@ export class Challenges {
     const fail = (failed: Message) => ({ issued, failed });
     if (at > issued.expiresAt) return fail(msg('challenge.expired'));
     if (at - issued.issuedAt < this.settings.minSolveMs) return fail(msg('challenge.too_quick'));
-    const hash = createHash('sha256').update(`${solution.challengeId}:${solution.challengeNonce ?? ''}`).digest();
-    if (leadingZeroBits(hash) < issued.bits) return fail(msg('challenge.wrong_proof_of_work'));
-    const answer = Buffer.from(normalizeAnswer(solution.challengeAnswer ?? ''));
+    if (leadingZeroBits(createHash('sha256').update(`${solution.challengeId}:${solution.challengeNonce ?? ''}`).digest()) < issued.bits) {
+      return fail(msg('challenge.wrong_proof_of_work'));
+    }
+    const answer = Buffer.from((solution.challengeAnswer ?? '').toUpperCase().replace(/[\s-]/g, ''));
     const expected = Buffer.from(issued.answer);
     if (answer.length !== expected.length || !timingSafeEqual(answer, expected)) return fail(msg('challenge.wrong_characters'));
     return { issued, failed: null };
@@ -288,15 +249,21 @@ export class Challenges {
   private async admit(sent: Sent, userId: string, solution: ChallengeSolution, language: string): Promise<Release> {
     const at = this.now();
     const { limit, windowMs, unchallenged } = this.pace(sent);
-    const recent = recentCell(sent, userId, at);
+    /** The times of what the user sent in the minute before `at`: epoch ms, oldest first. */
+    const recent: Cell<number[]> = {
+      key: sent === 'post' ? recentPostsKey(userId) : recentCommentsKey(userId),
+      ttlMs: MINUTE,
+      sent,
+      read: (stored) => (stored ? stored.split(' ').map(Number) : []).filter((t) => t > at - MINUTE),
+      write: (times) => times.join(' ') || null,
+    };
     /** Adds this one's time, where the minute has room for it. */
     const add = (times: number[]) => (limit === 0 || times.length < limit ? [...times, at] : times);
     const forget: Release = async () => {
-      const without = (times: number[]) => {
+      await this.change(recent, (times: number[]) => {
         const i = times.indexOf(at);
         return i < 0 ? times : [...times.slice(0, i), ...times.slice(i + 1)];
-      };
-      await this.change(recent, without).catch(() => {});
+      }).catch(() => {});
     };
     /** Whether a comment after these needs no challenge: the minute still has one of those to give. */
     const spare = (times: number[]) => windowMs > 0 && unchallenged !== undefined && times.length < unchallenged;
@@ -308,8 +275,18 @@ export class Challenges {
     if (limit > 0) refuseOverLimit(sent, before, at, limit);
     if (spare(before)) return forget;
 
-    const recently = sent === 'post' ? msg('challenge.posted_recently', { seconds: windowMs / 1000 }) : msg('challenge.commented_recently', { count: before.length });
-    const release: Release = windowMs > 0 ? await this.passChallenges(sent, userId, solution, language, at, windowMs, recently) : async () => {};
+    const release: Release =
+      windowMs > 0
+        ? await this.passChallenges(
+            sent,
+            userId,
+            solution,
+            language,
+            at,
+            windowMs,
+            sent === 'post' ? msg('challenge.posted_recently', { seconds: windowMs / 1000 }) : msg('challenge.commented_recently', { count: before.length }),
+          )
+        : async () => {};
     if (!counted) return release;
     try {
       // Another may have taken the last place since the check above.
@@ -350,8 +327,7 @@ export class Challenges {
       const stored = (await hot.get(cell.key))?.toString('utf8') ?? null;
       const value = cell.read(stored);
       const next = change(value);
-      if (next === value) return value;
-      if (await hot.swap(cell.key, stored, cell.write(next), cell.ttlMs)) return value;
+      if (next === value || (await hot.swap(cell.key, stored, cell.write(next), cell.ttlMs))) return value;
     }
     throw tooManyRequests(msg(WORDS[cell.sent].atOnce), 1);
   }
@@ -366,13 +342,27 @@ export class Challenges {
    * doesn't (see admit), and its run is of such comments alone: it starts over once a minute goes by
    * with none of them, and no challenge to comment.
    *
-   * One after `streak` challenged ones in the run needs `runSteps(streak)` challenges, solved one after
-   * another: each right answer gets the next, and a wrong one a new challenge at the same step. Of
-   * concurrent posts only one passes without a challenge, and only one post or comment passes at each
-   * point of its run, so solving runs in parallel gains nothing.
+   * One after `streak` challenged ones in the run needs one challenge, or two once `streak` reaches two,
+   * solved one after another: each right answer gets the next, and a wrong one a new challenge at the
+   * same step. Of concurrent posts only one passes without a challenge, and only one post or comment
+   * passes at each point of its run, so solving runs in parallel gains nothing.
    */
   private async passChallenges(sent: Sent, userId: string, solution: ChallengeSolution, language: string, at: number, windowMs: number, recently: Message): Promise<Release> {
-    const change = (to: (run: Run | null) => Run | null) => this.change(runCell(sent, userId, windowMs), to);
+    const change = (to: (run: Run | null) => Run | null) =>
+      this.change(
+        {
+          key: sent === 'post' ? postRunKey(userId) : commentRunKey(userId),
+          ttlMs: windowMs,
+          sent,
+          read(stored) {
+            if (!stored) return null;
+            const [last, streak] = stored.split(' ').map(Number);
+            return { last: last!, streak: streak! };
+          },
+          write: (run) => run && `${run.last} ${run.streak}`,
+        },
+        to,
+      );
     /** Whether a whole window has gone by since the run's last post or comment, or challenge. */
     const over = (run: Run) => run.last <= at - windowMs;
     const words = WORDS[sent];
@@ -395,8 +385,7 @@ export class Challenges {
     }
     if (issued) {
       const streak = issued.streak ?? 0;
-      const was = await change((run) => ((run?.streak ?? 0) === streak ? { last: run?.last ?? at, streak: streak + 1 } : run));
-      if ((was?.streak ?? 0) === streak) {
+      if (((await change((run) => ((run?.streak ?? 0) === streak ? { last: run?.last ?? at, streak: streak + 1 } : run)))?.streak ?? 0) === streak) {
         return async () => {
           await change((run) => (run?.streak === streak + 1 ? { ...run, streak } : run)).catch(() => {});
         };
@@ -404,10 +393,13 @@ export class Challenges {
     }
 
     const streak = (await change((run) => run))?.streak ?? 0;
-    const steps = runSteps(streak);
-    const reason = issued ? msg(words.overtaken) : (failed ?? recently);
-    // After a challenge that didn't let it through, the ones to solve are new ones.
-    const need = msg(issued || failed ? words.toSendNew : words.toSend, { reason, count: steps });
-    throw challengeRequired(need, await this.issue(scope, language, { step: 1, steps, streak }));
+    // How many challenges this one needs after `streak` in a row with challenges: 1, 1, then 2 for as long
+    // as the run goes on. Nobody is asked to solve more than two one after another.
+    const steps = streak < 2 ? 1 : 2;
+    throw challengeRequired(
+      // After a challenge that didn't let it through, the ones to solve are new ones.
+      msg(issued || failed ? words.toSendNew : words.toSend, { reason: issued ? msg(words.overtaken) : (failed ?? recently), count: steps }),
+      await this.issue(scope, language, { step: 1, steps, streak }),
+    );
   }
 }

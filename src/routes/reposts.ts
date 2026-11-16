@@ -1,19 +1,21 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { authenticate, type AuthUser } from '../auth/apiKey.js';
+import { authenticate } from '../auth/apiKey.js';
+import type { AuthUser } from '../auth/apiKey.types.js';
 import { ChallengeFields } from '../challenge/challenges.js';
 import { loadPublished, requireMeta } from '../content.js';
 import { isUniqueViolation } from '../db/index.js';
-import type { RouteDeps } from '../deps.js';
+import type { RouteDeps } from '../deps.types.js';
 import { plainText } from '../format.js';
 import { badRequest, conflict, unprocessable } from '../http/errors.js';
 import { Credentials, Flag } from '../http/schemas.js';
 import { messageKey, msg } from '../language.js';
-import { moderatePost, moderateRepost, refuseBanned, type RemovedTag } from '../moderation/policy.js';
+import { moderatePost, moderateRepost, refuseBanned } from '../moderation/policy.js';
+import type { RemovedTag } from '../moderation/policy.types.js';
 import { LINK_MIME, LinkUrl, MAX_TEXT_CHARS, mediaType, originMediaUrl, previewCutter, TEXT_MIME } from '../posts.js';
 import { MAX_REPOSTED_TAGS, readableOf, repostedTags, repostsOf } from '../reposts.js';
-import type { ContentMeta, Origin, Preview, Publisher, Summary } from '../storage/index.js';
+import type { Origin, Preview } from '../storage/index.js';
 import { authorIndex } from '../tagfeed/layout.js';
 import { allowedTags, parseTagList } from '../tags.js';
 import { iso } from '../time.js';
@@ -24,39 +26,22 @@ import { alreadyReposted, tooManyReposted } from '../write.js';
 const ORIGIN_PATH = /\/content\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
 /**
- * The address of the original of a repost: https://other.example/content/<id>, with nothing after
- * the id and nobody's credentials in it. Its id is read in lower case, so that an original has one
- * address here however it was sent (see `content.origin_hash`).
+ * What a repost says of a post on another server (`origin` in POST /repost): its address there,
+ * who published it, and its summary, all as the reposter's client read them on that server.
  */
-const OriginUrl = LinkUrl.refine(
-  (href) => {
-    const url = new URL(href);
-    return ORIGIN_PATH.test(url.pathname) && !url.search && !url.hash && !url.username && !url.password;
-  },
-  { message: messageKey('repost.origin_url') },
-).transform((href) => href.replace(ORIGIN_PATH, (path) => path.toLowerCase()));
-
-/** A content type, as one line of a summary holds it. */
-const MimeType = z
-  .string()
-  .trim()
-  .max(255)
-  .regex(/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/)
-  .transform((type) => type.toLowerCase());
-
-/**
- * The original's summary, as the reposter's client read it on the original's server (its feed
- * record, or GET /content/:id there) and sends it on: this server never asks another. An image's,
- * video's or audio's `url` isn't taken from it: the bytes are read at the original's address.
- */
-const OriginPreview = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('text'), text: z.string().trim().min(1).max(MAX_TEXT_CHARS) }),
-  z.object({ kind: z.enum(['image', 'video', 'audio']), text: z.string().trim().max(MAX_TEXT_CHARS).optional() }),
-  z.object({ kind: z.literal('link'), url: LinkUrl }),
-]);
-
 const OriginFields = z.object({
-  url: OriginUrl,
+  /**
+   * The address of the original of a repost: https://other.example/content/<id>, with nothing after
+   * the id and nobody's credentials in it. Its id is read in lower case, so that an original has one
+   * address here however it was sent (see `content.origin_hash`).
+   */
+  url: LinkUrl.refine(
+    (href) => {
+      const url = new URL(href);
+      return ORIGIN_PATH.test(url.pathname) && !url.search && !url.hash && !url.username && !url.password;
+    },
+    { message: messageKey('repost.origin_url') },
+  ).transform((href) => href.replace(ORIGIN_PATH, (path) => path.toLowerCase())),
   /** Who published the original there. The name is one line: it is kept on a line of the summary. */
   publisher: z.object({
     userId: z.string().uuid(),
@@ -67,13 +52,33 @@ const OriginFields = z.object({
       .max(64)
       .refine((name) => !/[\u0000-\u001f\u007f\u0085\u2028\u2029]/.test(name), { message: messageKey('repost.origin_username') }),
   }),
-  /** The original's content type. Needed of an image, video or audio; a text's and a link's are their own. */
-  mimeType: MimeType.optional(),
+  /** The original's content type, as one line of a summary holds it. Needed of an image, video or audio; a text's and a link's are their own. */
+  mimeType: z
+    .string()
+    .trim()
+    .max(255)
+    .regex(/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/)
+    .transform((type) => type.toLowerCase())
+    .optional(),
   aiGenerated: Flag.default(false),
-  preview: OriginPreview,
+  /**
+   * The original's summary, as the reposter's client read it on the original's server (its feed
+   * record, or GET /content/:id there) and sends it on: this server never asks another. An image's,
+   * video's or audio's `url` isn't taken from it: the bytes are read at the original's address.
+   */
+  preview: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('text'), text: z.string().trim().min(1).max(MAX_TEXT_CHARS) }),
+    z.object({ kind: z.enum(['image', 'video', 'audio']), text: z.string().trim().max(MAX_TEXT_CHARS).optional() }),
+    z.object({ kind: z.literal('link'), url: LinkUrl }),
+  ]),
 });
 type OriginFields = z.infer<typeof OriginFields>;
 
+/**
+ * What POST /repost says: the post to repost, as `contentId` or as `origin` (the route refuses a
+ * request with both, or neither), the hashtags the repost gives it, and the solution of a
+ * challenge when the request answers one.
+ */
 const Body = Credentials.extend({
   /** The post to repost, on this server. */
   contentId: z.string().uuid().optional(),
@@ -85,11 +90,10 @@ const Body = Credentials.extend({
 });
 type Body = z.infer<typeof Body>;
 
-/** How /store answers about content that waits in the moderation queue, and so does a repost that is held there. */
-const PENDING_REVIEW = { status: 'pending_review' } as const;
-
-const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
-
+/**
+ * Reposts (POST /repost, see src/reposts.ts): a user gives someone else's post more hashtags, a
+ * post on this server or one on another, which the server then keeps an entry of its own for.
+ */
 export function repostRoutes(app: FastifyInstance, { db, config, content, challenges, writer, trustPlugins, now = Date.now }: RouteDeps) {
   const cut = previewCutter(config.feed);
   const serverTags = allowedTags(config.tagging);
@@ -154,7 +158,7 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, challe
     const local = ownContentId(origin.url);
     if (local !== null) return repostHere(req, reply, user, local, tags, body);
 
-    const hash = sha256(origin.url);
+    const hash = createHash('sha256').update(origin.url).digest('hex');
     const entry = await entryOf(hash);
     if (entry !== null) return repostHere(req, reply, user, entry, tags, body);
     try {
@@ -256,23 +260,22 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, challe
           ? { kind: 'link', url: sent.preview.url }
           : { kind: sent.preview.kind, url: originMediaUrl(origin), ...(caption ? { text: cut(caption) } : {}) };
 
-    const texts = [sent.preview.kind === 'link' ? sent.preview.url : caption && plainText(caption, true), origin.url, origin.publisher.username];
-    const moderated = await moderatePost({ db, config, trustPlugins, now, log: req.log }, { userId: user.id, tags, texts });
+    const moderated = await moderatePost(
+      { db, config, trustPlugins, now, log: req.log },
+      { userId: user.id, tags, texts: [sent.preview.kind === 'link' ? sent.preview.url : caption && plainText(caption, true), origin.url, origin.publisher.username] },
+    );
     const queued = moderated.route === 'queue';
 
     const contentId = randomUUID();
     const ts = now();
-    const publisher: Publisher = { userId: user.id, username: user.username };
     const { aiGenerated } = sent;
     const file = await spoolBytes(Buffer.from(origin.url), config.storage);
     try {
-      const summary: Summary = { contentId, createdAt: ts, updatedAt: ts, userId: user.id, mimeType, aiGenerated, comments: false, tags: moderated.tags, preview, origin };
-      const meta: ContentMeta = { contentId, mimeType, size: file.size, aiGenerated, comments: false, preview, tags: moderated.tags, updatedAt: ts, origin };
       await challenges.admitting('post', user.id, solution, req.language, () =>
         writer.write({
-          publisher,
-          summary,
-          meta,
+          publisher: { userId: user.id, username: user.username },
+          summary: { contentId, createdAt: ts, updatedAt: ts, userId: user.id, mimeType, aiGenerated, comments: false, tags: moderated.tags, preview, origin },
+          meta: { contentId, mimeType, size: file.size, aiGenerated, comments: false, preview, tags: moderated.tags, updatedAt: ts, origin },
           // The bytes are an address, whatever the original is: they are stored as a link's are.
           putBytes: () => file.place(content, contentId, LINK_MIME),
           queued: queued ? { trustScore: moderated.trustScore } : undefined,
@@ -285,7 +288,8 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, challe
     reply.status(queued ? 202 : 201);
     return {
       contentId,
-      ...(queued && PENDING_REVIEW),
+      // How /store answers about content that waits in the moderation queue, and so does a repost that is held there.
+      ...(queued && { status: 'pending_review' }),
       tags: moderated.tags,
       ...(moderated.removedTags.length > 0 && { removedTags: moderated.removedTags }),
       preview,

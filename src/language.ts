@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import english from '../languages/en.json' with { type: 'json' };
+import type { Language, LanguageMessages, Message, MessageParams } from './language.types.js';
 
 /**
  * What the server says: the errors it answers with, and the notes that come with some results.
@@ -30,24 +31,17 @@ export const REFERENCE_LANGUAGE = 'en';
 
 export type MessageKey = keyof typeof english.messages;
 
-/** A parameter of a message: a value, or another message, said in the same language. */
-export type MessageParams = Record<string, string | number | Message>;
-
-/** A message of the language files, not yet in any language: which one, and what to put in it. */
-export interface Message {
-  key: MessageKey;
-  params?: MessageParams;
-}
-
 /** A message, or words that are said as they are: those of a trust plugin that wrote its own. */
 export type Text = Message | string;
 
+/** A message by its key, with the parameters that fill it in. It is in no language yet: `render` says it in one. */
 export const msg = (key: MessageKey, params?: MessageParams): Message => ({ key, params });
 
 /** A key where a string is wanted, such as a zod schema's own message, which the error handler then says in the request's language. */
 export const messageKey = (key: MessageKey): string => key;
 
-const Template = z.union([
+/** A message's words in a language file: one string, or its forms by plural category, of which `other` must be there. Any other key is refused. */
+export const Template = z.union([
   z.string(),
   z.strictObject({
     zero: z.string().optional(),
@@ -58,35 +52,20 @@ const Template = z.union([
     other: z.string(),
   }),
 ]);
-type Template = z.infer<typeof Template>;
+export type Template = z.infer<typeof Template>;
 
+/** What a file of the languages folder holds: the language's name, and its messages by key. `loadLanguages` reads each file with it. */
 const LanguageFile = z.object({
   /** The language's name in the language itself, as a list of languages shows it. */
   name: z.string().trim().min(1).max(64),
   messages: z.record(z.string(), Template),
 });
 
-/** A language the server speaks, as GET /languages lists it. */
-export interface Language {
-  /** Its file's name: a BCP 47 tag such as en or pt-BR. */
-  code: string;
-  name: string;
-}
-
-/** A language and its messages, as its file holds them. */
-export interface LanguageMessages extends Language {
-  messages: Record<string, Template>;
-}
-
+/** A language as `Languages` keeps it: its file's messages, and the plural rules of its code. */
 interface Loaded extends LanguageMessages {
   /** Which form of a message a number takes in this language. */
   plurals: Intl.PluralRules;
 }
-
-/** The most languages of an Accept-Language header that are looked at. */
-const MAX_ACCEPTED = 20;
-
-const PLACEHOLDER = /\{(\w+)\}/g;
 
 /** The code as BCP 47 writes it ("pt-br" -> "pt-BR"), or undefined if it isn't a language tag. */
 function canonical(code: string): string | undefined {
@@ -112,8 +91,11 @@ export class Languages {
     for (const language of this.inOrder) this.byCode.set(language.code.toLowerCase(), language);
     const found = this.find(defaultLanguage);
     if (!found) {
-      const have = this.inOrder.map((language) => language.code).join(', ') || 'no language';
-      throw new Error(`the default language is "${defaultLanguage}" (DEFAULT_LANGUAGE), but ${folder} has no ${defaultLanguage}.json: it has ${have}`);
+      throw new Error(
+        `the default language is "${defaultLanguage}" (DEFAULT_LANGUAGE), but ${folder} has no ${defaultLanguage}.json: it has ${
+          this.inOrder.map((language) => language.code).join(', ') || 'no language'
+        }`,
+      );
     }
     this.default = found;
   }
@@ -134,9 +116,10 @@ export class Languages {
    */
   preferred(acceptLanguage: unknown): string | undefined {
     if (typeof acceptLanguage !== 'string') return undefined;
-    const wanted = acceptLanguage
+    for (const { tag } of acceptLanguage
       .split(',')
-      .slice(0, MAX_ACCEPTED)
+      // The most languages of an Accept-Language header that are looked at.
+      .slice(0, 20)
       .map((part, position) => {
         const [tag = '', ...params] = part.split(';');
         const q = params.map((param) => /^\s*q\s*=\s*([\d.]+)\s*$/i.exec(param)?.[1]).find((value) => value !== undefined);
@@ -144,8 +127,7 @@ export class Languages {
       })
       // q=0 is a language that isn't wanted at all.
       .filter(({ tag, q }) => tag && q > 0)
-      .sort((a, b) => b.q - a.q || a.position - b.position);
-    for (const { tag } of wanted) {
+      .sort((a, b) => b.q - a.q || a.position - b.position)) {
       const code = tag === '*' ? this.default : this.closest(tag);
       if (code) return code;
     }
@@ -167,8 +149,7 @@ export class Languages {
 
   /** Where a message is looked for: the language asked for, then the default one, then the one the keys are checked against. */
   private sources(code: string): Loaded[] {
-    const sources = [code, this.default, REFERENCE_LANGUAGE].map((c) => this.byCode.get(c.toLowerCase()));
-    return [...new Set(sources.filter((language): language is Loaded => language !== undefined))];
+    return [...new Set([code, this.default, REFERENCE_LANGUAGE].map((c) => this.byCode.get(c.toLowerCase())).filter((language): language is Loaded => language !== undefined))];
   }
 
   /** Whether `key` is a message of the language files, which is what tells a schema's own message from zod's. */
@@ -188,12 +169,14 @@ export class Languages {
       const template = language.messages[text.key];
       if (template === undefined) continue;
       // The form is chosen by the rules of the language the message is in, which is `code` unless it lacks the message.
-      const form = typeof template === 'string' ? template : (template[language.plurals.select(Number(params.count))] ?? template.other);
-      return form.replace(PLACEHOLDER, (placeholder, name: string) => {
-        const value = params[name];
-        if (value === undefined) return placeholder;
-        return typeof value === 'object' ? this.render(code, value) : String(value);
-      });
+      return (typeof template === 'string' ? template : (template[language.plurals.select(Number(params.count))] ?? template.other)).replace(
+        /\{(\w+)\}/g,
+        (placeholder, name: string) => {
+          const value = params[name];
+          if (value === undefined) return placeholder;
+          return typeof value === 'object' ? this.render(code, value) : String(value);
+        },
+      );
     }
     return text.key;
   }
@@ -231,8 +214,11 @@ export function loadLanguages(defaultLanguage: string = REFERENCE_LANGUAGE, dir:
     }
     const parsed = LanguageFile.safeParse(raw);
     if (!parsed.success) {
-      const issues = parsed.error.issues.map((issue) => `${issue.path.join('.') || 'the file'}: ${issue.message}`).join('; ');
-      throw new Error(`the language file ${path} must hold the language's "name" and its "messages", each a string or an object of plural forms with "other" (${issues})`);
+      throw new Error(
+        `the language file ${path} must hold the language's "name" and its "messages", each a string or an object of plural forms with "other" (${
+          parsed.error.issues.map((issue) => `${issue.path.join('.') || 'the file'}: ${issue.message}`).join('; ')
+        })`,
+      );
     }
     languages.push({ code, name: parsed.data.name, messages: parsed.data.messages });
   }

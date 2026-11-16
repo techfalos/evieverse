@@ -4,7 +4,12 @@ import { z } from 'zod';
 import { loadLanguages, REFERENCE_LANGUAGE } from './language.js';
 import { parseTagList } from './tags.js';
 
+/** A setting that is a whole number above zero, given as a number or as the string the environment has it in; `def` where it isn't set. */
 const int = (def: number) => z.coerce.number().int().positive().default(def);
+/**
+ * A setting that is on or off; `def` where it isn't set. Of a string, as the environment has it,
+ * "1", "true" and "yes" are on, in any case, and anything else is off.
+ */
 const bool = (def: boolean) =>
   z
     .preprocess(
@@ -16,6 +21,11 @@ const bool = (def: boolean) =>
 /** The support address GET /rules gives on a server whose operator has set none (SUPPORT_EMAIL). */
 export const DEFAULT_SUPPORT_EMAIL = 'noreply@yoururl.com';
 
+/**
+ * Every setting of the server: its type, its default, and the values it refuses. `loadConfig`
+ * parses what the file, the environment and the overrides say with it, and `Config` is what
+ * comes out.
+ */
 const ConfigSchema = z.object({
   host: z.string().default('0.0.0.0'),
   port: z.coerce.number().int().default(3000),
@@ -442,6 +452,10 @@ function deepMerge(base: Json, over: Json): Json {
   return out;
 }
 
+/**
+ * Which setting each environment variable sets, as the path of the setting's keys in the
+ * configuration (`db.poolSize`). A variable that is unset or empty sets nothing (see setPath).
+ */
 const ENV_MAP: Record<string, string> = {
   HOST: 'host',
   PORT: 'port',
@@ -529,6 +543,11 @@ const ENV_MAP: Record<string, string> = {
   MONETIZATION_POST_ADS: 'monetization.postAds',
 };
 
+/**
+ * Every section of the configuration, empty: what the file, the environment and the overrides are
+ * merged over. A section none of them names is then still an object, which the schema fills with
+ * its defaults; it refuses one that is missing.
+ */
 const EMPTY_SECTIONS: Json = {
   db: {},
   redis: {},
@@ -597,6 +616,5 @@ export function loadConfig(
   const envConfig: Json = {};
   for (const [envKey, path] of Object.entries(ENV_MAP)) setPath(envConfig, path, env[envKey]);
 
-  const merged = deepMerge(deepMerge(deepMerge(EMPTY_SECTIONS, fileConfig), envConfig), overrides);
-  return ConfigSchema.parse(merged);
+  return ConfigSchema.parse(deepMerge(deepMerge(deepMerge(EMPTY_SECTIONS, fileConfig), envConfig), overrides));
 }

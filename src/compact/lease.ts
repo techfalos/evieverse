@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../db/index.js';
 
+/** The id of the one row of `compactor_lease`, which the first migration inserts: every compactor run takes, renews and frees the lease on it. */
 const LEASE_ID = 'compactor';
 
 export class LeaseLostError extends Error {
@@ -32,13 +33,19 @@ export class CompactorLease {
   /** Takes the lease if it is free or has expired; false if a live run holds it. */
   async acquire(): Promise<boolean> {
     const at = this.now();
-    const res = await this.db
-      .updateTable('compactor_lease')
-      .set({ holder: this.holder, expires_at: at + this.ttlMs })
-      .where('id', '=', LEASE_ID)
-      .where('expires_at', '<=', at)
-      .executeTakeFirst();
-    if (Number(res.numUpdatedRows) !== 1) return false;
+    if (
+      Number(
+        (
+          await this.db
+            .updateTable('compactor_lease')
+            .set({ holder: this.holder, expires_at: at + this.ttlMs })
+            .where('id', '=', LEASE_ID)
+            .where('expires_at', '<=', at)
+            .executeTakeFirst()
+        ).numUpdatedRows,
+      ) !== 1
+    )
+      return false;
     this.renewedAt = at;
     return true;
   }
@@ -54,13 +61,18 @@ export class CompactorLease {
   /** Extends the lease, provided no other run has taken it since this one did (even after it expired). */
   private async renew(): Promise<void> {
     const at = this.now();
-    const res = await this.db
-      .updateTable('compactor_lease')
-      .set({ expires_at: at + this.ttlMs })
-      .where('id', '=', LEASE_ID)
-      .where('holder', '=', this.holder)
-      .executeTakeFirst();
-    if (Number(res.numUpdatedRows) !== 1) {
+    if (
+      Number(
+        (
+          await this.db
+            .updateTable('compactor_lease')
+            .set({ expires_at: at + this.ttlMs })
+            .where('id', '=', LEASE_ID)
+            .where('holder', '=', this.holder)
+            .executeTakeFirst()
+        ).numUpdatedRows,
+      ) !== 1
+    ) {
       this.lost = true;
       throw new LeaseLostError();
     }

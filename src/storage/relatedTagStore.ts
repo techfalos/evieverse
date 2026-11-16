@@ -1,6 +1,7 @@
 import { TtlCache } from '../util.js';
-import type { HotStore } from './hotStore.js';
+import type { HotStore } from './hotStore.types.js';
 
+/** The Redis key of a hashtag's related hashtags: most related first, with a space between them. A hashtag that has none has no key. */
 const relatedKey = (tag: string) => `rel:${tag}`;
 
 /**

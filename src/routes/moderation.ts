@@ -1,11 +1,12 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { authenticate, type AuthUser } from '../auth/apiKey.js';
+import { authenticate } from '../auth/apiKey.js';
+import type { AuthUser } from '../auth/apiKey.types.js';
 import { commentRemoval, publishComment, removeCommentRows } from '../comments.js';
 import { loadContent } from '../content.js';
 import { addOnce, ignoreConflicts } from '../db/index.js';
 import { setForDeletion } from '../deletion.js';
-import type { RouteDeps } from '../deps.js';
+import type { RouteDeps } from '../deps.types.js';
 import { badRequest, conflict, forbidden, notFound } from '../http/errors.js';
 import { listPage, listQuery } from '../http/listCursor.js';
 import { Credentials, Flag, HASHTAG, ListQuery } from '../http/schemas.js';
@@ -23,27 +24,38 @@ const Tag = z
   .string()
   .regex(HASHTAG, messageKey('tags.invalid'))
   .transform((t) => normalizeTag(t)!);
+/** The hashtag a path names, for the routes under /tags/:tag: its blocked words, its moderators, and the users muted on it. */
 const TagParams = z.object({ tag: Tag });
+/** A hashtag and a user in a path: the user who is made or unmade a moderator of the hashtag, or muted or unmuted on it. */
 const TagUserParams = z.object({ tag: Tag, userId: z.string().uuid() });
+/** The user a path names: the one who is made or unmade an admin or a server moderator, or banned or unbanned. */
 const UserParams = z.object({ userId: z.string().uuid() });
+/** The post a path names in the moderation queue, for the request that accepts or rejects it. */
 const ContentParams = z.object({ contentId: z.string().uuid() });
+/** The content and the hashtag under it that a path names (/content/:contentId/tags/:tag), for a tag's moderator to approve or remove. */
 const ContentTagParams = z.object({ contentId: z.string().uuid(), tag: Tag });
+/** The comment a path names in the moderation queue, by its post's id and its own, for the request that accepts or rejects it. */
 const CommentParams = z.object({ contentId: z.string().uuid(), commentId: z.string().uuid() });
 /** Why a user is banned, which only moderators read. */
 const BanBody = Credentials.extend({ reason: z.string().trim().min(1).max(500).optional() });
+/**
+ * The entries a request adds to a list of blocked words, or removes from it: 1 to 1000 of them,
+ * each a word, a phrase or a pattern as it was typed, of 1000 characters at most. What a list keeps
+ * of each, and whether it can keep it, is for `normalizeWords` to say.
+ */
 const WordsBody = Credentials.extend({ words: z.array(z.string().max(1000)).min(1).max(1000) });
+/** What a request that removes a hashtag from content says: with `mute`, its publisher is muted on the hashtag too. Left out: they aren't. */
 const RemoveTagBody = Credentials.extend({ mute: Flag.default(false) });
 /** A page of the moderation queue: smaller than other lists', as each post's meta file, or each comment, is read for it. */
 const QueueQuery = ListQuery.extend({ limit: z.coerce.number().int().min(1).max(100).default(50) });
 
+/** 404 for a post that isn't in the moderation queue, which is all a request can accept or reject there. */
 const notQueued = () => notFound(msg('moderation.not_queued'));
+/** 403 for a caller who isn't an admin, where only an admin may ask. */
 const adminOnly = () => forbidden(msg('moderation.admin_only'));
 
 /** Rows per insert of blocked words, well within every dialect's limit on parameters. */
 const INSERT_BATCH = 200;
-
-/** How often revoking an admin looks again for an admin to leave in place, when the one it chose stopped being one meanwhile. */
-const REVOKE_ATTEMPTS = 3;
 
 /**
  * Moderation: admins make and revoke admins, appoint server moderators and tag moderators, and keep
@@ -92,8 +104,9 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   /** The server's admins. Admins only. */
   app.get('/admins', async (req) => {
     await asAdmin(req, Credentials.parse(req.body ?? {}));
-    const admins = await db.selectFrom('users').select(['id', 'username']).where('admin', '=', 1).orderBy('username').execute();
-    return { admins: admins.map((a) => ({ userId: a.id, username: a.username })) };
+    return {
+      admins: (await db.selectFrom('users').select(['id', 'username']).where('admin', '=', 1).orderBy('username').execute()).map((a) => ({ userId: a.id, username: a.username })),
+    };
   });
 
   /** Makes a user an admin. Admins only. */
@@ -101,28 +114,9 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     const { userId } = UserParams.parse(req.params);
     await asAdmin(req, Credentials.parse(req.body ?? {}));
     const { username } = await findUser(userId);
-    const res = await db.updateTable('users').set({ admin: 1 }).where('id', '=', userId).where('admin', '=', 0).executeTakeFirst();
-    const already = Number(res.numUpdatedRows) === 0;
+    const already = Number((await db.updateTable('users').set({ admin: 1 }).where('id', '=', userId).where('admin', '=', 0).executeTakeFirst()).numUpdatedRows) === 0;
     return reply.status(already ? 200 : 201).send({ userId, username, alreadyAdmin: already });
   });
-
-  /**
-   * Revokes `userId`'s admin role, leaving `keeperId` an admin: true if it did, false if `userId`
-   * wasn't an admin, null if `keeperId` isn't one any more. The updates that change nothing come
-   * first, so both rows are locked (in the order of their ids, so two revocations can't deadlock):
-   * every revocation holds the row of an admin it leaves in place, and so the server always has one.
-   */
-  const revoke = (userId: string, keeperId: string) =>
-    db.transaction().execute(async (trx) => {
-      const ids = [userId, keeperId].sort();
-      for (const id of ids) await trx.updateTable('users').set((eb) => ({ admin: eb.ref('admin') })).where('id', '=', id).execute();
-      const rows = await trx.selectFrom('users').select(['id', 'admin']).where('id', 'in', ids).execute();
-      const isAdmin = (id: string) => rows.some((r) => r.id === id && r.admin === 1);
-      if (!isAdmin(keeperId)) return null;
-      if (!isAdmin(userId)) return false;
-      await trx.updateTable('users').set({ admin: 0 }).where('id', '=', userId).execute();
-      return true;
-    });
 
   /**
    * Revokes a user's admin role. Admins only, and never the last one: the admin left in place is the
@@ -131,13 +125,27 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   app.delete('/admins/:userId', async (req) => {
     const { userId } = UserParams.parse(req.params);
     const caller = await asAdmin(req, Credentials.parse(req.body ?? {}));
-    for (let attempt = 0; attempt < REVOKE_ATTEMPTS; attempt++) {
+    // Looks again, up to 3 times, for an admin to leave in place, when the one it chose stopped being one meanwhile.
+    for (let attempt = 0; attempt < 3; attempt++) {
       const other =
         userId === caller.id
           ? await db.selectFrom('users').select('id').where('admin', '=', 1).where('id', '<>', userId).limit(1).executeTakeFirst()
           : caller;
       if (!other) throw conflict(msg('moderation.only_admin'));
-      const wasAdmin = await revoke(userId, other.id);
+      // Revokes `userId`'s admin role, leaving `other` an admin: true if it did, false if `userId`
+      // wasn't an admin, null if `other` isn't one any more. The updates that change nothing come
+      // first, so both rows are locked (in the order of their ids, so two revocations can't deadlock):
+      // every revocation holds the row of an admin it leaves in place, and so the server always has one.
+      const wasAdmin = await db.transaction().execute(async (trx) => {
+        const ids = [userId, other.id].sort();
+        for (const id of ids) await trx.updateTable('users').set((eb) => ({ admin: eb.ref('admin') })).where('id', '=', id).execute();
+        const rows = await trx.selectFrom('users').select(['id', 'admin']).where('id', 'in', ids).execute();
+        const isAdmin = (id: string) => rows.some((r) => r.id === id && r.admin === 1);
+        if (!isAdmin(other.id)) return null;
+        if (!isAdmin(userId)) return false;
+        await trx.updateTable('users').set({ admin: 0 }).where('id', '=', userId).execute();
+        return true;
+      });
       if (wasAdmin !== null) return { userId, wasAdmin };
       // The caller was revoked while this request was under way.
       if (other.id === caller.id) throw adminOnly();
@@ -150,8 +158,12 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   /** The server's moderators. Admins only. */
   app.get('/moderators', async (req) => {
     await asAdmin(req, Credentials.parse(req.body ?? {}));
-    const moderators = await db.selectFrom('users').select(['id', 'username']).where('moderator', '=', 1).orderBy('username').execute();
-    return { moderators: moderators.map((m) => ({ userId: m.id, username: m.username })) };
+    return {
+      moderators: (await db.selectFrom('users').select(['id', 'username']).where('moderator', '=', 1).orderBy('username').execute()).map((m) => ({
+        userId: m.id,
+        username: m.username,
+      })),
+    };
   });
 
   /** Makes a user a server moderator. Admins only. */
@@ -159,8 +171,8 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     const { userId } = UserParams.parse(req.params);
     await asAdmin(req, Credentials.parse(req.body ?? {}));
     const { username } = await findUser(userId);
-    const res = await db.updateTable('users').set({ moderator: 1 }).where('id', '=', userId).where('moderator', '=', 0).executeTakeFirst();
-    const already = Number(res.numUpdatedRows) === 0;
+    const already =
+      Number((await db.updateTable('users').set({ moderator: 1 }).where('id', '=', userId).where('moderator', '=', 0).executeTakeFirst()).numUpdatedRows) === 0;
     return reply.status(already ? 200 : 201).send({ userId, username, alreadyModerator: already });
   });
 
@@ -168,8 +180,10 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   app.delete('/moderators/:userId', async (req) => {
     const { userId } = UserParams.parse(req.params);
     await asAdmin(req, Credentials.parse(req.body ?? {}));
-    const res = await db.updateTable('users').set({ moderator: 0 }).where('id', '=', userId).where('moderator', '=', 1).executeTakeFirst();
-    return { userId, wasModerator: Number(res.numUpdatedRows) > 0 };
+    return {
+      userId,
+      wasModerator: Number((await db.updateTable('users').set({ moderator: 0 }).where('id', '=', userId).where('moderator', '=', 1).executeTakeFirst()).numUpdatedRows) > 0,
+    };
   });
 
   // Bans: who can't post, comment, like or send messages.
@@ -181,20 +195,23 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   app.get('/banned', async (req) => {
     const page = listQuery(req.query);
     await asServerModerator(req, Credentials.parse(req.body ?? {}));
-    const query = db
-      .selectFrom('users')
-      .leftJoin('users as bans', 'bans.id', 'users.banned_by')
-      .select((eb) => [
-        'users.id',
-        'users.username',
-        eb.ref('users.banned_at').$castTo<number>().as('created_at'),
-        'users.ban_reason',
-        'bans.id as by_id',
-        'bans.username as by_username',
-      ])
-      .where('users.banned_at', 'is not', null)
-      .where('users.deleted_at', 'is', null);
-    const { rows, nextCursor } = await listPage(query, { createdAt: 'users.banned_at', userId: 'users.id' }, page);
+    const { rows, nextCursor } = await listPage(
+      db
+        .selectFrom('users')
+        .leftJoin('users as bans', 'bans.id', 'users.banned_by')
+        .select((eb) => [
+          'users.id',
+          'users.username',
+          eb.ref('users.banned_at').$castTo<number>().as('created_at'),
+          'users.ban_reason',
+          'bans.id as by_id',
+          'bans.username as by_username',
+        ])
+        .where('users.banned_at', 'is not', null)
+        .where('users.deleted_at', 'is', null),
+      { createdAt: 'users.banned_at', userId: 'users.id' },
+      page,
+    );
     return {
       banned: rows.map((r) => ({
         userId: r.id,
@@ -223,16 +240,21 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (admin === 1 || staff === 1) throw forbidden(msg('moderation.ban_staff'));
     const at = now();
     // Only a user who isn't banned and holds no role, so a ban never overwrites the first, nor lands on someone made staff meanwhile.
-    const res = await db
-      .updateTable('users')
-      .set({ banned_at: at, banned_by: moderator.id, ban_reason: body.reason ?? null })
-      .where('id', '=', userId)
-      .where('banned_at', 'is', null)
-      .where('admin', '=', 0)
-      .where('moderator', '=', 0)
-      .where('deleted_at', 'is', null)
-      .executeTakeFirst();
-    if (Number(res.numUpdatedRows) === 0) {
+    if (
+      Number(
+        (
+          await db
+            .updateTable('users')
+            .set({ banned_at: at, banned_by: moderator.id, ban_reason: body.reason ?? null })
+            .where('id', '=', userId)
+            .where('banned_at', 'is', null)
+            .where('admin', '=', 0)
+            .where('moderator', '=', 0)
+            .where('deleted_at', 'is', null)
+            .executeTakeFirst()
+        ).numUpdatedRows,
+      ) === 0
+    ) {
       const current = await db.selectFrom('users').select(['banned_at', 'ban_reason']).where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
       if (!current) throw notFound(msg('user.not_found'));
       if (current.banned_at === null) throw forbidden(msg('moderation.ban_staff'));
@@ -247,14 +269,18 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   app.delete('/banned/:userId', async (req) => {
     const { userId } = UserParams.parse(req.params);
     const moderator = await asServerModerator(req, Credentials.parse(req.body ?? {}));
-    const res = await db
-      .updateTable('users')
-      .set({ banned_at: null, banned_by: null, ban_reason: null })
-      .where('id', '=', userId)
-      .where('banned_at', 'is not', null)
-      .where('deleted_at', 'is', null)
-      .executeTakeFirst();
-    const wasBanned = Number(res.numUpdatedRows) > 0;
+    const wasBanned =
+      Number(
+        (
+          await db
+            .updateTable('users')
+            .set({ banned_at: null, banned_by: null, ban_reason: null })
+            .where('id', '=', userId)
+            .where('banned_at', 'is not', null)
+            .where('deleted_at', 'is', null)
+            .executeTakeFirst()
+        ).numUpdatedRows,
+      ) > 0;
     if (wasBanned) {
       req.log.info({ userId, moderator: moderator.id }, 'ended a ban');
       await notify(deps, { userId, kind: 'user_unbanned', by: moderator.id }, req.log);
@@ -269,8 +295,13 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     for (const input of inputs) {
       const word = normalizeWord(input);
       if (!word) {
-        const params = { word: input.slice(0, 100), maxWords: MAX_PHRASE_WORDS, maxChars: MAX_WORD_CHARS };
-        throw badRequest(msg(isPattern(input) ? 'moderation.pattern_unblockable' : 'moderation.word_unblockable', params));
+        throw badRequest(
+          msg(isPattern(input) ? 'moderation.pattern_unblockable' : 'moderation.word_unblockable', {
+            word: input.slice(0, 100),
+            maxWords: MAX_PHRASE_WORDS,
+            maxChars: MAX_WORD_CHARS,
+          }),
+        );
       }
       words.add(word);
     }
@@ -290,9 +321,11 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     }
     const ts = now();
     for (let i = 0; i < words.length; i += INSERT_BATCH) {
-      const insert = db.insertInto('blocked_words').values(words.slice(i, i + INSERT_BATCH).map((word) => ({ tag: list, word, created_at: ts })));
       // Another request may have added some of them meanwhile.
-      await ignoreConflicts(insert, config.db.dialect).execute();
+      await ignoreConflicts(
+        db.insertInto('blocked_words').values(words.slice(i, i + INSERT_BATCH).map((word) => ({ tag: list, word, created_at: ts }))),
+        config.db.dialect,
+      ).execute();
     }
     return listWords(list);
   }
@@ -346,15 +379,19 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   /** Who moderates a hashtag. Public, like posts. */
   app.get('/tags/:tag/moderators', async (req) => {
     const { tag } = TagParams.parse(req.params);
-    const rows = await db
-      .selectFrom('tag_moderators')
-      .innerJoin('users', 'users.id', 'tag_moderators.user_id')
-      .select(['users.id', 'users.username', 'tag_moderators.created_at'])
-      .where('tag_moderators.tag', '=', tag)
-      .orderBy('tag_moderators.created_at')
-      .orderBy('tag_moderators.user_id')
-      .execute();
-    return { tag, moderators: rows.map((r) => ({ userId: r.id, username: r.username, since: iso(r.created_at) })) };
+    return {
+      tag,
+      moderators: (
+        await db
+          .selectFrom('tag_moderators')
+          .innerJoin('users', 'users.id', 'tag_moderators.user_id')
+          .select(['users.id', 'users.username', 'tag_moderators.created_at'])
+          .where('tag_moderators.tag', '=', tag)
+          .orderBy('tag_moderators.created_at')
+          .orderBy('tag_moderators.user_id')
+          .execute()
+      ).map((r) => ({ userId: r.id, username: r.username, since: iso(r.created_at) })),
+    };
   });
 
   /** Makes a user a moderator of a hashtag. Admins only. */
@@ -373,8 +410,11 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   app.delete('/tags/:tag/moderators/:userId', async (req) => {
     const { tag, userId } = TagUserParams.parse(req.params);
     await asAdmin(req, Credentials.parse(req.body ?? {}));
-    const res = await db.deleteFrom('tag_moderators').where('tag', '=', tag).where('user_id', '=', userId).executeTakeFirst();
-    return { tag, userId, wasModerator: Number(res.numDeletedRows) > 0 };
+    return {
+      tag,
+      userId,
+      wasModerator: Number((await db.deleteFrom('tag_moderators').where('tag', '=', tag).where('user_id', '=', userId).executeTakeFirst()).numDeletedRows) > 0,
+    };
   });
 
   // Mutes.
@@ -391,12 +431,15 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     const { tag } = TagParams.parse(req.params);
     const page = listQuery(req.query);
     await asModerator(req, tag, Credentials.parse(req.body ?? {}));
-    const query = db
-      .selectFrom('tag_mutes')
-      .innerJoin('users', 'users.id', 'tag_mutes.user_id')
-      .select(['users.id', 'users.username', 'tag_mutes.created_at'])
-      .where('tag_mutes.tag', '=', tag);
-    const { rows, nextCursor } = await listPage(query, { createdAt: 'tag_mutes.created_at', userId: 'tag_mutes.user_id' }, page);
+    const { rows, nextCursor } = await listPage(
+      db
+        .selectFrom('tag_mutes')
+        .innerJoin('users', 'users.id', 'tag_mutes.user_id')
+        .select(['users.id', 'users.username', 'tag_mutes.created_at'])
+        .where('tag_mutes.tag', '=', tag),
+      { createdAt: 'tag_mutes.created_at', userId: 'tag_mutes.user_id' },
+      page,
+    );
     return { tag, muted: rows.map((r) => ({ userId: r.id, username: r.username, mutedAt: iso(r.created_at) })), nextCursor };
   });
 
@@ -414,8 +457,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   app.delete('/tags/:tag/muted/:userId', async (req) => {
     const { tag, userId } = TagUserParams.parse(req.params);
     const moderator = await asModerator(req, tag, Credentials.parse(req.body ?? {}));
-    const res = await db.deleteFrom('tag_mutes').where('user_id', '=', userId).where('tag', '=', tag).executeTakeFirst();
-    const wasMuted = Number(res.numDeletedRows) > 0;
+    const wasMuted = Number((await db.deleteFrom('tag_mutes').where('user_id', '=', userId).where('tag', '=', tag).executeTakeFirst()).numDeletedRows) > 0;
     if (wasMuted) await notify(deps, { userId, kind: 'tag_unmuted', tag, by: moderator.id }, req.log);
     return { tag, userId, wasMuted };
   });
@@ -426,8 +468,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   /** Approves content under a hashtag (see approveTag), which takes it out of the hashtag's queue. Its moderators and admins. */
   app.put('/content/:contentId/tags/:tag', async (req, reply) => {
     const { contentId, tag } = ContentTagParams.parse(req.params);
-    const moderator = await asModerator(req, tag, Credentials.parse(req.body ?? {}));
-    const { alreadyApproved } = await approveTag(deps, contentId, tag, moderator.id);
+    const { alreadyApproved } = await approveTag(deps, contentId, tag, (await asModerator(req, tag, Credentials.parse(req.body ?? {}))).id);
     return reply.status(alreadyApproved ? 200 : 201).send({ contentId, tag, moderated: true, alreadyApproved });
   });
 
@@ -458,26 +499,38 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   app.get('/moderation/queue', async (req) => {
     const page = listQuery(req.query, QueueQuery);
     await asServerModerator(req, Credentials.parse(req.body ?? {}));
-    const posts = db
-      .selectFrom('moderation_queue')
-      .innerJoin('content', 'content.id', 'moderation_queue.content_id')
-      .select([kindColumn('post'), 'moderation_queue.content_id as id', 'moderation_queue.content_id', 'moderation_queue.trust_score', 'moderation_queue.created_at'])
-      // Content set for deletion (rejected, or deleted by its publisher) is gone, though its row is still there.
-      .where('content.delete_requested_at', 'is', null);
-    const held = db
-      .selectFrom('comment_queue')
-      .innerJoin('content', 'content.id', 'comment_queue.content_id')
-      .select([kindColumn('comment'), 'comment_queue.comment_id as id', 'comment_queue.content_id', 'comment_queue.trust_score', 'comment_queue.created_at'])
-      // And so are the comments on it.
-      .where('content.delete_requested_at', 'is', null);
-    const query = db.selectFrom(posts.unionAll(held).as('queue')).selectAll('queue');
-    const { rows, nextCursor } = await listPage(query, { createdAt: 'queue.created_at', userId: 'queue.id' }, page, 'oldest');
+    const { rows, nextCursor } = await listPage(
+      db
+        .selectFrom(
+          db
+            .selectFrom('moderation_queue')
+            .innerJoin('content', 'content.id', 'moderation_queue.content_id')
+            .select([kindColumn('post'), 'moderation_queue.content_id as id', 'moderation_queue.content_id', 'moderation_queue.trust_score', 'moderation_queue.created_at'])
+            // Content set for deletion (rejected, or deleted by its publisher) is gone, though its row is still there.
+            .where('content.delete_requested_at', 'is', null)
+            .unionAll(
+              db
+                .selectFrom('comment_queue')
+                .innerJoin('content', 'content.id', 'comment_queue.content_id')
+                .select([kindColumn('comment'), 'comment_queue.comment_id as id', 'comment_queue.content_id', 'comment_queue.trust_score', 'comment_queue.created_at'])
+                // And so are the comments on it.
+                .where('content.delete_requested_at', 'is', null),
+            )
+            .as('queue'),
+        )
+        .selectAll('queue'),
+      { createdAt: 'queue.created_at', userId: 'queue.id' },
+      page,
+      'oldest',
+    );
     const items = await queueItems(deps, rows, { held: true });
-    const queue = rows.flatMap((r, i) => {
-      const item = items[i];
-      return item ? [{ ...item, trustScore: r.trust_score, queuedAt: iso(r.created_at) }] : [];
-    });
-    return { queue, nextCursor };
+    return {
+      queue: rows.flatMap((r, i) => {
+        const item = items[i];
+        return item ? [{ ...item, trustScore: r.trust_score, queuedAt: iso(r.created_at) }] : [];
+      }),
+      nextCursor,
+    };
   });
 
   /**
@@ -520,8 +573,9 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
    */
   const decide = <T>(contentId: string, commentId: string, decision: () => Promise<T>): Promise<T> =>
     db.transaction().execute(async (trx) => {
-      const res = await trx.deleteFrom('comment_queue').where('comment_id', '=', commentId).where('content_id', '=', contentId).executeTakeFirst();
-      if (Number(res.numDeletedRows) === 0) throw notFound(msg('comment.not_queued'));
+      if (Number((await trx.deleteFrom('comment_queue').where('comment_id', '=', commentId).where('content_id', '=', contentId).executeTakeFirst()).numDeletedRows) === 0) {
+        throw notFound(msg('comment.not_queued'));
+      }
       return decision();
     });
 

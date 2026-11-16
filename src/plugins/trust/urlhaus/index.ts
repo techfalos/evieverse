@@ -1,7 +1,9 @@
 import { msg } from '../../../language.js';
-import { MIN_TRUST_SCORE, type TrustAlgorithm } from '../../../moderation/trust.js';
+import { MIN_TRUST_SCORE } from '../../../moderation/trust.js';
+import type { TrustAlgorithm } from '../../../moderation/trust.types.js';
 import { findLinks } from './links.js';
-import { isListed, MalwareList, type Listed } from './list.js';
+import { isListed, MalwareList } from './list.js';
+import type { Listed } from './list.types.js';
 
 /**
  * Links that spread malware: a post with a link that is on URLhaus's list (https://urlhaus.abuse.ch)

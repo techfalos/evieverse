@@ -40,20 +40,20 @@ export type Block =
   /** `start` is the number a numbered list starts at. */
   | { type: 'list'; ordered: boolean; start: number; items: Inline[][] };
 
-/** The longest address of a `[label](address)` link. */
-const MAX_ADDRESS_CHARS = 2048;
-
+/** A whitespace character: what separates words, and what a mark can't open before or close after. */
 const SPACE = /\s/;
 /** ASCII punctuation: what a backslash can stand before. */
 const PUNCTUATION = /[!-/:-@[-`{-~]/;
+/** A letter or a digit of any script. A `_` between two of them is within a word, and an address written out doesn't start right after one. */
 const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
 /** An address written out in a text. It ends before a space and before what no address has. */
 const ADDRESS = /https?:\/\/[^\s<>[\]`"\\]+/iy;
+/** A character no address has, which is what ADDRESS ends before: with one in its `(address)`, a `[label](address)` is no link. */
 const NOT_IN_ADDRESS = /[\s<>[\]`"\\]/;
-/** What ends a sentence or a formatted run, and so isn't the end of an address written before it. */
-const AFTER_ADDRESS = ".,;:!?'*_~";
 
+/** Whether `c` is a space, or isn't there at all (undefined): the start and the end of a text count as one. */
 const isSpace = (c: string | undefined) => c === undefined || SPACE.test(c);
+/** Whether `c` is a letter or a digit. The start and the end of a text (undefined) are neither. */
 const isWord = (c: string | undefined) => c !== undefined && LETTER_OR_DIGIT.test(c);
 
 /** What a block's text is made of, in order: its `src` joined is the text. */
@@ -100,7 +100,8 @@ function addressAt(src: string, i: number): string | null {
   for (;;) {
     const last = found[end - 1]!;
     if (last === ')' && unopened > 0) unopened--;
-    else if (!AFTER_ADDRESS.includes(last)) break;
+    // These end a sentence or a formatted run, and so aren't the end of an address written before them.
+    else if (!".,;:!?'*_~".includes(last)) break;
     end--;
   }
   const url = found.slice(0, end);
@@ -112,7 +113,8 @@ function linkEnd(src: string, i: number): { url: string; end: number } | null {
   if (src[i + 1] !== '(') return null;
   const from = i + 2;
   let depth = 0;
-  for (let j = from; j < src.length && j <= from + MAX_ADDRESS_CHARS; j++) {
+  // 2048 characters is the longest address of a `[label](address)` link.
+  for (let j = from; j < src.length && j <= from + 2048; j++) {
     const c = src[j]!;
     if (c === '(') depth++;
     else if (c === ')') {
@@ -448,39 +450,38 @@ export function cutFormatted(text: string, maxWords: number, maxChars: number): 
     out += src;
     tail = -1;
   };
-  const writeToken = (token: Token): boolean => {
-    switch (token.kind) {
-      case 'text':
-        return writeText(token.src);
-      case 'literal':
-        return token.inert ? write(token.src, true) : write(escaped(token.src));
-      case 'url':
-        if (write(token.src)) return true;
-        if (!inWord && words === maxWords) return false;
-        // It has no room. An address that is cut leads elsewhere, so it is written as text, as far as it goes.
-        cut = false;
-        return writeText(escaped(token.src).replace('://', '\\://'));
-      case 'code':
-        waiting.push({ kind: 'open', src: '`', text: '', closer: '`' });
-        if (!writeText(token.text, true)) return false;
-        close('`');
-        return true;
-      case 'open':
-        waiting.push(token);
-        return true;
-      case 'close':
-        close(token.src);
-        return true;
-      case 'break':
-        space();
-        return true;
-    }
-  };
   const writeBlock = (src: string, marker?: string): boolean => {
     space();
     if (marker !== undefined && !writeText(marker)) return false;
     space();
-    return scan(src).every(writeToken);
+    return scan(src).every((token: Token): boolean => {
+      switch (token.kind) {
+        case 'text':
+          return writeText(token.src);
+        case 'literal':
+          return token.inert ? write(token.src, true) : write(escaped(token.src));
+        case 'url':
+          if (write(token.src)) return true;
+          if (!inWord && words === maxWords) return false;
+          // It has no room. An address that is cut leads elsewhere, so it is written as text, as far as it goes.
+          cut = false;
+          return writeText(escaped(token.src).replace('://', '\\://'));
+        case 'code':
+          waiting.push({ kind: 'open', src: '`', text: '', closer: '`' });
+          if (!writeText(token.text, true)) return false;
+          close('`');
+          return true;
+        case 'open':
+          waiting.push(token);
+          return true;
+        case 'close':
+          close(token.src);
+          return true;
+        case 'break':
+          space();
+          return true;
+      }
+    });
   };
 
   blocksOf(text).every((block) =>

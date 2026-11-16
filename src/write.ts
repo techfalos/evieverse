@@ -2,16 +2,18 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 import { contentNotFound, summaryOf, takesComments } from './content.js';
 import { updateOnConflict } from './db/index.js';
-import type { AppDeps } from './deps.js';
+import type { AppDeps } from './deps.types.js';
 import { badRequest, conflict, unprocessable } from './http/errors.js';
 import { msg } from './language.js';
 import { previewOf } from './posts.js';
-import { MAX_REPOSTED_TAGS, reposterIndexes, repostedTags, repostsOf, repostTimes, type Repost } from './reposts.js';
-import type { ContentMeta, Publisher, StoredBytes, Summary } from './storage/index.js';
+import { MAX_REPOSTED_TAGS, reposterIndexes, repostedTags, repostsOf, repostTimes } from './reposts.js';
+import type { Publisher, Summary } from './storage/index.js';
 import { countTagPairs, touchTags } from './tags.js';
 import { authorIndex } from './tagfeed/layout.js';
 import { wholeSeconds } from './time.js';
+import type { ContentWrite, RepostWrite } from './write.types.js';
 
+/** 409: the content is set for deletion, and takes no update. */
 export const pendingDeletion = () => conflict(msg('content.pending_deletion'));
 
 /** Refuses an update, of content type `mimeType`, that the content can't take. `meta` is its meta file as it is. */
@@ -20,48 +22,6 @@ export function assertUpdatable(existing: { delete_requested_at: number | null }
   if (mimeType !== meta.mimeType) {
     throw badRequest(msg('content.type_changed', { original: meta.mimeType, mimeType }));
   }
-}
-
-export interface ContentWrite {
-  publisher: Publisher;
-  /** The meta file an update writes over; absent for new content. */
-  previous?: ContentMeta;
-  /** Names the content id; `updatedAt` is when this write is made. */
-  summary: Summary;
-  meta: ContentMeta;
-  /** Writes the content's bytes, and returns their size as stored, which is the one recorded in the meta file. */
-  putBytes: () => Promise<StoredBytes>;
-  /**
-   * The write's trust score sent it to the moderation queue: the content is stored, but has no
-   * summary and is in no feed index until an admin accepts it. Absent: it is published.
-   */
-  queued?: { trustScore: number };
-  /**
-   * An update of content that was reposted: the places reposts gave it (see `reposts`), as the
-   * request read them. The hashtags among them are the content's like its publisher's own, and are
-   * in `summary.tags` and `meta.tags` unless `droppedReposts` names them.
-   */
-  reposts?: Repost[];
-  /**
-   * The hashtags a repost gave the content that this update is refused: its publisher is muted on
-   * them now, or what it now says has their blocked words. They aren't the publisher's to send
-   * again, so the write's commit records each as removed from the content (`tag_moderation`, with
-   * no moderator), which keeps it off the content for good, as a moderator's removal does.
-   */
-  droppedReposts?: string[];
-  /** New content that is a repost of a post on another server: the hash of the original's address (see `content.origin_hash`). */
-  originHash?: string;
-}
-
-/** A repost of content that is there (see contentWriter's repost). */
-export interface RepostWrite {
-  contentId: string;
-  /** Who reposts it. */
-  userId: string;
-  /** The hashtags the repost gives the content. */
-  tags: string[];
-  /** The hashtags the content's meta file has. */
-  carried: string[];
 }
 
 /** 409: a user reposts a post once. */
@@ -140,15 +100,18 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
     const { contentId, createdAt, updatedAt: ts, aiGenerated } = summary;
     const own = authorIndex(publisher.userId);
     const reposters = reposterIndexes(reposts);
-    // The indexes the content is published in: its hashtags', its publisher's own, and those of whoever reposted it.
-    const tags = queued ? [] : [...summary.tags, own, ...reposters];
-    // Queued: also the hashtags it has now, should an admin accept what it was while this is under way.
-    const dropped = !previous
-      ? []
-      : queued
-        ? [...previous.tags, ...summary.tags, own, ...reposters, ...droppedReposts]
-        : [...previous.tags.filter((tag) => !summary.tags.includes(tag)), ...droppedReposts];
-    const touched = [...new Set([...tags, ...dropped])];
+    const touched = [
+      ...new Set([
+        // The indexes the content is published in: its hashtags', its publisher's own, and those of whoever reposted it.
+        ...(queued ? [] : [...summary.tags, own, ...reposters]),
+        // The ones an update dropped. Queued: also the hashtags it has now, should an admin accept what it was while this is under way.
+        ...(!previous
+          ? []
+          : queued
+            ? [...previous.tags, ...summary.tags, own, ...reposters, ...droppedReposts]
+            : [...previous.tags.filter((tag) => !summary.tags.includes(tag)), ...droppedReposts]),
+      ]),
+    ];
 
     if (previous && touched.length) await enqueue(db, contentId, touched, false);
     try {
@@ -168,21 +131,42 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
       // Content that waited in the moderation queue still does, and has no summary, whatever this write had stored.
       else if (await isHeld(contentId).catch(() => false)) await summaries.erase(summary).catch(() => {});
       // The meta file is still the one before: feeds go back to showing what it describes.
-      else await summaries.put(summaryBefore(summary, previous)).catch(() => {});
+      else {
+        await summaries
+          // The summary of the content before the update, which its meta file then (`previous`) still describes.
+          .put({
+            ...summary,
+            updatedAt: previous.updatedAt,
+            mimeType: previous.mimeType,
+            aiGenerated: previous.aiGenerated,
+            comments: takesComments(previous),
+            tags: previous.tags,
+            preview: previewOf(previous, config.publicBaseUrl),
+          })
+          .catch(() => {});
+      }
       throw err;
     }
 
     try {
       await db.transaction().execute(async (trx) => {
         if (previous) {
-          const res = await trx
-            .updateTable('content')
-            .set({ ai_generated: aiGenerated ? 1 : 0 })
-            .where('id', '=', contentId)
-            .where('delete_requested_at', 'is', null)
-            .executeTakeFirst();
           // MySQL counts the rows it changed, not those it matched, so a row it left as it was is looked for.
-          if (Number(res.numUpdatedRows) !== 1 && !(await isLive(trx, contentId))) throw pendingDeletion();
+          if (
+            Number(
+              (
+                await trx
+                  .updateTable('content')
+                  .set({ ai_generated: aiGenerated ? 1 : 0 })
+                  .where('id', '=', contentId)
+                  .where('delete_requested_at', 'is', null)
+                  .executeTakeFirst()
+              ).numUpdatedRows,
+            ) !== 1 &&
+            !(await isLive(trx, contentId))
+          ) {
+            throw pendingDeletion();
+          }
         } else {
           await trx
             .insertInto('content')
@@ -191,8 +175,12 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
         }
         if (queued) {
           // Content that was waiting keeps its place in the queue.
-          const row = { content_id: contentId, trust_score: queued.trustScore, created_at: ts };
-          await updateOnConflict(trx.insertInto('moderation_queue').values(row), dialect, 'content_id', { trust_score: queued.trustScore }).execute();
+          await updateOnConflict(
+            trx.insertInto('moderation_queue').values({ content_id: contentId, trust_score: queued.trustScore, created_at: ts }),
+            dialect,
+            'content_id',
+            { trust_score: queued.trustScore },
+          ).execute();
         } else if (previous) {
           await trx.deleteFrom('moderation_queue').where('content_id', '=', contentId).execute();
         }
@@ -227,11 +215,14 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
     await publishers.put(publisher).catch((err) => log.warn({ err, userId: publisher.userId }, 'could not refresh the publisher credit in Redis'));
     // Not the hashtags a repost gave it, which the repost counted, whether the meta file had them yet or not.
     const reposted = new Set(repostedTags(reposts));
-    const added = previous ? summary.tags.filter((tag) => !previous.tags.includes(tag) && !reposted.has(tag)) : summary.tags;
     // Stamped now, not when the write began: the compactor goes by it, and must find the rows written by then.
-    await countTagPairs(db, dialect, summary.tags, added, now()).catch((err) =>
-      log.warn({ err, contentId }, 'could not count the hashtags of the write; related hashtags go without it'),
-    );
+    await countTagPairs(
+      db,
+      dialect,
+      summary.tags,
+      previous ? summary.tags.filter((tag) => !previous.tags.includes(tag) && !reposted.has(tag)) : summary.tags,
+      now(),
+    ).catch((err) => log.warn({ err, contentId }, 'could not count the hashtags of the write; related hashtags go without it'));
   }
 
   /**
@@ -248,9 +239,12 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
     const contentId = row.id;
     const accepted = await db.transaction().execute(async (trx) => {
       await trx.updateTable('content').set((eb) => ({ ai_generated: eb.ref('ai_generated') })).where('id', '=', contentId).execute();
-      if (!(await isLive(trx, contentId))) return null;
-      const res = await trx.deleteFrom('moderation_queue').where('content_id', '=', contentId).executeTakeFirst();
-      if (Number(res.numDeletedRows) === 0) return null;
+      if (
+        !(await isLive(trx, contentId)) ||
+        Number((await trx.deleteFrom('moderation_queue').where('content_id', '=', contentId).executeTakeFirst()).numDeletedRows) === 0
+      ) {
+        return null;
+      }
       // Read with the row locked: a write that commits after this one has it as its `previous`, or wrote it.
       const meta = await content.getMeta(contentId);
       if (!meta) throw new Error(`the meta file of ${contentId} is missing`);
@@ -267,8 +261,9 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
     const publisher: Publisher = { userId: row.user_id, username: row.username };
     // Written, not only looked for: whatever summary a write that failed may have left is not of what was accepted.
     // The compactor writes it when it rebuilds the content's entries, should this fail.
-    const summary = summaryOf({ ...row, ai_generated: meta.aiGenerated ? 1 : 0 }, meta, config.publicBaseUrl, repostTimes(reposts));
-    await summaries.put(summary).catch((err) => log.warn({ err, contentId }, 'could not write the summary of accepted content; the compactor will'));
+    await summaries
+      .put(summaryOf({ ...row, ai_generated: meta.aiGenerated ? 1 : 0 }, meta, config.publicBaseUrl, repostTimes(reposts)))
+      .catch((err) => log.warn({ err, contentId }, 'could not write the summary of accepted content; the compactor will'));
     await publishers.put(publisher).catch((err) => log.warn({ err, userId: publisher.userId }, 'could not refresh the publisher credit in Redis'));
     return meta.tags;
   }
@@ -339,8 +334,7 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
 
   /** Whether the content is there and not set for deletion. */
   async function isLive(trx: Pick<typeof db, 'selectFrom'>, contentId: string): Promise<boolean> {
-    const row = await trx.selectFrom('content').select('id').where('id', '=', contentId).where('delete_requested_at', 'is', null).executeTakeFirst();
-    return row !== undefined;
+    return (await trx.selectFrom('content').select('id').where('id', '=', contentId).where('delete_requested_at', 'is', null).executeTakeFirst()) !== undefined;
   }
 
   /** Whether the database holds new content whose insert reported an error; null if it can't say. */
@@ -351,17 +345,6 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
       return null;
     }
   }
-
-  /** The summary of content before an update, which its meta file then (`previous`) still describes. */
-  const summaryBefore = (summary: Summary, previous: ContentMeta): Summary => ({
-    ...summary,
-    updatedAt: previous.updatedAt,
-    mimeType: previous.mimeType,
-    aiGenerated: previous.aiGenerated,
-    comments: takesComments(previous),
-    tags: previous.tags,
-    preview: previewOf(previous, config.publicBaseUrl),
-  });
 
   /** Removes what was stored of new content that the database doesn't hold. */
   async function discard(summary: Summary): Promise<void> {

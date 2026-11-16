@@ -1,29 +1,17 @@
 import { sql } from 'kysely';
-import { toCommentRecords, type CommentRecord } from '../comments.js';
+import { toCommentRecords } from '../comments.js';
+import type { CommentRecord } from '../comments.types.js';
 import { publisherOf, summaryOf } from '../content.js';
-import type { AppDeps } from '../deps.js';
-import { toFeedRecord, type FeedRecord } from '../tagfeed/layout.js';
-
-/**
- * What the server's two queues hold, the moderation queue and the report queue: posts and comments,
- * in one order. Each queue is a UNION ALL of the posts' table and the comments' (moderation_queue
- * and comment_queue, reports and comment_reports), paged as one list, and this is what the two
- * have in common: what an item of either is, and how a page of rows becomes items.
- */
-export type QueueKind = 'post' | 'comment';
+import type { AppDeps } from '../deps.types.js';
+import { toFeedRecord } from '../tagfeed/layout.js';
+import type { FeedRecord } from '../tagfeed/layout.types.js';
+import type { QueueKind, QueueRow } from './queues.types.js';
 
 /**
  * The kind of a branch of a queue's union, as a column. Written into the SQL, not sent as a
  * parameter: a parameter has no type for PostgreSQL to give the column.
  */
 export const kindColumn = (kind: QueueKind) => (kind === 'post' ? sql<QueueKind>`'post'` : sql<QueueKind>`'comment'`).as('kind');
-
-/** A row of a queue: a post (`id` is its content id) or a comment (`id` is the comment's, `content_id` its post's). */
-export interface QueueRow {
-  kind: QueueKind;
-  id: string;
-  content_id: string;
-}
 
 /** A post in a queue: its feed record, with its whole text or caption. */
 export type QueuedPost = { kind: 'post' } & FeedRecord & { text?: string };
@@ -58,14 +46,12 @@ export async function queueItems(
     Promise.all(
       rows.map(async (r) => {
         if (r.kind === 'post') return { meta: await content.getMeta(r.id), comment: null };
-        const waiting = held ? await comments.getHeld(r.content_id, r.id) : null;
-        return { meta: null, comment: waiting ?? (await comments.get(r.content_id, r.id)) };
+        return { meta: null, comment: (held ? await comments.getHeld(r.content_id, r.id) : null) ?? (await comments.get(r.content_id, r.id)) };
       }),
     ),
   ]);
   const postsById = new Map(posts.map((p) => [p.id, p]));
-  const shown = found.flatMap(({ comment }) => (comment ? [comment] : []));
-  const records = new Map((await toCommentRecords(deps, shown)).map((record) => [record.commentId, record]));
+  const records = new Map((await toCommentRecords(deps, found.flatMap(({ comment }) => (comment ? [comment] : [])))).map((record) => [record.commentId, record]));
   return rows.map((r, i) => {
     if (r.kind === 'comment') {
       const record = records.get(r.id);
@@ -74,7 +60,10 @@ export async function queueItems(
     const post = postsById.get(r.id);
     const meta = found[i]!.meta;
     if (!post || !meta) return null;
-    const summary = summaryOf(post, meta, config.publicBaseUrl);
-    return { kind: 'post' as const, ...toFeedRecord(summary, post.like_count, publisherOf(post)), ...(meta.text !== undefined && { text: meta.text }) };
+    return {
+      kind: 'post' as const,
+      ...toFeedRecord(summaryOf(post, meta, config.publicBaseUrl), post.like_count, publisherOf(post)),
+      ...(meta.text !== undefined && { text: meta.text }),
+    };
   });
 }

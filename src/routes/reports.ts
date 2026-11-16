@@ -1,11 +1,12 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { authenticate, type AuthUser } from '../auth/apiKey.js';
+import { authenticate } from '../auth/apiKey.js';
+import type { AuthUser } from '../auth/apiKey.types.js';
 import { removeComment } from '../comments.js';
 import { loadContent, loadPublished, requireMeta, takesComments } from '../content.js';
 import { addOnce } from '../db/index.js';
 import { setForDeletion } from '../deletion.js';
-import type { AppDeps } from '../deps.js';
+import type { AppDeps } from '../deps.types.js';
 import { forbidden, notFound, tooManyRequests } from '../http/errors.js';
 import { listPage, listQuery } from '../http/listCursor.js';
 import { Credentials, ListQuery } from '../http/schemas.js';
@@ -18,18 +19,23 @@ import { HOUR, iso } from '../time.js';
 /** The longest reason a report can give, which is what `reports.reason` holds. */
 export const MAX_REASON_CHARS = 500;
 
+/** What POST /report says: the post that is reported, or with `commentId` a comment on it, and why, if the user gives a reason. */
 const ReportBody = Credentials.extend({
   contentId: z.string().uuid(),
   /** To report a comment on the post rather than the post. */
   commentId: z.string().uuid().optional(),
   reason: z.string().trim().max(MAX_REASON_CHARS).optional(),
 });
+/** The reported post a path names (/moderation/reports/:contentId), for the routes that list its reports, accept it or delete it. */
 const ContentParams = z.object({ contentId: z.string().uuid() });
+/** The reported comment a path names, by its post's id and its own, for the same three routes of a comment. */
 const CommentParams = z.object({ contentId: z.string().uuid(), commentId: z.string().uuid() });
 /** A page of the report queue: smaller than other lists', as each post's meta file, or each comment, is read for it. */
 const QueueQuery = ListQuery.extend({ limit: z.coerce.number().int().min(1).max(100).default(50) });
 
+/** 404 for a post with no reports that wait for a decision: it isn't in the report queue, so there is nothing to accept or delete there. */
 const notReported = () => notFound(msg('report.not_reported'));
+/** 404 for a comment with no reports that wait for a decision, as `notReported` is for a post. */
 const commentNotReported = () => notFound(msg('comment.not_reported'));
 
 /**
@@ -121,29 +127,39 @@ export function reportRoutes(app: FastifyInstance, deps: AppDeps) {
   app.get('/moderation/reports', async (req) => {
     const page = listQuery(req.query, QueueQuery);
     await asServerModerator(req);
-    const posts = db
-      .selectFrom('reports')
-      .select((eb) => [kindColumn('post'), 'content_id as id', 'content_id', eb.fn.countAll<number>().as('reports'), eb.fn.min('created_at').as('created_at')])
-      .where('accepted_at', 'is', null)
-      .groupBy('content_id');
-    const commented = db
-      .selectFrom('comment_reports')
-      .select((eb) => [kindColumn('comment'), 'comment_id as id', 'content_id', eb.fn.countAll<number>().as('reports'), eb.fn.min('created_at').as('created_at')])
-      .where('accepted_at', 'is', null)
-      .groupBy(['comment_id', 'content_id']);
-    const query = db
-      .selectFrom(posts.unionAll(commented).as('reported'))
-      .innerJoin('content', 'content.id', 'reported.content_id')
-      .select(['reported.kind', 'reported.id', 'reported.content_id', 'reported.reports', 'reported.created_at'])
-      // Content set for deletion (here, or by its publisher) is gone, though its row and its reports are still there. So are its comments.
-      .where('content.delete_requested_at', 'is', null);
-    const { rows, nextCursor } = await listPage(query, { createdAt: 'reported.created_at', userId: 'reported.id' }, page, 'oldest');
+    const { rows, nextCursor } = await listPage(
+      db
+        .selectFrom(
+          db
+            .selectFrom('reports')
+            .select((eb) => [kindColumn('post'), 'content_id as id', 'content_id', eb.fn.countAll<number>().as('reports'), eb.fn.min('created_at').as('created_at')])
+            .where('accepted_at', 'is', null)
+            .groupBy('content_id')
+            .unionAll(
+              db
+                .selectFrom('comment_reports')
+                .select((eb) => [kindColumn('comment'), 'comment_id as id', 'content_id', eb.fn.countAll<number>().as('reports'), eb.fn.min('created_at').as('created_at')])
+                .where('accepted_at', 'is', null)
+                .groupBy(['comment_id', 'content_id']),
+            )
+            .as('reported'),
+        )
+        .innerJoin('content', 'content.id', 'reported.content_id')
+        .select(['reported.kind', 'reported.id', 'reported.content_id', 'reported.reports', 'reported.created_at'])
+        // Content set for deletion (here, or by its publisher) is gone, though its row and its reports are still there. So are its comments.
+        .where('content.delete_requested_at', 'is', null),
+      { createdAt: 'reported.created_at', userId: 'reported.id' },
+      page,
+      'oldest',
+    );
     const items = await queueItems(deps, rows, { held: false });
-    const queue = rows.flatMap((r, i) => {
-      const item = items[i];
-      return item ? [{ ...item, reports: Number(r.reports), reportedAt: iso(r.created_at) }] : [];
-    });
-    return { queue, nextCursor };
+    return {
+      queue: rows.flatMap((r, i) => {
+        const item = items[i];
+        return item ? [{ ...item, reports: Number(r.reports), reportedAt: iso(r.created_at) }] : [];
+      }),
+      nextCursor,
+    };
   });
 
   /**
@@ -155,10 +171,13 @@ export function reportRoutes(app: FastifyInstance, deps: AppDeps) {
     const page = listQuery(req.query);
     await asServerModerator(req);
     await loadContent(db, contentId);
-    const query = waiting(contentId)
-      .innerJoin('users', 'users.id', 'reports.user_id')
-      .select(['users.id', 'users.username', 'reports.reason', 'reports.created_at']);
-    const { rows, nextCursor } = await listPage(query, { createdAt: 'reports.created_at', userId: 'reports.user_id' }, page);
+    const { rows, nextCursor } = await listPage(
+      waiting(contentId)
+        .innerJoin('users', 'users.id', 'reports.user_id')
+        .select(['users.id', 'users.username', 'reports.reason', 'reports.created_at']),
+      { createdAt: 'reports.created_at', userId: 'reports.user_id' },
+      page,
+    );
     return {
       contentId,
       reports: rows.map((r) => ({ userId: r.id, username: r.username, ...(r.reason !== null && { reason: r.reason }), reportedAt: iso(r.created_at) })),
@@ -175,8 +194,9 @@ export function reportRoutes(app: FastifyInstance, deps: AppDeps) {
     const { contentId } = ContentParams.parse(req.params);
     const moderator = await asServerModerator(req);
     await loadContent(db, contentId);
-    const res = await db.updateTable('reports').set({ accepted_at: now() }).where('content_id', '=', contentId).where('accepted_at', 'is', null).executeTakeFirst();
-    const reports = Number(res.numUpdatedRows);
+    const reports = Number(
+      (await db.updateTable('reports').set({ accepted_at: now() }).where('content_id', '=', contentId).where('accepted_at', 'is', null).executeTakeFirst()).numUpdatedRows,
+    );
     if (reports === 0) throw notReported();
     req.log.info({ contentId, moderator: moderator.id, reports }, 'accepted from the report queue');
     return { contentId, status: 'accepted', reports };
@@ -208,10 +228,13 @@ export function reportRoutes(app: FastifyInstance, deps: AppDeps) {
     const page = listQuery(req.query);
     await asServerModerator(req);
     await loadContent(db, contentId);
-    const query = waitingOnComment(contentId, commentId)
-      .innerJoin('users', 'users.id', 'comment_reports.user_id')
-      .select(['users.id', 'users.username', 'comment_reports.reason', 'comment_reports.created_at']);
-    const { rows, nextCursor } = await listPage(query, { createdAt: 'comment_reports.created_at', userId: 'comment_reports.user_id' }, page);
+    const { rows, nextCursor } = await listPage(
+      waitingOnComment(contentId, commentId)
+        .innerJoin('users', 'users.id', 'comment_reports.user_id')
+        .select(['users.id', 'users.username', 'comment_reports.reason', 'comment_reports.created_at']),
+      { createdAt: 'comment_reports.created_at', userId: 'comment_reports.user_id' },
+      page,
+    );
     return {
       contentId,
       commentId,
@@ -229,14 +252,17 @@ export function reportRoutes(app: FastifyInstance, deps: AppDeps) {
     const { contentId, commentId } = CommentParams.parse(req.params);
     const moderator = await asServerModerator(req);
     await loadContent(db, contentId);
-    const res = await db
-      .updateTable('comment_reports')
-      .set({ accepted_at: now() })
-      .where('comment_id', '=', commentId)
-      .where('content_id', '=', contentId)
-      .where('accepted_at', 'is', null)
-      .executeTakeFirst();
-    const reports = Number(res.numUpdatedRows);
+    const reports = Number(
+      (
+        await db
+          .updateTable('comment_reports')
+          .set({ accepted_at: now() })
+          .where('comment_id', '=', commentId)
+          .where('content_id', '=', contentId)
+          .where('accepted_at', 'is', null)
+          .executeTakeFirst()
+      ).numUpdatedRows,
+    );
     if (reports === 0) throw commentNotReported();
     req.log.info({ contentId, commentId, moderator: moderator.id, reports }, 'accepted a comment from the report queue');
     return { contentId, commentId, status: 'accepted', reports };

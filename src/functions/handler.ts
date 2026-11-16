@@ -1,33 +1,10 @@
 import type { FastifyInstance } from 'fastify';
-import { buildApp, type AppOptions } from '../app.js';
+import { buildApp } from '../app.js';
+import type { AppOptions } from '../app.types.js';
 import { loadConfig, type Config } from '../config.js';
 import { bootstrap, bootstrapStores } from '../deps.js';
-import type { HotStore } from '../storage/index.js';
 import { GROUPS, type GroupName } from './groups.js';
-
-/** An HTTP request as a function receives it, whatever the platform calls its parts. */
-export interface FunctionRequest {
-  method: string;
-  /** Path and query string. */
-  url: string;
-  headers: Record<string, string | string[] | undefined>;
-  body?: Buffer;
-  /** The peer the platform saw: the client, or the last proxy before the function (see TRUST_PROXY). */
-  remoteAddress?: string;
-}
-
-export interface FunctionResponse {
-  statusCode: number;
-  headers: Record<string, string | string[]>;
-  body: Buffer;
-}
-
-export interface FunctionOptions {
-  /** Injectable clock (UTC epoch ms). */
-  now?: () => number;
-  /** The hot store to use instead of the configured one: functions in one process sharing an in-memory store. */
-  hot?: HotStore;
-}
+import type { FunctionOptions, FunctionRequest, FunctionResponse } from './handler.types.js';
 
 /** What a function's settings default to where the environment doesn't say (see functionConfig). */
 const FUNCTION_DEFAULTS: NodeJS.ProcessEnv = {
@@ -86,8 +63,7 @@ export function createFunction(group: GroupName, config: Config = functionConfig
       await started();
     },
     async handle(req: FunctionRequest): Promise<FunctionResponse> {
-      const { app } = await started();
-      const res = await app.inject({
+      const res = await (await started()).app.inject({
         method: req.method as 'GET',
         url: req.url,
         headers: req.headers,

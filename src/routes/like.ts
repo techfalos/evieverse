@@ -4,18 +4,20 @@ import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
 import { contentNotFound, loadPublished, requireMeta, takesComments } from '../content.js';
 import { isUniqueViolation } from '../db/index.js';
-import type { AppDeps } from '../deps.js';
+import type { AppDeps } from '../deps.types.js';
 import { notFound } from '../http/errors.js';
 import { Credentials } from '../http/schemas.js';
 import { msg } from '../language.js';
 import { refuseBanned } from '../moderation/policy.js';
 
+/** The body of POST /like: who's asking, and the post to like, or the post and the comment on it to like. */
 const Body = Credentials.extend({
   contentId: z.string().uuid(),
   /** To like a comment on the post rather than the post. */
   commentId: z.string().uuid().optional(),
 });
 
+/** Likes, of posts and of comments on them: POST /like, and nothing else. No route takes a like back. */
 export function likeRoutes(app: FastifyInstance, { db, content, comments, now = Date.now }: AppDeps) {
   /**
    * Likes a post, or with `commentId`, a comment on it. Likes are permanent and idempotent: liking
@@ -46,22 +48,26 @@ export function likeRoutes(app: FastifyInstance, { db, content, comments, now = 
     try {
       await db.transaction().execute(async (trx) => {
         // Published content only: what is set for deletion, or waits in the moderation queue, isn't there to like.
-        const content = await trx
-          .selectFrom('content')
-          .leftJoin('moderation_queue', 'moderation_queue.content_id', 'content.id')
-          .select('content.id')
-          .where('content.id', '=', contentId)
-          .where('content.delete_requested_at', 'is', null)
-          .where('moderation_queue.content_id', 'is', null)
-          .executeTakeFirst();
-        if (!content) throw contentNotFound();
-        const existing = await trx
-          .selectFrom('likes')
-          .select('user_id')
-          .where('user_id', '=', user.id)
-          .where('content_id', '=', contentId)
-          .executeTakeFirst();
-        if (existing) {
+        if (
+          !(await trx
+            .selectFrom('content')
+            .leftJoin('moderation_queue', 'moderation_queue.content_id', 'content.id')
+            .select('content.id')
+            .where('content.id', '=', contentId)
+            .where('content.delete_requested_at', 'is', null)
+            .where('moderation_queue.content_id', 'is', null)
+            .executeTakeFirst())
+        ) {
+          throw contentNotFound();
+        }
+        if (
+          await trx
+            .selectFrom('likes')
+            .select('user_id')
+            .where('user_id', '=', user.id)
+            .where('content_id', '=', contentId)
+            .executeTakeFirst()
+        ) {
           alreadyLiked = true;
           return;
         }

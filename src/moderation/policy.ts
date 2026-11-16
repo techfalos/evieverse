@@ -1,29 +1,17 @@
 import type { FastifyBaseLogger } from 'fastify';
-import type { AuthUser } from '../auth/apiKey.js';
-import type { Config } from '../config.js';
+import type { AuthUser } from '../auth/apiKey.types.js';
 import type { Db } from '../db/index.js';
 import { plainText } from '../format.js';
 import { forbidden, unprocessable } from '../http/errors.js';
 import { msg } from '../language.js';
-import { routeOf, trustOf, type TrustPlugin, type TrustRoute } from './trust.js';
+import type { Moderated, ModerationDeps, RemovedTag } from './policy.types.js';
+import { routeOf, trustOf, type TrustRoute } from './trust.js';
 import { scanTexts } from './words.js';
-
-/**
- * Why a post didn't get a hashtag: the publisher is muted on it (or, for a repost, the reposter is),
- * a moderator removed it from this content, or its blocked words. And, for a repost alone: the
- * post has the hashtag already.
- */
-type RemovalReason = 'muted' | 'removed' | 'blocked_word' | 'already_tagged';
-export interface RemovedTag {
-  tag: string;
-  reason: RemovalReason;
-}
 
 /** Whether `user` can moderate `tag`: an admin, or one of the tag's moderators. */
 export async function moderates(db: Db, user: AuthUser, tag: string): Promise<boolean> {
   if (user.admin) return true;
-  const row = await db.selectFrom('tag_moderators').select('tag').where('tag', '=', tag).where('user_id', '=', user.id).executeTakeFirst();
-  return row !== undefined;
+  return (await db.selectFrom('tag_moderators').select('tag').where('tag', '=', tag).where('user_id', '=', user.id).executeTakeFirst()) !== undefined;
 }
 
 /**
@@ -51,16 +39,6 @@ export async function setAdmin(db: Db, user: string, admin: boolean): Promise<{ 
   return { userId: row.id, username: row.username };
 }
 
-/** What moderation of a post or a comment works with: the database, the settings, and the trust plugins. */
-export interface ModerationDeps {
-  db: Db;
-  config: Config;
-  trustPlugins: TrustPlugin[];
-  now?: () => number;
-  /** The request's log, which is told of a blocked pattern that took too long to read the post (see scanTexts). */
-  log?: FastifyBaseLogger;
-}
-
 /**
  * Moderation of a new comment by `userId` on the post `contentId`, or of an edit of one. It goes
  * through the gate a post does: the same trust plugins give it a score, each told it is a comment
@@ -76,23 +54,20 @@ export async function moderateComment(
   { db, config, trustPlugins, now = Date.now, log }: ModerationDeps,
   comment: { userId: string; contentId: string; text: string; filename?: string | null },
 ): Promise<{ trustScore: number; route: Exclude<TrustRoute, 'delete'> }> {
-  // Its text as its readers read it: without its formatting, with where its links lead (format.ts).
-  const texts = [plainText(comment.text, true), comment.filename].filter((text): text is string => !!text);
-  const trust = await trustOf(trustPlugins, { userId: comment.userId, commentOn: comment.contentId, tags: [], texts }, { db, config, now, log });
+  const trust = await trustOf(
+    trustPlugins,
+    {
+      userId: comment.userId,
+      commentOn: comment.contentId,
+      tags: [],
+      // Its text as its readers read it: without its formatting, with where its links lead (format.ts).
+      texts: [plainText(comment.text, true), comment.filename].filter((text): text is string => !!text),
+    },
+    { db, config, now, log },
+  );
   const route = routeOf(trust.score, config.trust);
   if (route === 'delete') throw unprocessable(trust.reason ?? msg('comment.not_trusted'));
   return { trustScore: trust.score, route };
-}
-
-export interface Moderated {
-  /** The hashtags the post gets. */
-  tags: string[];
-  /** Those it doesn't, with why. */
-  removedTags: RemovedTag[];
-  /** How far the server trusts the post (see trustOf). Kept only with a post that waits in the moderation queue. */
-  trustScore: number;
-  /** Where the score sends the post: to the moderation queue, or straight to the feeds. */
-  route: Exclude<TrustRoute, 'delete'>;
 }
 
 /**
@@ -142,8 +117,7 @@ export async function moderateRepost(
   repost: { userId: string; publisherId: string; contentId: string; tags: string[]; texts: (string | null | undefined)[] },
 ): Promise<Pick<Moderated, 'tags' | 'removedTags'>> {
   const { userId, publisherId, contentId, tags } = repost;
-  const rules = await tagRules(db, { userIds: [userId, publisherId], contentId, tags });
-  const { kept, removedTags } = rules.apply(repost.texts.filter((text): text is string => !!text), log);
+  const { kept, removedTags } = (await tagRules(db, { userIds: [userId, publisherId], contentId, tags })).apply(repost.texts.filter((text): text is string => !!text), log);
   return { tags: kept, removedTags };
 }
 
@@ -169,16 +143,19 @@ async function tagRules(db: Db, { userIds, contentId, tags }: { userIds: string[
   const muted = new Set(mutes.map((r) => r.tag));
   const removed = new Set(removals.map((r) => r.tag));
 
-  const apply = (texts: string[], log?: FastifyBaseLogger) => {
-    // With no hashtag's list that applies to the post, nothing needs reading.
-    const blocked = lists.size ? scanTexts(lists, [...texts, ...tags], log) : null;
-    const removedTags: RemovedTag[] = [];
-    const kept = tags.filter((tag) => {
-      const reason = muted.has(tag) ? 'muted' : removed.has(tag) ? 'removed' : blocked?.has(tag) ? 'blocked_word' : null;
-      if (reason) removedTags.push({ tag, reason });
-      return !reason;
-    });
-    return { kept, removedTags };
+  return {
+    apply: (texts: string[], log?: FastifyBaseLogger) => {
+      // With no hashtag's list that applies to the post, nothing needs reading.
+      const blocked = lists.size ? scanTexts(lists, [...texts, ...tags], log) : null;
+      const removedTags: RemovedTag[] = [];
+      return {
+        kept: tags.filter((tag) => {
+          const reason = muted.has(tag) ? 'muted' : removed.has(tag) ? 'removed' : blocked?.has(tag) ? 'blocked_word' : null;
+          if (reason) removedTags.push({ tag, reason });
+          return !reason;
+        }),
+        removedTags,
+      };
+    },
   };
-  return { apply };
 }

@@ -3,7 +3,7 @@ import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { Config } from '../config.js';
-import type { AppDeps } from '../deps.js';
+import type { AppDeps } from '../deps.types.js';
 import { decodeCursor, decodeFollowingCursor, encodeCursor, encodeFollowingCursor } from '../feed/cursor.js';
 import { planFollowing } from '../feed/following.js';
 import { FEED_ALGORITHMS, FEED_HOURS, planFeed } from '../feed/plan.js';
@@ -15,12 +15,12 @@ import { say } from '../http/language.js';
 import { invalidCursor } from '../http/listCursor.js';
 import { HASHTAG } from '../http/schemas.js';
 import { messageKey, msg } from '../language.js';
-import { adRecord, eligibleAds, orderAds, placeAds, type FeedAd } from '../monetization.js';
-import type { AdStore, PublisherStore, RelatedTagStore, SummaryStore } from '../storage/index.js';
+import { adRecord, eligibleAds, orderAds, placeAds } from '../monetization.js';
+import type { FeedAd } from '../monetization.types.js';
 import { normalizeTag } from '../tags.js';
 import { authorIndex } from '../tagfeed/layout.js';
-import type { TagFeedReader } from '../tagfeed/reader.js';
 import { DAY } from '../time.js';
+import type { FeedDeps } from './feed.types.js';
 
 /** The most hashtags a feed reads: the ones asked for and, with addRelated, the ones related to them. */
 const MAX_TAGS = 20;
@@ -29,36 +29,37 @@ const MAX_TAGS = 20;
 const Limit = z.coerce.number().int().positive().optional();
 /** true: only content its publisher declared created with AI. false: only content declared not. Omitted: both. */
 const AiGenerated = z.stringbool().optional();
-/**
- * false: only posts no moderator of their hashtag has decided on yet, which is that hashtag's moderation
- * queue. true: only posts one has approved. Omitted: both.
- */
-const Moderated = z.stringbool().optional();
 
-/** Posts of the past this many hours: 1, 2, 4, 8 or 12 hours, or 1, 2, 3, 7, 14, 21, 30, 60 or 90 days' worth. */
-const Hours = z.coerce
-  .number()
-  .refine((hours) => FEED_HOURS.includes(hours), { message: messageKey('feed.hours_invalid'), params: { hours: FEED_HOURS.join(', ') } })
-  .default(24);
 /**
- * true: the feed also returns posts under the hashtags related to the ones asked for, which are those
- * that tend to be on the same posts. Omitted or false: only under the ones asked for.
+ * The query of GET /feed: the hashtags to read, how far back, which posts come first and which are
+ * left out, and the page asked for (`limit`, and the `cursor` the page before came with).
  */
-const AddRelated = z.stringbool().optional();
-
 const Query = z.object({
   /** Comma-separated hashtags, e.g. "news,mumbai". Also accepts repeated ?tags= params. */
   tags: z.union([z.string(), z.array(z.string())]),
-  hours: Hours,
+  /** Posts of the past this many hours: 1, 2, 4, 8 or 12 hours, or 1, 2, 3, 7, 14, 21, 30, 60 or 90 days' worth. */
+  hours: z.coerce
+    .number()
+    .refine((hours) => FEED_HOURS.includes(hours), { message: messageKey('feed.hours_invalid'), params: { hours: FEED_HOURS.join(', ') } })
+    .default(24),
   limit: Limit,
   /** Which of the window's posts come first. popular: the most liked. chronological: the newest. */
   algorithm: z.enum(FEED_ALGORITHMS).default('popular'),
-  addRelated: AddRelated,
+  /**
+   * true: the feed also returns posts under the hashtags related to the ones asked for, which are those
+   * that tend to be on the same posts. Omitted or false: only under the ones asked for.
+   */
+  addRelated: z.stringbool().optional(),
   aiGenerated: AiGenerated,
-  moderated: Moderated,
+  /**
+   * false: only posts no moderator of their hashtag has decided on yet, which is that hashtag's moderation
+   * queue. true: only posts one has approved. Omitted: both.
+   */
+  moderated: z.stringbool().optional(),
   cursor: z.string().optional(),
 });
 
+/** The query of GET /feed/following: whose follows, which of their posts are left out, and the page asked for. */
 const FollowingQuery = z.object({
   /** Whose follows. Theirs to read by their key; anyone's, with no key, if they show whom they follow. */
   userId: z.string().uuid(),
@@ -74,17 +75,11 @@ function pageLimit(config: Config, requested: number | undefined): number {
   return limit;
 }
 
-/** Only the feed index, summaries, publisher credits, related hashtags and ads are passed in: hashtag feeds never touch the database. */
-export interface FeedDeps {
-  config: Config;
-  feedReader: TagFeedReader;
-  summaries: SummaryStore;
-  publishers: PublisherStore;
-  relatedTags: RelatedTagStore;
-  ads: AdStore;
-  now?: () => number;
-}
-
+/**
+ * The hashtag feed: GET /feed, and nothing else. It never touches the database (see FeedDeps), so
+ * it can be served by a function that opens none (see functions/groups.ts). The following feed
+ * does, and is a route of its own (followingFeedRoutes).
+ */
 export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries, publishers, relatedTags, ads, now = Date.now }: FeedDeps) {
   /**
    * retrieve_feed. Each record says whether a moderator of the hashtag it is listed under has approved
@@ -103,8 +98,15 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries
    */
   app.get('/feed', async (req, reply) => {
     const q = Query.parse(req.query);
-    const raw = (Array.isArray(q.tags) ? q.tags : [q.tags]).flatMap((t) => t.split(',')).map((t) => t.trim()).filter(Boolean);
-    const tags = [...new Set(raw.map((t) => (HASHTAG.test(t) ? normalizeTag(t) : null)))];
+    const tags = [
+      ...new Set(
+        (Array.isArray(q.tags) ? q.tags : [q.tags])
+          .flatMap((t) => t.split(','))
+          .map((t) => t.trim())
+          .filter(Boolean)
+          .map((t) => (HASHTAG.test(t) ? normalizeTag(t) : null)),
+      ),
+    ];
     if (!tags.length || tags.includes(null)) throw badRequest(msg('feed.tags_invalid'));
     if (tags.length > MAX_TAGS) throw badRequest(msg('feed.too_many_tags', { max: MAX_TAGS }));
     const tagList = tags as string[];
@@ -139,9 +141,8 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries
     if (cursor && cursor.after.length !== feedTags.length) throw invalidCursor();
 
     // Every page reads the indexes as they are now. The cursor says where in each tag's list the page before stopped.
-    const views = await Promise.all(feedTags.map((tag) => feedReader.view(tag)));
     const plan = planFeed(
-      views.map((v) => v.candidates),
+      (await Promise.all(feedTags.map((tag) => feedReader.view(tag)))).map((v) => v.candidates),
       {
         algorithm: q.algorithm,
         aiGenerated: q.aiGenerated,
@@ -153,31 +154,39 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries
         fresh: { every: freshEvery, maxLikes: freshMaxLikes, pool: freshPool, seed, after: cursor?.freshAfter },
       },
     );
-    const nextCursor = plan.truncated
-      ? encodeCursor({
-          anchor,
-          hours: q.hours,
-          tags: tagList,
-          related,
-          algorithm: q.algorithm,
-          aiGenerated: q.aiGenerated,
-          moderated: q.moderated,
-          after: plan.after,
-          seed,
-          freshAfter: plan.freshAfter,
-        })
-      : null;
     const bodies = await loadBodies(planned(plan), summaries, publishers);
 
     // The ads this page chooses from, in the page's own order of them (see orderAds): the session's
     // seed and the cursor the page was asked with tell it from every other page.
     const pageAds = config.monetization.feedAds ? orderAds(eligibleAds(await ads.get(), feedTags, now()), `${seed} ${q.cursor ?? ''}`) : undefined;
     const label = say(req, msg('ad.sponsored'));
-    const placed =
-      pageAds && ((count: number): FeedAd[] => placeAds(pageAds, count).map(({ ad, position }) => ({ ...adRecord(ad, label, config.publicBaseUrl), position })));
 
     reply.type('application/json; charset=utf-8');
-    return reply.send(Readable.from(renderFeed(plan, feedTags, bodies, nextCursor, related, placed)));
+    return reply.send(
+      Readable.from(
+        renderFeed(
+          plan,
+          feedTags,
+          bodies,
+          plan.truncated
+            ? encodeCursor({
+                anchor,
+                hours: q.hours,
+                tags: tagList,
+                related,
+                algorithm: q.algorithm,
+                aiGenerated: q.aiGenerated,
+                moderated: q.moderated,
+                after: plan.after,
+                seed,
+                freshAfter: plan.freshAfter,
+              })
+            : null,
+          related,
+          pageAds && ((count: number): FeedAd[] => placeAds(pageAds, count).map(({ ad, position }) => ({ ...adRecord(ad, label, config.publicBaseUrl), position }))),
+        ),
+      ),
+    );
   });
 }
 
@@ -202,9 +211,7 @@ export function followingFeedRoutes(app: FastifyInstance, { db, config, authorRe
     await requireShownFollows(db, req, q.userId, 'following');
     const t = now();
 
-    const followees = await follows.get(q.userId);
-    const indexes = await Promise.all(followees.map((id) => authorReader.open(authorIndex(id))));
-    const plan = await planFollowing(authorReader, indexes, {
+    const plan = await planFollowing(authorReader, await Promise.all((await follows.get(q.userId)).map((id) => authorReader.open(authorIndex(id)))), {
       limit,
       after,
       aiGenerated: q.aiGenerated,

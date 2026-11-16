@@ -1,6 +1,8 @@
 import { parseArgs } from 'node:util';
-import { apiClient, CliError, UpdateRequired, type Api } from './client.js';
-import { COMMANDS, helpText, usage, type Command, type Context, type Io } from './commands.js';
+import { apiClient, CliError, UpdateRequired } from './client.js';
+import type { Api } from './client.types.js';
+import { COMMANDS, helpText, usage } from './commands.js';
+import type { Command, Context, Io } from './commands.types.js';
 import { pickProfile } from './profiles.js';
 import { installRelease } from './update.js';
 

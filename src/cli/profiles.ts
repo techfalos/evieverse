@@ -1,26 +1,16 @@
 import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CliError } from './client.js';
-
-/**
- * A server and an account's key on it, kept in <home>/profiles/<name>.json, where <home> is
- * ~/.evieverse (or EVIEVERSE_HOME). `login` writes one, and so does a Terraform deployment, for
- * the admin account it creates.
- */
-export interface Profile {
-  /** The server's base URL. */
-  server: string;
-  userId: string;
-  /** The account's name when the profile was written; `whoami` asks the server for the one it has now. */
-  username?: string;
-  apiKey: string;
-}
+import type { Profile } from './profiles.types.js';
 
 /** The name `login` saves a profile under when it isn't given one. */
 export const DEFAULT_PROFILE = 'default';
 
+/** A profile's name, which names its file too: 1 to 64 letters, digits, ".", "_" and "-", the first a letter or a digit. */
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** The directory profiles are kept in, under `home`. */
 const dir = (home: string) => join(home, 'profiles');
+/** The file the profile `name` is kept in: <home>/profiles/<name>.json. */
 const file = (home: string, name: string) => join(dir(home), `${name}.json`);
 
 function checkName(name: string): string {
@@ -28,14 +18,22 @@ function checkName(name: string): string {
   return name;
 }
 
+/**
+ * The names of the profiles kept under `home`, sorted: the .json files there whose name can be a
+ * profile's. Empty if the directory can't be read, as before the first `login`, when there is none.
+ */
 export async function listProfiles(home: string): Promise<string[]> {
-  const files = await readdir(dir(home)).catch(() => [] as string[]);
-  return files
+  return (await readdir(dir(home)).catch(() => [] as string[]))
     .filter((f) => f.endsWith('.json') && NAME.test(f.slice(0, -5)))
     .map((f) => f.slice(0, -5))
     .sort();
 }
 
+/**
+ * The profile `name` as its file holds it, with the server's URL without a trailing slash. Throws a
+ * `CliError` if the name can't be a profile's, if there is no such file, or if the file isn't a
+ * profile: JSON with a `server`, a `userId` and an `apiKey`.
+ */
 export async function readProfile(home: string, name: string): Promise<Profile> {
   const path = file(home, checkName(name));
   let raw: string;
@@ -66,9 +64,9 @@ export async function writeProfile(home: string, name: string, profile: Profile)
   return path;
 }
 
+/** Deletes the file of the profile `name`, and nothing on its server. Returns whether there was such a profile. */
 export async function removeProfile(home: string, name: string): Promise<boolean> {
-  const names = await listProfiles(home);
-  if (!names.includes(name)) return false;
+  if (!(await listProfiles(home)).includes(name)) return false;
   await rm(file(home, name));
   return true;
 }

@@ -1,22 +1,28 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { authenticate, type AuthUser } from '../auth/apiKey.js';
+import { authenticate } from '../auth/apiKey.js';
+import type { AuthUser } from '../auth/apiKey.types.js';
 import { addOnce } from '../db/index.js';
-import type { AppDeps } from '../deps.js';
+import type { AppDeps } from '../deps.types.js';
 import { badRequest, forbidden, notFound, tooManyRequests } from '../http/errors.js';
 import { say } from '../http/language.js';
 import { listPage, listQuery } from '../http/listCursor.js';
 import { Credentials, Flag, ListQuery } from '../http/schemas.js';
 import { isNotice, MAX_MESSAGE_CHARS, MESSAGE, NOTICES } from '../inbox.js';
-import { msg, type Message } from '../language.js';
+import { msg } from '../language.js';
+import type { Message } from '../language.types.js';
 import { refuseBanned } from '../moderation/policy.js';
 import { iso } from '../time.js';
 
+/** The path of a user's inbox, and of the list of whom they block: the user's id. */
 const Params = z.object({ userId: z.string().uuid() });
+/** The path of one message or notice in a user's inbox: the user's id, and its own. */
 const MessageParams = z.object({ userId: z.string().uuid(), messageId: z.string().uuid() });
+/** The path of a block: the user who blocks, and the user they block. */
 const BlockParams = z.object({ userId: z.string().uuid(), blockedId: z.string().uuid() });
 
+/** The body of POST /messages: who's sending, whom to, and the text, which is 1 to MAX_MESSAGE_CHARS characters without the spaces around it. */
 const SendBody = Credentials.extend({
   /** Whom the message is for. */
   to: z.string().uuid(),
@@ -139,25 +145,34 @@ export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.
       listPage(query, { createdAt: 'inbox.created_at', userId: 'inbox.id' }, page),
       unreadIn(userId),
     ]);
-    const inbox = rows.map((r) => {
-      const times = { sentAt: iso(r.created_at), readAt: r.read_at === null ? null : iso(r.read_at) };
-      if (r.kind === MESSAGE) {
-        // No sender: their account is gone.
-        const from = r.sender_id !== null && r.username !== null ? { userId: r.sender_id, username: r.username } : null;
-        return { messageId: r.id, kind: r.kind, from, text: r.body ?? '', ...times };
-      }
-      return {
-        messageId: r.id,
-        kind: r.kind,
-        ...(r.content_id !== null && { contentId: r.content_id }),
-        ...(r.tag !== null && { tag: r.tag }),
-        ...(r.body !== null && { excerpt: r.body }),
-        // A kind this build doesn't know (left by a newer one) is shown by its name.
-        text: isNotice(r.kind) ? say(req, msg(NOTICES[r.kind], { tag: r.tag ?? '' })) : r.kind,
-        ...times,
-      };
-    });
-    return { userId, unread: unreadCount, inbox, nextCursor };
+    return {
+      userId,
+      unread: unreadCount,
+      inbox: rows.map((r) => {
+        const times = { sentAt: iso(r.created_at), readAt: r.read_at === null ? null : iso(r.read_at) };
+        if (r.kind === MESSAGE) {
+          return {
+            messageId: r.id,
+            kind: r.kind,
+            // No sender: their account is gone.
+            from: r.sender_id !== null && r.username !== null ? { userId: r.sender_id, username: r.username } : null,
+            text: r.body ?? '',
+            ...times,
+          };
+        }
+        return {
+          messageId: r.id,
+          kind: r.kind,
+          ...(r.content_id !== null && { contentId: r.content_id }),
+          ...(r.tag !== null && { tag: r.tag }),
+          ...(r.body !== null && { excerpt: r.body }),
+          // A kind this build doesn't know (left by a newer one) is shown by its name.
+          text: isNotice(r.kind) ? say(req, msg(NOTICES[r.kind], { tag: r.tag ?? '' })) : r.kind,
+          ...times,
+        };
+      }),
+      nextCursor,
+    };
   });
 
   /** Marks the caller's messages and notices as read: the ones named, or all of them. Those already read stay as they are. */
@@ -167,16 +182,14 @@ export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.
     await inboxOwner(req, userId, body);
     let update = db.updateTable('inbox').set({ read_at: now() }).where('user_id', '=', userId).where('read_at', 'is', null);
     if (body.messageIds) update = update.where('id', 'in', body.messageIds);
-    const res = await update.executeTakeFirst();
-    return { userId, read: Number(res.numUpdatedRows), unread: await unreadIn(userId) };
+    return { userId, read: Number((await update.executeTakeFirst()).numUpdatedRows), unread: await unreadIn(userId) };
   });
 
   /** Deletes a message or a notice from the caller's inbox. One that isn't there changes nothing. */
   app.delete('/users/:userId/inbox/:messageId', async (req) => {
     const { userId, messageId } = MessageParams.parse(req.params);
     await inboxOwner(req, userId);
-    const res = await db.deleteFrom('inbox').where('id', '=', messageId).where('user_id', '=', userId).executeTakeFirst();
-    return { userId, messageId, wasThere: Number(res.numDeletedRows) > 0 };
+    return { userId, messageId, wasThere: Number((await db.deleteFrom('inbox').where('id', '=', messageId).where('user_id', '=', userId).executeTakeFirst()).numDeletedRows) > 0 };
   });
 
   // Blocks.
@@ -189,8 +202,7 @@ export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.
     const { userId, blockedId } = BlockParams.parse(req.params);
     await blocker(req, userId);
     if (blockedId === userId) throw badRequest(msg('block.yourself'));
-    const blocked = await db.selectFrom('users').select('id').where('id', '=', blockedId).where('deleted_at', 'is', null).executeTakeFirst();
-    if (!blocked) throw notFound(msg('user.not_found'));
+    if (!(await db.selectFrom('users').select('id').where('id', '=', blockedId).where('deleted_at', 'is', null).executeTakeFirst())) throw notFound(msg('user.not_found'));
     const { at, already } = await addOnce(
       now,
       () => db.selectFrom('user_blocks').select('created_at').where('user_id', '=', userId).where('blocked_id', '=', blockedId).executeTakeFirst(),
@@ -203,8 +215,11 @@ export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.
   app.delete('/users/:userId/blocked/:blockedId', async (req) => {
     const { userId, blockedId } = BlockParams.parse(req.params);
     await blocker(req, userId);
-    const res = await db.deleteFrom('user_blocks').where('user_id', '=', userId).where('blocked_id', '=', blockedId).executeTakeFirst();
-    return { userId, blockedId, wasBlocked: Number(res.numDeletedRows) > 0 };
+    return {
+      userId,
+      blockedId,
+      wasBlocked: Number((await db.deleteFrom('user_blocks').where('user_id', '=', userId).where('blocked_id', '=', blockedId).executeTakeFirst()).numDeletedRows) > 0,
+    };
   });
 
   /** Whom the caller blocks, most recently blocked first, a page at a time. Unlike follows, only theirs to read. */
@@ -212,12 +227,15 @@ export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.
     const { userId } = Params.parse(req.params);
     const page = listQuery(req.query);
     await blocker(req, userId);
-    const query = db
-      .selectFrom('user_blocks')
-      .innerJoin('users', 'users.id', 'user_blocks.blocked_id')
-      .select(['users.id', 'users.username', 'user_blocks.created_at'])
-      .where('user_blocks.user_id', '=', userId);
-    const { rows, nextCursor } = await listPage(query, { createdAt: 'user_blocks.created_at', userId: 'user_blocks.blocked_id' }, page);
+    const { rows, nextCursor } = await listPage(
+      db
+        .selectFrom('user_blocks')
+        .innerJoin('users', 'users.id', 'user_blocks.blocked_id')
+        .select(['users.id', 'users.username', 'user_blocks.created_at'])
+        .where('user_blocks.user_id', '=', userId),
+      { createdAt: 'user_blocks.created_at', userId: 'user_blocks.blocked_id' },
+      page,
+    );
     return { userId, blocked: rows.map((r) => ({ userId: r.id, username: r.username, blockedAt: iso(r.created_at) })), nextCursor };
   });
 }

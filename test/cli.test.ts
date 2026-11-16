@@ -9,13 +9,14 @@ import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { BUILD, CLI_HEADER } from '../src/cli/client.js';
-import type { Io } from '../src/cli/commands.js';
+import type { Io } from '../src/cli/commands.types.js';
 import { run, UPDATED } from '../src/cli/main.js';
 import { writeProfile } from '../src/cli/profiles.js';
 import { bootstrapAdmin, ensureAdmin, type BootstrapAdmin } from '../src/moderation/bootstrap.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { RELEASE } from '../src/release.js';
-import { loadCliRelease, type CliRelease } from '../src/routes/cli.js';
+import { loadCliRelease } from '../src/routes/cli.js';
+import type { CliRelease } from '../src/routes/cli.types.js';
 import { DAY } from '../src/time.js';
 import { as, createTestContext, PNG, post, storeText, TARGETS, type TestContext, type User } from './helpers.js';
 

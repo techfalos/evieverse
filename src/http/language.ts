@@ -2,10 +2,12 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Languages, Text } from '../language.js';
 
 declare module 'fastify' {
+  /** Fastify's own, with what `registerLanguages` adds to the app. */
   interface FastifyInstance {
     /** The languages the server speaks (src/language.ts). */
     languages: Languages;
   }
+  /** Fastify's own, with what `registerLanguages` adds to every request. */
   interface FastifyRequest {
     /**
      * The code of the language this request is answered in: the user's own once the request is

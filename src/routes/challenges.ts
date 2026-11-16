@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import type { RouteDeps } from '../deps.js';
+import type { RouteDeps } from '../deps.types.js';
 
+/** The path of a challenge's audio: the id the challenge was issued with. */
 const Params = z.object({ challengeId: z.string().uuid() });
 
 /**
@@ -18,6 +19,12 @@ function byteRange(header: string | undefined, size: number): { first: number; l
   return first <= last ? { first, last } : null;
 }
 
+/**
+ * A challenge read out, for whoever can't read its image: GET /challenges/:challengeId/audio, and
+ * nothing else. Challenges are issued, and answered, by the requests they are asked of
+ * (registering, posting and reposting, commenting); this reads out any of them, whichever route
+ * issued it.
+ */
 export function challengeRoutes(app: FastifyInstance, { challenges }: RouteDeps) {
   /**
    * A challenge's characters read out: what its `audio` names, for people who can't read its image
@@ -29,8 +36,7 @@ export function challengeRoutes(app: FastifyInstance, { challenges }: RouteDeps)
    * parts (Range), which some browsers won't play audio without.
    */
   app.get('/challenges/:challengeId/audio', { compress: false }, async (req, reply) => {
-    const { challengeId } = Params.parse(req.params);
-    const wav = await challenges.audio(challengeId);
+    const wav = await challenges.audio(Params.parse(req.params).challengeId);
     reply.header('content-type', 'audio/wav').header('cache-control', 'no-store').header('accept-ranges', 'bytes');
     const range = byteRange(req.headers.range, wav.length);
     if (range === undefined) return reply.send(wav);

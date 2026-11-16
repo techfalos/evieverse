@@ -1,8 +1,9 @@
 import { loadPublished, requireMeta } from '../content.js';
 import { isUniqueViolation, updateOnConflict } from '../db/index.js';
-import type { AppDeps } from '../deps.js';
+import type { AppDeps } from '../deps.types.js';
 import { notFound } from '../http/errors.js';
 import { msg } from '../language.js';
+import type { Removal } from './tagDecisions.types.js';
 
 /**
  * What a hashtag's moderators decide about the content under it. Every post is published under its
@@ -17,6 +18,7 @@ import { msg } from '../language.js';
 
 type Deps = Pick<AppDeps, 'db' | 'config' | 'content' | 'now'>;
 
+/** The 404 for content that doesn't carry `tag`: it never did, or a moderator removed it. */
 const notTagged = (tag: string) => notFound(msg('content.not_tagged', { tag }));
 
 /**
@@ -43,30 +45,22 @@ async function tagged({ db, content }: Deps, contentId: string, tag: string) {
  */
 export async function approveTag(deps: Deps, contentId: string, tag: string, moderatorId: string): Promise<{ alreadyApproved: boolean }> {
   const { db, now = Date.now } = deps;
-  const { approved } = await tagged(deps, contentId, tag);
-  if (approved) return { alreadyApproved: true };
+  if ((await tagged(deps, contentId, tag)).approved) return { alreadyApproved: true };
 
-  const decidedAt = now();
   try {
     await db
       .insertInto('tag_moderation')
-      .values({ content_id: contentId, tag, decision: 'approved', moderator_id: moderatorId, decided_at: decidedAt, applied_at: null })
+      .values({ content_id: contentId, tag, decision: 'approved', moderator_id: moderatorId, decided_at: now(), applied_at: null })
       .execute();
   } catch (err) {
     if (!isUniqueViolation(err)) throw err;
     // Another moderator decided meanwhile, and a removal is the last word.
-    const other = await db.selectFrom('tag_moderation').select('decision').where('content_id', '=', contentId).where('tag', '=', tag).executeTakeFirst();
-    if (other?.decision === 'removed') throw notTagged(tag);
+    if ((await db.selectFrom('tag_moderation').select('decision').where('content_id', '=', contentId).where('tag', '=', tag).executeTakeFirst())?.decision === 'removed') {
+      throw notTagged(tag);
+    }
     return { alreadyApproved: true };
   }
   return { alreadyApproved: false };
-}
-
-export interface Removal {
-  /** The content's publisher. */
-  userId: string;
-  /** The hashtags the content is left with: none, if this was its last. */
-  tags: string[];
 }
 
 /**
@@ -86,8 +80,7 @@ export async function removeTag(deps: Deps, contentId: string, tag: string, mode
   const { db, config, now = Date.now } = deps;
   const { row, meta, removed } = await tagged(deps, contentId, tag);
 
-  const decidedAt = now();
-  const decision = { decision: 'removed', moderator_id: moderatorId, decided_at: decidedAt, applied_at: null } as const;
+  const decision = { decision: 'removed', moderator_id: moderatorId, decided_at: now(), applied_at: null } as const;
   await updateOnConflict(
     db.insertInto('tag_moderation').values({ content_id: contentId, tag, ...decision }),
     config.db.dialect,

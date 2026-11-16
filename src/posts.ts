@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { cutFormatted } from './format.js';
-import type { Preview } from './storage/contentStore.js';
+import type { Preview } from './storage/contentStore.types.js';
 
 /**
  * What a post is. An image, video or audio post is a file with an optional caption; a text post is its
@@ -17,6 +17,7 @@ export const LINK_MIME = 'text/uri-list';
 
 /** The longest text post or caption, in UTF-16 code units. */
 export const MAX_TEXT_CHARS = 40_000;
+/** The longest URL a `LinkUrl` can be, in characters, counted as the WHATWG parser writes it: a link post's, a repost's original, where an ad leads. */
 const MAX_URL_CHARS = 2048;
 
 /** An http or https URL, as the WHATWG parser writes it. */

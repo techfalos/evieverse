@@ -1,7 +1,8 @@
-import type { PublishedAd } from '../monetization.js';
+import type { PublishedAd } from '../monetization.types.js';
 import { TtlCache } from '../util.js';
-import type { HotStore } from './hotStore.js';
+import type { HotStore } from './hotStore.types.js';
 
+/** The one Redis key every published ad is under, and the name this process caches what it read there by. */
 const ADS_KEY = 'ads';
 
 /** What the key holds. Bump `v` if a published ad changes shape: readers take another version for no ads. */
@@ -43,8 +44,7 @@ export class AdStore {
    */
   async sync(ads: PublishedAd[]): Promise<boolean> {
     const next = ads.length ? JSON.stringify({ v: 1, ads } satisfies Published) : null;
-    const current = (await this.hot.get(ADS_KEY))?.toString('utf8') ?? null;
-    if (current === next) return false;
+    if (((await this.hot.get(ADS_KEY))?.toString('utf8') ?? null) === next) return false;
     if (next === null) await this.hot.del([ADS_KEY]);
     else await this.hot.set(ADS_KEY, next);
     return true;

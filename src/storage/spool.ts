@@ -5,18 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import type { SpooledFile } from './spool.types.js';
 
 export class UploadTooLargeError extends Error {
   /** `limit`: the most bytes an upload may be, which the response names in the request's language (http/errors.ts). */
   constructor(public readonly limit: number) {
     super(`Upload exceeds the maximum size of ${limit} bytes`);
   }
-}
-
-export interface SpooledFile {
-  path: string;
-  size: number;
-  cleanup: () => Promise<void>;
 }
 
 /** Streams an upload to a local temp file, enforcing a size limit. */
@@ -29,15 +24,18 @@ export async function spoolToTemp(
   const path = join(tmpDir, `upload-${randomUUID()}`);
   const cleanup = () => rm(path, { force: true });
   let size = 0;
-  const meter = new Transform({
-    transform(chunk: Buffer, _enc, cb) {
-      size += chunk.length;
-      if (size > maxBytes) return cb(new UploadTooLargeError(maxBytes));
-      cb(null, chunk);
-    },
-  });
   try {
-    await pipeline(body, meter, createWriteStream(path));
+    await pipeline(
+      body,
+      new Transform({
+        transform(chunk: Buffer, _enc, cb) {
+          size += chunk.length;
+          if (size > maxBytes) return cb(new UploadTooLargeError(maxBytes));
+          cb(null, chunk);
+        },
+      }),
+      createWriteStream(path),
+    );
   } catch (err) {
     await cleanup();
     // @fastify/multipart truncates instead of erroring when its own limit is hit.

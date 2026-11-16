@@ -1,5 +1,6 @@
-import type { HotStore } from './hotStore.js';
+import type { HotStore } from './hotStore.types.js';
 
+/** The Redis key of whom a user follows: their ids, one to a line. A user who follows nobody has none. */
 const followingKey = (userId: string) => `fol:${userId}`;
 
 /**

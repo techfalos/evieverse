@@ -1,5 +1,5 @@
 import type { Db } from './db/index.js';
-import type { AppDeps } from './deps.js';
+import type { AppDeps } from './deps.types.js';
 import { syncFollowing } from './follows.js';
 import { conflict, forbidden, notFound } from './http/errors.js';
 import { msg } from './language.js';
@@ -36,9 +36,6 @@ type Log = { warn: (o: object, msg?: string) => void };
 /** What setting the content of an account for deletion needs. */
 export type SweepDeps = Pick<AppDeps, 'db' | 'now'>;
 export type AccountDeps = SweepDeps & Pick<AppDeps, 'follows' | 'publishers'>;
-
-/** How many times deleting an admin's account looks again for an admin to leave in place, when the one it chose stopped being one meanwhile. */
-const KEEPER_ATTEMPTS = 3;
 
 /** Users per read of their follows, well within every dialect's limit on parameters. */
 const SYNC_BATCH = 500;
@@ -107,7 +104,8 @@ export async function closeAccount(
   log: Log,
 ): Promise<{ deletedAt: number; removed: boolean }> {
   const { db, follows, publishers, now = Date.now } = deps;
-  for (let attempt = 0; attempt < KEEPER_ATTEMPTS; attempt++) {
+  // Three times at most: deleting an admin's account looks again for an admin to leave in place when the one it chose stopped being one meanwhile.
+  for (let attempt = 0; attempt < 3; attempt++) {
     const user = await db.selectFrom('users').select(['admin', 'deleted_at']).where('id', '=', userId).executeTakeFirst();
     if (!user) throw notFound(msg('user.not_found'));
     let keeperId: string | null = null;
@@ -139,8 +137,7 @@ export async function closeAccount(
         await syncFollowing(db, follows, affected.slice(i, i + SYNC_BATCH)).catch((err) => log.warn({ err, userId }, 'could not write the follows of a deleted account to Redis'));
       }
     }
-    const removed = (await purgeAccounts(db, [userId])).length > 0;
-    return { deletedAt: closed.at, removed };
+    return { deletedAt: closed.at, removed: (await purgeAccounts(db, [userId])).length > 0 };
   }
   throw conflict(msg('moderation.admins_changed'));
 }
@@ -171,15 +168,22 @@ export async function purgeAccounts(db: Db, userIds?: string[]): Promise<string[
   }
   const purged: string[] = [];
   for (const { id } of await query.execute()) {
-    const res = await db
-      .deleteFrom('users')
-      .where('id', '=', id)
-      .where('deleted_at', 'is not', null)
-      .where((eb) => eb.not(eb.exists(eb.selectFrom('content').select('content.id').whereRef('content.user_id', '=', 'users.id'))))
-      // Nor a post of someone else's that they reposted, still in their own index: the compactor finds those by this row.
-      .where((eb) => eb.not(eb.exists(eb.selectFrom('reposts').select('reposts.content_id').whereRef('reposts.user_id', '=', 'users.id').where('reposts.tag', 'like', '@%'))))
-      .executeTakeFirst();
-    if (Number(res.numDeletedRows) > 0) purged.push(id);
+    if (
+      Number(
+        (
+          await db
+            .deleteFrom('users')
+            .where('id', '=', id)
+            .where('deleted_at', 'is not', null)
+            .where((eb) => eb.not(eb.exists(eb.selectFrom('content').select('content.id').whereRef('content.user_id', '=', 'users.id'))))
+            // Nor a post of someone else's that they reposted, still in their own index: the compactor finds those by this row.
+            .where((eb) => eb.not(eb.exists(eb.selectFrom('reposts').select('reposts.content_id').whereRef('reposts.user_id', '=', 'users.id').where('reposts.tag', 'like', '@%'))))
+            .executeTakeFirst()
+        ).numDeletedRows,
+      ) > 0
+    ) {
+      purged.push(id);
+    }
   }
   return purged;
 }

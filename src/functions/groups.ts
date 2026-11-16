@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import type { RouteDeps, StoreDeps } from '../deps.js';
+import type { RouteDeps, StoreDeps } from '../deps.types.js';
 import { challengeRoutes } from '../routes/challenges.js';
 import { cliRoutes } from '../routes/cli.js';
 import { commentReadRoutes, commentWriteRoutes } from '../routes/comments.js';
@@ -19,6 +19,7 @@ import { storeRoutes } from '../routes/store.js';
 import { tagRoutes } from '../routes/tags.js';
 import { uploadRoutes } from '../routes/uploads.js';
 
+/** A group whose routes use the database: its function opens it as it starts, and an app that has none refuses to serve the group (`buildApp`). */
 interface WithDatabase {
   database: true;
   register(app: FastifyInstance, deps: RouteDeps): void;
@@ -96,5 +97,11 @@ export const GROUPS = {
 } satisfies Record<string, WithDatabase | WithoutDatabase>;
 
 export type GroupName = keyof typeof GROUPS;
+/**
+ * The names of the route groups, in the order of `GROUPS`: what an app serves unless it is told
+ * which (`buildApp`), and what the check of a deployment's settings starts one by one
+ * (`checkSettings`).
+ */
 export const GROUP_NAMES = Object.keys(GROUPS) as GroupName[];
+/** Whether `name` is a route group's: what an entry point holds FUNCTION_GROUP to, which may not be set at all. */
 export const isGroup = (name: string | undefined): name is GroupName => name !== undefined && Object.hasOwn(GROUPS, name);

@@ -2,36 +2,24 @@ import type { ExpressionBuilder } from 'kysely';
 import { purgeAccounts, sweepContent } from '../accounts.js';
 import { summaryOf } from '../content.js';
 import type { Database, TagDecision } from '../db/schema.js';
-import type { AppDeps } from '../deps.js';
+import type { AppDeps } from '../deps.types.js';
 import { syncFollowing } from '../follows.js';
 import { publishedAd } from '../monetization.js';
 import { repostedTags, repostTimes, type Repost } from '../reposts.js';
 import type { ContentMeta, Summary } from '../storage/index.js';
-import {
-  authorIndex,
-  compareRecent,
-  compareRecords,
-  COMPACTOR_STATE_KEY,
-  dayKey,
-  dayQuota,
-  EMPTY_HEAD,
-  headKey,
-  indexAuthor,
-  manifestKey,
-  newGenId,
-  newManifestId,
-  packDay,
-  unpackDay,
-  type DayRef,
-  type Head,
-  type IndexEntry,
-  type Manifest,
-} from '../tagfeed/layout.js';
+import { authorIndex, compareRecent, compareRecords, COMPACTOR_STATE_KEY, dayKey, dayQuota, EMPTY_HEAD, headKey, indexAuthor, manifestKey, newGenId, newManifestId, packDay, unpackDay } from '../tagfeed/layout.js';
+import type { DayRef, Head, IndexEntry, Manifest } from '../tagfeed/layout.types.js';
 import { readJson } from '../tagfeed/read.js';
 import { DAY, HOUR, utcDay, wholeSeconds } from '../time.js';
 import { mapLimit } from '../util.js';
+import type { RunOptions, RunResult } from './compactor.types.js';
 import { CompactorLease, LeaseLostError } from './lease.js';
 
+/**
+ * The most values a run names in the `in (...)` list of one database statement (content ids, user
+ * ids, queue tokens), and the most hashtags or users it syncs to Redis between two checks of its
+ * lease.
+ */
 const BATCH = 500;
 
 /** Meta files of queued content read at once, ahead of the indexes that need them. */
@@ -40,26 +28,22 @@ const META_READS = 64;
 /** Indexes a run opens together: their heads are one round trip, and their manifests another. */
 const TAG_BATCH = 200;
 
-/**
- * About how many entries a run rebuilds together. The tags of a batch are taken a chunk at a time,
- * each chunk's days holding about this many between them, and a chunk is read, rebuilt and
- * published as one: it is what a run holds in memory, and what one round trip carries.
- */
-const CHUNK_ENTRIES = 25_000;
-
-/** What a day counts for in a chunk beside its entries: its keys are read and written with them. */
-const DAY_WEIGHT = 8;
-
+/** No content: what a day's plan has for `recheck` or `readmit` when the tag's work names nothing for that day. */
 const NONE: ReadonlySet<string> = new Set();
 
+/**
+ * What a key of the hot store holds, parsed as the JSON a run wrote there: a head or a manifest.
+ * Its shape isn't checked. Throws if it isn't JSON.
+ */
 const json = <T>(buf: Buffer) => JSON.parse(buf.toString('utf8')) as T;
-
-/** What superseded index keys are kept for, past the time a node caches a head: a request under way reads on from a head that was just replaced. */
-const HEAD_SLACK_MS = 60_000;
 
 type LogFn = (o: object, msg?: string) => void;
 type CompactorLog = { info: LogFn; warn: LogFn; error: LogFn };
 
+/**
+ * What a `Compactor` works with: of what an app has (`AppDeps`), the settings, the database, the
+ * stores and the clock, and the log it reports to, if any. `createCompactor` makes it.
+ */
 interface CompactorDeps extends Pick<AppDeps, 'config' | 'db' | 'hot' | 'summaries' | 'content' | 'comments' | 'publishers' | 'follows' | 'relatedTags' | 'ads' | 'now'> {
   log?: CompactorLog;
 }
@@ -100,6 +84,12 @@ interface GonePlace {
   tag: string;
 }
 
+/**
+ * How far the compactor's runs have got, which is all it keeps from one run to the next: in the hot
+ * store, under `COMPACTOR_STATE_KEY`. A run reads it as it starts (none there counts as nothing
+ * applied yet), writes it once its tags are compacted, and again once it has deleted what is past
+ * retention, which it does once a UTC day.
+ */
 interface State {
   /** Likes and profile changes before this instant have been applied. */
   through: number;
@@ -162,6 +152,7 @@ interface ContentRow {
 
 /** What hashtags' moderators decided about content under them, by `decidedKey`. */
 type Decided = Map<string, { decision: TagDecision; applied: boolean }>;
+/** A tag and a piece of content as one string, which `Decided` and `RunContext.gone` are keyed by. */
 const decidedKey = (tag: string, contentId: string) => `${tag} ${contentId}`;
 
 /** One UTC day of a tag that a run rebuilds. */
@@ -200,6 +191,7 @@ interface DayBuild {
   entries: IndexEntry[];
 }
 
+/** A tag as a chunk rebuilds it: `compactChunk` fills in its days' entries, and `pack` makes its `Publication` of them. */
 interface TagBuild {
   plan: TagPlan;
   days: DayBuild[];
@@ -217,12 +209,15 @@ interface Publication {
   writes: { key: string; value: Buffer | string }[];
 }
 
-/** The tags of a batch in chunks of about CHUNK_ENTRIES entries; a tag that holds more is a chunk of its own. */
+/** The tags of a batch in chunks of about 25,000 entries; a tag that holds more is a chunk of its own. */
 function* chunksOf(plans: TagPlan[]): Generator<TagPlan[]> {
   let chunk: TagPlan[] = [];
   let weight = 0;
   for (const plan of plans) {
-    if (chunk.length && weight + plan.weight > CHUNK_ENTRIES) {
+    // 25,000 is about how many entries a run rebuilds together. The tags of a batch are taken a chunk
+    // at a time, each chunk's days holding about that many between them, and a chunk is read, rebuilt
+    // and published as one: it is what a run holds in memory, and what one round trip carries.
+    if (chunk.length && weight + plan.weight > 25_000) {
       yield chunk;
       chunk = [];
       weight = 0;
@@ -242,25 +237,12 @@ interface Decision {
   decidedAt: number;
 }
 
-const newWork = (): TagWork => ({ days: new Set(), readmit: new Map(), recheck: new Map(), all: false });
-
+/** Notes the content `id` under `day` in `ids`, a `TagWork`'s `recheck` or `readmit`, which it changes. */
 const addTo = (ids: Map<number, Set<string>>, day: number, id: string) => {
   const set = ids.get(day);
   if (set) set.add(id);
   else ids.set(day, new Set([id]));
 };
-
-export interface RunOptions {
-  all?: boolean;
-  rebuild?: boolean;
-}
-
-export interface RunResult {
-  /** Hashtags (and publishers' own indexes) compacted. */
-  tags: string[];
-  /** Content deleted for good. */
-  deleted: string[];
-}
 
 /**
  * Writes the feed index: it is the only thing that does. It is one process that runs for as long
@@ -338,7 +320,8 @@ export class Compactor {
    * them longer: a cursor names no index, and each page reads the one its tag's head names by then.
    */
   private get keepMs() {
-    return this.cfg.feed.headCacheMs + HEAD_SLACK_MS;
+    // A minute past the time a node caches a head: a request under way reads on from a head that was just replaced.
+    return this.cfg.feed.headCacheMs + 60_000;
   }
 
   /** How long what a run writes for a hashtag lasts unless the hashtag's head is swapped to it. */
@@ -374,7 +357,7 @@ export class Compactor {
     const work = new Map<string, TagWork>();
     const workFor = (tag: string) => {
       let w = work.get(tag);
-      if (!w) work.set(tag, (w = newWork()));
+      if (!w) work.set(tag, (w = { days: new Set(), readmit: new Map(), recheck: new Map(), all: false }));
       return w;
     };
     // The queue first, before this run reads any meta file: a write stores its meta file before it
@@ -444,8 +427,10 @@ export class Compactor {
 
     if (tags.length || deleted.length) {
       // How long the oldest write this run took had waited, by the clock of the node that queued it: what feeds lag by.
-      const oldest = queue.reduce((at, r) => Math.min(at, r.queued_at), runStart);
-      this.deps.log?.info({ tags: tags.length, deleted: deleted.length, queued: queue.length, lagMs: runStart - oldest }, 'compacted the feed index');
+      this.deps.log?.info(
+        { tags: tags.length, deleted: deleted.length, queued: queue.length, lagMs: runStart - queue.reduce((at, r) => Math.min(at, r.queued_at), runStart) },
+        'compacted the feed index',
+      );
     }
     return { tags, deleted };
   }
@@ -481,13 +466,17 @@ export class Compactor {
    */
   private async markEverything(workFor: (tag: string) => TagWork, runStart: number, lease: CompactorLease, ctx: RunContext) {
     const oldest = runStart - this.retentionDays * DAY;
-    const rows = await this.deps.db
-      .selectFrom('content')
-      .select(['id', 'user_id', 'created_at'])
-      .where('delete_requested_at', 'is', null)
-      .where((eb) => eb.or([eb('content.created_at', '>', oldest), this.repostedSince(eb, oldest)]))
-      .execute();
-    await this.markContent(workFor, rows, ctx, { readmit: true });
+    await this.markContent(
+      workFor,
+      await this.deps.db
+        .selectFrom('content')
+        .select(['id', 'user_id', 'created_at'])
+        .where('delete_requested_at', 'is', null)
+        .where((eb) => eb.or([eb('content.created_at', '>', oldest), this.repostedSince(eb, oldest)]))
+        .execute(),
+      ctx,
+      { readmit: true },
+    );
     // Not the accounts that were deleted, whose credits are gone for good.
     const users = await this.deps.db.selectFrom('users').select(['id', 'username']).where('deleted_at', 'is', null).execute();
     await this.putCredits(users, lease);
@@ -497,16 +486,20 @@ export class Compactor {
   /** (tag, day) of content liked in [since, until); the liked content is re-admitted if it was trimmed. */
   private async markNewLikes(workFor: (tag: string) => TagWork, since: number, until: number, ctx: RunContext) {
     const oldest = until - this.retentionDays * DAY;
-    const rows = await this.deps.db
-      .selectFrom('likes')
-      .innerJoin('content', 'content.id', 'likes.content_id')
-      .select(['content.id', 'content.user_id', 'content.created_at'])
-      .distinct()
-      .where('likes.created_at', '>=', since)
-      .where('likes.created_at', '<', until)
-      .where((eb) => eb.or([eb('content.created_at', '>', oldest), this.repostedSince(eb, oldest)]))
-      .execute();
-    await this.markContent(workFor, rows, ctx, { readmit: true });
+    await this.markContent(
+      workFor,
+      await this.deps.db
+        .selectFrom('likes')
+        .innerJoin('content', 'content.id', 'likes.content_id')
+        .select(['content.id', 'content.user_id', 'content.created_at'])
+        .distinct()
+        .where('likes.created_at', '>=', since)
+        .where('likes.created_at', '<', until)
+        .where((eb) => eb.or([eb('content.created_at', '>', oldest), this.repostedSince(eb, oldest)]))
+        .execute(),
+      ctx,
+      { readmit: true },
+    );
   }
 
   /** Whether the content of a query's row was reposted after `oldest`: it is then in an index, however old it is itself. */
@@ -540,14 +533,18 @@ export class Compactor {
    * its user by, so its request fails if its write does (see followRoutes).
    */
   private async syncChangedFollowing(since: number, until: number, lease: CompactorLease) {
-    const users = await this.deps.db
-      .selectFrom('follows')
-      .select('follower_id')
-      .distinct()
-      .where('created_at', '>=', since)
-      .where('created_at', '<', until)
-      .execute();
-    await this.syncFollowing(users.map((u) => u.follower_id), lease);
+    await this.syncFollowing(
+      (
+        await this.deps.db
+          .selectFrom('follows')
+          .select('follower_id')
+          .distinct()
+          .where('created_at', '>=', since)
+          .where('created_at', '<', until)
+          .execute()
+      ).map((u) => u.follower_id),
+      lease,
+    );
   }
 
   /**
@@ -656,12 +653,11 @@ export class Compactor {
    * taken together or not at all.
    */
   private readQueue(until: number): Promise<QueueRow[]> {
-    const stopped = until - this.cfg.compact.graceSeconds * 1000;
     return this.deps.db
       .selectFrom('feed_queue')
       .innerJoin('content', 'content.id', 'feed_queue.content_id')
       .select(['content.id', 'feed_queue.tag', 'feed_queue.token', 'feed_queue.created_at as queued_at', 'content.created_at'])
-      .where((eb) => eb.or([eb('feed_queue.committed', '=', 1), eb('feed_queue.created_at', '<', stopped)]))
+      .where((eb) => eb.or([eb('feed_queue.committed', '=', 1), eb('feed_queue.created_at', '<', until - this.cfg.compact.graceSeconds * 1000)]))
       .execute();
   }
 
@@ -705,8 +701,7 @@ export class Compactor {
     await mapLimit(old, META_READS, async (id) => {
       const row = found.get(id);
       if (row) workFor(authorIndex(row.user_id));
-      const meta = await this.meta(id, ctx).catch(() => null);
-      for (const tag of meta?.tags ?? []) workFor(tag);
+      for (const tag of (await this.meta(id, ctx).catch(() => null))?.tags ?? []) workFor(tag);
     });
   }
 
@@ -718,16 +713,16 @@ export class Compactor {
     const fresh = [...new Set(ids)].filter((id) => !ctx.reposts.has(id));
     for (let i = 0; i < fresh.length; i += BATCH) {
       const batch = fresh.slice(i, i + BATCH);
-      const rows = await this.deps.db
+      const found = new Map<string, Repost[]>(batch.map((id) => [id, []]));
+      for (const { content_id: id, ...place } of await this.deps.db
         .selectFrom('reposts')
         .select(['content_id', 'tag', 'user_id', 'likes_before', 'created_at'])
         .where('content_id', 'in', batch)
         // In the order repostsOf reads them, which is the order the content comes to carry the hashtags in.
         .orderBy('created_at')
         .orderBy('tag')
-        .execute();
-      const found = new Map<string, Repost[]>(batch.map((id) => [id, []]));
-      for (const { content_id: id, ...place } of rows) if (!ctx.gone.has(decidedKey(place.tag, id))) found.get(id)!.push(place);
+        .execute())
+        if (!ctx.gone.has(decidedKey(place.tag, id))) found.get(id)!.push(place);
       for (const [id, places] of found) ctx.reposts.set(id, places);
     }
   }
@@ -764,12 +759,11 @@ export class Compactor {
     const closed = await db.selectFrom('users').select('id').where('deleted_at', 'is not', null).execute();
     const gone: GonePlace[] = [];
     for (let i = 0; i < closed.length; i += BATCH) {
-      const rows = await db
+      for (const r of await db
         .selectFrom('reposts')
         .select(['content_id', 'tag', 'created_at'])
         .where('user_id', 'in', closed.slice(i, i + BATCH).map((u) => u.id))
-        .execute();
-      for (const r of rows) {
+        .execute()) {
         // Not the hashtags they gave the content: those are the content's now.
         if (indexAuthor(r.tag) === null) continue;
         workFor(r.tag).days.add(utcDay(r.created_at));
@@ -811,8 +805,12 @@ export class Compactor {
     const rows = await this.contentRows(ids);
     const removed = new Map<string, Set<string>>();
     for (let i = 0; i < ids.length; i += BATCH) {
-      const decided = await db.selectFrom('tag_moderation').select(['content_id', 'tag']).where('content_id', 'in', ids.slice(i, i + BATCH)).where('decision', '=', 'removed').execute();
-      for (const d of decided) {
+      for (const d of await db
+        .selectFrom('tag_moderation')
+        .select(['content_id', 'tag'])
+        .where('content_id', 'in', ids.slice(i, i + BATCH))
+        .where('decision', '=', 'removed')
+        .execute()) {
         const tags = removed.get(d.content_id);
         if (tags) tags.add(d.tag);
         else removed.set(d.content_id, new Set([d.tag]));
@@ -847,8 +845,7 @@ export class Compactor {
    * several at once. One that can't be read fails the tags that need it, when they ask for it.
    */
   private async prefetch(rows: QueueRow[], ctx: RunContext) {
-    const ids = [...new Set(rows.map((r) => r.id))];
-    await mapLimit(ids, META_READS, async (id) => {
+    await mapLimit([...new Set(rows.map((r) => r.id))], META_READS, async (id) => {
       await this.meta(id, ctx).catch(() => null);
     });
   }
@@ -941,9 +938,8 @@ export class Compactor {
 
     await this.loadReposts(rows.map((r) => r.id), ctx);
     await lease.check();
-    const removals = new Map(rows.filter((r) => r.decision === 'removed').map((r) => [r.id, r]));
     const unapplied = new Set<string>();
-    await mapLimit([...removals.values()], 16, async (row) => {
+    await mapLimit([...new Map(rows.filter((r) => r.decision === 'removed').map((r) => [r.id, r])).values()], 16, async (row) => {
       try {
         await this.untag(row, until, ctx);
       } catch (err) {
@@ -983,8 +979,7 @@ export class Compactor {
   ): Promise<void> {
     const { db, content, summaries } = this.deps;
     // All of them, not only this run's: a write under way when one was removed may have written it back.
-    const rows = await db.selectFrom('tag_moderation').select('tag').where('content_id', '=', row.id).where('decision', '=', 'removed').execute();
-    const removed = new Set(rows.map((r) => r.tag));
+    const removed = new Set((await db.selectFrom('tag_moderation').select('tag').where('content_id', '=', row.id).where('decision', '=', 'removed').execute()).map((r) => r.tag));
     const meta = await content.getMeta(row.id);
     if (!meta) return;
     const tags = meta.tags.filter((tag) => !removed.has(tag));
@@ -1039,8 +1034,7 @@ export class Compactor {
     const tagsOf = await this.markContent(workFor, rows, ctx);
     const queued = new Map<string, string[]>();
     for (let i = 0; i < rows.length; i += BATCH) {
-      const ids = rows.slice(i, i + BATCH).map((r) => r.id);
-      for (const q of await db.selectFrom('feed_queue').select(['content_id', 'tag']).where('content_id', 'in', ids).execute()) {
+      for (const q of await db.selectFrom('feed_queue').select(['content_id', 'tag']).where('content_id', 'in', rows.slice(i, i + BATCH).map((r) => r.id)).execute()) {
         const tags = queued.get(q.content_id);
         if (tags) tags.push(q.tag);
         else queued.set(q.content_id, [q.tag]);
@@ -1048,14 +1042,13 @@ export class Compactor {
     }
     return rows.map((r) => {
       const tags = new Set(tagsOf.get(r) ?? []);
-      const places = this.placed(r.id, ctx);
       // Under a tag a repost placed it in, its day is the repost's, which markContent marked.
       for (const tag of queued.get(r.id) ?? []) {
         tags.add(tag);
         workFor(tag).days.add(utcDay(r.created_at));
       }
       // When it was reposted: its summary is under those days too, and goes from them with it.
-      return { id: r.id, createdAt: r.created_at, repostedAt: repostTimes(places), tags: [...tags] };
+      return { id: r.id, createdAt: r.created_at, repostedAt: repostTimes(this.placed(r.id, ctx)), tags: [...tags] };
     });
   }
 
@@ -1079,10 +1072,9 @@ export class Compactor {
     const tagsOf = new Map<R, string[]>();
     await this.loadReposts(rows.map((r) => r.id), ctx);
     await mapLimit(rows, 16, async (r) => {
-      const meta = await this.meta(r.id, ctx);
       const placedAt = new Map(this.placed(r.id, ctx).map((p) => [p.tag, p.created_at]));
       // The content is its publisher's, whatever its meta file holds.
-      const tags = [...new Set([...(meta?.tags ?? []), authorIndex(r.user_id), ...placedAt.keys()])];
+      const tags = [...new Set([...((await this.meta(r.id, ctx))?.tags ?? []), authorIndex(r.user_id), ...placedAt.keys()])];
       for (const tag of tags) {
         const day = utcDay(placedAt.get(tag) ?? r.created_at);
         const w = workFor(tag);
@@ -1166,9 +1158,15 @@ export class Compactor {
     const days: DayPlan[] = [...rebuild]
       .filter((day) => day >= minDay)
       .map((day) => ({ day, prev: existing.get(day), quota: quotaOf(day), recheck: work.recheck.get(day) ?? NONE, readmit: work.readmit.get(day) ?? NONE }));
-    const carried = [...existing.values()].filter((d) => d.day >= minDay && !rebuild.has(d.day));
-    const weight = days.reduce((n, d) => n + DAY_WEIGHT + (d.prev?.count ?? 0) + d.recheck.size + d.readmit.size, 0);
-    return { tag, author, manifest, carried, days, weight };
+    return {
+      tag,
+      author,
+      manifest,
+      carried: [...existing.values()].filter((d) => d.day >= minDay && !rebuild.has(d.day)),
+      days,
+      // A day counts for 8 in a chunk beside its entries: its keys are read and written with them.
+      weight: days.reduce((n, d) => n + 8 + (d.prev?.count ?? 0) + d.recheck.size + d.readmit.size, 0),
+    };
   }
 
   /**
@@ -1202,8 +1200,7 @@ export class Compactor {
       }
     }
     const rows = await this.contentRows([...ids]);
-    const hashtags = tags.filter((t) => t.plan.author === null).map((t) => t.plan.tag);
-    const decided = await this.decisions(hashtags, [...underHashtags]);
+    const decided = await this.decisions(tags.filter((t) => t.plan.author === null).map((t) => t.plan.tag), [...underHashtags]);
     // The meta files of what is rebuilt: read already, unless the run that marked the content couldn't.
     const building = new Set(tags.flatMap((t) => t.days.flatMap((d) => d.build)));
     // Where reposts placed what is rebuilt, and what the days hold because of one.
@@ -1266,8 +1263,7 @@ export class Compactor {
     next = 0;
     const evicted: string[] = [];
     const published = publishing.filter((p) => {
-      const there = kept.slice(next, (next += p.writes.length));
-      if (!there.includes(false)) return true;
+      if (!kept.slice(next, (next += p.writes.length)).includes(false)) return true;
       evicted.push(...p.writes.map((w) => w.key));
       this.fail([p.tag], new Error(`part of the new index of #${p.tag} expired or was evicted before its head was swapped`), ctx);
       return false;
@@ -1276,12 +1272,14 @@ export class Compactor {
     await hot.setMany(published.map((p) => ({ key: headKey(p.tag), value: JSON.stringify({ v: 5, manifest: p.next.id, compactedAt: runStart } satisfies Head) })));
 
     // Requests that read the previous heads, from a node's cache or just before the swap, still find their keys.
-    const superseded = published.flatMap(({ tag, previous, next: { days } }) => {
-      if (!previous) return [];
-      const used = new Set(days.map((d) => d.gen));
-      return [...previous.days.filter((d) => !used.has(d.gen)).map((d) => dayKey(tag, d.gen)), manifestKey(tag, previous.id)];
-    });
-    await hot.expire(superseded, this.keepMs);
+    await hot.expire(
+      published.flatMap(({ tag, previous, next: { days } }) => {
+        if (!previous) return [];
+        const used = new Set(days.map((d) => d.gen));
+        return [...previous.days.filter((d) => !used.has(d.gen)).map((d) => dayKey(tag, d.gen)), manifestKey(tag, previous.id)];
+      }),
+      this.keepMs,
+    );
   }
 
   /**
@@ -1293,21 +1291,20 @@ export class Compactor {
     const held = new Map<string, IndexEntry>();
     if (before) for (const e of unpackDay(before)) held.set(e.contentId, e);
     for (const id of plan.recheck) held.delete(id);
-    const build = [...plan.recheck, ...[...plan.readmit].filter((id) => !held.has(id) && !plan.recheck.has(id))];
-    return { plan, before, held: [...held.values()], build, entries: [] };
+    return { plan, before, held: [...held.values()], build: [...plan.recheck, ...[...plan.readmit].filter((id) => !held.has(id) && !plan.recheck.has(id))], entries: [] };
   }
 
   /** The rows of these pieces of content, by id, each with whether it waits in the moderation queue. */
   private async contentRows(ids: string[]): Promise<Map<string, ContentRow>> {
     const out = new Map<string, ContentRow>();
     for (let i = 0; i < ids.length; i += BATCH) {
-      const rows = await this.deps.db
+      for (const r of await this.deps.db
         .selectFrom('content')
         .leftJoin('moderation_queue', 'moderation_queue.content_id', 'content.id')
         .select(['content.id', 'content.user_id', 'content.like_count', 'content.created_at', 'content.ai_generated', 'content.delete_requested_at', 'moderation_queue.content_id as queued_id'])
         .where('content.id', 'in', ids.slice(i, i + BATCH))
-        .execute();
-      for (const r of rows) out.set(r.id, r);
+        .execute())
+        out.set(r.id, r);
     }
     return out;
   }
@@ -1317,13 +1314,13 @@ export class Compactor {
     const out: Decided = new Map();
     if (!hashtags.length) return out;
     for (let i = 0; i < ids.length; i += BATCH) {
-      const rows = await this.deps.db
+      for (const r of await this.deps.db
         .selectFrom('tag_moderation')
         .select(['content_id', 'tag', 'decision', 'applied_at'])
         .where('content_id', 'in', ids.slice(i, i + BATCH))
         .where('tag', 'in', hashtags)
-        .execute();
-      for (const r of rows) out.set(decidedKey(r.tag, r.content_id), { decision: r.decision, applied: r.applied_at !== null });
+        .execute())
+        out.set(decidedKey(r.tag, r.content_id), { decision: r.decision, applied: r.applied_at !== null });
     }
     return out;
   }
@@ -1393,15 +1390,17 @@ export class Compactor {
     const moderated = this.moderated(plan.tag, row.id, decided, ctx);
     if (moderated === null) return null;
     const summary = summaryOf(row, meta, this.cfg.publicBaseUrl, repostTimes(this.placed(row.id, ctx)));
-    const entry: IndexEntry = {
-      contentId: row.id,
-      createdAt: place.at,
-      likes: Math.max(0, row.like_count - place.likesBefore),
-      aiGenerated: summary.aiGenerated,
-      moderated,
-      repost: place.repost,
+    return {
+      entry: {
+        contentId: row.id,
+        createdAt: place.at,
+        likes: Math.max(0, row.like_count - place.likesBefore),
+        aiGenerated: summary.aiGenerated,
+        moderated,
+        repost: place.repost,
+      },
+      summary,
     };
-    return { entry, summary };
   }
 
   /**

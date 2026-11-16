@@ -5,17 +5,20 @@ import { ChallengeFields } from '../challenge/challenges.js';
 import { MAX_COMMENT_CHARS, newCommentId, publishComment, removeComment, toCommentRecord, toCommentRecords } from '../comments.js';
 import { loadContent, loadPublished, loadReadable, readsHeld, requireMeta, takesComments } from '../content.js';
 import { updateOnConflict } from '../db/index.js';
-import type { AppDeps, RouteDeps } from '../deps.js';
+import type { AppDeps, RouteDeps } from '../deps.types.js';
 import { badRequest, forbidden, notFound } from '../http/errors.js';
 import { Credentials } from '../http/schemas.js';
 import { notify } from '../inbox.js';
 import { msg } from '../language.js';
 import { moderateComment, moderatesServer, refuseBanned } from '../moderation/policy.js';
 import type { Comment, CommentMedia } from '../storage/index.js';
-import { readCommentFile, readMultipart, readUploaded, type CommentFile, type Upload } from '../upload.js';
+import { readCommentFile, readMultipart, readUploaded } from '../upload.js';
+import type { CommentFile, Upload } from '../upload.types.js';
 import { rawHeaders } from './content.js';
 
+/** The path of a post's comments: the post's id. */
 const Params = z.object({ contentId: z.string().uuid() });
+/** The path of one comment: the id of the post it is on, and its own. */
 const CommentParams = z.object({ contentId: z.string().uuid(), commentId: z.string().uuid() });
 /** A page of a post's comments, or of the replies to one: from the first sent or from the last, after the comment the page before ended on. */
 const PageQuery = z.object({
@@ -24,7 +27,17 @@ const PageQuery = z.object({
   /** The `nextCursor` of the page before, which is the id of its last comment. */
   cursor: z.string().uuid().optional(),
 });
+/**
+ * A comment's text, without the spaces around it: MAX_COMMENT_CHARS characters at most, and none
+ * at least, as a comment that has an image or a video needs no text. The routes refuse an empty one
+ * where there is no file.
+ */
 const Text = z.string().trim().max(MAX_COMMENT_CHARS);
+/**
+ * The body of POST /content/:contentId/comments, as JSON or as the fields of a multipart form:
+ * who's asking, what the comment says and which comment it replies to, the image or video it comes
+ * with, and the solution of a challenge.
+ */
 const CommentBody = Credentials.extend({
   /** What it says. A comment that comes with an image or a video needs none. */
   text: Text.optional(),
@@ -43,12 +56,10 @@ const CommentBody = Credentials.extend({
 /** An edit's text, which may be empty for a comment that has an image or a video to be. */
 const EditBody = Credentials.extend({ text: Text, ...ChallengeFields });
 
-/** The largest JSON body a comment is sent in, which holds its file when the file is inline: what /store takes. */
-const INLINE_BODY_BYTES = 32 * 1024 * 1024;
-
 /** What a comment that waits in the moderation queue carries, as a post that waits there does. */
 const PENDING_REVIEW = { status: 'pending_review' } as const;
 
+/** The 404 for a comment that isn't there, which a comment its reader may not read is answered with too. It is returned, not thrown. */
 export const commentNotFound = () => notFound(msg('comment.not_found'));
 
 /**
@@ -207,8 +218,7 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
    */
   async function place(req: FastifyRequest, { kind, file, mimeType }: CommentFile, postId: string, commentId: string): Promise<CommentMedia> {
     try {
-      const { size } = await file.place(content, { postId, commentId }, mimeType);
-      return { kind, mimeType, size };
+      return { kind, mimeType, size: (await file.place(content, { postId, commentId }, mimeType)).size };
     } catch (err) {
       await discard(req, postId, commentId);
       throw err;
@@ -251,7 +261,8 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
    * stored count. One answered with a challenge is sent again with its solution, and with the same
    * `uploadId` if it has one: the upload is kept for it.
    */
-  app.post('/content/:contentId/comments', { bodyLimit: INLINE_BODY_BYTES }, async (req, reply) => {
+  // The body limit is the largest JSON body a comment is sent in, which holds its file when the file is inline: what /store takes.
+  app.post('/content/:contentId/comments', { bodyLimit: 32 * 1024 * 1024 }, async (req, reply) => {
     let raw: Record<string, unknown>;
     let upload: Upload | undefined;
     let file: CommentFile | undefined;
@@ -291,7 +302,6 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
         const commentId = newCommentId(createdAt);
         const media = attached && (await place(req, attached, contentId, commentId));
         const comment: Comment = { commentId, contentId, ...(parentId !== undefined && { parentId }), userId: user.id, text, ...(media && { media }), createdAt };
-        const record = toCommentRecord(comment, { userId: user.id, username: user.username }, config.publicBaseUrl);
         try {
           await comments.put(comment, { held });
         } catch (err) {
@@ -310,7 +320,7 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
           }
         }
         await answered(comment);
-        return record;
+        return toCommentRecord(comment, { userId: user.id, username: user.username }, config.publicBaseUrl);
       });
       stored = true;
       reply.status(held ? 202 : 201);
@@ -388,13 +398,19 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
         await queue(edited, trustScore, editedAt);
       } else {
         // Out of the queue as an accepted comment goes: its row first, in the transaction the store's work is done inside.
-        const there = await db.transaction().execute(async (trx) => {
-          const res = await trx.deleteFrom('comment_queue').where('comment_id', '=', commentId).where('content_id', '=', contentId).executeTakeFirst();
-          // Decided on while this was under way: it is published as it was, or gone.
-          if (Number(res.numDeletedRows) === 0) return false;
-          return publishComment(deps, edited);
-        });
-        if (!there) throw commentNotFound();
+        if (
+          !(await db.transaction().execute(async (trx) => {
+            // Decided on while this was under way: it is published as it was, or gone.
+            if (
+              Number((await trx.deleteFrom('comment_queue').where('comment_id', '=', commentId).where('content_id', '=', contentId).executeTakeFirst()).numDeletedRows) === 0
+            ) {
+              return false;
+            }
+            return publishComment(deps, edited);
+          }))
+        ) {
+          throw commentNotFound();
+        }
       }
       return edited;
     });
@@ -423,8 +439,7 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
     const own = comment?.userId === user.id;
     // A held comment is there only for those who can read it.
     if (!comment || (!published && !own && !moderatesServer(user))) throw commentNotFound();
-    const onOwnPost = published !== null && post.user_id === user.id;
-    if (!own && !user.admin && !onOwnPost) throw forbidden(msg('comment.delete_not_allowed'));
+    if (!own && !user.admin && !(published !== null && post.user_id === user.id)) throw forbidden(msg('comment.delete_not_allowed'));
     await removeComment(deps, contentId, commentId);
     req.log.info({ contentId, commentId, by: user.id }, 'deleted a comment');
     await notify(deps, { userId: comment.userId, kind: 'comment_deleted', contentId, comment: comment.text, by: user.id }, req.log);

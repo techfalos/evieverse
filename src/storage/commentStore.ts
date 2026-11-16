@@ -1,33 +1,8 @@
 import type { Operator } from 'opendal';
 import { mapLimit } from '../util.js';
-import type { HotStore, LexRange } from './hotStore.js';
+import type { Comment, CommentPageQuery } from './commentStore.types.js';
+import type { HotStore, LexRange } from './hotStore.types.js';
 import { createOperator, isNotFound, readObject } from './opendal.js';
-
-/** A comment on a post, as it is stored. */
-export interface Comment {
-  /** A UUIDv7 (see newCommentId): the order of a post's comment ids is the order they were sent in. */
-  commentId: string;
-  /** The post it is on. */
-  contentId: string;
-  /** The comment it replies to, which is on the same post. Absent on a comment on the post itself. */
-  parentId?: string;
-  /** Who wrote it. */
-  userId: string;
-  /** What it says. Empty for one that is only its image or video. */
-  text: string;
-  /** The image or video it came with, whose bytes are an object of their own (see commentMediaKey). Absent on one that is only text. */
-  media?: CommentMedia;
-  /** When it was sent. UTC epoch milliseconds. */
-  createdAt: number;
-  /** When its author last changed its text. Absent on one that was never edited. */
-  editedAt?: number;
-  /**
-   * Set on what stands in a comment's place among the post's published comments once the comment
-   * is gone from there (see placeholder): `deleted`, for good, or `held`, taken back to the
-   * moderation queue by an edit. Absent on a comment.
-   */
-  gone?: 'deleted' | 'held';
-}
 
 /**
  * What stands in the place of a published comment that is gone from it: deleted, or taken back to
@@ -45,14 +20,6 @@ export const placeholder = ({ commentId, contentId, parentId, createdAt }: Pick<
   gone,
 });
 
-/** What a comment says of the image or video it came with. */
-export interface CommentMedia {
-  kind: 'image' | 'video';
-  mimeType: string;
-  /** Of the bytes, as stored. */
-  size: number;
-}
-
 /** A comment that replies to another, as a list of a post's objects has it. */
 interface Reply {
   commentId: string;
@@ -61,27 +28,19 @@ interface Reply {
 }
 
 /**
- * Which comments a page holds: so many of the comments on the post itself, or of the replies to
- * one comment, from the first or from the last, after the one the page before ended on.
+ * How many reads of the store one call has under way at once, for what Redis doesn't have: the
+ * comments it reads from their objects, and the lists of likes it counts.
  */
-export interface CommentPageQuery {
-  order: 'oldest' | 'newest';
-  limit: number;
-  /** The id of the last comment of the page before. */
-  cursor?: string;
-  /** The comment whose replies the page is of. Absent: the comments on the post itself. */
-  parentId?: string;
-}
-
 const COLD_READS = 32;
-/** How often an edit tries to put its comment in Redis over what is there, before it leaves that to the next reader. */
-const SWAP_ATTEMPTS = 3;
-/** For how long a user's like of a comment keeps another of theirs, sent at the same moment, from counting too. */
-const LIKING_MS = 10_000;
 /** What an object holds whose name says it all: one byte, since not every backend takes an empty object. */
 const MARK = '1';
 
+/**
+ * The prefix everything of a post's comments is under: the published comments and what says which
+ * are replies, right under it, and below it the held ones, the likes, and the images and videos.
+ */
 const commentDir = (postId: string) => `comments/${postId}/`;
+/** A published comment's object, which holds its JSON, or that of the placeholder that stands in its place. */
 export const commentObjectKey = (postId: string, commentId: string) => `${commentDir(postId)}${commentId}.json`;
 /**
  * What says a published comment is a reply, and to which comment: an object beside the two, whose
@@ -91,6 +50,7 @@ export const commentObjectKey = (postId: string, commentId: string) => `${commen
 export const replyObjectKey = (postId: string, parentId: string, commentId: string) => `${commentDir(postId)}${parentId}.${commentId}.reply`;
 /** Where a comment is while it waits in the moderation queue: apart, so no list of the post's comments finds it. */
 export const heldCommentObjectKey = (postId: string, commentId: string) => `${commentDir(postId)}held/${commentId}.json`;
+/** The prefix a comment's likes are under, an object for each user who liked it: a list of it counts them, and removing it deletes them all. */
 const likeDir = (postId: string, commentId: string) => `${commentDir(postId)}likes/${commentId}/`;
 /** A user's like of a comment: an object whose name is all there is to it, so a like is made once however often it is sent. */
 export const likeObjectKey = (postId: string, commentId: string, userId: string) => `${likeDir(postId, commentId)}${userId}`;
@@ -113,9 +73,17 @@ export const commentLikingKey = (commentId: string, userId: string) => `cmtlk:${
 /** In a post's index once it holds every comment the store has. It sorts after every member, which begin with a hex digit, a dash or a colon. */
 const COMPLETE = '~';
 
+/**
+ * What matches an id in an object's name, a comment's or a user's: 36 characters, each a lowercase
+ * hex digit or a dash, as a UUID is written. The source of a part of the patterns below, which
+ * say where in a name the id is.
+ */
 const ID = '[0-9a-f-]{36}';
+/** Matches the name of a published comment's object among a post's, `<commentId>.json`, and captures the id. */
 const COMMENT_FILE = new RegExp(`^(${ID})\\.json$`);
+/** Matches the name of an object that says a comment is a reply, `<parentId>.<commentId>.reply`, and captures the two ids, in that order. */
 const REPLY_FILE = new RegExp(`^(${ID})\\.(${ID})\\.reply$`);
+/** Matches the name of a like among the objects under a comment's likes: the id of the user who liked it, and nothing more. */
 const LIKE_FILE = new RegExp(`^${ID}$`);
 
 /**
@@ -125,10 +93,12 @@ const LIKE_FILE = new RegExp(`^${ID}$`);
  * the post itself.
  */
 const member = (parentId: string | undefined, commentId: string) => `${parentId ?? ''}:${commentId}`;
+/** The id of the comment a member of a post's index is of: what follows its colon. */
 const idOf = (m: string) => m.slice(m.indexOf(':') + 1);
 /** The bounds of the members that reply to a comment, or without one, of those on the post itself: ';' is what follows ':'. */
 const under = (parentId: string | undefined): Required<LexRange> => ({ after: `${parentId ?? ''}:`, before: `${parentId ?? ''};` });
 
+/** Whether a member is within the bounds, as HotStore.lexRange reads them: after `after` and before `before`, and a bound left out is no bound. */
 const within = (m: string, { after, before }: LexRange) => (after === undefined || m > after) && (before === undefined || m < before);
 
 /** `range` of members that are in order, as HotStore.lexRange gives it of a set. */
@@ -329,7 +299,8 @@ export class CommentStore {
     const key = commentKey(commentId);
     await this.write(commentObjectKey(postId, commentId), comment);
     const json = JSON.stringify(comment);
-    for (let attempt = 0; attempt < SWAP_ATTEMPTS; attempt++) {
+    // An edit tries this many times to put its comment in Redis over what is there, before it leaves that to the next reader.
+    for (let attempt = 0; attempt < 3; attempt++) {
       const blob = await this.hot.get(key);
       const cached = blob?.toString('utf8') ?? null;
       if (cached === '') {
@@ -488,8 +459,7 @@ export class CommentStore {
    */
   async likes(postId: string, commentIds: string[]): Promise<number[]> {
     if (!commentIds.length) return [];
-    const cached = await this.hot.mget(commentIds.map(commentLikesKey));
-    const out = cached.map((blob) => (blob ? Number(blob.toString('utf8')) : null));
+    const out = (await this.hot.mget(commentIds.map(commentLikesKey))).map((blob) => (blob ? Number(blob.toString('utf8')) : null));
     await mapLimit(
       commentIds.map((_, i) => i).filter((i) => out[i] === null),
       COLD_READS,
@@ -514,8 +484,8 @@ export class CommentStore {
   async like(postId: string, commentId: string, userId: string): Promise<{ likes: number; already: boolean }> {
     const key = likeObjectKey(postId, commentId, userId);
     const liking = commentLikingKey(commentId, userId);
-    const first = await this.hot.swap(liking, null, MARK, LIKING_MS);
-    const already = !first || (await this.op.exists(key));
+    // For 10 seconds, a user's like of a comment keeps another of theirs, sent at the same moment, from counting too.
+    const already = !(await this.hot.swap(liking, null, MARK, 10_000)) || (await this.op.exists(key));
     if (!already) {
       try {
         await this.op.write(key, MARK);

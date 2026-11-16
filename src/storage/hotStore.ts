@@ -1,83 +1,12 @@
 import { Redis } from 'ioredis';
+import type { HotEntry, HotStore, LexRange } from './hotStore.types.js';
 
-/**
- * The RAM tier: the feed index (heads, manifests, day indexes), hot summaries and publisher
- * credits. Keys are relative; each store adds its own prefix. Any Redis-protocol server
- * works (Redis, Valkey, ElastiCache, Memorystore, Azure); without one, MemoryHotStore keeps
- * everything in this process, which only suits a single node.
- */
-export interface HotStore {
-  get(key: string): Promise<Buffer | null>;
-  mget(keys: string[]): Promise<(Buffer | null)[]>;
-  /** Without `ttlMs` the key never expires (and is never evicted under a volatile-* policy). */
-  set(key: string, value: Buffer | string, ttlMs?: number): Promise<void>;
-  /** Sets several keys in one round trip, each as `set` does. Not atomic: if it fails, some may be set. */
-  setMany(entries: HotEntry[]): Promise<void>;
-  /** Sets a key that isn't there, to expire in `ttlMs`; one that is there is left as it is. */
-  setIfAbsent(key: string, value: Buffer, ttlMs: number): Promise<void>;
-  /** Gets and deletes a key in one step, so of concurrent callers only one gets its value. */
-  take(key: string): Promise<Buffer | null>;
-  del(keys: string[]): Promise<void>;
-  /** Makes existing keys expire `ttlMs` from now; missing keys are ignored. */
-  expire(keys: string[], ttlMs: number): Promise<void>;
-  /** Makes keys never expire. For each, whether it is still there: false if it expired or was evicted first. */
-  persist(keys: string[]): Promise<boolean[]>;
-  exists(keys: string[]): Promise<boolean[]>;
-  /**
-   * Adds one to a counter that starts at zero and is deleted `ttlMs` after its first count. Returns
-   * the count and how long the counter has left. Atomic, so processes counting together miss nothing.
-   */
-  incr(key: string, ttlMs: number): Promise<{ count: number; ttlMs: number }>;
-  /**
-   * Adds one to a counter that is there, which keeps its expiry, and returns the count. A counter
-   * that isn't there is left missing, and null returned: a count somebody cached is kept up, and
-   * one nobody cached isn't begun at 1. Atomic.
-   */
-  bump(key: string): Promise<number | null>;
-  /**
-   * Sets a key to `next` (or deletes it, if null), but only if it holds `expected` (null: if it is
-   * missing), and returns whether it did. Atomic, so of concurrent callers that read the same value
-   * only one changes it. `ttlMs` is as for `set`.
-   */
-  swap(key: string, expected: string | null, next: string | null, ttlMs?: number): Promise<boolean>;
-  /**
-   * Adds members to a set that is kept in the order of its members, which must be ASCII (byte order
-   * is then the order of the strings). A set that is new, or somehow has no expiry, expires `ttlMs`
-   * from now; one that has an expiry keeps it, so the set lasts `ttlMs` from when it was begun.
-   */
-  lexAdd(key: string, members: string[], ttlMs: number): Promise<void>;
-  /**
-   * Up to `limit` of an ordered set's members after `after` and before `before` (neither included;
-   * left out: no bound), in order, or with `reverse` from the last back. A missing set is empty.
-   */
-  lexRange(key: string, range: LexRange & { limit: number; reverse?: boolean }): Promise<string[]>;
-  /** How many of an ordered set's members are within the bounds. */
-  lexCount(key: string, range?: LexRange): Promise<number>;
-  /** Whether an ordered set has the member. */
-  lexHas(key: string, member: string): Promise<boolean>;
-  lexRem(key: string, members: string[]): Promise<void>;
-  /** Deletes every key under this store's prefix. */
-  clear(): Promise<void>;
-  close(): Promise<void>;
-}
-
-/** A key to set (see setMany). */
-export interface HotEntry {
-  key: string;
-  value: Buffer | string;
-  ttlMs?: number;
-}
-
-/** The bounds of a range of an ordered set (see lexRange): neither is part of the range. */
-export interface LexRange {
-  after?: string;
-  before?: string;
-}
-
+/** An expiry as both stores set it: a whole number of ms, rounded up, and 1 at the least, so nothing is set to expire at once or in the past. */
 const ttl = (ms: number) => Math.max(1, Math.ceil(ms));
 
-/** A range's bounds as ZRANGEBYLEX takes them. */
+/** A range's lower bound as ZRANGEBYLEX takes it: `after`, which is not part of the range, or `-` for none. */
 const lexMin = ({ after }: LexRange) => (after === undefined ? '-' : `(${after}`);
+/** A range's upper bound as ZRANGEBYLEX takes it: `before`, which is not part of the range, or `+` for none. */
 const lexMax = ({ before }: LexRange) => (before === undefined ? '+' : `(${before}`);
 
 /** Members a lexAdd sends in one command. */
@@ -220,8 +149,18 @@ export class RedisHotStore implements HotStore {
   }
 
   async swap(key: string, expected: string | null, next: string | null, ttlMs?: number) {
-    const args = [expected === null ? '0' : '1', expected ?? '', next === null ? '0' : '1', next ?? '', ttlMs === undefined ? '' : String(ttl(ttlMs))];
-    return (await this.redis.eval(SWAP, 1, this.k(key), ...args)) === 1;
+    return (
+      (await this.redis.eval(
+        SWAP,
+        1,
+        this.k(key),
+        expected === null ? '0' : '1',
+        expected ?? '',
+        next === null ? '0' : '1',
+        next ?? '',
+        ttlMs === undefined ? '' : String(ttl(ttlMs)),
+      )) === 1
+    );
   }
 
   async lexAdd(key: string, members: string[], ttlMs: number) {
@@ -250,8 +189,9 @@ export class RedisHotStore implements HotStore {
   }
 
   async clear() {
-    const stream = this.redis.scanStream({ match: `${this.prefix}*`, count: 500 });
-    for await (const keys of stream as AsyncIterable<string[]>) if (keys.length) await this.redis.unlink(...keys);
+    for await (const keys of this.redis.scanStream({ match: `${this.prefix}*`, count: 500 }) as AsyncIterable<string[]>) {
+      if (keys.length) await this.redis.unlink(...keys);
+    }
   }
 
   async close() {
@@ -265,6 +205,7 @@ class LexSet {
 }
 
 type Value = Buffer | LexSet;
+/** Whether what a key of MemoryHotStore holds is an ordered set, and not bytes: what its lex* methods ask before they read one. */
 const isLexSet = (v: Value): v is LexSet => v instanceof LexSet;
 
 /** In-process stand-in for Redis (development, tests, single-node setups). Expiry follows the injected clock. */
@@ -358,8 +299,7 @@ export class MemoryHotStore implements HotStore {
   }
 
   async swap(key: string, expected: string | null, next: string | null, ttlMs?: number) {
-    const current = this.value(key, Buffer.isBuffer)?.toString('utf8') ?? null;
-    if (current !== expected) return false;
+    if ((this.value(key, Buffer.isBuffer)?.toString('utf8') ?? null) !== expected) return false;
     if (next === null) this.map.delete(key);
     else await this.set(key, next, ttlMs);
     return true;
@@ -373,8 +313,7 @@ export class MemoryHotStore implements HotStore {
   }
 
   async lexRange(key: string, { after, before, limit, reverse }: LexRange & { limit: number; reverse?: boolean }) {
-    const set = this.value(key, isLexSet);
-    const within = [...(set?.members ?? [])].filter((m) => (after === undefined || m > after) && (before === undefined || m < before)).sort();
+    const within = [...(this.value(key, isLexSet)?.members ?? [])].filter((m) => (after === undefined || m > after) && (before === undefined || m < before)).sort();
     return (reverse ? within.reverse() : within).slice(0, limit);
   }
 
@@ -399,6 +338,11 @@ export class MemoryHotStore implements HotStore {
   async close() {}
 }
 
+/**
+ * The hot store the settings ask for (`redis` of the configuration): the Redis-protocol server at
+ * `url`, every key under `keyPrefix`, or with no `url`, a store in this process, whose expiry
+ * follows `now` and which has no use for the prefix.
+ */
 export function createHotStore(cfg: { url?: string; keyPrefix: string }, now: () => number = Date.now): HotStore {
   return cfg.url ? new RedisHotStore(cfg.url, cfg.keyPrefix) : new MemoryHotStore(now);
 }

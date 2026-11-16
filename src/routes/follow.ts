@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
 import { isUniqueViolation, lockUser } from '../db/index.js';
-import type { AppDeps } from '../deps.js';
+import type { AppDeps } from '../deps.types.js';
 import { requireShownFollows, syncFollowing } from '../follows.js';
 import { badRequest, conflict, forbidden, HttpError, notFound } from '../http/errors.js';
 import { listPage, listQuery } from '../http/listCursor.js';
@@ -10,7 +10,9 @@ import { Credentials } from '../http/schemas.js';
 import { msg } from '../language.js';
 import { iso } from '../time.js';
 
+/** The path of a user's lists of follows: the user's id. */
 const Params = z.object({ userId: z.string().uuid() });
+/** The path of one follow: the user who follows, and the user they follow. */
 const PairParams = z.object({ userId: z.string().uuid(), followeeId: z.string().uuid() });
 
 /** Each list is the user's side of a follow, and the other user's. */
@@ -19,6 +21,13 @@ const SIDES = {
   followers: { own: 'follows.followee_id', other: 'follows.follower_id' },
 } as const;
 
+/**
+ * Follows: a user follows another, or stops, which only they do, by their key; and the lists of
+ * whom a user follows and of who follows them, which anyone reads if the user shows them.
+ *
+ * A follow is a row in `follows`, and a user has `maxFollowing` at most (409 past them). Whom a
+ * user follows is also written to Redis each time, where the following feed reads it.
+ */
 export function followRoutes(app: FastifyInstance, { db, config, follows, now = Date.now }: AppDeps) {
   /**
    * Following feeds read whom a user follows from Redis. Every request rewrites it, so repeating one
@@ -47,8 +56,7 @@ export function followRoutes(app: FastifyInstance, { db, config, follows, now = 
     const { userId, followeeId } = PairParams.parse(req.params);
     await caller(req, userId);
     if (followeeId === userId) throw badRequest(msg('follow.yourself'));
-    const followee = await db.selectFrom('users').select('id').where('id', '=', followeeId).where('deleted_at', 'is', null).executeTakeFirst();
-    if (!followee) throw notFound(msg('user.not_found'));
+    if (!(await db.selectFrom('users').select('id').where('id', '=', followeeId).where('deleted_at', 'is', null).executeTakeFirst())) throw notFound(msg('user.not_found'));
 
     let followedAt = (await findFollow(userId, followeeId))?.created_at;
     const alreadyFollowing = followedAt !== undefined;
@@ -58,12 +66,19 @@ export function followRoutes(app: FastifyInstance, { db, config, follows, now = 
         await db.transaction().execute(async (trx) => {
           // First: the user's follows then take turns, and none gets past the limit.
           await lockUser(trx, config.db.dialect, userId);
-          const { n } = await trx
-            .selectFrom('follows')
-            .select((eb) => eb.fn.countAll().as('n'))
-            .where('follower_id', '=', userId)
-            .executeTakeFirstOrThrow();
-          if (Number(n) >= config.maxFollowing) throw conflict(msg('follow.limit', { max: config.maxFollowing }));
+          if (
+            Number(
+              (
+                await trx
+                  .selectFrom('follows')
+                  .select((eb) => eb.fn.countAll().as('n'))
+                  .where('follower_id', '=', userId)
+                  .executeTakeFirstOrThrow()
+              ).n,
+            ) >= config.maxFollowing
+          ) {
+            throw conflict(msg('follow.limit', { max: config.maxFollowing }));
+          }
           await trx.insertInto('follows').values({ follower_id: userId, followee_id: followeeId, created_at: ts }).execute();
         });
         followedAt = ts;
@@ -100,12 +115,15 @@ export function followRoutes(app: FastifyInstance, { db, config, follows, now = 
       await requireShownFollows(db, req, userId, list);
 
       const { own, other } = SIDES[list];
-      const query = db
-        .selectFrom('follows')
-        .innerJoin('users', 'users.id', other)
-        .select(['users.id', 'users.username', 'follows.created_at'])
-        .where(own, '=', userId);
-      const { rows, nextCursor } = await listPage(query, { createdAt: 'follows.created_at', userId: other }, page);
+      const { rows, nextCursor } = await listPage(
+        db
+          .selectFrom('follows')
+          .innerJoin('users', 'users.id', other)
+          .select(['users.id', 'users.username', 'follows.created_at'])
+          .where(own, '=', userId),
+        { createdAt: 'follows.created_at', userId: other },
+        page,
+      );
       return {
         userId,
         [list]: rows.map((r) => ({ userId: r.id, username: r.username, followedAt: iso(r.created_at) })),

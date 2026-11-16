@@ -91,7 +91,7 @@ Apart from its admin CLI, an instance has no client of its own. It's designed fo
 
 1. **Allow the user to register on several instances,** and give them one interface to all of them.
 2. **Keep one set of credentials** that unlocks the user's API key for each instance, so the client is the layer between the user and the instances they've registered on.
-3. **Let the user set the parameters of each request,** such as a feed's tags, window and algorithm, so the experience is theirs to shape.
+3. **Let the user set the parameters of each request,** such as a feed's tags, window and algorithm, so the experience is theirs.
 4. **Syndicate a post to several instances** by posting it to each one. Instances don't pass posts on to each other, so a user's key for one instance never goes to another.
 
 
@@ -102,7 +102,7 @@ Every instance serves the same API, so anyone can register on an instance direct
 
 ## User registration and API keys
 
-When a user registers using the register endpoint(`POST /register`), unless pre-existing admin credentials are supplied (the CLI does this automatically), the instance responds with a challenge. Once the challenge is solved, the instance returns the user's id and an API key. The key is shown once, and an instance has no way to show it again, so it's the client's job to keep it safe. A user who still has their key can replace it (`POST /users/:userId/key`, or `evieverse key rotate`): the old key stops working at once and a new one comes back, which is what to do when a key may have leaked. A key that's lost can't be replaced. The details are in [API.md](docs/API.md#post-usersuseridkey).
+When a user registers using the register endpoint(`POST /register`), unless pre-existing admin credentials are supplied (the CLI does this automatically), the instance responds with a challenge. Once the challenge is solved, the instance returns the user's id and an API key. The key is shown once, and an instance has no way to show it again, so it's the client's job to keep it safe. A user who still has their key can replace it (`POST /users/:userId/key`, or `evieverse key rotate`): the old key stops working at once and a new one comes back, which is what to do when a key may have leaked. The details are in [API.md](docs/API.md#post-usersuseridkey).
 
 ## Content organization and moderation
 

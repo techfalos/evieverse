@@ -1,37 +1,22 @@
 import http from 'node:http';
-import { loadLanguages, msg, type Languages, type Message } from '../language.js';
+import { loadLanguages, msg, type Languages } from '../language.js';
+import type { Message } from '../language.types.js';
 import { EDGE_SECRET_HEADER, sameSecret } from './edge.js';
-import type { FunctionRequest, FunctionResponse, RouteFunction } from './handler.js';
+import type { RouteFunction } from './handler.js';
+import type { FunctionRequest, FunctionResponse } from './handler.types.js';
+import type { HttpApiEvent, HttpApiResult, Invocation } from './lambdaRuntime.types.js';
 
 export { EDGE_SECRET_HEADER };
 
-/** An API Gateway HTTP API request (payload format 2.0), as far as it is read here. */
-export interface HttpApiEvent {
-  rawPath: string;
-  rawQueryString?: string;
-  /** Names in lower case; the values of a repeated header joined by commas. */
-  headers?: Record<string, string | undefined>;
-  cookies?: string[];
-  requestContext: { http: { method: string; sourceIp?: string } };
-  body?: string;
-  isBase64Encoded?: boolean;
-}
-
-export interface HttpApiResult {
-  statusCode: number;
-  headers: Record<string, string>;
-  cookies?: string[];
-  body: string;
-  isBase64Encoded: boolean;
-}
-
-/** Lambda refuses a response over 6 MB; base64 makes a body a third larger. */
-const MAX_RESPONSE_BYTES = 6 * 1024 * 1024 - 64 * 1024;
-
+/**
+ * An HTTP API event as the request a function takes: the path with its query string, the body
+ * decoded to bytes, and the cookies back in a `cookie` header. Content-Length and Transfer-Encoding
+ * are dropped, as they were true of the body the gateway was sent. The peer the gateway saw is the
+ * request's remote address, and is taken off the end of X-Forwarded-For, where the gateway put it.
+ */
 export function toRequest(event: HttpApiEvent): FunctionRequest {
   const headers: FunctionRequest['headers'] = { ...event.headers };
   if (event.cookies?.length) headers.cookie = event.cookies.join('; ');
-  const body = event.body === undefined ? undefined : Buffer.from(event.body, event.isBase64Encoded ? 'base64' : 'utf8');
   // The length is the decoded body's, whatever the gateway was sent.
   delete headers['content-length'];
   delete headers['transfer-encoding'];
@@ -47,14 +32,17 @@ export function toRequest(event: HttpApiEvent): FunctionRequest {
     else delete headers['x-forwarded-for'];
   }
 
-  const query = event.rawQueryString ? `?${event.rawQueryString}` : '';
-  return { method: event.requestContext.http.method, url: `${event.rawPath}${query}`, headers, body, remoteAddress: peer };
+  return {
+    method: event.requestContext.http.method,
+    url: `${event.rawPath}${event.rawQueryString ? `?${event.rawQueryString}` : ''}`,
+    headers,
+    body: event.body === undefined ? undefined : Buffer.from(event.body, event.isBase64Encoded ? 'base64' : 'utf8'),
+    remoteAddress: peer,
+  };
 }
 
 /** Of the connection the app thinks it answers on, not of the response: the gateway sets its own. */
 const CONNECTION_HEADERS = new Set(['connection', 'keep-alive', 'transfer-encoding', 'content-length']);
-
-const isText = (type: string) => /^text\/|[/+]json\b|[/+]xml\b|^application\/javascript\b/i.test(type);
 
 /** `say` puts what this itself has to tell the client in the request's language (see httpApiHandler). */
 export function toResult(res: FunctionResponse, say: (text: Message) => string): HttpApiResult {
@@ -64,14 +52,16 @@ export function toResult(res: FunctionResponse, say: (text: Message) => string):
     if (name === 'set-cookie') cookies = Array.isArray(value) ? value : [value];
     else if (!CONNECTION_HEADERS.has(name)) headers[name] = Array.isArray(value) ? value.join(', ') : value;
   }
-  const text = !headers['content-encoding'] && isText(headers['content-type'] ?? '');
+  const text = !headers['content-encoding'] && /^text\/|[/+]json\b|[/+]xml\b|^application\/javascript\b/i.test(headers['content-type'] ?? '');
   const body = text ? res.body.toString('utf8') : res.body.toString('base64');
-  if (Buffer.byteLength(body) > MAX_RESPONSE_BYTES) {
+  // Lambda refuses a response over 6 MB; base64 makes a body a third larger.
+  if (Buffer.byteLength(body) > 6 * 1024 * 1024 - 64 * 1024) {
     return json(500, { error: say(msg('function.response_too_large')) });
   }
   return { statusCode: res.statusCode, headers, ...(cookies && { cookies }), body, isBase64Encoded: !text };
 }
 
+/** A JSON response of the handler's own, which the app had no part in: `body` with the status `statusCode`. */
 const json = (statusCode: number, body: object): HttpApiResult => ({
   statusCode,
   headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -100,12 +90,10 @@ export function httpApiHandler(fn: Pick<RouteFunction, 'handle'>, opts: { edgeSe
   };
 }
 
-export interface Invocation {
-  requestId: string;
-  /** When Lambda ends the invocation (UTC epoch ms). */
-  deadline: number;
-}
-
+/**
+ * What the Lambda Runtime API answered one of `runLambda`'s calls. For the next invocation, its
+ * id and its deadline are in the headers and its event is the body.
+ */
 interface RuntimeReply {
   status: number;
   headers: http.IncomingHttpHeaders;
@@ -173,8 +161,9 @@ export async function runLambda(
       const id = encodeURIComponent(requestId);
       let result: string;
       try {
-        const deadline = Number(next.headers['lambda-runtime-deadline-ms']) || Date.now();
-        result = JSON.stringify((await handler(JSON.parse(next.body.toString('utf8')), { requestId, deadline })) ?? null);
+        result = JSON.stringify(
+          (await handler(JSON.parse(next.body.toString('utf8')), { requestId, deadline: Number(next.headers['lambda-runtime-deadline-ms']) || Date.now() })) ?? null,
+        );
       } catch (err) {
         log(err, 'the invocation failed');
         await call('POST', `/invocation/${id}/error`, failure(err), errorHeaders).catch((e) => log(e, 'could not report the failure'));

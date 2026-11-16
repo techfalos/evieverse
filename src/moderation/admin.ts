@@ -9,9 +9,14 @@ import { setAdmin } from './policy.js';
  * a server's first admin and is the way back in without one; admins otherwise use /admins, or the
  * CLI the server ships (src/cli).
  */
-const [command, user] = process.argv.slice(2);
-const usage = 'usage: npm run admin -- grant <username or userId> | revoke <username or userId> | list';
 
+/** What the command line asks: `grant`, `revoke` or `list`, and for the first two, the user, by username or id. */
+const [command, user] = process.argv.slice(2);
+
+/**
+ * The server's database, opened as the server opens it, so with its schema brought up to date
+ * first unless `migrateOnStart` is off. Closed when the command is done.
+ */
 const db = await openDb(loadConfig().db);
 let failed = false;
 try {
@@ -27,7 +32,7 @@ try {
       failed = true;
     }
   } else {
-    console.error(usage);
+    console.error('usage: npm run admin -- grant <username or userId> | revoke <username or userId> | list');
     failed = true;
   }
 } finally {

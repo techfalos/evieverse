@@ -3,26 +3,13 @@ import type { FastifyRequest } from 'fastify';
 import { lockUser, type Db, type DbDialect } from '../db/index.js';
 import { forbidden, notFound, unauthorized } from '../http/errors.js';
 import { msg, type Languages } from '../language.js';
+import type { AuthUser } from './apiKey.types.js';
 
+/**
+ * An API key as `issueApiKey` makes one: `tu_`, 12 hex digits, `_`, and the 43 base64url characters
+ * of its 32 random bytes. Anything else is refused with 401 before the database is asked.
+ */
 const KEY_PATTERN = /^tu_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$/;
-
-export interface AuthUser {
-  id: string;
-  username: string;
-  admin: boolean;
-  /** A server moderator: one who works through the moderation queue. An admin does too, without being one. */
-  moderator: boolean;
-  /** The code of the language the server answers the user in (see languageOf). */
-  language: string;
-  /** Whether the user takes part in messages between users: on, until they turn it off. */
-  messages: boolean;
-  /** Whether anyone can list whom the user follows: off, until they turn it on. */
-  showFollowing: boolean;
-  /** Whether anyone can list who follows the user: off, until they turn it on. */
-  showFollowers: boolean;
-  /** Whether a server moderator or an admin banned the user: they are refused posts, comments, likes, messages and upload links (see refuseBanned). */
-  banned: boolean;
-}
 
 /**
  * The language a user is answered in: the one they registered in or changed to since. The server's
@@ -69,8 +56,7 @@ export async function reissueApiKey(
     // The user's row, not the key's: MySQL's locks on the keys' index deadlock two replacements that each go on to insert a key.
     await lockUser(trx, dialect, userId);
     const revokeLive = () => trx.updateTable('api_keys').set({ revoked_at: now }).where('user_id', '=', userId).where('revoked_at', 'is', null);
-    const presented = await revokeLive().where('key_hash', '=', hashKey(apiKey)).executeTakeFirst();
-    if (Number(presented.numUpdatedRows) === 0) throw unauthorized();
+    if (Number((await revokeLive().where('key_hash', '=', hashKey(apiKey)).executeTakeFirst()).numUpdatedRows) === 0) throw unauthorized();
     await revokeLive().execute();
     return issueApiKey(trx, userId, now);
   });
@@ -116,8 +102,7 @@ export async function reissueApiKeyFor(
       .executeTakeFirst();
     if (!caller) throw unauthorized();
     if (caller.admin !== 1) throw forbidden(msg('user.key_own_only'));
-    const user = await trx.selectFrom('users').select('id').where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
-    if (!user) throw notFound(msg('user.not_found'));
+    if (!(await trx.selectFrom('users').select('id').where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst())) throw notFound(msg('user.not_found'));
     await trx.updateTable('api_keys').set({ revoked_at: now }).where('user_id', '=', userId).where('revoked_at', 'is', null).execute();
     return issueApiKey(trx, userId, now);
   });
@@ -173,11 +158,11 @@ function credentialsFrom(
 ): { userId?: string; apiKey?: string } {
   const forwarded = req.headers['x-forwarded-authorization'];
   const header = typeof forwarded === 'string' ? forwarded : req.headers.authorization;
-  const bearer = header?.startsWith('Bearer ') ? header.slice(7).trim() : undefined;
   const headerUser = req.headers['x-user-id'];
-  const userId = typeof fields.userId === 'string' ? fields.userId : typeof headerUser === 'string' ? headerUser : undefined;
-  const apiKey = typeof fields.apiKey === 'string' ? fields.apiKey : bearer;
-  return { userId, apiKey };
+  return {
+    userId: typeof fields.userId === 'string' ? fields.userId : typeof headerUser === 'string' ? headerUser : undefined,
+    apiKey: typeof fields.apiKey === 'string' ? fields.apiKey : header?.startsWith('Bearer ') ? header.slice(7).trim() : undefined,
+  };
 }
 
 /**

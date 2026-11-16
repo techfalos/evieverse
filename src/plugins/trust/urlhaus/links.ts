@@ -4,15 +4,7 @@
  * text, a caption or a comment, inside whatever markup surrounds it.
  */
 
-/** A web address as it is compared: without its scheme, so http and https are one, and without its fragment. */
-export interface Address {
-  /** Its host, with its port unless that is the scheme's own: example.com, 192.0.2.1:8080. */
-  host: string;
-  /** The host and the path: example.com/files/setup.exe. */
-  path: string;
-  /** The same with the query, where there is one: example.com/get.php?file=7. */
-  full: string;
-}
+import type { Address, Link } from './links.types.js';
 
 /** `url` as it is compared, the way the URL parser writes it; null if it isn't an http or https URL. */
 export function addressOf(url: string): Address | null {
@@ -31,22 +23,9 @@ export function addressOf(url: string): Address | null {
   return { host, path, full: path + parsed.search };
 }
 
-/** A link as a text has it. */
-export interface Link {
-  /** Whether it is written with http:// or https://. One that isn't (example.com/file) only may be a link. */
-  schemed: boolean;
-  /** Its scheme and host. One written without a scheme has both it could be read with, as they differ in the port they leave out. */
-  origins: string[];
-  /** What follows the host, up to the next space: the path and the query, and whatever the text has right after them. */
-  tail: string;
-}
-
-/** The longest path and query that is read. URLhaus lists none near as long. */
-const MAX_TAIL_CHARS = 2048;
-
-// What can't be in a link, so ends it: a space, and the characters markup puts around one.
+/** What can't be in a link, so ends it: a space, and the characters markup puts around one. Written as the inside of a character class. */
 const END = '\\s<>"`';
-// The dots domain names are written with: the full stop, and the ones the URL parser reads as it.
+/** The dots domain names are written with: the full stop, and the ones the URL parser reads as it. Written as the inside of a character class. */
 const DOT = '.\\u3002\\uFF0E\\uFF61';
 
 /**
@@ -65,8 +44,8 @@ const BARE = new RegExp(
   'giu',
 );
 
-/** What follows a host that has a path, a query or a fragment. */
-const TAIL = new RegExp(`[\\/?#\\\\][^${END}]{0,${MAX_TAIL_CHARS}}`, 'y');
+/** What follows a host that has a path, a query or a fragment. 2048 characters is the longest path and query that is read: URLhaus lists none near as long. */
+const TAIL = new RegExp(`[\\/?#\\\\][^${END}]{0,2048}`, 'y');
 
 /** What a sentence or markup puts after a host that ends the link: "see https://example.com." */
 const AFTER_HOST = new RegExp(`[${DOT}_%\\-]+$`, 'u');
@@ -99,13 +78,10 @@ export function findLinks(text: string): Link[] {
   return links;
 }
 
-// What a sentence or markup puts right after a link, which isn't part of it.
+/** What a sentence or markup puts right after a link, which isn't part of it. */
 const TRAILING = new Set(`.,;:!?'")]}*_~|`);
-// What markup ends a link with before it goes on without a space, and what the server's own formatting (src/format.ts) ends an address at.
+/** What markup ends a link with before it goes on without a space, and what the server's own formatting (src/format.ts) ends an address at. */
 const CLOSING = new Set(`)]}[\\'|,;!*`);
-/** How many characters that trail a link it is tried without, and how many places in it it is tried to end at. */
-const MAX_TRAILING = 8;
-const MAX_CLOSINGS = 32;
 
 /**
  * What `tail` is if the link ends where it could. Nothing in a text marks a link's end, and any of
@@ -115,14 +91,11 @@ const MAX_CLOSINGS = 32;
  */
 export function endings(tail: string): string[] {
   const ends = new Set([tail.length]);
-  for (let end = tail.length, n = 0; end > 0 && TRAILING.has(tail[end - 1]!) && n < MAX_TRAILING; n++) ends.add(--end);
-  for (let i = 0, n = 0; i < tail.length && n < MAX_CLOSINGS; i++) if (CLOSING.has(tail[i]!) && ++n) ends.add(i);
+  // The link is tried without up to 8 of the characters that trail it, and ending at up to 32 places in it.
+  for (let end = tail.length, n = 0; end > 0 && TRAILING.has(tail[end - 1]!) && n < 8; n++) ends.add(--end);
+  for (let i = 0, n = 0; i < tail.length && n < 32; i++) if (CLOSING.has(tail[i]!) && ++n) ends.add(i);
   return [...ends].map((end) => tail.slice(0, end));
 }
-
-/** A path segment that takes back the one before it: "..", however it is written. */
-const STEP_BACK = /[/\\](?:\.|%2e){2}(?=[/\\?#]|$)/gi;
-const MAX_STEPS_BACK = 4;
 
 /**
  * `tail`, and `tail` up to each segment that steps back ("/.."). The URL parser takes such a
@@ -131,8 +104,9 @@ const MAX_STEPS_BACK = 4;
  */
 export function beforeStepsBack(tail: string): string[] {
   const tails = [tail];
-  for (const match of tail.matchAll(STEP_BACK)) {
-    if (tails.length > MAX_STEPS_BACK) break;
+  // Each path segment that takes back the one before it: "..", however it is written.
+  for (const match of tail.matchAll(/[/\\](?:\.|%2e){2}(?=[/\\?#]|$)/gi)) {
+    if (tails.length > 4) break; // the most steps back that are read
     tails.push(tail.slice(0, match.index));
   }
   return tails;

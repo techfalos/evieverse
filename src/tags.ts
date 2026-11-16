@@ -1,9 +1,7 @@
 import { sql } from 'kysely';
 import { updateOnConflict, type Db, type DbDialect } from './db/index.js';
-import { msg, type Message } from './language.js';
-
-/** A tag is a single hashtag word: lowercase letters, digits and underscores. */
-const TAG_PATTERN = /^[a-z0-9_]{1,64}$/;
+import { msg } from './language.js';
+import type { Message } from './language.types.js';
 
 /** The most hashtags a post can have. */
 export const MAX_TAGS = 10;
@@ -17,7 +15,8 @@ export function normalizeTag(input: string): string | null {
     .replace(/^#+/, '')
     .replace(/[^a-z0-9_]/g, '')
     .slice(0, 64);
-  return TAG_PATTERN.test(tag) ? tag : null;
+  // A tag is a single hashtag word: lowercase letters, digits and underscores.
+  return /^[a-z0-9_]{1,64}$/.test(tag) ? tag : null;
 }
 
 /**
@@ -26,9 +25,8 @@ export function normalizeTag(input: string): string | null {
  * `max` is how many there can be: a post's, unless the list is of something else.
  */
 export function parseTagList(input: string | string[], max = MAX_TAGS): { tags: string[] } | { error: Message } {
-  const words = typeof input === 'string' ? input.split(/[\s,]+/) : input;
   const tags = new Set<string>();
-  for (const word of words) {
+  for (const word of typeof input === 'string' ? input.split(/[\s,]+/) : input) {
     if (!word.trim()) continue;
     const tag = normalizeTag(word);
     if (!tag) return { error: msg('tags.unusable', { word }) };
@@ -45,6 +43,7 @@ export function parseTagList(input: string | string[], max = MAX_TAGS): { tags: 
 export const allowedTags = (tagging: { mode: 'server' | 'user'; serverTags: string[] }): string[] | null =>
   tagging.mode === 'server' ? tagging.serverTags : null;
 
+/** Whether two lists hold the same hashtags, in whatever order. Each is taken to name a hashtag once, as `parseTagList` gives them. */
 export function sameTags(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((t) => b.includes(t));
 }
@@ -53,8 +52,7 @@ export function sameTags(a: string[], b: string[]): boolean {
 export async function touchTags(db: Db, dialect: DbDialect, tags: string[], now: number): Promise<void> {
   // Sorted, so concurrent transactions lock shared tag rows in the same order and can't deadlock.
   for (const name of [...tags].sort()) {
-    const insert = db.insertInto('tags').values({ name, created_at: now, last_appended_at: now });
-    await updateOnConflict(insert, dialect, 'name', { last_appended_at: now }).execute();
+    await updateOnConflict(db.insertInto('tags').values({ name, created_at: now, last_appended_at: now }), dialect, 'name', { last_appended_at: now }).execute();
   }
 }
 
@@ -68,12 +66,17 @@ export async function countTagPairs(db: Db, dialect: DbDialect, tags: string[], 
   const pairs = new Set<string>();
   for (const a of added) for (const b of tags) pairs.add(a < b ? `${a} ${b}` : `${b} ${a}`);
   if (!pairs.size) return;
-  // Sorted, so concurrent statements lock shared rows in the same order and can't deadlock.
-  const rows = [...pairs].sort().map((pair) => {
-    const [tag_a, tag_b] = pair.split(' ') as [string, string];
-    return { tag_a, tag_b, posts: 1, updated_at: now };
-  });
-  // The row's own count, named by its table: Postgres takes a bare `posts` to be ambiguous here.
-  const counted = { posts: sql<number>`${sql.ref('tag_pairs.posts')} + 1`, updated_at: now };
-  await updateOnConflict(db.insertInto('tag_pairs').values(rows), dialect, ['tag_a', 'tag_b'], counted).execute();
+  await updateOnConflict(
+    db.insertInto('tag_pairs').values(
+      // Sorted, so concurrent statements lock shared rows in the same order and can't deadlock.
+      [...pairs].sort().map((pair) => {
+        const [tag_a, tag_b] = pair.split(' ') as [string, string];
+        return { tag_a, tag_b, posts: 1, updated_at: now };
+      }),
+    ),
+    dialect,
+    ['tag_a', 'tag_b'],
+    // The row's own count, named by its table: Postgres takes a bare `posts` to be ambiguous here.
+    { posts: sql<number>`${sql.ref('tag_pairs.posts')} + 1`, updated_at: now },
+  ).execute();
 }

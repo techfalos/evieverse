@@ -17,16 +17,29 @@ import { createCompactor } from './compactor.js';
  * is already up: a rebuild that finds that process mid-pass waits for it, rather than being skipped
  * as an ordinary pass is.
  */
+
+/** The process's settings, as `loadConfig` read them from the config file and the environment. */
 const config = loadConfig();
+/** Where this process and its compactor log, as JSON lines on stdout, at the level LOG_LEVEL sets. */
 const log = pino({ level: config.logLevel });
 if (!config.redis.url) {
   log.error('the standalone compactor needs REDIS_URL: without it the feed index lives inside each API process');
   process.exit(1);
 }
+/**
+ * The database and the stores the compactor works on (`deps`), the schema brought up to date first
+ * unless DB_MIGRATE_ON_START is off, and `close`, which ends their connections.
+ */
 const { close, ...deps } = await bootstrap(config);
+/** The one compactor of this process: every pass below is its, the ones asked for by hand and the ones it then makes on its own. */
 const compactor = createCompactor(deps, log);
 
+/**
+ * What the command line asks the first pass to rebuild: `--all`, `--rebuild` (see above). The
+ * passes after it rebuild only what changed.
+ */
 const opts = { all: process.argv.includes('--all'), rebuild: process.argv.includes('--rebuild') };
+/** Whether a rebuild was asked for by hand: such a pass waits for its turn where an ordinary one is skipped (see `pass`). */
 const asked = opts.all || opts.rebuild;
 
 /** One pass. What was asked for by hand isn't lost to a pass another compactor is making: it takes the next turn. */
@@ -44,8 +57,7 @@ if (process.argv.includes('--once')) {
   await close();
 } else {
   if (asked) {
-    const { tags } = await pass();
-    log.info({ tags: tags.length }, opts.rebuild ? 'rebuilt the feed index' : 'rebuilt every tag');
+    log.info({ tags: (await pass()).tags.length }, opts.rebuild ? 'rebuilt the feed index' : 'rebuilt every tag');
   }
   const stop = compactor.start();
   const shutdown = async () => {

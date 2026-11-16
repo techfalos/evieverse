@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sql, type Kysely } from 'kysely';
-import { Migrator, type Migration, type MigrationProvider } from 'kysely/migration';
+import { Migrator, type Migration } from 'kysely/migration';
 
 /** SQL migrations live next to this file as `<name>.sql` (shipped to dist/ by the build). */
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), 'migrations');
@@ -34,9 +34,13 @@ export function sqlMigrations(dir = MIGRATIONS_DIR): Record<string, Migration> {
   return migrations;
 }
 
+/**
+ * Brings the schema of `db` up to date: runs the migrations it hasn't had yet (see
+ * `sqlMigrations`), in the order of their names, and none if it has had them all. Throws if they
+ * can't be run, naming the migration that failed if one did.
+ */
 export async function migrateToLatest(db: Kysely<any>): Promise<void> {
-  const provider: MigrationProvider = { getMigrations: async () => sqlMigrations() };
-  const { error, results } = await new Migrator({ db, provider }).migrateToLatest();
+  const { error, results } = await new Migrator({ db, provider: { getMigrations: async () => sqlMigrations() } }).migrateToLatest();
   const failed = results?.find((r) => r.status === 'Error');
   if (error || failed) {
     throw new Error(`Migration failed${failed ? ` at ${failed.migrationName}` : ''}: ${String(error)}`);

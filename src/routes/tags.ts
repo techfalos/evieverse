@@ -1,9 +1,14 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import type { AppDeps } from '../deps.js';
+import type { AppDeps } from '../deps.types.js';
 import { allowedTags, MAX_TAGS } from '../tags.js';
 import { iso } from '../time.js';
 
+/**
+ * What GET /tags is asked: with `prefix` (letters, digits and _, with or without #, in any case),
+ * only the hashtags that start with it; and `limit`, the most hashtags to list, 200 unless the
+ * request says, and 1000 at most.
+ */
 const Query = z.object({
   prefix: z
     .string()
@@ -12,6 +17,7 @@ const Query = z.object({
   limit: z.coerce.number().int().min(1).max(1000).default(200),
 });
 
+/** What the server tells anyone about hashtags, with no credentials: how posts are tagged here (GET /tagging), and the hashtags posts have used (GET /tags). */
 export function tagRoutes(app: FastifyInstance, { db, config }: AppDeps) {
   /**
    * How posts are tagged on this server, for anyone to read: what a client needs to know to offer
@@ -33,7 +39,6 @@ export function tagRoutes(app: FastifyInstance, { db, config }: AppDeps) {
       .limit(q.limit);
     const prefix = q.prefix?.replace(/^#/, '').toLowerCase();
     if (prefix) query = query.where('name', 'like', `${prefix}%`);
-    const rows = await query.execute();
-    return { tags: rows.map((r) => ({ tag: r.name, lastActiveAt: iso(r.last_appended_at) })) };
+    return { tags: (await query.execute()).map((r) => ({ tag: r.name, lastActiveAt: iso(r.last_appended_at) })) };
   });
 }

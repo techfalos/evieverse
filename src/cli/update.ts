@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { rename, rm, stat, writeFile } from 'node:fs/promises';
-import { BUNDLE_PATH, CliError, isRelease, type Release } from './client.js';
+import { BUNDLE_PATH, CliError, isRelease } from './client.js';
+import type { Release } from './client.types.js';
 
 /** The commands that install the CLI a server ships, which is how to get it back if an update can't be made. */
 export const installHint = (server: string) =>
@@ -28,8 +29,7 @@ async function downloadRelease(fetchFn: typeof fetch, server: string, release: R
   });
   if (!res.ok) throw new CliError(`could not download the CLI from ${server}: it answered ${res.status}`);
   const bundle = Buffer.from(await res.arrayBuffer());
-  const sha256 = createHash('sha256').update(bundle).digest('hex');
-  if (sha256 !== release.sha256 || bundle.length !== release.size) {
+  if (createHash('sha256').update(bundle).digest('hex') !== release.sha256 || bundle.length !== release.size) {
     throw new CliError(`the CLI downloaded from ${server} isn't build ${release.build}: the server may be mid-deploy, so try again in a minute`);
   }
   return bundle;
@@ -47,8 +47,7 @@ export async function installRelease(fetchFn: typeof fetch, selfPath: string | n
   const bundle = await downloadRelease(fetchFn, server, release);
   const tmp = `${selfPath}.${process.pid}.tmp`;
   try {
-    const mode = (await stat(selfPath)).mode & 0o777;
-    await writeFile(tmp, bundle, { mode });
+    await writeFile(tmp, bundle, { mode: (await stat(selfPath)).mode & 0o777 });
     await rename(tmp, selfPath);
   } catch (err) {
     await rm(tmp, { force: true }).catch(() => {});

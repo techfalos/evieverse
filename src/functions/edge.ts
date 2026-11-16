@@ -6,6 +6,11 @@ import { msg } from '../language.js';
 /** The header a CDN in front of the functions sends to prove a request came through it (see FUNCTION_EDGE_SECRET). */
 export const EDGE_SECRET_HEADER = 'x-edge-secret';
 
+/**
+ * Whether `given`, a header's value, is `secret`: false for anything that isn't a string. Values
+ * of the same length are compared in constant time, so how long it takes doesn't tell how much
+ * matched.
+ */
 export function sameSecret(given: unknown, secret: string): boolean {
   const a = Buffer.from(typeof given === 'string' ? given : '');
   const b = Buffer.from(secret);

@@ -159,8 +159,7 @@ function encodeWav(samples: Float32Array): Buffer {
  */
 export function renderSpoken(text: string, voice: Voice, seed: Buffer): Buffer {
   const draw = keystream(seed);
-  const next = () => draw(4).readUInt32LE() / 2 ** 32;
-  const range = (lo: number, hi: number) => lo + (hi - lo) * next();
+  const range = (lo: number, hi: number) => lo + (hi - lo) * (draw(4).readUInt32LE() / 2 ** 32);
   const seconds = (s: number) => Math.round(s * SAMPLE_RATE);
 
   const lead = seconds(range(0.25, 0.45));

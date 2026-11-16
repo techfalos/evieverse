@@ -1,4 +1,4 @@
-import type { AppDeps } from './deps.js';
+import type { AppDeps } from './deps.types.js';
 
 /**
  * Sets content for deletion, and returns when that was requested. /content stops serving it at
@@ -14,6 +14,5 @@ export async function setForDeletion(
   const at = now();
   await db.updateTable('content').set({ delete_requested_at: at }).where('id', '=', row.id).where('delete_requested_at', 'is', null).execute();
   // Another request may have set it first, and then theirs stands; no row means the compactor already finished.
-  const marked = await db.selectFrom('content').select('delete_requested_at').where('id', '=', row.id).executeTakeFirst();
-  return marked?.delete_requested_at ?? at;
+  return (await db.selectFrom('content').select('delete_requested_at').where('id', '=', row.id).executeTakeFirst())?.delete_requested_at ?? at;
 }

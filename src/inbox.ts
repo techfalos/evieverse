@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import type { AppDeps } from './deps.js';
+import type { AppDeps } from './deps.types.js';
 import { plainText } from './format.js';
+import type { Notice } from './inbox.types.js';
 import type { MessageKey } from './language.js';
 import type { ContentMeta } from './storage/index.js';
 
@@ -54,21 +55,8 @@ export type NoticeKind = keyof typeof NOTICES;
 /** The `kind` of a message another user wrote; every other kind is a notice's. */
 export const MESSAGE = 'message';
 
+/** Whether the `kind` of an inbox row is one of NOTICES, which has words to say it with. Not a message's, and not a kind this build doesn't know. */
 export const isNotice = (kind: string): kind is NoticeKind => Object.hasOwn(NOTICES, kind);
-
-export interface Notice {
-  /** Whose inbox it goes to: the publisher of the post, the author of the comment, or the user who was muted or banned. */
-  userId: string;
-  kind: NoticeKind;
-  /** Who did what the notice reports. The notice doesn't name them; nobody is told of what they did themselves. */
-  by: string;
-  /** The post it is about, or the post the comment it is about is on. */
-  contentId?: string;
-  /** The hashtag it is about. */
-  tag?: string;
-  /** The comment it is about, which the notice quotes the start of in place of the post's. */
-  comment?: string;
-}
 
 /**
  * The start of a text, as a notice quotes it. Null for no text at all. A `formatted` text (a post's,
@@ -103,10 +91,19 @@ export async function notify(
 ): Promise<void> {
   if (by === userId) return;
   try {
-    const body = comment !== undefined ? excerpt(comment) : contentId ? excerptOf(await content.getMeta(contentId)) : null;
     await db
       .insertInto('inbox')
-      .values({ id: randomUUID(), user_id: userId, kind, sender_id: null, content_id: contentId ?? null, tag: tag ?? null, body, created_at: now(), read_at: null })
+      .values({
+        id: randomUUID(),
+        user_id: userId,
+        kind,
+        sender_id: null,
+        content_id: contentId ?? null,
+        tag: tag ?? null,
+        body: comment !== undefined ? excerpt(comment) : contentId ? excerptOf(await content.getMeta(contentId)) : null,
+        created_at: now(),
+        read_at: null,
+      })
       .execute();
   } catch (err) {
     log.warn({ err, userId, kind, contentId, tag }, 'could not leave the notice in the inbox; the user is not told');

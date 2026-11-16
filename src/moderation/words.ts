@@ -17,6 +17,7 @@ export const PATTERN_BUDGET_MS = 100;
 
 /** A word is a run of letters, combining marks (which some scripts write vowels with) and digits. */
 const WORD = /[\p{L}\p{M}\p{N}]+/gu;
+/** Whether a string is made of the characters a word is, and nothing else. `trailingWord` asks it of one character at a time. */
 const WORD_CHAR = /^[\p{L}\p{M}\p{N}]+$/u;
 
 /**
@@ -45,8 +46,10 @@ const PATTERN_FLAGS = 'iu';
  * becomes syntax: a full-width `？` is a question mark to find, not a quantifier.
  */
 function compilePattern(entry: string): RegExp {
-  const source = entry.slice(1, -1).replace(/[^\x00-\x7f]+/g, (run) => plain(run).replace(/[\x00-\x7f]/g, (c) => `\\u{${c.charCodeAt(0).toString(16)}}`));
-  return new RegExp(source, PATTERN_FLAGS);
+  return new RegExp(
+    entry.slice(1, -1).replace(/[^\x00-\x7f]+/g, (run) => plain(run).replace(/[\x00-\x7f]/g, (c) => `\\u{${c.charCodeAt(0).toString(16)}}`)),
+    PATTERN_FLAGS,
+  );
 }
 
 /**
@@ -163,6 +166,11 @@ interface PatternJob {
  * script that outruns the time it is given, whatever the script is doing, so a script runs them.
  */
 let sandbox: Context | undefined;
+/**
+ * The script that runs patterns in the sandbox: it tries each pattern of the sandbox's `job` on
+ * each of its texts, in order, and stops at the first that matches, with `job.hit` set. `job.at`
+ * is the pattern it is at, so the one it was stopped on if its time ran out.
+ */
 const RUN_PATTERNS = new Script(`{
   const { patterns, texts } = job;
   run: for (; job.at < patterns.length; job.at++) {

@@ -3,7 +3,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { setAdmin } from '../src/moderation/policy.js';
-import { loadTrustPlugins, trustOf, type TrustChange, type TrustContext, type TrustPlugin, type TrustPost } from '../src/moderation/trust.js';
+import { loadTrustPlugins, trustOf } from '../src/moderation/trust.js';
+import type { TrustChange, TrustContext, TrustPlugin, TrustPost } from '../src/moderation/trust.types.js';
 import { as, createTestContext, requests, TARGETS, type TestContext } from './helpers.js';
 
 const REFUSED = "the post contains a word or phrase this server doesn't allow, so it wasn't published";

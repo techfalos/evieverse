@@ -2,8 +2,11 @@ import { buildApp } from './app.js';
 import { createCompactor } from './compact/compactor.js';
 import { bootstrap } from './deps.js';
 
+/** What the long-running server works with: its settings, the stores and the database. `close` ends their connections, as the server shuts down. */
 const { close, ...deps } = await bootstrap();
+/** The server's settings, as `loadConfig` read them from the config file and the environment. */
 const { config } = deps;
+/** The app with every group of routes: this one process serves them all. */
 const app = await buildApp(deps);
 
 if (!config.redis.url) {
@@ -18,6 +21,10 @@ if (config.compact.inProcess) {
   stopCompactor = compactor.start();
 }
 
+/**
+ * Stops the server on SIGINT or SIGTERM: the app first, so it takes no more requests, then the
+ * compactor, whose run under way is waited for, then the connections. The process exits with 0.
+ */
 const shutdown = async () => {
   app.log.info('shutting down');
   await app.close();

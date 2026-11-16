@@ -4,56 +4,25 @@ import type { Operator } from 'opendal';
 import { mediaUrl, originMediaUrl, readPreview, type StoredPreview } from '../posts.js';
 import { DAY, utcDay } from '../time.js';
 import { Lru, mapLimit } from '../util.js';
-import type { Origin, Preview } from './contentStore.js';
-import type { HotStore } from './hotStore.js';
+import type { Origin } from './contentStore.types.js';
+import type { HotStore } from './hotStore.types.js';
 import { createOperator, isNotFound, readObject } from './opendal.js';
+import type { Summary, SummaryRef, SummaryStoreOptions } from './summaryStore.types.js';
 
+/** zlib's `brotliCompress` as a promise: what SummaryStore.compress compresses a summary's text with. */
 const compress = promisify(brotliCompress);
-const HEADER_LINES = 5;
+/**
+ * The most one call has under way at the object store at once: summaries being read (getMany),
+ * summaries being looked for, and written where one is missing (ensureMany), or copies being
+ * deleted (remove).
+ */
 const COLD_READS = 32;
 
-/** Everything a feed record holds except its likes and the publisher's name. */
-export interface Summary {
-  contentId: string;
-  createdAt: number;
-  /** When the content was last written. */
-  updatedAt: number;
-  userId: string;
-  mimeType: string;
-  /** Declared by the publisher at /store. */
-  aiGenerated: boolean;
-  /** Whether the post takes comments, which its publisher says at /store. */
-  comments: boolean;
-  tags: string[];
-  preview: Preview;
-  /** On a repost of a post on another server: the original, which the preview is of. */
-  origin?: Origin;
-  /**
-   * When the content was reposted, once for each repost of it. It isn't part of what a summary
-   * says, and a summary that is read has none: it says where one that is written is kept (see
-   * SummaryRef).
-   */
-  repostedAt?: number[];
-}
-
-/**
- * What locates a summary. A feed finds one by its index entry, which holds the content's id and a
- * time: the content's creation, or, where a repost placed the content in the index, the repost's.
- * That time's UTC day picks the object-store prefix, and its age the tier.
- *
- * So a summary is kept under the day the content was created and under each day it was reposted
- * (`repostedAt`), the same bytes under each. To read one, `createdAt` is the entry's time, whichever
- * it is. To write or erase one, `createdAt` is the content's and `repostedAt` its reposts', which
- * covers every copy.
- */
-export interface SummaryRef {
-  contentId: string;
-  createdAt: number;
-  repostedAt?: number[];
-}
-
+/** The Redis key of a piece of content's summary: one key, under however many days the object store keeps it. */
 export const summaryKey = (r: { contentId: string }) => `sum:${r.contentId}`;
+/** The object-store prefix of the summaries kept under a UTC day: the day's number (see utcDay), as five digits, which is how purgeBefore knows a day. */
 const dayPrefix = (day: number) => `summaries/${String(day).padStart(5, '0')}/`;
+/** Where a piece of content's summary is kept under one UTC day: its Brotli-compressed bytes, named by the content's id. */
 const objectKey = (contentId: string, day: number) => `${dayPrefix(day)}${contentId}.br`;
 /** Where a feed reads the summary of an entry placed at `createdAt`. */
 export const summaryObjectKey = (r: { contentId: string; createdAt: number }) => objectKey(r.contentId, utcDay(r.createdAt));
@@ -61,9 +30,6 @@ export const summaryObjectKey = (r: { contentId: string; createdAt: number }) =>
 export const summaryObjectKeys = (r: SummaryRef) => [...new Set([r.createdAt, ...(r.repostedAt ?? [])].map(utcDay))].map((day) => objectKey(r.contentId, day));
 /** The latest time a summary is found by: for as long as that is young, Redis keeps the summary. */
 const latest = (r: SummaryRef) => Math.max(r.createdAt, ...(r.repostedAt ?? []));
-
-/** What a summary holds after its header: a text post's text or a caption, or a link's URL. */
-const body = (p: Preview) => (p.kind === 'link' ? p.url : (p.text ?? ''));
 
 /** The preview a summary's kind line and body hold. */
 function storedPreview(contentId: string, kind: string, text: string): StoredPreview {
@@ -87,9 +53,16 @@ function storedPreview(contentId: string, kind: string, text: string): StoredPre
  * URL is built from that address. Any other summary is as it was before there were reposts.
  */
 export function encodeSummary(s: Summary): string {
-  const numbers = `${s.createdAt} ${s.updatedAt} ${s.aiGenerated ? 1 : 0} ${s.comments ? 1 : 0}${s.origin ? ' 1' : ''}`;
-  const origin = s.origin ? [`${s.origin.url} ${s.origin.publisher.userId} ${s.origin.publisher.username}`] : [];
-  return [numbers, s.userId, s.mimeType, s.tags.join(' '), s.preview.kind, ...origin, body(s.preview)].join('\n');
+  return [
+    `${s.createdAt} ${s.updatedAt} ${s.aiGenerated ? 1 : 0} ${s.comments ? 1 : 0}${s.origin ? ' 1' : ''}`,
+    s.userId,
+    s.mimeType,
+    s.tags.join(' '),
+    s.preview.kind,
+    ...(s.origin ? [`${s.origin.url} ${s.origin.publisher.userId} ${s.origin.publisher.username}`] : []),
+    // What a summary holds after its header: a text post's text or a caption, or a link's URL.
+    s.preview.kind === 'link' ? s.preview.url : (s.preview.text ?? ''),
+  ].join('\n');
 }
 
 /** The original a summary's sixth header line names. */
@@ -99,6 +72,13 @@ function storedOrigin(contentId: string, line: string): Origin {
   return { url, publisher: { userId, username: username.join(' ') } };
 }
 
+/**
+ * The summary that `text` holds, as encodeSummary wrote it, of the content with this id, which the
+ * text doesn't say. An image's, video's or audio's URL is built here: from `publicBaseUrl` and the
+ * id, or for a repost of a post on another server, from the original's address. `repostedAt` is
+ * never set. Throws if the text ends before its header does, names a preview kind that is none of
+ * a post's, or says it has an original and names none.
+ */
 export function decodeSummary(contentId: string, text: string, publicBaseUrl: string): Summary {
   const lines: string[] = [];
   let pos = 0;
@@ -108,7 +88,7 @@ export function decodeSummary(contentId: string, text: string, publicBaseUrl: st
     lines.push(text.slice(pos, nl));
     pos = nl + 1;
   };
-  for (let i = 0; i < HEADER_LINES; i++) line();
+  for (let i = 0; i < 5; i++) line(); // the header's lines (see encodeSummary)
   const [createdAt, updatedAt, ai, comments, reposted] = lines[0]!.split(' ').map(Number);
   if (reposted === 1) line();
   const origin = reposted === 1 ? storedOrigin(contentId, lines[5]!) : undefined;
@@ -124,18 +104,6 @@ export function decodeSummary(contentId: string, text: string, publicBaseUrl: st
     preview: readPreview(storedPreview(contentId, lines[4]!, text.slice(pos)), origin ? originMediaUrl(origin) : mediaUrl(publicBaseUrl, contentId)),
     ...(origin && { origin }),
   };
-}
-
-export interface SummaryStoreOptions {
-  /** Posts younger than this are kept in Redis too. */
-  hotDays: number;
-  /** Brotli quality, 0-11. */
-  quality: number;
-  /** Compressed summaries from the object store kept in this process... */
-  cacheSize: number;
-  /** ...for this long: how long a node may go on showing a post as it was before an update. */
-  cacheSeconds: number;
-  publicBaseUrl: string;
 }
 
 /**
@@ -219,8 +187,7 @@ export class SummaryStore {
       const s = list[i]!;
       try {
         // Every copy: one under a day the content was reposted on is the only one an entry of that day finds.
-        const there = await Promise.all(summaryObjectKeys(s).map((key) => this.op.exists(key)));
-        if (there.includes(false)) await this.put(s);
+        if ((await Promise.all(summaryObjectKeys(s).map((key) => this.op.exists(key)))).includes(false)) await this.put(s);
         else if (!inHot[i]) await this.hot.set(summaryKey(s), await this.compress(s), this.hotTtl(latest(s)));
       } catch (err) {
         errors[i] = err instanceof Error ? err : new Error(String(err));

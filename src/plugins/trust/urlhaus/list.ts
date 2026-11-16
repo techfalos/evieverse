@@ -1,21 +1,8 @@
 import type { Config } from '../../../config.js';
-import type { TrustContext } from '../../../moderation/trust.js';
-import { addressOf, beforeStepsBack, endings, type Link } from './links.js';
-
-/**
- * URLhaus's list of the URLs that spread malware (https://urlhaus.abuse.ch), as this process holds
- * it: in memory, so that checking a link is a lookup, and nothing is asked of URLhaus while a post
- * waits. It is downloaded whole, and again every `urlhaus.refreshMinutes`.
- */
-export interface Listed {
-  /** The hosts that have a URL on the list, which is what most links are told apart by, each with the length of its longest. */
-  hosts: Map<string, number>;
-  /** The URLs, each as `addressOf` writes it in full. */
-  urls: Set<string>;
-}
-
-/** The longest listed URL that a link is taken for when it only starts with it. A longer one is matched whole. */
-const MAX_START_CHARS = 512;
+import type { TrustContext } from '../../../moderation/trust.types.js';
+import { addressOf, beforeStepsBack, endings } from './links.js';
+import type { Link } from './links.types.js';
+import type { Listed } from './list.types.js';
 
 /**
  * Whether `link` is on the list. It is when it is a listed URL:
@@ -43,7 +30,8 @@ export function isListed({ hosts, urls }: Listed, link: Link): boolean {
       if (urls.has(address.full) || urls.has(address.path)) return true;
       // Each start of it that could be a listed URL: longer than the host and its slash, and no longer than the host's longest.
       const { full } = address;
-      for (let end = Math.min(full.length - 1, longest, MAX_START_CHARS); end > address.host.length + 1; end--) {
+      // 512 characters is the longest listed URL that a link is taken for when it only starts with it. A longer one is matched whole.
+      for (let end = Math.min(full.length - 1, longest, 512); end > address.host.length + 1; end--) {
         if (full[end - 1] !== '/' && urls.has(full.slice(0, end))) return true;
       }
     }
@@ -87,22 +75,17 @@ async function* linesOf(body: AsyncIterable<Uint8Array>): AsyncGenerator<string>
   if (rest) yield rest;
 }
 
-/** How long a download may take. A post with a link waits for the first one. */
-const DOWNLOAD_TIMEOUT_MS = 30_000;
-/** How long after a download that failed the next one is tried. */
-const RETRY_MS = 60_000;
-
 /** Downloads the list. The Auth-Key is part of the address, so neither is put in an error. */
 async function download({ authKey, listUrl }: Config['urlhaus'], fetcher: typeof fetch): Promise<Listed> {
   const key = authKey ?? '';
   const response = await fetcher(listUrl.replaceAll('{key}', encodeURIComponent(key)), {
     headers: { 'auth-key': key, 'user-agent': 'evieverse (urlhaus trust plugin)' },
-    signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
+    // A download may take 30 seconds. A post with a link waits for the first one.
+    signal: AbortSignal.timeout(30_000),
   });
   if (!response.ok || !response.body) {
     await response.body?.cancel();
-    const hint = response.status === 401 || response.status === 403 ? ': it refused the Auth-Key (URLHAUS_AUTH_KEY)' : '';
-    throw new Error(`URLhaus answered ${response.status}${hint}`);
+    throw new Error(`URLhaus answered ${response.status}${response.status === 401 || response.status === 403 ? ': it refused the Auth-Key (URLHAUS_AUTH_KEY)' : ''}`);
   }
   const listed: Listed = { hosts: new Map(), urls: new Set() };
   for await (const line of linesOf(response.body)) {
@@ -138,7 +121,8 @@ export class MalwareList {
    */
   refresh({ config, now, log }: Context): void {
     if (this.download || now() < this.dueAt) return;
-    this.dueAt = now() + RETRY_MS;
+    // A minute from now the next one is tried, if this one fails.
+    this.dueAt = now() + 60_000;
     this.download = download(config.urlhaus, this.fetcher)
       .then(
         (listed) => {
@@ -165,7 +149,9 @@ export class MalwareList {
     this.refresh(ctx);
     if (!this.listed) await this.download;
     if (this.listed) return this.listed;
-    const why = this.failure instanceof Error ? this.failure.message : String(this.failure);
-    throw new Error(`the urlhaus trust plugin has no list of malware URLs to check links with: ${why}`, { cause: this.failure });
+    throw new Error(
+      `the urlhaus trust plugin has no list of malware URLs to check links with: ${this.failure instanceof Error ? this.failure.message : String(this.failure)}`,
+      { cause: this.failure },
+    );
   }
 }

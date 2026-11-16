@@ -6,16 +6,17 @@ import { gunzipSync } from 'node:zlib';
 import { sql } from 'kysely';
 import { expect } from 'vitest';
 import { buildApp } from '../src/app.js';
-import type { AuditRecord } from '../src/audit.js';
-import { challengeKey, leadingZeroBits, type Challenge } from '../src/challenge/challenges.js';
+import type { AuditRecord } from '../src/audit.types.js';
+import { challengeKey, leadingZeroBits } from '../src/challenge/challenges.js';
+import type { Challenge } from '../src/challenge/challenges.types.js';
 import { createCompactor } from '../src/compact/compactor.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { createDb, type Db } from '../src/db/index.js';
 import { bootstrap } from '../src/deps.js';
 import type { Languages } from '../src/language.js';
 import type { HotStore } from '../src/storage/index.js';
-import type { TrustPlugin } from '../src/moderation/trust.js';
-import type { CliRelease } from '../src/routes/cli.js';
+import type { TrustPlugin } from '../src/moderation/trust.types.js';
+import type { CliRelease } from '../src/routes/cli.types.js';
 
 export interface TestTarget {
   name: string;

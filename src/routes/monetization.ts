@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { sql } from 'kysely';
 import { z } from 'zod';
-import { authenticate, type AuthUser } from '../auth/apiKey.js';
+import { authenticate } from '../auth/apiKey.js';
+import type { AuthUser } from '../auth/apiKey.types.js';
 import type { MonetizationRow } from '../db/schema.js';
-import type { RouteDeps } from '../deps.js';
+import type { RouteDeps } from '../deps.types.js';
 import { badRequest, conflict, forbidden, HttpError, notFound } from '../http/errors.js';
 import { listPage, listQuery } from '../http/listCursor.js';
 import { Credentials } from '../http/schemas.js';
@@ -13,9 +14,11 @@ import { AD_KINDS, adImageUrl, adStatus, adTags, MAX_AD_IMAGE_BYTES, MAX_AD_TAGS
 import { LinkUrl } from '../posts.js';
 import { parseTagList } from '../tags.js';
 import { iso } from '../time.js';
-import { readMultipart, readPost, type PostBytes, type Upload } from '../upload.js';
+import { readMultipart, readPost } from '../upload.js';
+import type { PostBytes, Upload } from '../upload.types.js';
 import { rawHeaders } from './content.js';
 
+/** The ad a path names (/monetization/ads/:adId), for the routes that read, change or delete it, and for its image and its link. */
 const Params = z.object({ adId: z.string().uuid() });
 
 /** A field an update can clear: null does, and so does an empty string, which is all a form field can send. */
@@ -43,11 +46,13 @@ const Fields = Credentials.extend({
   contentEncoding: z.literal('base64').optional(),
 });
 type Fields = z.infer<typeof Fields>;
+/** What a request that creates an ad says of it: `Fields`, with the `kind` a new ad has to name. */
 const NewFields = Fields.extend({ kind: z.enum(AD_KINDS) });
 
 /** A request with an image in it is the size of the image, in base64 where it is inline. */
 const BODY_LIMIT = 16 * 1024 * 1024;
 
+/** 404 for an ad that isn't there, and for what an ad doesn't have: the image of a text ad, the link of an ad that leads nowhere. */
 const adNotFound = () => notFound(msg('ad.not_found'));
 
 /**
@@ -111,12 +116,19 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
    * follows are two statements, so admins racing each other can go a few over, which harms nothing.
    */
   async function requireRoom(at: number): Promise<void> {
-    const { open } = await db
-      .selectFrom('monetization')
-      .select((eb) => eb.fn.countAll().as('open'))
-      .where((eb) => eb.or([eb('ends_at', 'is', null), eb('ends_at', '>', at)]))
-      .executeTakeFirstOrThrow();
-    if (Number(open) >= MAX_OPEN_ADS) throw conflict(msg('ad.limit', { max: MAX_OPEN_ADS }));
+    if (
+      Number(
+        (
+          await db
+            .selectFrom('monetization')
+            .select((eb) => eb.fn.countAll().as('open'))
+            .where((eb) => eb.or([eb('ends_at', 'is', null), eb('ends_at', '>', at)]))
+            .executeTakeFirstOrThrow()
+        ).open,
+      ) >= MAX_OPEN_ADS
+    ) {
+      throw conflict(msg('ad.limit', { max: MAX_OPEN_ADS }));
+    }
   }
 
   /**
@@ -232,8 +244,9 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
       if (fields.kind !== undefined && fields.kind !== row.kind) throw badRequest(msg('ad.kind_fixed', { kind: row.kind }));
       const sendsImage = upload !== undefined || fields.content !== undefined;
       if (row.kind === 'text' && sendsImage) throw badRequest(msg('ad.no_image'));
-      const named = [fields.text, fields.url, fields.tags, fields.startsAt, fields.endsAt].some((field) => field !== undefined);
-      if (!named && !sendsImage) throw badRequest(msg('ad.nothing_to_update'));
+      if (![fields.text, fields.url, fields.tags, fields.startsAt, fields.endsAt].some((field) => field !== undefined) && !sendsImage) {
+        throw badRequest(msg('ad.nothing_to_update'));
+      }
 
       const text = fields.text === undefined ? row.text : fields.text || null;
       if (row.kind === 'text' && !text) throw badRequest(msg('ad.text_required'));
@@ -259,9 +272,8 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
       if (image) await image.file.place(content, { adId }, image.type);
       // All of it but its clicks, which are counted meanwhile: the count read above may be behind by now.
       const { id: _id, clicks: _clicks, ...changed } = next;
-      const res = await db.updateTable('monetization').set(changed).where('id', '=', adId).executeTakeFirst();
       // Deleted meanwhile, and its image with it: the one just written goes too.
-      if (Number(res.numUpdatedRows) === 0) {
+      if (Number((await db.updateTable('monetization').set(changed).where('id', '=', adId).executeTakeFirst()).numUpdatedRows) === 0) {
         if (image) await content.removeAdImage(adId);
         throw adNotFound();
       }
@@ -276,8 +288,7 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
   app.delete('/monetization/ads/:adId', async (req) => {
     const { adId } = Params.parse(req.params);
     await asAdmin(req, Credentials.parse(req.body ?? {}));
-    const res = await db.deleteFrom('monetization').where('id', '=', adId).executeTakeFirst();
-    if (Number(res.numDeletedRows) === 0) throw adNotFound();
+    if (Number((await db.deleteFrom('monetization').where('id', '=', adId).executeTakeFirst()).numDeletedRows) === 0) throw adNotFound();
     await content.removeAdImage(adId);
     return { adId, status: 'deleted' };
   });

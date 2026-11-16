@@ -3,7 +3,8 @@ import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
-import { AD_POSITIONS, adStatus, eligibleAds, MAX_OPEN_ADS, orderAds, placeAds, type PublishedAd } from '../src/monetization.js';
+import { AD_POSITIONS, adStatus, eligibleAds, MAX_OPEN_ADS, orderAds, placeAds } from '../src/monetization.js';
+import type { PublishedAd } from '../src/monetization.types.js';
 import { as, createTestContext, JPEG, multipart, PNG, readAudit, requests, TARGETS, type FeedAdItem, type TestContext, type User } from './helpers.js';
 
 const NO_AD = '00000000-0000-4000-8000-000000000000';

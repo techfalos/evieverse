@@ -3,47 +3,12 @@ import { Readable } from 'node:stream';
 import type { FastifyRequest } from 'fastify';
 import { auditMultipart } from './audit.js';
 import { badRequest } from './http/errors.js';
-import { IMAGE_HEAD_BYTES, ImageError, imageType, stripImage, type ImageType } from './image.js';
+import { IMAGE_HEAD_BYTES, ImageError, imageType, stripImage } from './image.js';
 import { resolveMimeType } from './http/mime.js';
 import { msg } from './language.js';
 import { LINK_MIME, mediaType, POST_TYPES, TEXT_MIME, type MediaType, type PostType } from './posts.js';
-import { hashFile, spoolToTemp, UploadTooLargeError, type BytesOwner, type ContentStore, type SpooledFile, type StoredBytes } from './storage/index.js';
-
-/** Where uploads are spooled (the system's temp directory if not set), and how large one can be. */
-export interface UploadLimits {
-  tmpPath?: string;
-  maxUploadBytes: number;
-}
-
-/**
- * A post's bytes, wherever they wait to be stored: in a temp file here, or in the content store,
- * where the client put them with a link from POST /uploads.
- */
-export interface PostBytes {
-  /** In bytes. Of bytes in the content store, as last seen: `place` returns what was stored. */
-  size: number;
-  /**
-   * For an image post: which image the bytes are, read from the bytes themselves, and the bytes to
-   * store, which are the image without its metadata (see stripImage). 400 if they aren't an image
-   * the server takes. These bytes are then released by the ones returned.
-   */
-  image(): Promise<{ type: ImageType; file: PostBytes }>;
-  /**
-   * The SHA-256, in hex, of the bytes `place` stores: what a post's meta file keeps of its file, and
-   * what says a file sent as an update is the one the content has. Null for a video or audio file
-   * sent with an upload link: it is copied within the content store where that can be, not stored
-   * from a file here, and reading it to hash it would bring it through this process.
-   */
-  hash(): Promise<string | null>;
-  /** Writes the bytes as the content's, over the ones it had, or as a comment's image or video, and returns their size as stored. */
-  place(content: ContentStore, of: BytesOwner, mimeType: string): Promise<StoredBytes>;
-  /**
-   * Call when the request is over. `stored`: the server now holds the post, so its upload can go.
-   * Otherwise an upload in the content store is kept, for the request to be sent again (with a
-   * challenge solved, say); the store expires what nobody comes back for.
-   */
-  release(stored?: boolean): Promise<void>;
-}
+import { hashFile, spoolToTemp, UploadTooLargeError, type ContentStore, type SpooledFile } from './storage/index.js';
+import type { CommentFile, PostBytes, PostFields, Upload, UploadLimits } from './upload.types.js';
 
 /** 400 for a file that can't be an image post: it is no image the server takes, or not a whole one. */
 const notAnImage = ({ type }: ImageError) => badRequest(type ? msg('post.image_malformed', { mimeType: type }) : msg('post.image_unsupported'));
@@ -57,6 +22,12 @@ async function strip(...args: Parameters<typeof stripImage>) {
   }
 }
 
+/**
+ * A post's bytes that wait in a temp file here: a multipart request's file, or bytes that were in
+ * memory (see spoolBytes): inline content, a text post's text, a link's URL. As an image they are
+ * stripped of their metadata into a second temp file, and the first is deleted. The hash is
+ * worked out once. `release` deletes the temp file, whether the post was stored or not.
+ */
 const spooled = (file: SpooledFile, tmpPath?: string): PostBytes => {
   let sha256: Promise<string> | undefined;
   return {
@@ -78,13 +49,6 @@ const spooled = (file: SpooledFile, tmpPath?: string): PostBytes => {
 /** Bytes the server made itself, to store as a piece of content's: a text post's text, a link's URL, the address of a repost's original. */
 export const spoolBytes = async (bytes: Buffer, { tmpPath, maxUploadBytes }: UploadLimits): Promise<PostBytes> =>
   spooled(await spoolToTemp(Readable.from([bytes]), tmpPath, maxUploadBytes), tmpPath);
-
-/** A request's file: a multipart part spooled to a temp file, or an upload already in the content store. */
-export interface Upload {
-  file: PostBytes;
-  filename: string | null;
-  mimeType: string;
-}
 
 /**
  * The file a user put in the content store with the link POST /uploads gave them. Refused if it
@@ -117,23 +81,25 @@ export async function readUploaded(content: ContentStore, userId: string, upload
       // It must still be a `type`: whoever holds the upload link may have replaced the upload since.
       const stripped = () =>
         (fetched ??= content.streamUpload(userId, uploadId, maxUploadBytes).then(async (upload) => (await strip(upload, tmpPath, type)).file));
-      const image: PostBytes = {
-        ...file,
-        hash: () => (sha256 ??= stripped().then(({ path }) => hashFile(path))),
-        async place(_content, of) {
-          const { path, size } = await stripped();
-          await content.putFile(of, path, type);
-          return { size };
-        },
-        async release(stored) {
-          await fetched?.then(
-            ({ cleanup }) => cleanup(),
-            () => {},
-          );
-          await file.release(stored);
+      return {
+        type,
+        file: {
+          ...file,
+          hash: () => (sha256 ??= stripped().then(({ path }) => hashFile(path))),
+          async place(_content, of) {
+            const { path, size } = await stripped();
+            await content.putFile(of, path, type);
+            return { size };
+          },
+          async release(stored) {
+            await fetched?.then(
+              ({ cleanup }) => cleanup(),
+              () => {},
+            );
+            await file.release(stored);
+          },
         },
       };
-      return { type, file: image };
     },
     hash: async () => null,
     place: (_content, of, mimeType) => content.adoptUpload(userId, uploadId, of, mimeType, maxUploadBytes),
@@ -142,18 +108,6 @@ export async function readUploaded(content: ContentStore, userId: string, upload
     },
   };
   return { file, filename: null, mimeType: found.contentType ?? 'application/octet-stream' };
-}
-
-/** What a request says of its post, beside an uploaded file. */
-export interface PostFields {
-  type: PostType;
-  text?: string;
-  url?: string;
-  /** An image's, video's or audio's file, inline. */
-  content?: string;
-  contentEncoding: 'utf8' | 'base64';
-  contentType?: string;
-  filename?: string;
 }
 
 /** A post and its bytes: an image's, video's or audio's file, a text post's text, or a link's URL. */
@@ -210,16 +164,10 @@ type FileFields = Pick<PostFields, 'content' | 'contentEncoding' | 'contentType'
 /** The name a file was sent with, and its content type: the one it was sent as, or the one its name says. */
 function sentAs(fields: FileFields, upload: Upload | undefined): { filename: string | null; mimeType: string } {
   const filename = upload?.filename ?? fields.filename ?? null;
-  const sent = upload?.mimeType ?? (fields.contentEncoding === 'base64' ? 'application/octet-stream' : 'text/plain');
-  return { filename, mimeType: resolveMimeType(fields.contentType ?? sent, filename) };
-}
-
-/** The image or video a comment comes with, and its bytes. */
-export interface CommentFile {
-  kind: 'image' | 'video';
-  file: PostBytes;
-  filename: string | null;
-  mimeType: string;
+  return {
+    filename,
+    mimeType: resolveMimeType(fields.contentType ?? upload?.mimeType ?? (fields.contentEncoding === 'base64' ? 'application/octet-stream' : 'text/plain'), filename),
+  };
 }
 
 /**

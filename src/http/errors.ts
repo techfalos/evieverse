@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { ZodError } from 'zod';
-import { msg, type Message, type MessageParams, type Text } from '../language.js';
+import { msg, type Text } from '../language.js';
+import type { Message, MessageParams } from '../language.types.js';
 import { UploadTooLargeError } from '../storage/spool.js';
 import { say } from './language.js';
 
@@ -19,18 +20,31 @@ export class HttpError extends Error {
   }
 }
 
+/** 400: a request the server can't take as it is. `details`, if there are any, go into the response as they are. */
 export const badRequest = (text: Message, details?: unknown) => new HttpError(400, text, details);
+/** 401: credentials that aren't a user's. It says they are invalid unless given other words, as a request that carries none is told they are required. */
 export const unauthorized = (text: Message = msg('auth.invalid')) => new HttpError(401, text);
+/** 403: the user is who they say, and may not do what the request asks. */
 export const forbidden = (text: Message) => new HttpError(403, text);
+/** 404: what the request is about isn't there. */
 export const notFound = (text: Message) => new HttpError(404, text);
+/** 409: a valid request that things as they are refuse: a username that is taken, a list that is full, a post that is being deleted. */
 export const conflict = (text: Message) => new HttpError(409, text);
 /** A valid request whose content moderation refuses. Its words may be a trust plugin's own. */
 export const unprocessable = (text: Text, extra?: Record<string, unknown>) => new HttpError(422, text, undefined, extra);
 /** Nothing was done: the request has to be sent again with the challenge's solution. */
 export const challengeRequired = (text: Message, challenge: unknown) => new HttpError(428, text, undefined, { challenge });
+/** 429: the user is past a rate limit. When to try again is said twice: `retryAfterSeconds` in the body, and the Retry-After header. */
 export const tooManyRequests = (text: Message, retryAfterSeconds: number) =>
   new HttpError(429, text, undefined, { retryAfterSeconds }, { 'retry-after': String(retryAfterSeconds) });
 
+/**
+ * Makes every error thrown while a request is handled a JSON response with an `error`: an
+ * `HttpError` with its status, details, extra fields and headers, a zod error as 400 with its
+ * issues as `details`, and an upload over the limit as 413, all in the language the request is
+ * answered in; the framework's own refusals as it words them. Anything else is logged and answered
+ * 500, which doesn't say what went wrong.
+ */
 export function registerErrorHandler(app: FastifyInstance) {
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof HttpError) {

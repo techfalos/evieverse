@@ -4,7 +4,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryHotStore, SummaryStore, type Summary } from '../src/storage/index.js';
 import { decodeSummary, encodeSummary, summaryKey } from '../src/storage/summaryStore.js';
-import { DAY_ENTRY_BYTES, packDay, unpackDay, type IndexEntry } from '../src/tagfeed/layout.js';
+import { DAY_ENTRY_BYTES, packDay, unpackDay } from '../src/tagfeed/layout.js';
+import type { IndexEntry } from '../src/tagfeed/layout.types.js';
 import { DAY } from '../src/time.js';
 
 const NOW = Date.UTC(2026, 10, 6, 12);

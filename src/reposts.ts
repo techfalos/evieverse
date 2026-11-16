@@ -1,7 +1,7 @@
 import type { Db } from './db/index.js';
 import type { RepostRow } from './db/schema.js';
 import { plainText } from './format.js';
-import type { ContentMeta } from './storage/contentStore.js';
+import type { ContentMeta } from './storage/contentStore.types.js';
 import { indexAuthor } from './tagfeed/layout.js';
 
 /**
@@ -26,11 +26,9 @@ export const MAX_REPOSTED_TAGS = 10;
 /** A place a repost gave content, as far as anything but the database's keys goes. */
 export type Repost = Pick<RepostRow, 'tag' | 'user_id' | 'likes_before' | 'created_at'>;
 
-const COLUMNS = ['tag', 'user_id', 'likes_before', 'created_at'] as const;
-
-/** The places reposts gave a piece of content, oldest first, and those of one repost by tag. */
+/** The places reposts gave a piece of content, oldest first, and those of one repost by tag: the columns of `reposts` that a `Repost` is made of. */
 export const repostsOf = (db: Pick<Db, 'selectFrom'>, contentId: string): Promise<Repost[]> =>
-  db.selectFrom('reposts').select(COLUMNS).where('content_id', '=', contentId).orderBy('created_at').orderBy('tag').execute();
+  db.selectFrom('reposts').select(['tag', 'user_id', 'likes_before', 'created_at']).where('content_id', '=', contentId).orderBy('created_at').orderBy('tag').execute();
 
 /** The hashtags reposts gave the content: its places but for the reposters' own indexes. */
 export const repostedTags = (rows: { tag: string }[]): string[] => rows.filter((r) => indexAuthor(r.tag) === null).map((r) => r.tag);
@@ -46,8 +44,7 @@ export const reposterIndexes = (rows: { tag: string }[]): string[] => rows.filte
 export function readableOf(meta: Pick<ContentMeta, 'preview' | 'text' | 'origin'>): string[] {
   const { preview, origin } = meta;
   const text = meta.text ?? (preview.kind === 'link' ? undefined : preview.text);
-  const texts = [preview.kind === 'link' ? preview.url : text && plainText(text, true), origin?.url, origin?.publisher.username];
-  return texts.filter((t): t is string => !!t);
+  return [preview.kind === 'link' ? preview.url : text && plainText(text, true), origin?.url, origin?.publisher.username].filter((t): t is string => !!t);
 }
 
 /** When the content was reposted, once for each repost, oldest first: where its summary is kept beside its own day (see SummaryRef). */

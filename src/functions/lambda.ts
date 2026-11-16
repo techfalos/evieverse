@@ -19,6 +19,8 @@ import { httpApiHandler, runLambda } from './lambdaRuntime.js';
  *
  * FUNCTION_EDGE_SECRET, if set, is what the CDN in front of the gateway sends as X-Edge-Secret.
  */
+
+/** FUNCTION_GROUP as the environment has it: which function this is, a route group's or `migrate`. Anything else is refused below. */
 const group = process.env.FUNCTION_GROUP;
 
 if (group === 'migrate') {

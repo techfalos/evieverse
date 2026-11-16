@@ -1,5 +1,6 @@
 import type { HotStore } from '../storage/index.js';
-import { EMPTY_HEAD, headKey, type Head } from './layout.js';
+import { EMPTY_HEAD, headKey } from './layout.js';
+import type { Head } from './layout.types.js';
 
 /** Reads of the feed index's keys that the reader and the compactor share. */
 

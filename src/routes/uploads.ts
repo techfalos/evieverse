@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
-import type { AppDeps } from '../deps.js';
+import type { AppDeps } from '../deps.types.js';
 import { HttpError, tooManyRequests } from '../http/errors.js';
 import { resolveMimeType } from '../http/mime.js';
 import { Credentials } from '../http/schemas.js';
@@ -13,6 +13,10 @@ import { UploadTooLargeError } from '../storage/index.js';
 import { iso } from '../time.js';
 import { requirePostType, wrongFileType } from '../upload.js';
 
+/**
+ * What POST /uploads says of the file a link is asked for: what it will be posted as, its content
+ * type, or the filename that tells it where no type is given, and its size.
+ */
 const Body = Credentials.extend({
   /** What the file will be posted as. */
   type: z.enum(['image', 'video', 'audio']),
@@ -22,6 +26,7 @@ const Body = Credentials.extend({
   size: z.coerce.number().int().positive(),
 });
 
+/** Upload links (POST /uploads): how a file that a request to this server can't carry reaches the content store, to be posted by POST /store. */
 export function uploadRoutes(app: FastifyInstance, { db, config, content, hot, now = Date.now }: AppDeps) {
   /**
    * Gives a link to send a file straight to the content store with, and the uploadId to then post it

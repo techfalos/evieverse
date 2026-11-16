@@ -30,6 +30,7 @@ function localFile(op: Operator, key: string): string | null {
   return file;
 }
 
+/** Whether an error of Node's says a local file isn't there (ENOENT): what isNotFound says of OpenDAL's errors. */
 const missing = (err: unknown) => (err as NodeJS.ErrnoException)?.code === 'ENOENT';
 
 /**

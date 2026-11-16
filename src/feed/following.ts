@@ -1,30 +1,9 @@
-import { compareRecent, indexAuthor, type DayRef } from '../tagfeed/layout.js';
-import type { Candidate, OpenTag, TagFeedReader } from '../tagfeed/reader.js';
+import { compareRecent, indexAuthor } from '../tagfeed/layout.js';
+import type { DayRef } from '../tagfeed/layout.types.js';
+import type { TagFeedReader } from '../tagfeed/reader.js';
+import type { OpenTag } from '../tagfeed/reader.types.js';
 import { utcDay } from '../time.js';
-
-export interface FollowingOptions {
-  /** Most records in the page. */
-  limit: number;
-  /** The previous page's last record: this page holds only records after it, in compareRecent order. */
-  after?: { createdAt: number; contentId: string };
-  /** Only records created with AI (true) or without (false); omitted, both. */
-  aiGenerated?: boolean;
-  /** Records created at or before this instant are left out (the lookback limit). */
-  oldest: number;
-}
-
-/** A record of a following feed: an entry of a followed user's own index. */
-export interface FollowingPick extends Candidate {
-  /** For a repost's entry: who reposted the content, which is whose index it was read from. */
-  by?: string;
-}
-
-export interface FollowingPlan {
-  /** Newest first. */
-  picks: FollowingPick[];
-  /** More records come after the last pick. */
-  truncated: boolean;
-}
+import type { FollowingOptions, FollowingPick, FollowingPlan } from './following.types.js';
 
 /**
  * A page of a following feed: the newest records of the followed publishers' own indexes, after
@@ -38,10 +17,6 @@ export interface FollowingPlan {
  */
 export async function planFollowing(reader: TagFeedReader, indexes: OpenTag[], opts: FollowingOptions): Promise<FollowingPlan> {
   const { after, limit } = opts;
-  const keep = (c: Candidate) =>
-    c.createdAt > opts.oldest &&
-    (opts.aiGenerated === undefined || c.aiGenerated === opts.aiGenerated) &&
-    (!after || compareRecent(after, c) < 0);
   const found: FollowingPick[] = [];
 
   // Days the cursor has passed, or older than the lookback, hold nothing for this page.
@@ -73,11 +48,14 @@ export async function planFollowing(reader: TagFeedReader, indexes: OpenTag[], o
       }
     }
     const read = [...batch];
-    const loaded = await Promise.all(read.map(([ix, refs]) => reader.loadDays(ix, refs)));
-    loaded.forEach((list, n) => {
+    (await Promise.all(read.map(([ix, refs]) => reader.loadDays(ix, refs)))).forEach((list, n) => {
       const by = indexAuthor(read[n]![0].tag) ?? undefined;
       // The reader's entries are shared and never changed: a repost's is copied to say whose index it is from.
-      for (const c of list) if (keep(c)) found.push(c.repost ? { ...c, by } : c);
+      for (const c of list) {
+        if (c.createdAt > opts.oldest && (opts.aiGenerated === undefined || c.aiGenerated === opts.aiGenerated) && (!after || compareRecent(after, c) < 0)) {
+          found.push(c.repost ? { ...c, by } : c);
+        }
+      }
     });
   }
 

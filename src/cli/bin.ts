@@ -48,13 +48,6 @@ async function readSecret(prompt: string): Promise<string> {
   });
 }
 
-const rerun = (argv: string[]) =>
-  new Promise<number>((resolve, reject) => {
-    const child = spawn(process.execPath, [selfPath!, ...argv], { stdio: 'inherit', env: { ...process.env, [UPDATED]: '1' } });
-    child.on('error', reject);
-    child.on('exit', (code) => resolve(code ?? 1));
-  });
-
 process.exitCode = await run(process.argv.slice(2), {
   fetch,
   env: process.env,
@@ -63,5 +56,10 @@ process.exitCode = await run(process.argv.slice(2), {
   home: process.env.EVIEVERSE_HOME || join(homedir(), '.evieverse'),
   selfPath,
   readSecret,
-  rerun,
+  rerun: (argv: string[]) =>
+    new Promise<number>((resolve, reject) => {
+      const child = spawn(process.execPath, [selfPath!, ...argv], { stdio: 'inherit', env: { ...process.env, [UPDATED]: '1' } });
+      child.on('error', reject);
+      child.on('exit', (code) => resolve(code ?? 1));
+    }),
 });

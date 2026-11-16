@@ -1,4 +1,5 @@
 import type { AdKind, MonetizationTable } from './db/schema.js';
+import type { AdRecord, PublishedAd } from './monetization.types.js';
 
 /**
  * Monetization: the ads the server shows, which its admins keep in the `monetization` table
@@ -14,6 +15,7 @@ import type { AdKind, MonetizationTable } from './db/schema.js';
  * Clicks are all that is counted: nothing counts how often an ad was shown.
  */
 
+/** What an ad can be, which a request that makes one says as its `kind`: its text alone, or an image with an optional caption. */
 export const AD_KINDS = ['text', 'image'] as const satisfies readonly AdKind[];
 
 /** The longest text ad, or caption of an image ad, in UTF-16 code units. */
@@ -33,40 +35,6 @@ export const MAX_OPEN_ADS = 100;
  * posts from 1 in the order they are shown in. A page too short for one of them has no ad there.
  */
 export const AD_POSITIONS: readonly number[] = [3, 10, 17];
-
-/** An ad as the compactor publishes it and feeds and posts read it: what is shown, and what decides whether it is. */
-export interface PublishedAd {
-  adId: string;
-  kind: AdKind;
-  /** A text ad's text, or an image ad's caption. */
-  text?: string;
-  /** Where the ad leads when it is followed. Whoever shows the ad only reads whether it leads anywhere: what it sends is adClickUrl. */
-  url?: string;
-  /** The hashtags it is targeted at; null for one that appears all the time. */
-  tags: string[] | null;
-  /** It is shown from this instant (UTC epoch ms)... */
-  startsAt: number;
-  /** ...until this one; null for an ad with no end. */
-  endsAt: number | null;
-}
-
-/** An ad as a response carries it. */
-export interface AdRecord {
-  adId: string;
-  /** "Sponsored", in the language the request is answered in: what discloses that this is an ad. */
-  label: string;
-  kind: AdKind;
-  /** An image ad's image. */
-  imageUrl?: string;
-  text?: string;
-  /** Where the ad is followed, if it leads anywhere: the server's link, which counts the click and redirects to where the ad leads (adClickUrl). */
-  url?: string;
-}
-
-/** An ad of a feed's page, and the post of the page it goes before (see AD_POSITIONS). */
-export interface FeedAd extends AdRecord {
-  position: number;
-}
 
 type AdRow = Pick<MonetizationTable, 'id' | 'kind' | 'text' | 'url' | 'tags' | 'starts_at' | 'ends_at'>;
 

@@ -11,9 +11,12 @@ import { migrateToLatest } from '../src/db/migrator.js';
 import { bootstrap } from '../src/deps.js';
 import { checkSettings, migrateDeployment } from '../src/functions/deploy.js';
 import { GROUP_NAMES, type GroupName } from '../src/functions/groups.js';
-import { createFunction, functionConfig, type FunctionResponse, type RouteFunction } from '../src/functions/handler.js';
-import { EDGE_SECRET_HEADER, httpApiHandler, runLambda, toRequest, toResult, type HttpApiEvent } from '../src/functions/lambdaRuntime.js';
-import { loadLanguages, type Message } from '../src/language.js';
+import { createFunction, functionConfig, type RouteFunction } from '../src/functions/handler.js';
+import type { FunctionResponse } from '../src/functions/handler.types.js';
+import { EDGE_SECRET_HEADER, httpApiHandler, runLambda, toRequest, toResult } from '../src/functions/lambdaRuntime.js';
+import type { HttpApiEvent } from '../src/functions/lambdaRuntime.types.js';
+import { loadLanguages } from '../src/language.js';
+import type { Message } from '../src/language.types.js';
 import { MemoryHotStore } from '../src/storage/index.js';
 import { readAudit, solution } from './helpers.js';
 

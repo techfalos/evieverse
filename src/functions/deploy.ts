@@ -3,9 +3,11 @@ import type { Config } from '../config.js';
 import { createDb } from '../db/index.js';
 import { migrateToLatest } from '../db/migrator.js';
 import { loadLanguages } from '../language.js';
-import { bootstrapAdmin, type EnsuredAdmin } from '../moderation/bootstrap.js';
+import { bootstrapAdmin } from '../moderation/bootstrap.js';
+import type { Deployed } from './deploy.types.js';
 import { GROUP_NAMES } from './groups.js';
-import { createFunction, functionConfig, requireRedis, type FunctionOptions } from './handler.js';
+import { createFunction, functionConfig, requireRedis } from './handler.js';
+import type { FunctionOptions } from './handler.types.js';
 
 /**
  * The step a deployment of functions runs once, before any function or the compactor gets a new
@@ -22,12 +24,6 @@ import { createFunction, functionConfig, requireRedis, type FunctionOptions } fr
  * succeeded, as every request failing. Here it fails the deploy instead, with the functions that
  * are running left as they are.
  */
-
-export interface Deployed {
-  migrated: true;
-  dialect: Config['db']['dialect'];
-  admin?: EnsuredAdmin;
-}
 
 /** Why a start failed, in a line: a refused setting by its name and what is wrong with it. */
 function reasonOf(err: unknown): string {

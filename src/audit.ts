@@ -2,69 +2,23 @@ import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import { gzip } from 'node:zlib';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { AuditContext, AuditLog, AuditRecord } from './audit.types.js';
 import type { Config } from './config.js';
 import { createOperator } from './storage/opendal.js';
 
+/** zlib's gzip as a promise of the compressed bytes: what an audit record is stored as, and logged as where its write fails. */
 const gzipAsync = promisify(gzip);
 
-/** What the audit log keeps of a request that changed something. Bump `version` if a field changes meaning. */
-export interface AuditRecord {
-  version: 1;
-  id: string;
-  /** When the server answered, ISO 8601 UTC. */
-  time: string;
-  requestId: string;
-  method: string;
-  /** As requested: path and query string. */
-  url: string;
-  /** The route it matched, with its parameters unfilled (`/content/:contentId`). */
-  route: string | null;
-  params: unknown;
-  query: unknown;
-  status: number;
-  /** Who made the request, as authenticated; null for one that named nobody (registering). */
-  userId: string | null;
-  ip: string;
-  userAgent: string | null;
-  /** The request's whole body, but for what REDACTED hides. For a multipart request, its text fields and a description of its file: the file's bytes are in the content store. */
-  body: unknown;
-  /** The ids the response named (a new post's, comment's, user's ...), which only the response says. */
-  result: Record<string, string>;
-}
-
-/** What a request adds to the record beyond what Fastify already knows (see `req.audit`). */
-export interface AuditContext {
-  userId?: string;
-  /** Set by a route that reads its body itself, as /store does with a multipart one (see auditMultipart). */
-  body?: unknown;
-}
-
 declare module 'fastify' {
+  /** Fastify's request, with what the audit log keeps on each one (see registerAudit). */
   interface FastifyRequest {
     /** What the audit log is told of this request that only its handler knows. Null until the request starts. */
     audit: AuditContext | null;
   }
 }
 
-/** The fields of a body that are secrets, and so are never written down. */
-const REDACTED = ['apiKey'];
-
-/** The fields of a response worth keeping in the record: the ids of what the request made or changed. */
-const RESULT_IDS = ['contentId', 'commentId', 'messageId', 'uploadId', 'userId', 'adId', 'ruleId'];
-
 /** The methods that change something. The rest read (a route that reads and is not a GET is a bug in the route). */
 const WRITES = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-
-/**
- * The largest record a failed write still falls back to the application log with. Log services cap
- * an entry at about 256 KB (CloudWatch, Cloud Logging), and the record is logged as base64.
- */
-const FALLBACK_MAX_BYTES = 150 * 1024;
-
-export interface AuditLog {
-  /** Writes the record, and resolves once it is durable. */
-  write(record: AuditRecord): Promise<string>;
-}
 
 /** The object a record is stored as: one gzipped JSON document, under its UTC hour. */
 export function auditKey(record: Pick<AuditRecord, 'id' | 'time'>): string {
@@ -91,7 +45,8 @@ export function createAuditLog({ scheme, options }: Config['audit']): AuditLog |
 function redact(body: unknown): unknown {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return body;
   const out = { ...(body as Record<string, unknown>) };
-  for (const field of REDACTED) if (field in out) out[field] = '[redacted]';
+  // The fields of a body that are secrets, and so are never written down.
+  for (const field of ['apiKey']) if (field in out) out[field] = '[redacted]';
   return out;
 }
 
@@ -100,7 +55,10 @@ function resultOf(payload: unknown): Record<string, string> {
   if (typeof payload !== 'string' || !payload.startsWith('{')) return {};
   try {
     const parsed = JSON.parse(payload) as Record<string, unknown>;
-    return Object.fromEntries(RESULT_IDS.flatMap((field) => (typeof parsed[field] === 'string' ? [[field, parsed[field]]] : [])));
+    // The fields of a response worth keeping in the record: the ids of what the request made or changed.
+    return Object.fromEntries(
+      ['contentId', 'commentId', 'messageId', 'uploadId', 'userId', 'adId', 'ruleId'].flatMap((field) => (typeof parsed[field] === 'string' ? [[field, parsed[field]]] : [])),
+    );
   } catch {
     return {};
   }
@@ -155,13 +113,14 @@ export function registerAudit(app: FastifyInstance, audit: AuditLog | null, now:
       result: resultOf(payload),
     };
     try {
-      const key = await audit.write(record);
       // The metadata, for the application log's own retention; the whole record is the object.
-      req.log.info({ audit: key, method: record.method, route: record.route, status: record.status, userId: record.userId, ...record.result }, 'audit');
+      req.log.info({ audit: await audit.write(record), method: record.method, route: record.route, status: record.status, userId: record.userId, ...record.result }, 'audit');
     } catch (err) {
       const fallback = await gzipAsync(JSON.stringify(record)).then((zipped) => zipped.toString('base64'), () => '');
+      // 150 KB is the largest record a failed write still falls back to the application log with. Log services cap
+      // an entry at about 256 KB (CloudWatch, Cloud Logging), and the record is logged as base64.
       req.log.error(
-        { err, audit: record.id, method: record.method, route: record.route, status: record.status, ...(fallback && fallback.length <= FALLBACK_MAX_BYTES && { record: fallback }) },
+        { err, audit: record.id, method: record.method, route: record.route, status: record.status, ...(fallback && fallback.length <= 150 * 1024 && { record: fallback }) },
         'audit log write failed',
       );
     }

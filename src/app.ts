@@ -2,33 +2,21 @@ import compress from '@fastify/compress';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
-import Fastify, { type FastifyServerOptions } from 'fastify';
-import { createAuditLog, registerAudit, type AuditLog } from './audit.js';
+import Fastify from 'fastify';
+import type { AppOptions } from './app.types.js';
+import { createAuditLog, registerAudit } from './audit.js';
 import { Challenges } from './challenge/challenges.js';
 import type { Db } from './db/index.js';
-import type { RouteDeps, StoreDeps } from './deps.js';
+import type { RouteDeps, StoreDeps } from './deps.types.js';
 import { requireEdgeSecret } from './functions/edge.js';
 import { GROUP_NAMES, GROUPS, type GroupName } from './functions/groups.js';
 import { HttpError, registerErrorHandler } from './http/errors.js';
 import { registerLanguages } from './http/language.js';
 import { rateLimitStore } from './http/rateLimitStore.js';
-import { loadLanguages, msg, type Languages } from './language.js';
-import { loadTrustPlugins, type TrustPlugin } from './moderation/trust.js';
-import { loadCliRelease, requireCliBuild, type CliRelease } from './routes/cli.js';
+import { loadLanguages, msg } from './language.js';
+import { loadTrustPlugins } from './moderation/trust.js';
+import { loadCliRelease, requireCliBuild } from './routes/cli.js';
 import { contentWriter } from './write.js';
-
-export interface AppOptions extends FastifyServerOptions {
-  /** Refuse requests that don't carry this in X-Edge-Secret (functions/edge.ts). */
-  edgeSecret?: string;
-  /** The CLI the server ships, or null for none. By default, the one built with it, if it was (routes/cli.ts). */
-  cli?: CliRelease | null;
-  /** The trust plugins, in the order they run. By default, the folders of src/plugins/trust (moderation/trust.ts). */
-  trustPlugins?: TrustPlugin[];
-  /** The languages the server answers in. By default, the files of the languages folder (language.ts). */
-  languages?: Languages;
-  /** Where changes are written down, or null for nowhere. By default, the store `config.audit` names, if it names one (audit.ts). */
-  audit?: AuditLog | null;
-}
 
 /**
  * The app serving `groups` of routes (src/functions/groups.ts): all of them for the long-running

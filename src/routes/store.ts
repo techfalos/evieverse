@@ -5,19 +5,26 @@ import { authenticate } from '../auth/apiKey.js';
 import { ChallengeFields } from '../challenge/challenges.js';
 import { contentNotFound, requireMeta, takesComments } from '../content.js';
 import type { ContentRow } from '../db/schema.js';
-import type { RouteDeps } from '../deps.js';
+import type { RouteDeps } from '../deps.types.js';
 import { badRequest, forbidden } from '../http/errors.js';
 import { plainText } from '../format.js';
 import { Credentials, Flag } from '../http/schemas.js';
 import { msg } from '../language.js';
-import { moderatePost, refuseBanned, type RemovedTag } from '../moderation/policy.js';
+import { moderatePost, refuseBanned } from '../moderation/policy.js';
+import type { RemovedTag } from '../moderation/policy.types.js';
 import { LinkUrl, MAX_TEXT_CHARS, mediaUrl, POST_TYPES, previewCutter } from '../posts.js';
 import { MAX_REPOSTED_TAGS, repostedTags, repostsOf, repostTimes, type Repost } from '../reposts.js';
 import type { ContentMeta, ContentStore, Preview, Publisher, Summary } from '../storage/index.js';
 import { allowedTags, MAX_TAGS, parseTagList, sameTags } from '../tags.js';
-import { readMultipart, readPost, readUploaded, requirePostType, textOf, type Post, type Upload } from '../upload.js';
+import { readMultipart, readPost, readUploaded, requirePostType, textOf, type Post } from '../upload.js';
+import type { Upload } from '../upload.types.js';
 import { assertUpdatable } from '../write.js';
 
+/**
+ * What POST /store says of a post, as JSON or as the fields of a multipart form: what it is, its
+ * text, its URL or its file, its hashtags and its flags, with `contentId` when it is an update,
+ * and the solution of a challenge when the request answers one.
+ */
 const Fields = Credentials.extend({
   contentId: z.string().uuid().optional(),
   /** What the post is: an image, video or audio file, with an optional caption in `text`; text; or a link. */
@@ -72,6 +79,7 @@ async function sameBody(post: Post, meta: ContentMeta, content: ContentStore): P
   );
 }
 
+/** Writing posts (POST /store): a new post, or with `contentId`, an update of one of the publisher's own. */
 export function storeRoutes(app: FastifyInstance, { db, config, content, challenges, writer, trustPlugins, now = Date.now }: RouteDeps) {
   const cut = previewCutter(config.feed);
 
@@ -95,8 +103,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
    */
   function publisherTags(fields: Fields): string[] {
     // An update may send back the hashtags reposts gave the content with its own: how many are its own is counted once those are known.
-    const max = fields.contentId === undefined ? MAX_TAGS : MAX_TAGS + MAX_REPOSTED_TAGS;
-    const parsed = fields.tags === undefined ? { tags: [] } : parseTagList(fields.tags, max);
+    const parsed = fields.tags === undefined ? { tags: [] } : parseTagList(fields.tags, fields.contentId === undefined ? MAX_TAGS : MAX_TAGS + MAX_REPOSTED_TAGS);
     if ('error' in parsed) throw badRequest(parsed.error);
     if (!parsed.tags.length && fields.contentId === undefined) throw tagsRequired();
     const refused = allowed ? parsed.tags.find((tag) => !allowed.has(tag)) : undefined;
@@ -169,7 +176,6 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
       if (uploadId) upload = await readUploaded(content, user.id, uploadId, config.storage);
       post ??= await readPost(fields, upload, config.storage);
       const { filename, mimeType } = post;
-      const publisher: Publisher = { userId: user.id, username: user.username };
       const sent = publisherTags(fields);
 
       const row = fields.contentId
@@ -196,7 +202,6 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
       if (own(sent).length > MAX_TAGS) throw badRequest(msg('tags.too_many', { max: MAX_TAGS, got: own(sent).length }));
       // An update has to say the publisher's hashtags, unless the content has none of its own to lose.
       if (existing && !own(sent).length && own(existing.meta.tags).length) throw tagsRequired();
-      const tags = [...own(sent), ...given];
 
       const aiGenerated = fields.aiGenerated ?? (row?.ai_generated === 1);
       // The post's own two flags: the declaration that it was created with AI, and whether it takes comments.
@@ -213,8 +218,15 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
       // Before any challenge, so nobody solves one for a post that isn't stored. A text or caption is read as
       // its readers read it, without its formatting ("sp**am**" says spam), with where its links lead.
       // What the content says now is held to the rules of every hashtag it has, those reposts gave it too.
-      const texts = [post.type === 'link' ? post.url : post.text && plainText(post.text, true), filename];
-      const moderated = await moderatePost({ db, config, trustPlugins, now, log: req.log }, { userId: user.id, contentId: existing?.row.id, tags, texts });
+      const moderated = await moderatePost(
+        { db, config, trustPlugins, now, log: req.log },
+        {
+          userId: user.id,
+          contentId: existing?.row.id,
+          tags: [...own(sent), ...given],
+          texts: [post.type === 'link' ? post.url : post.text && plainText(post.text, true), filename],
+        },
+      );
       const queued = moderated.route === 'queue';
       // The hashtags of reposts that the update is refused, by a mute or a blocked word: they come off the content
       // for good (see ContentWrite.droppedReposts). One a moderator removed is coming off it already.
@@ -235,7 +247,15 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
 
       const admitted = post;
       const s = await challenges.admitting('post', user.id, fields, req.language, () =>
-        store(publisher, admitted, flags, existing, moderated.tags, queued ? { trustScore: moderated.trustScore } : undefined, droppedReposts),
+        store(
+          { userId: user.id, username: user.username },
+          admitted,
+          flags,
+          existing,
+          moderated.tags,
+          queued ? { trustScore: moderated.trustScore } : undefined,
+          droppedReposts,
+        ),
       );
       stored = true;
       reply.status(queued ? 202 : existing ? 200 : 201);
@@ -266,7 +286,6 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
   ): Promise<Summary> {
     const contentId = existing?.row.id ?? randomUUID();
     const ts = now();
-    const createdAt = existing?.row.created_at ?? ts;
     const { file, mimeType } = post;
     const preview: Preview =
       post.type === 'text'
@@ -284,7 +303,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
     const repostedAt = repostTimes(reposts);
     const summary: Summary = {
       contentId,
-      createdAt,
+      createdAt: existing?.row.created_at ?? ts,
       updatedAt: ts,
       userId: publisher.userId,
       mimeType,
@@ -294,20 +313,28 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
       preview,
       ...(repostedAt.length > 0 && { repostedAt }),
     };
-    // The size recorded is that of the bytes as stored, which putBytes returns.
-    const meta: ContentMeta = {
-      contentId,
-      mimeType,
-      size: file.size,
-      ...(sha256 !== null && { sha256 }),
-      aiGenerated,
-      comments,
-      preview,
-      ...(text !== undefined && { text }),
-      tags,
-      updatedAt: ts,
-    };
-    await writer.write({ publisher, previous: existing?.meta, summary, meta, putBytes: () => file.place(content, contentId, mimeType), queued, reposts, droppedReposts });
+    await writer.write({
+      publisher,
+      previous: existing?.meta,
+      summary,
+      // The size recorded is that of the bytes as stored, which putBytes returns.
+      meta: {
+        contentId,
+        mimeType,
+        size: file.size,
+        ...(sha256 !== null && { sha256 }),
+        aiGenerated,
+        comments,
+        preview,
+        ...(text !== undefined && { text }),
+        tags,
+        updatedAt: ts,
+      },
+      putBytes: () => file.place(content, contentId, mimeType),
+      queued,
+      reposts,
+      droppedReposts,
+    });
     return summary;
   }
 }

@@ -1,7 +1,12 @@
-import type { Profile } from './profiles.js';
+import type { Api, Release } from './client.types.js';
+import type { Profile } from './profiles.types.js';
 
-// Set by the build (scripts/build-cli.mjs); absent when the CLI is run from source.
+/** Set by the build (scripts/build-cli.mjs) to the version in package.json; absent when the CLI is run from source. */
 declare const __CLI_VERSION__: string | undefined;
+/**
+ * Set by the build to its id: the first 16 hex characters of the SHA-256 of the bundle as it is
+ * before the id is written into it. Absent when the CLI is run from source.
+ */
 declare const __CLI_BUILD__: string | undefined;
 
 /** The server's version this CLI was built with, for people to read. */
@@ -19,15 +24,7 @@ export const CLI_HEADER = 'x-evieverse-cli';
 /** Where a server serves the CLI it ships. */
 export const BUNDLE_PATH = '/cli/evieverse.mjs';
 
-/** The CLI a server ships, as GET /cli and a 426 describe it. */
-export interface Release {
-  version: string;
-  build: string;
-  /** Of the file at BUNDLE_PATH, in hex. */
-  sha256: string;
-  size: number;
-}
-
+/** Whether `v` is a `Release`, which the answer to GET /cli, a 426's `cli` and the build's manifest.json are each held to before they are used. */
 export const isRelease = (v: unknown): v is Release => {
   const r = v as Release | null;
   return typeof r?.version === 'string' && typeof r.build === 'string' && typeof r.sha256 === 'string' && typeof r.size === 'number';
@@ -61,11 +58,6 @@ export class UpdateRequired extends Error {
   ) {
     super(`the server needs build ${release.build} of the CLI`);
   }
-}
-
-export interface Api {
-  server: string;
-  request<T = unknown>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', path: string, body?: unknown, timeoutMs?: number): Promise<T>;
 }
 
 /** "https://api.example.com/" -> "https://api.example.com" */
@@ -113,8 +105,7 @@ export function apiClient(fetchFn: typeof fetch, profile: Pick<Profile, 'server'
         text = await res.text();
       } catch (err) {
         const e = err as Error & { cause?: { message?: string } };
-        const why = e.name === 'TimeoutError' ? `no answer in ${timeoutMs / 1000} seconds` : (e.cause?.message ?? e.message);
-        throw new CliError(`could not reach ${server}: ${why}`);
+        throw new CliError(`could not reach ${server}: ${e.name === 'TimeoutError' ? `no answer in ${timeoutMs / 1000} seconds` : (e.cause?.message ?? e.message)}`);
       }
       let data: unknown = null;
       try {

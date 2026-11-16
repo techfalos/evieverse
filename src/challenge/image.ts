@@ -3,8 +3,11 @@ import { deflateSync } from 'node:zlib';
 
 /** No two of these look alike once distorted: 0/O/D/Q, 1/I/L, 2/Z, 5/S, 6/G, 8/B and U/V each keep at most one. */
 export const ALPHABET = 'ACDEFGHJKLMNPRTUWXY34789';
+/** How many characters of `ALPHABET` a challenge's answer has. */
 export const ANSWER_LENGTH = 6;
+/** How wide a challenge's image is, in pixels. */
 export const WIDTH = 240;
+/** How high a challenge's image is, in pixels. */
 export const HEIGHT = 80;
 
 type Pt = [number, number];
@@ -18,6 +21,7 @@ function arc(cx: number, cy: number, rx: number, ry: number, from: number, to: n
   });
 }
 
+/** The one stroke of the letter P, which R starts with too: a stem and a bowl, in the unit box of `GLYPHS`. */
 const P: Pt[] = [[0.1, 1], [0.1, 0], [0.5, 0], ...arc(0.5, 0.27, 0.4, 0.27, 90, -90), [0.1, 0.54]];
 
 /** Stroke outlines in a unit box, y downwards: drawn as thick lines, not from a font, so there is no text to extract. */
@@ -67,6 +71,11 @@ function randomSource() {
   return { next, range: (lo: number, hi: number) => lo + (hi - lo) * next() };
 }
 
+/**
+ * A line to draw in the image: the points it goes through, and how thick it is, both in pixels.
+ * `renderChallenge` makes one of each line of a character, and of each curve and arc it adds, and
+ * draws them all.
+ */
 interface Stroke {
   pts: Pt[];
   width: number;
@@ -102,8 +111,7 @@ export function renderChallenge(text: string): Buffer {
     const w = h * range(0.62, 0.8);
     return { glyph: GLYPHS[c]!, h, w, step: w * range(0.8, 0.95) };
   });
-  const span = chars.slice(0, -1).reduce((s, c) => s + c.step, 0) + chars.at(-1)!.w;
-  let x = (WIDTH - span) / 2 + range(-5, 5);
+  let x = (WIDTH - (chars.slice(0, -1).reduce((s, c) => s + c.step, 0) + chars.at(-1)!.w)) / 2 + range(-5, 5);
   for (const c of chars) {
     place(c.glyph, x + c.w / 2, HEIGHT / 2 + range(-5, 5), c.w, c.h, range(-0.3, 0.3), range(-0.25, 0.25), range(3.4, 4.4));
     x += c.step;
@@ -116,8 +124,7 @@ export function renderChallenge(text: string): Buffer {
     for (let i = 0; i <= 48; i++) {
       const t = i / 48;
       const u = 1 - t;
-      const y = u * u * u * ys[0]! + 3 * u * u * t * ys[1]! + 3 * u * t * t * ys[2]! + t * t * t * ys[3]!;
-      pts.push([-4 + t * (WIDTH + 8), y]);
+      pts.push([-4 + t * (WIDTH + 8), u * u * u * ys[0]! + 3 * u * u * t * ys[1]! + 3 * u * t * t * ys[2]! + t * t * t * ys[3]!]);
     }
     strokes.push({ pts, width });
   }
@@ -134,12 +141,11 @@ export function renderChallenge(text: string): Buffer {
   const fy = range(0.04, 0.09);
   const px = range(0, 2 * Math.PI);
   const py = range(0, 2 * Math.PI);
-  const warp = ([x0, y0]: Pt): Pt => [x0 + ax * Math.sin(y0 * fy + px), y0 + ay * Math.sin(x0 * fx + py)];
 
   const ink = new Float32Array(WIDTH * HEIGHT);
   for (const { pts, width } of strokes) {
     let prev: Pt | undefined;
-    for (const p of subdivide(pts, 1.5).map(warp)) {
+    for (const p of subdivide(pts, 1.5).map(([x0, y0]: Pt): Pt => [x0 + ax * Math.sin(y0 * fy + px), y0 + ay * Math.sin(x0 * fx + py)])) {
       if (prev) drawSegment(ink, prev, p, width / 2);
       prev = p;
     }
@@ -168,7 +174,7 @@ export function renderChallenge(text: string): Buffer {
   return encodePng(WIDTH, HEIGHT, gray);
 }
 
-/** The polyline with no segment longer than `max`, so the warp bends straight strokes too. */
+/** The polyline with no segment longer than `max`, so the wave bends straight strokes too. */
 function subdivide(pts: Pt[], max: number): Pt[] {
   const out: Pt[] = [pts[0]!];
   for (let i = 1; i < pts.length; i++) {
@@ -187,9 +193,8 @@ function drawSegment(ink: Float32Array, [ax, ay]: Pt, [bx, by]: Pt, r: number) {
   const len2 = dx * dx + dy * dy || 1;
   const x0 = Math.max(0, Math.floor(Math.min(ax, bx) - r - 1));
   const x1 = Math.min(WIDTH - 1, Math.ceil(Math.max(ax, bx) + r + 1));
-  const y0 = Math.max(0, Math.floor(Math.min(ay, by) - r - 1));
   const y1 = Math.min(HEIGHT - 1, Math.ceil(Math.max(ay, by) + r + 1));
-  for (let y = y0; y <= y1; y++) {
+  for (let y = Math.max(0, Math.floor(Math.min(ay, by) - r - 1)); y <= y1; y++) {
     for (let x = x0; x <= x1; x++) {
       const cx = x + 0.5 - ax;
       const cy = y + 0.5 - ay;
@@ -202,6 +207,10 @@ function drawSegment(ink: Float32Array, [ax, ay]: Pt, [bx, by]: Pt, r: number) {
   }
 }
 
+/**
+ * The lookup table of CRC-32, the checksum every PNG chunk ends with: for each value of a byte,
+ * what eight shifts by the polynomial 0xedb88320 make of it, so `crc32` takes a byte at a time.
+ */
 const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
   let c = n;
   for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;

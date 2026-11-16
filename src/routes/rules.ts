@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { authenticate, type AuthUser } from '../auth/apiKey.js';
+import { authenticate } from '../auth/apiKey.js';
+import type { AuthUser } from '../auth/apiKey.types.js';
 import type { Db } from '../db/index.js';
 import type { ServerRulesTable } from '../db/schema.js';
-import type { AppDeps } from '../deps.js';
+import type { AppDeps } from '../deps.types.js';
 import { badRequest, conflict, forbidden, notFound } from '../http/errors.js';
 import { Credentials } from '../http/schemas.js';
 import { msg } from '../language.js';
@@ -16,11 +17,15 @@ export const MAX_RULES = 100;
 /** The longest a rule's text can be, which is what `server_rules.body` holds. */
 export const MAX_RULE_CHARS = 2000;
 
+/** A rule's text as a request gives it: 1 to MAX_RULE_CHARS characters once trimmed. */
 const RuleText = z.string().trim().min(1).max(MAX_RULE_CHARS);
 /** A rule's place in the list, counted from 1. One past the last rule's means the end of the list. */
 const Position = z.coerce.number().int().min(1);
+/** What POST /rules says: the new rule's text, and with `position`, its place in the list. Left out: the end. */
 const AddBody = Credentials.extend({ text: RuleText, position: Position.optional() });
+/** What PATCH /rules/:ruleId says: the rule's new text, its new place in the list, or both. The route refuses a request that says neither. */
 const UpdateBody = Credentials.extend({ text: RuleText.optional(), position: Position.optional() });
+/** The rule a path names (/rules/:ruleId), for the routes that change or remove it. */
 const RuleParams = z.object({ ruleId: z.string().uuid() });
 
 type RuleRow = Pick<ServerRulesTable, 'id' | 'sort_order' | 'body' | 'created_at' | 'updated_at'>;
@@ -125,12 +130,11 @@ export function rulesRoutes(app: FastifyInstance, { db, config, now = Date.now }
       const to = body.position === undefined ? from : Math.min(body.position, rules.length) - 1;
       const text = body.text ?? current.body;
       if (to === from && text === current.body) return record(current, from);
-      const updated: RuleRow = { ...current, body: text, updated_at: at };
       await trx.updateTable('server_rules').set({ body: text, updated_at: at }).where('id', '=', ruleId).execute();
       rules.splice(from, 1);
       rules.splice(to, 0, current);
       await arrange(trx, rules);
-      return record(updated, to);
+      return record({ ...current, body: text, updated_at: at }, to);
     });
   });
 
@@ -138,7 +142,6 @@ export function rulesRoutes(app: FastifyInstance, { db, config, now = Date.now }
   app.delete('/rules/:ruleId', async (req) => {
     const { ruleId } = RuleParams.parse(req.params);
     await asAdmin(req, Credentials.parse(req.body ?? {}));
-    const res = await db.deleteFrom('server_rules').where('id', '=', ruleId).executeTakeFirst();
-    return { ruleId, wasThere: Number(res.numDeletedRows) > 0 };
+    return { ruleId, wasThere: Number((await db.deleteFrom('server_rules').where('id', '=', ruleId).executeTakeFirst()).numDeletedRows) > 0 };
   });
 }

@@ -4,18 +4,20 @@ import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
 import { contentNotFound, loadReadable, publisherOf, requireMeta, takesComments } from '../content.js';
 import { setForDeletion } from '../deletion.js';
-import type { AppDeps } from '../deps.js';
+import type { AppDeps } from '../deps.types.js';
 import { forbidden } from '../http/errors.js';
 import { say } from '../http/language.js';
 import { Credentials } from '../http/schemas.js';
 import { notify } from '../inbox.js';
 import { msg } from '../language.js';
-import { adRecord, eligibleAds, type PublishedAd } from '../monetization.js';
+import { adRecord, eligibleAds } from '../monetization.js';
+import type { PublishedAd } from '../monetization.types.js';
 import { originMediaUrl, previewOf } from '../posts.js';
 import type { Publisher } from '../storage/index.js';
 import { indexAuthor } from '../tagfeed/layout.js';
 import { iso } from '../time.js';
 
+/** The path of a piece of content: its id. */
 const Params = z.object({ contentId: z.string().uuid() });
 
 /**
@@ -30,10 +32,10 @@ const Params = z.object({ contentId: z.string().uuid() });
  * isn't in the file's origin. It runs no script there either.
  */
 export function rawHeaders(contentType: string) {
-  const sandbox = /^(video|audio)\//.test(contentType) ? 'sandbox allow-same-origin' : 'sandbox';
   return {
     'x-content-type-options': 'nosniff',
-    'content-security-policy': `default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; ${sandbox}`,
+    'content-security-policy':
+      `default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; ${/^(video|audio)\//.test(contentType) ? 'sandbox allow-same-origin' : 'sandbox'}`,
   };
 }
 
@@ -103,16 +105,15 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    * with the hashtags it gave. `by` is left out of one whose user's account is gone, or closed.
    */
   async function repostsMade(contentId: string): Promise<{ by?: Publisher; tags: string[]; at: string }[]> {
-    const rows = await db
+    const made = new Map<string, { by?: Publisher; tags: string[]; at: string }>();
+    for (const r of await db
       .selectFrom('reposts')
       .leftJoin('users', (join) => join.onRef('users.id', '=', 'reposts.user_id').on('users.deleted_at', 'is', null))
       .select(['reposts.tag', 'reposts.created_at', 'users.id as user_id', 'users.username'])
       .where('reposts.content_id', '=', contentId)
       .orderBy('reposts.created_at')
       .orderBy('reposts.tag')
-      .execute();
-    const made = new Map<string, { by?: Publisher; tags: string[]; at: string }>();
-    for (const r of rows) {
+      .execute()) {
       const key = `${r.created_at} ${r.user_id ?? ''}`;
       let repost = made.get(key);
       if (!repost) made.set(key, (repost = { ...(r.user_id !== null && r.username !== null && { by: { userId: r.user_id, username: r.username } }), tags: [], at: iso(r.created_at) }));
@@ -137,8 +138,7 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    */
   app.get('/content/:contentId/raw', { compress: false }, async (req, reply) => {
     const { contentId } = Params.parse(req.params);
-    const row = await loadReadable(db, req, contentId);
-    if (row.origin_hash !== null) {
+    if ((await loadReadable(db, req, contentId)).origin_hash !== null) {
       const { origin } = await requireMeta(content, contentId);
       if (origin) return reply.redirect(originMediaUrl(origin), 302);
     }
@@ -154,6 +154,10 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
   });
 }
 
+/**
+ * Deleting content: DELETE /content/:contentId, and nothing else. It is apart from the routes that
+ * read content (contentRoutes), so the two can be served apart (see functions/groups.ts).
+ */
 export function deletionRoutes(app: FastifyInstance, deps: AppDeps) {
   const { db } = deps;
   /**

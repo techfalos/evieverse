@@ -1,7 +1,8 @@
 import { open } from 'node:fs/promises';
 import { Readable } from 'node:stream';
 import { crc32 } from 'node:zlib';
-import { spoolToTemp, type SpooledFile } from './storage/spool.js';
+import { spoolToTemp } from './storage/spool.js';
+import type { SpooledFile } from './storage/spool.types.js';
 
 /**
  * The images a post can be: the formats browsers show whose metadata `stripImage` knows how to
@@ -13,6 +14,7 @@ export type ImageType = (typeof IMAGE_TYPES)[number];
 /** How many of a file's first bytes say which image it is. */
 export const IMAGE_HEAD_BYTES = 12;
 
+/** The eight bytes every PNG file starts with. */
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 /** Which image a file is, by its first bytes (IMAGE_HEAD_BYTES of them), whatever its sender calls it. */
@@ -91,6 +93,7 @@ class Bytes {
 
 /** As much of an EXIF block as is read to find its Orientation, which is at its start in any file a camera wrote. */
 const EXIF_HEAD_BYTES = 1 << 16;
+/** What an EXIF block starts with in a JPEG's APP1 segment, before its TIFF file: "Exif" and two zero bytes. Some WebP files' EXIF chunk has it too. */
 const EXIF_PREFIX = Buffer.from('Exif\0\0', 'latin1');
 
 /**
@@ -121,10 +124,12 @@ function orientation(tiff: Buffer): number | null {
 const orientationOnly = (value: number) =>
   Buffer.from([0x4d, 0x4d, 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, value, 0, 0, 0, 0, 0, 0]);
 
+/** Whether `bytes` start with `text`, a byte to a character: how a JPEG segment says what it holds ("JFIF", "ICC_PROFILE", "Adobe"). */
 const startsWith = (bytes: Buffer, text: string) => bytes.toString('latin1', 0, text.length) === text;
 
 // --- JPEG ---
 
+/** A JPEG segment as a file holds it: 0xFF and the marker's `code`, the length in two bytes (big-endian), which counts itself and the body, then the body. */
 const jpegSegment = (code: number, body: Buffer) => Buffer.concat([Buffer.from([0xff, code, (body.length + 2) >> 8, (body.length + 2) & 0xff]), body]);
 
 /**
@@ -376,8 +381,7 @@ async function* webp(r: Bytes, patches: Patch[]): AsyncGenerator<Buffer> {
     } else if (type === 'EXIF') {
       const read = await r.take(Math.min(length, EXIF_HEAD_BYTES));
       await r.skip(padded - read.length);
-      const tiff = read.subarray(0, 6).equals(EXIF_PREFIX) ? read.subarray(6) : read;
-      const turn = flags !== undefined && !exif ? orientation(tiff) : null;
+      const turn = flags !== undefined && !exif ? orientation(read.subarray(0, 6).equals(EXIF_PREFIX) ? read.subarray(6) : read) : null;
       if (turn) {
         exif = true;
         const kept = riffChunk(type, orientationOnly(turn));
@@ -402,6 +406,11 @@ async function* webp(r: Bytes, patches: Patch[]): AsyncGenerator<Buffer> {
 
 // --- Any of them ---
 
+/**
+ * What reads an image of each type and gives it without its metadata, in pieces as it reads.
+ * Each throws Malformed for a file that isn't laid out as its format says, or that ends early.
+ * Only WebP adds to `patches`.
+ */
 const STRIP: Record<ImageType, (r: Bytes, patches: Patch[]) => AsyncGenerator<Buffer>> = {
   'image/jpeg': jpeg,
   'image/png': png,

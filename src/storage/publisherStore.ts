@@ -1,10 +1,7 @@
-import type { HotStore } from './hotStore.js';
+import type { HotStore } from './hotStore.types.js';
+import type { Publisher } from './publisherStore.types.js';
 
-export interface Publisher {
-  userId: string;
-  username: string;
-}
-
+/** The Redis key of a user's credit, which holds their username and nothing else. */
 const publisherKey = (userId: string) => `pub:${userId}`;
 
 /**

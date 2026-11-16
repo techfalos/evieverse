@@ -1,5 +1,10 @@
 import { extname } from 'node:path';
 
+/**
+ * The mime type a filename's extension stands for, by the extension in lowercase with its dot.
+ * `resolveMimeType` falls back to it when the client names no type, or only
+ * application/octet-stream.
+ */
 const BY_EXTENSION: Record<string, string> = {
   '.txt': 'text/plain',
   '.md': 'text/markdown',
@@ -35,6 +40,5 @@ const BY_EXTENSION: Record<string, string> = {
 export function resolveMimeType(clientType: string | undefined, filename: string | null | undefined): string {
   const declared = clientType?.split(';')[0]?.trim().toLowerCase();
   if (declared && declared !== 'application/octet-stream') return declared;
-  const byExt = filename ? BY_EXTENSION[extname(filename).toLowerCase()] : undefined;
-  return byExt ?? declared ?? 'application/octet-stream';
+  return (filename ? BY_EXTENSION[extname(filename).toLowerCase()] : undefined) ?? declared ?? 'application/octet-stream';
 }

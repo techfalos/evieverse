@@ -25,9 +25,8 @@ async function createDialect(cfg: Connection): Promise<Dialect> {
       return new PostgresDialect({ pool });
     }
     case 'mysql': {
-      const mysql = await import('mysql2');
       return new MysqlDialect({
-        pool: mysql.createPool({
+        pool: (await import('mysql2')).createPool({
           uri: cfg.url,
           connectionLimit: cfg.poolSize,
           supportBigNumbers: true,
@@ -49,6 +48,10 @@ async function createDialect(cfg: Connection): Promise<Dialect> {
   }
 }
 
+/**
+ * The database `cfg` names, with its schema as it is: nothing is migrated (see `openDb`). A SQLite
+ * file's directory is created if it isn't there. The caller closes it with `destroy()`.
+ */
 export async function createDb(cfg: Connection): Promise<Db> {
   return new Kysely<Database>({ dialect: await createDialect(cfg) });
 }

@@ -11,6 +11,8 @@ import { migrateDeployment } from './deploy.js';
  * `npm run migrate` (src/db/migrate.ts) is the same step for the long-running server, which checks
  * its settings itself when it starts.
  */
+
+/** What the step did (see `Deployed`): the dialect of the database it migrated, and what it did about the admin account, if BOOTSTRAP_ADMIN names one. */
 const { dialect, admin } = await migrateDeployment();
 console.log(`The functions start with these settings. Migrations complete (${dialect}).`);
 if (admin) console.log(describeAdmin(admin));

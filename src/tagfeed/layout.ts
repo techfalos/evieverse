@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
-import type { Origin, Preview, Publisher, Summary } from '../storage/index.js';
+import type { Publisher, Summary } from '../storage/index.js';
 import { iso, wholeSeconds } from '../time.js';
+import type { FeedRecord, Head, IndexEntry, RepostMark } from './layout.types.js';
 
 /**
  * Feed index layout in Redis, per hashtag (keys are relative to REDIS_KEY_PREFIX):
@@ -32,45 +33,6 @@ export const authorIndex = (userId: string) => `@${userId}`;
 /** The publisher whose own index this is; null for a hashtag. */
 export const indexAuthor = (name: string) => (name.startsWith('@') ? name.slice(1) : null);
 
-/** A feed record, in exactly the shape the feed returns. */
-export interface FeedRecord {
-  contentId: string;
-  publisher: Publisher;
-  mimeType: string;
-  aiGenerated: boolean;
-  /** Whether the post takes comments, which are read at /content/:contentId/comments. */
-  comments: boolean;
-  preview: Preview;
-  tags: string[];
-  likes: number;
-  /**
-   * Whether a moderator of the hashtag the record is listed under has approved it there. Only on
-   * the records of a hashtag's feed: moderation is per hashtag.
-   */
-  moderated?: boolean;
-  /** When the post was published, which for a reposted one is before it was placed here (see `repost`). */
-  createdAt: string;
-  updatedAt: string;
-  /**
-   * On a record a repost put where it was read: under a hashtag the repost gave the post, or in a
-   * following feed, by someone the user follows. `at` is when, which is where the feed orders the
-   * record, and `likes` are those since. `by` is who reposted it, in a following feed, where the
-   * record is read from their own index; a hashtag's feed doesn't say.
-   */
-  repost?: { at: string; by?: Publisher };
-  /**
-   * On a repost of a post on another server: the original, which the record is a link to, and who
-   * published it there. `publisher` is who reposted it here.
-   */
-  origin?: Origin;
-}
-
-/** The repost that put a record where it was read: when, and by whom if the index it was read from says. */
-export interface RepostMark {
-  at: number;
-  by?: Publisher;
-}
-
 /** `moderated` is the record's flag in the hashtag's index it was read from; omitted where it wasn't read from one. */
 export const toFeedRecord = (s: Summary, likes: number, publisher: Publisher, moderated?: boolean, repost?: RepostMark): FeedRecord => ({
   contentId: s.contentId,
@@ -88,42 +50,26 @@ export const toFeedRecord = (s: Summary, likes: number, publisher: Publisher, mo
   ...(s.origin && { origin: s.origin }),
 });
 
-/** One post in a day index. */
-export interface IndexEntry {
-  contentId: string;
-  /**
-   * When the content was placed in this index, which is where feeds order it: its creation, or
-   * for a repost's entry, the repost. UTC epoch ms; day indexes keep whole seconds.
-   */
-  createdAt: number;
-  /** The content's likes; for a repost's entry, those since the repost. */
-  likes: number;
-  /** Declared by the publisher at /store. */
-  aiGenerated: boolean;
-  /**
-   * A moderator of this hashtag approved the content under it. The compactor sets it, from
-   * `tag_moderation`, when it builds a day index. Never set in a publisher's own index.
-   */
-  moderated: boolean;
-  /**
-   * A repost put the content here: under a hashtag it gave it, or in the reposter's own index.
-   * The entry's time and likes are then the repost's (see above).
-   */
-  repost: boolean;
-}
-
 /** contentId (16 bytes) | likes u32 | createdAt seconds u32 | flags u8, big-endian. */
 export const DAY_ENTRY_BYTES = 25;
+/** The most a u32 field of a day index entry holds: likes and creation seconds above it are stored as this. */
 const U32 = 0xffffffff;
+/** `n` as a whole number from 0 to `max`: its fraction is dropped, and a value outside is brought to the nearer end. */
 const clamp = (n: number, max: number) => Math.min(max, Math.max(0, Math.floor(n)));
 
-/** Flag bits of a day index entry. */
+/** Flag bit of a day index entry: its publisher declared the content as created with AI. */
 const AI_GENERATED = 1;
+/** Flag bit of a day index entry: a moderator of the hashtag approved the content under it. */
 const MODERATED = 2;
+/** Flag bit of a day index entry: a repost put the content in the index. */
 const REPOST = 4;
-const flagsOf = (e: IndexEntry) => (e.aiGenerated ? AI_GENERATED : 0) | (e.moderated ? MODERATED : 0) | (e.repost ? REPOST : 0);
+/** The flags byte of a day index entry as the booleans an `IndexEntry` has. */
 const flagged = (flags: number) => ({ aiGenerated: (flags & AI_GENERATED) !== 0, moderated: (flags & MODERATED) !== 0, repost: (flags & REPOST) !== 0 });
 
+/**
+ * A day index as it is stored: DAY_ENTRY_BYTES per entry, in the order given. An entry's time is
+ * cut to whole seconds. Throws if a content id isn't a UUID.
+ */
 export function packDay(entries: IndexEntry[]): Buffer {
   const buf = Buffer.alloc(entries.length * DAY_ENTRY_BYTES);
   entries.forEach((e, i) => {
@@ -133,11 +79,15 @@ export function packDay(entries: IndexEntry[]): Buffer {
     id.copy(buf, o);
     buf.writeUInt32BE(clamp(e.likes, U32), o + 16);
     buf.writeUInt32BE(clamp(e.createdAt / 1000, U32), o + 20);
-    buf.writeUInt8(flagsOf(e), o + 24);
+    buf.writeUInt8((e.aiGenerated ? AI_GENERATED : 0) | (e.moderated ? MODERATED : 0) | (e.repost ? REPOST : 0), o + 24);
   });
   return buf;
 }
 
+/**
+ * The entries `packDay` packed, in the same order, their times in ms again (of whole seconds).
+ * Bytes at the end that don't make a whole entry are ignored.
+ */
 export function unpackDay(buf: Buffer): IndexEntry[] {
   const out: IndexEntry[] = [];
   for (let o = 0; o + DAY_ENTRY_BYTES <= buf.length; o += DAY_ENTRY_BYTES) {
@@ -152,43 +102,34 @@ export function unpackDay(buf: Buffer): IndexEntry[] {
   return out;
 }
 
-export interface Head {
-  v: 5;
-  /** The manifest readers should use; null until the tag's first compaction. */
-  manifest: string | null;
-  compactedAt: number;
-}
-
-/** One UTC day's index. */
-export interface DayRef {
-  /** UTC day number (ms / DAY). */
-  day: number;
-  gen: string;
-  /** The most posts the index was trimmed to; when the day's quota shrinks with age, it's re-trimmed. */
-  quota: number;
-  count: number;
-}
-
-export interface Manifest {
-  v: 5;
-  tag: string;
-  id: string;
-  createdAt: number;
-  /** Newest day first. */
-  days: DayRef[];
-}
-
+/** What a tag that was never compacted has for a head: no manifest, so no day index, and the tag reads as empty. */
 export const EMPTY_HEAD: Head = { v: 5, manifest: null, compactedAt: 0 };
 
+/** The key of a tag's head. `tag` is a hashtag or the name of a publisher's own index (`authorIndex`), here and in the keys below. */
 export const headKey = (tag: string) => `head:${tag}`;
+/** The key of the manifest `id` of a tag's index. */
 export const manifestKey = (tag: string, id: string) => `man:${tag}:${id}`;
+/** The key of one of a tag's day indexes: `gen` is the one its `DayRef` in the manifest names. */
 export const dayKey = (tag: string, gen: string) => `day:${tag}:${gen}`;
+/**
+ * The key the compactor keeps its progress under from one run to the next, as JSON: the instants
+ * up to which it has applied likes, profile changes and hashtag counts, and the day it has purged
+ * summaries up to (see `State` in src/compact/compactor.ts).
+ */
 export const COMPACTOR_STATE_KEY = 'compactor:state';
 
+/** `n` in decimal, with zeros in front up to `width` digits: 13 by default, which is as long as a time in epoch ms. */
 const pad = (n: number, width = 13) => String(n).padStart(width, '0');
+/** Eight random hex digits, which end a new id so that two made for the same instant differ. */
 const rand = () => randomBytes(4).toString('hex');
 
+/** The id of a new manifest: when it was made (`createdAt`, epoch ms, which is the compactor run's start), then random digits. */
 export const newManifestId = (createdAt: number) => `${pad(createdAt)}-${rand()}`;
+/**
+ * The `gen` of a new day index, which its key carries: the UTC day number, when it was built
+ * (`createdAt`, epoch ms, which is the compactor run's start), then random digits. A day that is
+ * rebuilt gets a new one, as a day index is never overwritten.
+ */
 export const newGenId = (day: number, createdAt: number) => `${pad(day, 5)}-${pad(createdAt)}-${rand()}`;
 
 /** Post quota of a UTC day at `ageDays` old: halves each day from `max`, never below `min`. */

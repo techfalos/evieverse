@@ -3,18 +3,10 @@ import { readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { brotliDecompressSync } from 'node:zlib';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { summaryKey, summaryObjectKey, type SummaryRef } from '../src/storage/summaryStore.js';
-import {
-  authorIndex,
-  DAY_ENTRY_BYTES,
-  dayKey,
-  headKey,
-  manifestKey,
-  unpackDay,
-  type DayRef,
-  type Head,
-  type Manifest,
-} from '../src/tagfeed/layout.js';
+import { summaryKey, summaryObjectKey } from '../src/storage/summaryStore.js';
+import type { SummaryRef } from '../src/storage/summaryStore.types.js';
+import { authorIndex, DAY_ENTRY_BYTES, dayKey, headKey, manifestKey, unpackDay } from '../src/tagfeed/layout.js';
+import type { DayRef, Head, Manifest } from '../src/tagfeed/layout.types.js';
 import { TagFeedReader } from '../src/tagfeed/reader.js';
 import { DAY, HOUR, utcDay } from '../src/time.js';
 import { createTestContext, queued, requests, TARGETS, type Feed, type TestContext, type User } from './helpers.js';

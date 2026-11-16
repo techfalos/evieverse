@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { FEED_ALGORITHMS, planFeed, type Boundary, type FeedPlan, type PlanOptions } from '../src/feed/plan.js';
-import type { Candidate } from '../src/tagfeed/reader.js';
+import { FEED_ALGORITHMS, planFeed } from '../src/feed/plan.js';
+import type { Boundary, FeedPlan, PlanOptions } from '../src/feed/plan.types.js';
+import type { Candidate } from '../src/tagfeed/reader.types.js';
 import { DAY, HOUR } from '../src/time.js';
 
 /** Noon, so a 24-hour window reaches into the UTC day before. */

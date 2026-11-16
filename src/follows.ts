@@ -9,9 +9,10 @@ import { mapLimit } from './util.js';
 /** Rewrites the Redis copy of whom each of these users follows from the database. */
 export async function syncFollowing(db: Db, follows: FollowStore, userIds: string[]): Promise<void> {
   if (!userIds.length) return;
-  const rows = await db.selectFrom('follows').select(['follower_id', 'followee_id']).where('follower_id', 'in', userIds).execute();
   const following = new Map(userIds.map((id): [string, string[]] => [id, []]));
-  for (const r of rows) following.get(r.follower_id)!.push(r.followee_id);
+  for (const r of await db.selectFrom('follows').select(['follower_id', 'followee_id']).where('follower_id', 'in', userIds).execute()) {
+    following.get(r.follower_id)!.push(r.followee_id);
+  }
   await mapLimit([...following], 16, ([userId, followees]) => follows.put(userId, followees));
 }
 
@@ -35,6 +36,5 @@ export async function requireShownFollows(db: Db, req: FastifyRequest, userId: s
   if (!user) throw notFound(msg('user.not_found'));
   const { shown, hidden } = SIDES[side];
   if (user[shown] === 1) return;
-  const reader = await authenticateIfNamed(db, req);
-  if (reader?.id !== userId) throw forbidden(msg(hidden));
+  if ((await authenticateIfNamed(db, req))?.id !== userId) throw forbidden(msg(hidden));
 }

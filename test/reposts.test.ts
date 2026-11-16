@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { setAdmin } from '../src/moderation/policy.js';
-import type { TrustPlugin } from '../src/moderation/trust.js';
+import type { TrustPlugin } from '../src/moderation/trust.types.js';
 import { authorIndex } from '../src/tagfeed/layout.js';
 import { DAY, HOUR, utcDay } from '../src/time.js';
 import { as, createTestContext, multipart, PNG, queued, requests, TARGETS, type FeedItem, type TestContext, type User } from './helpers.js';

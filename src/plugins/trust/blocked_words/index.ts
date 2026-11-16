@@ -1,5 +1,6 @@
 import { msg } from '../../../language.js';
-import { MIN_TRUST_SCORE, type TrustAlgorithm } from '../../../moderation/trust.js';
+import { MIN_TRUST_SCORE } from '../../../moderation/trust.js';
+import type { TrustAlgorithm } from '../../../moderation/trust.types.js';
 import { scanTexts, SERVER_LIST } from '../../../moderation/words.js';
 
 /**
@@ -13,10 +14,8 @@ import { scanTexts, SERVER_LIST } from '../../../moderation/words.js';
 export default {
   async assess({ texts, tags, commentOn }, { db, log }) {
     const rows = await db.selectFrom('blocked_words').select('word').where('tag', '=', SERVER_LIST).execute();
-    // With nothing blocked, nothing needs reading.
-    if (!rows.length) return null;
-    const matched = scanTexts(new Map([[SERVER_LIST, rows.map((r) => r.word)]]), [...texts, ...tags], log);
-    if (!matched.has(SERVER_LIST)) return null;
+    // With nothing blocked, nothing needs reading: the texts are scanned only where there are words.
+    if (!rows.length || !scanTexts(new Map([[SERVER_LIST, rows.map((r) => r.word)]]), [...texts, ...tags], log).has(SERVER_LIST)) return null;
     return { set: MIN_TRUST_SCORE, reason: msg(commentOn === undefined ? 'moderation.blocked_word' : 'comment.blocked_word') };
   },
 } satisfies TrustAlgorithm;

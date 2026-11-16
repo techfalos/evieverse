@@ -5,13 +5,14 @@ import { closeAccount } from '../accounts.js';
 import { authenticate, authenticateIfNamed, issueApiKey, reissueApiKey, reissueApiKeyFor } from '../auth/apiKey.js';
 import { ChallengeFields } from '../challenge/challenges.js';
 import { isUniqueViolation } from '../db/index.js';
-import type { RouteDeps } from '../deps.js';
+import type { RouteDeps } from '../deps.types.js';
 import { badRequest, conflict, forbidden, notFound } from '../http/errors.js';
 import { say } from '../http/language.js';
 import { Credentials, Flag } from '../http/schemas.js';
 import { msg } from '../language.js';
 import { iso } from '../time.js';
 
+/** A username as a request gives it, for a new user or a rename: 1 to 64 characters once trimmed. Whether it is taken is the database's to say. */
 const Username = z.string().trim().min(1).max(64);
 /** The code of one of the server's languages (GET /languages), in any case. */
 const LanguageCode = z.string().trim().min(1).max(35);
@@ -25,6 +26,7 @@ const RegisterBody = Credentials.extend({
   ...ChallengeFields,
 });
 
+/** What PATCH /users/:userId can change of the caller's own profile. A field left out is left as it is. */
 const UpdateBody = Credentials.extend({
   username: Username.optional(),
   language: LanguageCode.optional(),
@@ -35,6 +37,7 @@ const UpdateBody = Credentials.extend({
   showFollowers: Flag.optional(),
 });
 
+/** The user a path names (/users/:userId): the one whose profile is read or updated, whose key is replaced, or whose account is deleted. */
 const Params = z.object({ userId: z.string().uuid() });
 
 function usernameTaken(err: unknown): never {
@@ -42,6 +45,12 @@ function usernameTaken(err: unknown): never {
   throw err;
 }
 
+/**
+ * Accounts: registering a user (POST /register), a user's public profile, whose key the caller's
+ * is (GET /whoami), and what a user does with their own account: update its profile, replace its
+ * API key, delete it. An admin registers users for other people, replaces any user's key and
+ * deletes any account.
+ */
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   const { db, config, publishers, challenges, now = Date.now } = deps;
   const { languages } = app;
@@ -80,8 +89,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const caller = await authenticateIfNamed(db, req, body);
     if (body.language !== undefined) req.language = chosen(body.language);
     const { language } = req;
-    const taken = await db.selectFrom('users').select('id').where('username', '=', body.username).executeTakeFirst();
-    if (taken) throw conflict(msg('user.username_taken'));
+    if (await db.selectFrom('users').select('id').where('username', '=', body.username).executeTakeFirst()) throw conflict(msg('user.username_taken'));
     if (!caller?.admin) await challenges.register(body, language);
     const userId = randomUUID();
     const ts = now();
@@ -163,8 +171,9 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const body = UpdateBody.parse(req.body ?? {});
     const user = await authenticate(db, req, body);
     if (user.id !== userId) throw forbidden(msg('user.update_own_only'));
-    const given = [body.username, body.language, body.messages, body.showFollowing, body.showFollowers];
-    if (given.every((value) => value === undefined)) throw badRequest(msg('user.nothing_to_update'));
+    if ([body.username, body.language, body.messages, body.showFollowing, body.showFollowers].every((value) => value === undefined)) {
+      throw badRequest(msg('user.nothing_to_update'));
+    }
     const username = body.username ?? user.username;
     const language = body.language === undefined ? user.language : chosen(body.language);
     const messages = body.messages ?? user.messages;

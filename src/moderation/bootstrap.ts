@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Db } from '../db/index.js';
+import type { EnsuredAdmin } from './bootstrap.types.js';
 
 /**
  * The admin account a deployment is set up with, as BOOTSTRAP_ADMIN holds it (JSON). The key itself
@@ -12,17 +13,6 @@ const BootstrapAdmin = z.object({
   keyHash: z.string().regex(/^[0-9a-f]{64}$/),
 });
 export type BootstrapAdmin = z.infer<typeof BootstrapAdmin>;
-
-export interface EnsuredAdmin {
-  userId: string;
-  /** The account's name now, which is `username` only if this created it: it may have been renamed since. */
-  username: string;
-  created: boolean;
-  /** Whether the key was added, or other keys of the account revoked. */
-  keyChanged: boolean;
-  /** Whether the key was the account's once and has been replaced since: it stays revoked, and the account keeps the key it has. */
-  keyReplaced: boolean;
-}
 
 /**
  * Makes sure the account exists and is an admin, and gives it the key, as its only one, if the key
@@ -97,6 +87,11 @@ export async function bootstrapAdmin(db: Db, env: NodeJS.ProcessEnv = process.en
   return ensureAdmin(db, parsed.data);
 }
 
+/**
+ * What the migration step prints of the account `ensureAdmin` made sure of, in one sentence:
+ * whether it was created or was in place already, whether it got a new API key, and, for a key
+ * that was replaced and so stays revoked, how to give the account a new one.
+ */
 export const describeAdmin = ({ username, userId, created, keyChanged, keyReplaced }: EnsuredAdmin) =>
   `Admin account ${username} (${userId}) ${created ? 'created' : 'is in place'}${
     keyReplaced

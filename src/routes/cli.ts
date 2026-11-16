@@ -3,15 +3,12 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { BUNDLE_PATH, CLI_HEADER, isRelease, type Release } from '../cli/client.js';
+import { BUNDLE_PATH, CLI_HEADER, isRelease } from '../cli/client.js';
+import type { Release } from '../cli/client.types.js';
 import type { Config } from '../config.js';
 import { badRequest, HttpError, notFound } from '../http/errors.js';
 import { msg } from '../language.js';
-
-/** The CLI a server ships: the one file, and what describes it (scripts/build-cli.mjs writes both). */
-export interface CliRelease extends Release {
-  bundle: Buffer;
-}
+import type { CliRelease } from './cli.types.js';
 
 /** dist/cli, beside the built server. A server run from source has none. */
 const CLI_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'cli');
@@ -33,10 +30,8 @@ export function loadCliRelease(dir = CLI_DIR): CliRelease | null {
   return { version, build, sha256, size, bundle };
 }
 
+/** What describes the CLI the server ships, without the file itself: what GET /cli and a 426 tell a client. */
 const manifestOf = ({ version, build, sha256, size }: CliRelease): Release => ({ version, build, sha256, size });
-
-/** The paths a CLI of any build may ask for: where it gets the server's. */
-const CLI_PATHS = /^\/cli(?:[/?]|$)/;
 
 /**
  * Makes the CLI keep up with the server: a request that names another build of the CLI than the
@@ -46,18 +41,17 @@ const CLI_PATHS = /^\/cli(?:[/?]|$)/;
 export function requireCliBuild(app: FastifyInstance, release: CliRelease) {
   app.addHook('onRequest', async (req) => {
     const build = req.headers[CLI_HEADER];
-    if (build === undefined || build === release.build || CLI_PATHS.test(req.url)) return;
+    // /cli and the paths under it are the ones a CLI of any build may ask for: where it gets the server's.
+    if (build === undefined || build === release.build || /^\/cli(?:[/?]|$)/.test(req.url)) return;
     throw new HttpError(426, msg('cli.outdated', { version: release.version, build: release.build }), undefined, { cli: manifestOf(release) });
   });
 }
 
-/** A host as a URL has it: a name or an address, and perhaps a port. Anything else doesn't go into a script. */
-const HOST = /^(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/;
-
 /** The server's address as clients reach it: PUBLIC_BASE_URL, or else the one this request came to. */
 function baseUrl(config: Config, req: FastifyRequest): string {
   if (config.publicBaseUrl) return config.publicBaseUrl.replace(/\/+$/, '');
-  if (!HOST.test(req.host) || !['http', 'https'].includes(req.protocol)) throw badRequest(msg('cli.no_address'));
+  // A host as a URL has it: a name or an address, and perhaps a port. Anything else doesn't go into a script.
+  if (!/^(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/.test(req.host) || !['http', 'https'].includes(req.protocol)) throw badRequest(msg('cli.no_address'));
   return `${req.protocol}://${req.host}`;
 }
 
