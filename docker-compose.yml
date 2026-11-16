@@ -1,0 +1,85 @@
+# Local infrastructure for development and integration tests.
+#   docker compose up -d postgres mysql redis
+#   TEST_POSTGRES_URL=postgres://theuniverse:theuniverse@localhost:5432/theuniverse \
+#   TEST_MYSQL_URL=mysql://theuniverse:theuniverse@localhost:3306/theuniverse \
+#   TEST_REDIS_URL=redis://127.0.0.1:6379 npm test
+# Or run the whole stack (Postgres, MinIO for content and summaries, Valkey for the feed index, a compactor):
+#   docker compose --profile app up --build
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: theuniverse
+      POSTGRES_PASSWORD: theuniverse
+      POSTGRES_DB: theuniverse
+    ports: ['5432:5432']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U theuniverse']
+      interval: 2s
+      retries: 30
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_USER: theuniverse
+      MYSQL_PASSWORD: theuniverse
+      MYSQL_DATABASE: theuniverse
+    ports: ['3306:3306']
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-uroot', '-proot']
+      interval: 2s
+      retries: 60
+
+  # The feed index, tails, hot summaries and publisher credits (stands in for ElastiCache / Memorystore /
+  # Azure Cache for Redis). volatile-lru only ever evicts keys with a TTL (hot summaries, superseded index
+  # keys), never a live head or day index.
+  redis:
+    image: valkey/valkey:8
+    command: ['valkey-server', '--maxmemory', '512mb', '--maxmemory-policy', 'volatile-lru']
+    ports: ['6379:6379']
+    healthcheck:
+      test: ['CMD', 'valkey-cli', 'ping']
+      interval: 2s
+      retries: 30
+
+  # S3-compatible content and summary store.
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: theuniverse
+      MINIO_ROOT_PASSWORD: theuniverse-secret
+    ports: ['9000:9000', '9001:9001']
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on: [minio]
+    entrypoint: >
+      sh -c "until mc alias set local http://minio:9000 theuniverse theuniverse-secret; do sleep 1; done;
+             mc mb --ignore-existing local/theuniverse"
+
+  app:
+    profiles: [app]
+    build: .
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+    ports: ['3000:3000']
+    environment: &app-env
+      DB_DIALECT: postgres
+      DATABASE_URL: postgres://theuniverse:theuniverse@postgres:5432/theuniverse
+      REDIS_URL: redis://redis:6379
+      CONTENT_SCHEME: s3
+      CONTENT_OPTIONS: '{"bucket":"theuniverse","region":"us-east-1","endpoint":"http://minio:9000","access_key_id":"theuniverse","secret_access_key":"theuniverse-secret"}'
+      # Summaries share the content bucket (under summaries/) unless SUMMARY_SCHEME / SUMMARY_OPTIONS are set.
+      PUBLIC_BASE_URL: http://localhost:3000
+      COMPACT_IN_PROCESS: 'false'
+
+  compactor:
+    profiles: [app]
+    build: .
+    command: ['node', 'dist/compact/main.js']
+    depends_on: [app]
+    environment: *app-env

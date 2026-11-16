@@ -1,0 +1,313 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { existsSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { InjectOptions, LightMyRequestResponse } from 'fastify';
+import pino from 'pino';
+import { buildApp } from '../../src/app.js';
+import { Compactor } from '../../src/compact/compactor.js';
+import { loadConfig } from '../../src/config.js';
+import { createDb } from '../../src/db/index.js';
+import { migrateToLatest } from '../../src/db/migrator.js';
+import { createStores } from '../../src/deps.js';
+import { mapLimit } from '../../src/util.js';
+import {
+  article,
+  articleHtml,
+  articleText,
+  between,
+  gauss,
+  interests,
+  pick,
+  picture,
+  PUBLISHERS,
+  readerNames,
+  rng,
+  shuffle,
+  topicOf,
+  updateNote,
+  type PublisherSpec,
+} from './corpus.js';
+
+/**
+ * Seeds the testbed through the app's own routes (register, store, like), so every write takes the real
+ * path: object store, summaries, database and tail appends. Each request runs on its own clock, set back
+ * in time, which spreads the posts over the last SEED_DAYS days while requests run concurrently. Summaries
+ * use the real clock, so only posts younger than SUMMARY_HOT_DAYS are also kept in Redis. A final
+ * `--rebuild` compaction on the real clock builds the day indexes, as after a migration.
+ */
+
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+const OUT = process.env.SEED_OUT ?? '/out';
+const USERS_FILE = join(OUT, 'users.json');
+const POSTS = Number(process.env.SEED_POSTS ?? 2400);
+const READERS = Number(process.env.SEED_READERS ?? 220);
+const DAYS = Number(process.env.SEED_DAYS ?? 45);
+const UPDATES = Math.round(POSTS / 100);
+/** Share of posts their publisher declares created with AI. */
+const AI_SHARE = Number(process.env.SEED_AI_SHARE ?? 0.2);
+
+const log = (msg: string) => console.log(`${new Date().toISOString()} seed: ${msg}`);
+
+// It registers and posts on clocks set back in time, so no person is there to solve a challenge. Every
+// post carries its planned hashtags, whatever TAGGING_MODE the app runs with.
+const config = loadConfig({
+  logLevel: 'warn',
+  registerRateLimitPerHour: 1_000_000,
+  postRateLimitPerMinute: 0,
+  challenge: { register: false, postWindowSeconds: 0 },
+  tagging: { mode: 'user' },
+});
+const db = await createDb(config.db);
+await migrateToLatest(db);
+
+const { n: existingUsers } = await db.selectFrom('users').select(db.fn.countAll<number>().as('n')).executeTakeFirstOrThrow();
+if (Number(existingUsers) > 0) {
+  await db.destroy();
+  if (existsSync(USERS_FILE)) {
+    log(`already seeded (${existingUsers} users); run \`docker compose -f testbed/docker-compose.yml down -v\` to start over`);
+    process.exit(0);
+  }
+  log('a previous seed did not finish; run `docker compose -f testbed/docker-compose.yml down -v` and start again');
+  process.exit(1);
+}
+
+const clock = new AsyncLocalStorage<number>();
+const now = () => clock.getStore() ?? Date.now();
+const stores = createStores(config, now);
+const { summaries } = createStores(config, Date.now, stores.hot);
+const app = await buildApp({ config, db, ...stores, summaries, now }, { logger: { level: 'error' } });
+await app.ready();
+
+async function call<T>(time: number, opts: InjectOptions): Promise<T> {
+  // With a callback, inject dispatches at once, inside the clock; without one it waits for `then`, outside it.
+  const res = await new Promise<LightMyRequestResponse>((resolve, reject) =>
+    clock.run(time, () => app.inject(opts, (err, response) => (err ? reject(err) : resolve(response!)))),
+  );
+  if (res.statusCode >= 300) {
+    throw new Error(`${opts.method} ${opts.url} at ${new Date(time).toISOString()} -> ${res.statusCode} ${res.body}`);
+  }
+  return res.json() as T;
+}
+
+// Everything random is drawn up front, so the data is the same on every run.
+const r = rng(20261109);
+// A stream of its own, so the AI flags leave every other draw as it was.
+const rAi = rng(20261110);
+const start = Date.now();
+const registeredAt = start - (DAYS + 1) * DAY;
+
+interface UserPlan {
+  username: string;
+  publisherUrl: string;
+  role: 'publisher' | 'reader';
+  interests: string[];
+  spec?: PublisherSpec;
+}
+const userPlans: UserPlan[] = [
+  ...PUBLISHERS.map((spec) => ({
+    username: spec.username,
+    publisherUrl: `https://${spec.host}.example.com`,
+    role: 'publisher' as const,
+    interests: [...new Set([...spec.beats.map(topicOf), ...spec.beats])],
+    spec,
+  })),
+  ...readerNames(r, READERS).map((name) => ({
+    username: name,
+    publisherUrl: `https://social.example.com/@${name}`,
+    role: 'reader' as const,
+    interests: interests(r),
+  })),
+];
+const readerIdx = userPlans.flatMap((u, i) => (u.role === 'reader' ? [i] : []));
+
+/** Newest first in weight: a third in the last two days, a third in the rest of the week, a third before. */
+function postedAt(): number {
+  const x = r();
+  const age = x < 0.35 ? r() * 2 * DAY : x < 0.65 ? (2 + r() * 5) * DAY : (7 + r() * (DAYS - 7)) * DAY;
+  return start - Math.round(Math.max(age, 60_000));
+}
+
+const totalPull = PUBLISHERS.reduce((s, p) => s + p.pull, 0);
+function publisher(): number {
+  let x = r() * totalPull;
+  return Math.max(0, PUBLISHERS.findIndex((p) => (x -= p.pull) < 0));
+}
+
+interface PostPlan {
+  n: number;
+  author: number;
+  time: number;
+  filename: string;
+  contentType: string;
+  body: string | Buffer;
+  tags: string[];
+  aiGenerated: boolean;
+  likers: { user: number; time: number }[];
+  stored?: Promise<string>;
+  contentId?: string;
+}
+
+const posts: PostPlan[] = [];
+for (let n = 1; n <= POSTS; n++) {
+  const author = publisher();
+  const spec = PUBLISHERS[author]!;
+  const beat = pick(r, spec.beats);
+  const tags = [topicOf(beat), beat];
+  if (spec.beats.length > 1 && r() < 0.35) tags.push(pick(r, spec.beats.filter((b) => b !== beat)));
+  const time = postedAt();
+  const id = String(n).padStart(4, '0');
+
+  let plan: Omit<PostPlan, 'likers' | 'aiGenerated'>;
+  if (r() < (spec.images ?? 0.04)) {
+    if (!tags.includes('photography') && r() < 0.5) tags.push('photography');
+    plan = { n, author, time, tags, filename: `seed-${id}.png`, contentType: 'image/png', body: picture(r, topicOf(beat)) };
+  } else {
+    const a = article(r, beat, tags);
+    const html = r() < 0.08;
+    plan = {
+      n,
+      author,
+      time,
+      tags,
+      filename: `seed-${id}.${html ? 'html' : 'txt'}`,
+      contentType: html ? 'text/html' : 'text/plain',
+      body: html ? articleHtml(a) : articleText(a),
+    };
+  }
+
+  // Heavy-tailed likes; four in ten posts get none, and posts under 12 hours old have had less time.
+  const age = start - time;
+  const likes = r() < 0.4 ? 0 : Math.floor(Math.exp(1.5 + 1.1 * gauss(r)) * spec.pull * Math.min(1, age / (12 * HOUR)));
+  const fans = new Set(readerIdx.filter((i) => userPlans[i]!.interests.some((t) => tags.includes(t))));
+  const others = readerIdx.filter((i) => !fans.has(i));
+  const likers = [...shuffle(r, [...fans]), ...shuffle(r, others)].slice(0, likes).map((user) => ({
+    user,
+    time: time + Math.round(r() * Math.min(age - 30_000, 2 * DAY)),
+  }));
+  posts.push({ ...plan, aiGenerated: rAi() < AI_SHARE, likers });
+}
+posts.sort((a, b) => a.time - b.time);
+
+// A few text posts older than a day get a second version some hours later.
+const updates = shuffle(
+  r,
+  posts.filter((p) => typeof p.body === 'string' && p.time < start - DAY),
+)
+  .slice(0, UPDATES)
+  .map((p) => {
+    const tags = p.tags.length > 2 && r() < 0.3 ? p.tags.slice(0, 2) : p.tags;
+    const filename = p.filename.replace(/\.(\w+)$/, '-v2.$1');
+    const note = updateNote(r);
+    const body = p.contentType === 'text/html' ? (p.body as string).replace('<article>', `<article><p>${note}</p>`) : `${note}\n\n${p.body}`;
+    return { post: p, filename, body, tags, time: Math.min(p.time + between(r, 1, 20) * HOUR, start - 10 * 60_000) };
+  });
+
+log(`registering ${userPlans.length} users`);
+const users: (UserPlan & { userId: string; apiKey: string })[] = new Array(userPlans.length);
+await mapLimit(
+  userPlans.map((u, i) => ({ u, i })),
+  16,
+  async ({ u, i }) => {
+    const res = await call<{ userId: string; apiKey: string }>(registeredAt, {
+      method: 'POST',
+      url: '/register',
+      payload: { username: u.username, publisherUrl: u.publisherUrl },
+    });
+    users[i] = { ...u, userId: res.userId, apiKey: res.apiKey };
+  },
+);
+const creds = (i: number) => ({ userId: users[i]!.userId, apiKey: users[i]!.apiKey });
+
+// Edits go in time order with the posts: each store stamps its hashtags' last activity (what /tags sorts by)
+// with its own time, so a backdated edit run after every post would make those hashtags look days old.
+const writes = [
+  ...posts.map((post) => ({ time: post.time, post, update: undefined })),
+  ...updates.map((update) => ({ time: update.time, post: update.post, update })),
+].sort((a, b) => a.time - b.time);
+
+log(`storing ${posts.length} posts and ${updates.length} edits from ${new Date(writes[0]!.time).toISOString()} to ${new Date(writes.at(-1)!.time).toISOString()}`);
+let stored = 0;
+await mapLimit(writes, 8, async ({ post: p, update: u }) => {
+  if (u) {
+    // mapLimit starts items in order, so the post's own store has already begun.
+    const contentId = await p.stored!;
+    // No aiGenerated: an edit that doesn't say keeps the post's.
+    await call(u.time, {
+      method: 'POST',
+      url: '/store',
+      payload: { ...creds(p.author), contentId, content: u.body, contentType: p.contentType, filename: u.filename, tags: u.tags },
+    });
+    return;
+  }
+  const binary = typeof p.body !== 'string';
+  p.stored = call<{ contentId: string }>(p.time, {
+    method: 'POST',
+    url: '/store',
+    payload: {
+      ...creds(p.author),
+      content: binary ? (p.body as Buffer).toString('base64') : p.body,
+      contentEncoding: binary ? 'base64' : 'utf8',
+      contentType: p.contentType,
+      filename: p.filename,
+      tags: p.tags,
+      aiGenerated: p.aiGenerated,
+    },
+  }).then((res) => res.contentId);
+  p.contentId = await p.stored;
+  if (++stored % 250 === 0) log(`stored ${stored}/${posts.length}`);
+});
+
+const likes = posts.flatMap((p) => p.likers.map((l) => ({ ...l, contentId: p.contentId! }))).sort((a, b) => a.time - b.time);
+log(`liking: ${likes.length} likes`);
+let liked = 0;
+await mapLimit(likes, 16, async (l) => {
+  await call(l.time, { method: 'POST', url: '/like', payload: { ...creds(l.user), contentId: l.contentId } });
+  if (++liked % 2000 === 0) log(`liked ${liked}/${likes.length}`);
+});
+
+const span = await db
+  .selectFrom('content')
+    .select((eb) => [eb.fn.min('created_at').as('first'), eb.fn.max('created_at').as('last')])
+  .executeTakeFirstOrThrow();
+if (Number(span.first) > start - (DAYS - 7) * DAY) {
+  throw new Error(`posts were not backdated: the oldest is from ${new Date(Number(span.first)).toISOString()}`);
+}
+
+log('rebuilding the feed index');
+const compactor = new Compactor({ config, db, hot: stores.hot, summaries, content: stores.content, log: pino({ level: 'warn' }) });
+const { tags } = await compactor.runOnce({ rebuild: true });
+log(`indexed ${tags.length} hashtags`);
+
+for (const url of ['/feed?tags=news&hours=24', '/feed?tags=ai,space,football&hours=72&mode=balanced', '/feed?tags=news&hours=24&aiGenerated=true']) {
+  const res = await app.inject({ method: 'GET', url });
+  const feed = res.json() as { estimatedTokens: number; truncated: boolean; days: { tags: Record<string, unknown[]> }[] };
+  const records = feed.days.reduce((s, d) => s + Object.values(d.tags).reduce((t, list) => t + list.length, 0), 0);
+  log(`${url}: ${res.statusCode}, ${records} records, ~${feed.estimatedTokens} tokens, truncated=${feed.truncated}`);
+}
+
+await mkdir(OUT, { recursive: true });
+await writeFile(
+  USERS_FILE,
+  JSON.stringify({
+    seededAt: new Date(start).toISOString(),
+    posts: posts.length,
+    aiGenerated: posts.filter((p) => p.aiGenerated).length,
+    updates: updates.length,
+    likes: likes.length,
+    users: users.map((u) => ({
+      userId: u.userId,
+      apiKey: u.apiKey,
+      username: u.username,
+      publisherUrl: u.publisherUrl,
+      role: u.role,
+      interests: u.interests,
+    })),
+  }),
+);
+log(`done: ${users.length} users, ${posts.length} posts (${posts.filter((p) => p.aiGenerated).length} created with AI), ${updates.length} updates, ${likes.length} likes`);
+
+await app.close();
+await stores.hot.close();
+await db.destroy();

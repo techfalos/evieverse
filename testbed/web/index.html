@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>theuniverse testbed</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <h1>theuniverse <span>testbed</span></h1>
+    <span id="status" class="status">checking the API…</span>
+    <nav class="links">
+      <a href="/api/tags" target="_blank">/api/tags</a>
+      <a id="s3-console" target="_blank">object store console</a>
+    </nav>
+  </header>
+
+  <main class="layout">
+    <section class="feed-col">
+      <nav class="tabs" role="tablist">
+        <a role="tab" href="#user" data-tab="user">User feed</a>
+        <a role="tab" href="#latest" data-tab="latest">Latest feed</a>
+      </nav>
+      <p id="blurb" class="blurb"></p>
+
+      <form id="feed-form" class="controls">
+        <label class="grow">Hashtags
+          <input id="tags" list="tag-list" placeholder="news, ai, football" autocomplete="off" spellcheck="false">
+        </label>
+        <label>Hours
+          <select id="hours">
+            <option>1</option><option>6</option><option>12</option><option>24</option>
+            <option>48</option><option>72</option><option>168</option>
+          </select>
+        </label>
+        <label>AI content
+          <select id="ai">
+            <option value="">all</option>
+            <option value="false">not created with AI</option>
+            <option value="true">only created with AI</option>
+          </select>
+        </label>
+        <button type="submit">Load feed</button>
+        <button type="button" id="reset-tags" class="link">defaults</button>
+      </form>
+      <datalist id="tag-list"></datalist>
+      <div id="suggest" class="chips suggest"></div>
+
+      <div class="request">GET <a id="api-url" target="_blank"></a></div>
+      <div id="stats" class="stats"></div>
+      <div id="feed"></div>
+      <button id="more" class="more" hidden>Load more (next cursor)</button>
+      <details id="raw" class="raw">
+        <summary>Raw response of the last page</summary>
+        <pre></pre>
+      </details>
+    </section>
+
+    <aside class="side">
+      <section class="panel">
+        <h2>Acting as</h2>
+        <select id="actor"></select>
+        <div id="actor-info" class="muted small"></div>
+      </section>
+
+      <section class="panel" id="post-panel">
+        <h2>Post</h2>
+        <form id="post-form">
+          <div class="seg">
+            <label><input type="radio" name="kind" value="text" checked> Text</label>
+            <label><input type="radio" name="kind" value="file"> File upload</label>
+          </div>
+          <div id="text-fields">
+            <textarea id="content" rows="8" spellcheck="false"></textarea>
+            <label>Content type
+              <select id="content-type">
+                <option>text/plain</option>
+                <option>text/html</option>
+                <option>text/markdown</option>
+                <option>application/json</option>
+              </select>
+            </label>
+          </div>
+          <div id="file-fields" hidden>
+            <input type="file" id="file">
+          </div>
+          <label>Hashtags <span class="muted">(required unless <code>TAGGING_MODE</code> is <code>server</code>)</span>
+            <input id="post-tags" placeholder="news, ai" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="check"><input type="checkbox" id="ai-generated"> Created with AI
+            <span class="muted">(your disclosure; feeds can filter on it)</span>
+          </label>
+          <label>Content id to update <span class="muted">(blank for a new post)</span>
+            <input id="content-id" placeholder="new post" spellcheck="false">
+          </label>
+          <div class="row">
+            <button type="submit" id="post-btn">Post</button>
+            <button type="button" id="sample" class="link">sample text</button>
+          </div>
+          <p class="hint">
+            With <code>TAGGING_MODE=server</code>, every post gets <code>TAGGING_SERVER_TAGS</code> instead.
+            New posts show in feeds at once; likes after the next compactor run (about a minute).
+          </p>
+        </form>
+        <pre id="post-result" class="result" hidden></pre>
+      </section>
+
+      <section class="panel">
+        <details>
+          <summary>Register a user</summary>
+          <form id="register-form" class="stack">
+            <label>Username <input id="reg-username" required></label>
+            <label>Publisher URL <input id="reg-url" type="url" placeholder="https://me.example.com" required></label>
+            <label>Interests <span class="muted">(hashtags for the User feed)</span>
+              <input id="reg-interests" placeholder="ai, space">
+            </label>
+            <button type="submit">Register and act as</button>
+          </form>
+        </details>
+      </section>
+
+      <section class="panel">
+        <h2>Activity</h2>
+        <ol id="log" class="log"></ol>
+      </section>
+    </aside>
+  </main>
+
+  <dialog id="challenge" class="challenge">
+    <form method="dialog" id="challenge-form" class="stack">
+      <h2 id="challenge-title">Solve the challenge</h2>
+      <p id="challenge-reason" class="muted small"></p>
+      <img id="challenge-img" alt="Distorted characters to type" width="360" height="120">
+      <label>Type the characters
+        <input id="challenge-answer" autocomplete="off" spellcheck="false" autocapitalize="characters" maxlength="16" required>
+      </label>
+      <p id="challenge-status" class="muted small"></p>
+      <div class="row">
+        <button type="submit">Send</button>
+        <button type="button" id="challenge-cancel" class="link">cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
