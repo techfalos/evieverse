@@ -54,9 +54,16 @@ terraform apply -var subscription_id=00000000-0000-0000-0000-000000000000 -var l
 
 At the end of `apply`, Terraform prints the instance `url` (for example `https://d1234abcd.cloudfront.net`) and `try_it`, which shows ready-to-paste `curl` commands and how to install the CLI and use it as the deployment's [admin](#the-admin-account). To see them again later, run `terraform output url`.
 
-**Database Migrations**
+**Settings check and database migrations**
 
-Every `apply` first runs the migrations (powered by a Lambda function on AWS, a job on GCP and Azure), waits for them, and only then updates the functions and the compactor. If the migrations fail, the `apply` stops there with the old functions still serving.
+Every `apply` that changes the image, a setting or the admin account first runs one step (a Lambda function on AWS, a job on GCP and Azure), waits for it, and only then updates the functions and the compactor. The step does two things, in this order:
+
+1. **It checks the settings.** It's given the settings the functions are about to get, and starts each route group with them as its function would. A setting the server refuses, such as a misspelt plugin name in `TRUST_OPTIONAL_PLUGINS` or a `TAGGING_MODE=server` with no hashtags, fails the step with the reason.
+2. **It runs the migrations,** and sets up the [admin account](#the-admin-account).
+
+If the step fails, the `apply` stops there. Nothing else is changed: the functions and the compactor keep the image and the settings they have, and go on serving. Fix the setting and apply again, which runs the step again.
+
+The check is there because updating a function doesn't start it. Without it, a mistake in `environment` or `secrets` would pass the `apply`, and then every request would fail. It tells you that the server starts with your settings, not that they're right: a bucket that doesn't exist, or a key that a service refuses, passes the check and shows when it's used.
 
 **Settings**
 
@@ -64,9 +71,25 @@ Settings are passed through `environment`, and credentials through `secrets`. On
 
 ```hcl
 # terraform.tfvars (git-ignored)
-environment = { TAGGING_MODE = "server", TAGGING_SERVER_TAGS = "news" }
-secrets     = { SUMMARY_OPTIONS = "{\"bucket\":\"summaries\",\"access_key_id\":\"...\",\"secret_access_key\":\"...\"}" }
+support_email = "support@example.com"
+environment   = { TAGGING_MODE = "server", TAGGING_SERVER_TAGS = "news" }
+secrets       = { SUMMARY_OPTIONS = "{\"bucket\":\"summaries\",\"access_key_id\":\"...\",\"secret_access_key\":\"...\"}" }
 ```
+
+The support address has a variable of its own, `support_email`: the email address [`GET /rules`](API.md#get-rules) gives people to write to for support (`SUPPORT_EMAIL`). It's `noreply@yoururl.com` until you set it, a placeholder that nobody reads, and the plan fails if it isn't an email address.
+
+**Optional trust plugins**
+
+An optional [trust plugin](TRUST_PLUGINS.md#optional-plugins) is turned on the same way. For `urlhaus`, which refuses posts and comments with a link that spreads malware, name it in `environment` and put its Auth-Key in `secrets`:
+
+```hcl
+environment = { TRUST_OPTIONAL_PLUGINS = "urlhaus" }
+secrets     = { URLHAUS_AUTH_KEY = "..." }
+```
+
+- Set both in the same `apply`. The server doesn't start with `urlhaus` named and no key, so the modules check for it: the plan fails, before anything is changed, if `TRUST_OPTIONAL_PLUGINS` names `urlhaus` and `URLHAUS_AUTH_KEY` is missing or empty. The check is on the key being there, not on URLhaus accepting it. A name that isn't a plugin, such as `urlhouse`, gets past the plan and is refused by the [settings check](#deploy), which stops the `apply` before any function is updated.
+- Each function instance downloads URLhaus's list when it first has a link to check, and keeps it while it lives. A post with a link that reaches a new instance waits for that download, on top of the cold start.
+- The functions need a way out to `urlhaus-api.abuse.ch`, which the three modules give them: through the NAT gateway on AWS, and directly on GCP and Azure. If the list can't be downloaded, posts with a link fail with `500` on instances that have no list yet.
 
 [CONFIG.md](CONFIG.md) lists all settings.
 
@@ -75,7 +98,7 @@ secrets     = { SUMMARY_OPTIONS = "{\"bucket\":\"summaries\",\"access_key_id\":\
 Initial deployment creates an [admin](API.md#moderation) account:
 
 1. **Terraform makes the account's id and API key,** in the format the server issues keys in. The key is random, and exists in two places only: the Terraform state, and the profile file below.
-2. **The migration step creates the account.** It's given the key's SHA-256, not the key (`BOOTSTRAP_ADMIN`), and after the migrations it creates the user if it isn't there, makes it an admin, and makes that key its only one. It runs again whenever the image or the account's values change, and changes nothing when they haven't.
+2. **The migration step creates the account.** It's given the key's SHA-256, not the key (`BOOTSTRAP_ADMIN`), and after the migrations it creates the user if it isn't there, makes it an admin, and, if the key is new to the account, makes that key its only one. It runs again whenever the image, a setting or the account's values change, and changes nothing about the account when its values haven't.
 3. **The key is installed on the machine that applies,** once the account exists: Terraform writes `~/.evieverse/profiles/<name>.json` (`name` is the module's variable, `evieverse` by default), readable only by you. That's a profile of the server's [CLI](CLI.md), so after installing the CLI, it works as the admin with no sign-in:
 
 ```sh
@@ -107,8 +130,8 @@ Things to know:
 - **On another machine,** sign in with the outputs: `EVIEVERSE_API_KEY="$(terraform output -raw admin_api_key)" evieverse login "$(terraform output -raw url)" "$(terraform output -raw admin_user_id)"`. A machine that applies an existing deployment gets the profile file written too.
 - **The key is in the Terraform state,** in plain text, like the database password and the other secrets these modules create. Keep the state where only the deployment's operators can read it (an encrypted remote backend, rather than a file in the repo).
 - **To replace the key,** run `terraform apply -replace=random_password.admin_key`. The migration step gives the account the new key and revokes the old one, and the profile file is rewritten.
-- **Don't replace it through the API** (`[POST /users/:userId/key](API.md#post-usersuseridkey)`, or `evieverse key rotate`). The deployment doesn't learn of a key made there: the next apply that runs the migration step revokes it and makes the deployment's key work again, which undoes the replacement if that key had leaked.
-- **The account is a break-glass one.** Make your own account an admin with it, and use that from day to day. It can't be locked out by the API: the server refuses to revoke or delete its only admin, and if this account's role is revoked while others remain, the next apply that runs the migration step restores it. An admin can't ban it either. If its account is deleted while others remain, the migration step fails until the compactor has purged the account (which frees its username), and then creates it again.
+- **A key replaced through the API lasts, but the deployment doesn't learn of it** (`[POST /users/:userId/key](API.md#post-usersuseridkey)`, or `evieverse key rotate`). Later applies leave the new key in place, and the deployment's key stays revoked. Terraform still holds the old key, so the `admin_api_key` output no longer works, and the next apply writes the old key back to the profile file, over the one `key rotate` saved there. To give the deployment a working key again, replace the key as above.
+- **The account is a break-glass one.** Make your own account an admin with it, and use that from day to day. It can't be locked out for good by the API: the server refuses to revoke or delete its only admin, and if this account's role is revoked while others remain, the next apply that runs the migration step restores it. If another admin replaces its key, replacing the key as above takes the account back. An admin can't ban it either. If its account is deleted while others remain, the migration step fails until the compactor has purged the account (which frees its username), and then creates it again.
 - `terraform destroy` removes the profile file with the deployment.
 
 
@@ -145,17 +168,13 @@ On GCP, signing a link needs a private key, and Cloud Run's own credentials don'
 
 ## Audit log
 
-Every request that adds, updates or deletes something (a `POST`, `PUT`, `PATCH` or `DELETE` that succeeded) is written down whole, and no read is: `GET /feed` and the other reads leave nothing. What a record holds, and how a write that fails is handled, is in [CONFIG.md](CONFIG.md#audit-log).
-
-Each module creates a bucket of its own for it, which moves what it holds to the cloud's cold storage, and gives the functions the right to add to it and nothing else: not to read, overwrite or delete a record.
-
+Every request that adds, updates or deletes something (a `POST`, `PUT`, `PATCH` or `DELETE` that succeeded) is logged, these logs are eventually moved into cold storage. 
 
 | Cloud | Where                                    | Cold storage          | Written by                                        |
 | ----- | ---------------------------------------- | --------------------- | ------------------------------------------------- |
 | AWS   | S3 bucket `<name>-audit-…`               | Glacier Deep Archive  | Lambda functions (`s3:PutObject` only)            |
 | GCP   | GCS bucket `<project>-<name>-audit`      | Archive storage class | Cloud Run services (`storage.objectCreator` only) |
 | Azure | Container `audit` of the storage account | Archive tier          | Container Apps (the account key, as for content)  |
-
 
 Records stay as they were written for `audit_archive_after_days` (30 by default; the same variable on every cloud), then the bucket's lifecycle rule moves them. A record is one small object, so on AWS and Azure the archive tiers' per-object charges and minimum storage durations (180 days) are worth a look at your volume. Reading an archived record takes hours to restore. Nothing deletes records. The bucket is named in the `audit_bucket` output (`audit_container` on Azure).
 
@@ -263,7 +282,7 @@ It runs beside the compactor. If the compactor is mid-pass, the rebuild waits fo
 - Front Door sends requests by path only, so a rule on `/content/*` sends everything but `GET`, `HEAD` and `OPTIONS` to the api group, which is where `DELETE /content/:id` belongs, and writing and deleting comments.
 - A group at zero replicas takes its next request only after a replica has started, which includes pulling the image. Set `min_replicas = 1` if that wait matters more than the cost.
 - Azure Managed Redis uses `redis_sku` (default `Balanced_B1`) and `redis_high_availability` (default `true`). Its Enterprise cluster policy presents one endpoint, so the app connects as it would to a single Redis, over TLS on port 10000 with an access key.
-- The storage account key and the Redis access key reach the containers only as Container Apps secrets. Upload and download links are signed with the storage account key.
+- The storage account key and the Redis access key reach the containers only as Container Apps secrets. Upload links are signed with the storage account key. Downloads aren't signed links: `/content/:id/raw` streams the bytes through the Container App and Front Door, where on AWS and GCP it redirects to the bucket.
 - PostgreSQL accepts connections only from Azure services (the `0.0.0.0` firewall rule), and TLS is required.
 
 
@@ -271,6 +290,8 @@ It runs beside the compactor. If the compactor is mid-pass, the rebuild waits fo
 ## Setting it up yourself
 
 Without these modules, the server runs on any of each cloud's services below, as long-running API nodes with one compactor (`node dist/server.js`, `node dist/compact/main.js`), or as functions (`node dist/functions/http.js` for containers that scale with traffic, `node dist/functions/lambda.js` on Lambda, with `FUNCTION_GROUP` naming the group). The rules that apply on every cloud, and the ones functions add, are in [APP.md](APP.md#13-deployment-topology).
+
+With functions, run the step the modules run before you update them, with the settings they're about to get: `node dist/functions/migrate.js` as a job, or the Lambda entry point with `FUNCTION_GROUP=migrate`. It checks that the functions start with those settings, and then migrates the database. Nothing else tells you about a setting the server refuses until requests fail, since updating a function doesn't start it.
 
 **AWS**
 

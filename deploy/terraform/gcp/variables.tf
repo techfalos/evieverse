@@ -102,6 +102,16 @@ variable "compactor_memory" {
   default     = "1Gi"
 }
 
+variable "support_email" {
+  description = "The email address people write to for support, which GET /rules gives to anyone (SUPPORT_EMAIL). The default is a placeholder: set it to an address that someone reads. A SUPPORT_EMAIL in `environment` takes its place."
+  type        = string
+  default     = "noreply@yoururl.com"
+  validation {
+    condition     = can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", var.support_email))
+    error_message = "An email address, such as support@example.com."
+  }
+}
+
 variable "environment" {
   description = "Extra environment variables, e.g. { TAGGING_MODE = \"server\", TAGGING_SERVER_TAGS = \"news\" }."
   type        = map(string)

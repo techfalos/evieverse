@@ -20,7 +20,7 @@ export interface AuthUser {
   showFollowing: boolean;
   /** Whether anyone can list who follows the user: off, until they turn it on. */
   showFollowers: boolean;
-  /** Whether a server moderator or an admin banned the user: they are refused posts, comments, messages and upload links (see refuseBanned). */
+  /** Whether a server moderator or an admin banned the user: they are refused posts, comments, likes, messages and upload links (see refuseBanned). */
   banned: boolean;
 }
 

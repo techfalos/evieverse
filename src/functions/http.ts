@@ -1,7 +1,7 @@
 import { buildApp } from '../app.js';
 import { bootstrap, bootstrapStores } from '../deps.js';
 import { GROUPS, isGroup } from './groups.js';
-import { functionConfig } from './handler.js';
+import { functionConfig, requireRedis } from './handler.js';
 
 /**
  * The entry point of a function on a platform that runs containers behind HTTP and scales them with
@@ -17,9 +17,7 @@ import { functionConfig } from './handler.js';
  */
 const group = process.env.FUNCTION_GROUP;
 const config = functionConfig();
-if (!config.redis.url) {
-  throw new Error('functions need REDIS_URL: without it the feed index would live inside each instance');
-}
+requireRedis(config);
 if (!isGroup(group)) {
   throw new Error(`FUNCTION_GROUP must be feed, content, store or api (got ${JSON.stringify(group)})`);
 }

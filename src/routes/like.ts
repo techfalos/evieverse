@@ -8,6 +8,7 @@ import type { AppDeps } from '../deps.js';
 import { notFound } from '../http/errors.js';
 import { Credentials } from '../http/schemas.js';
 import { msg } from '../language.js';
+import { refuseBanned } from '../moderation/policy.js';
 
 const Body = Credentials.extend({
   contentId: z.string().uuid(),
@@ -22,10 +23,14 @@ export function likeRoutes(app: FastifyInstance, { db, content, comments, now = 
    *
    * A post's likes are rows in the database, and its count a column of the post's. A comment's are
    * in the content store, as comments are (see CommentStore.like), and the database has none.
+   *
+   * A banned user is refused (403) either like, before anything is looked up: one they made before
+   * the ban stays, and is answered the same way.
    */
   app.post('/like', async (req, reply) => {
     const body = Body.parse(req.body ?? {});
     const user = await authenticate(db, req, body);
+    refuseBanned(user);
     const { contentId, commentId } = body;
 
     if (commentId !== undefined) {

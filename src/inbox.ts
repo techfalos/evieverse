@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { AppDeps } from './deps.js';
+import { plainText } from './format.js';
 import type { MessageKey } from './language.js';
 import type { ContentMeta } from './storage/index.js';
 
@@ -16,14 +17,14 @@ export const MAX_MESSAGE_CHARS = 2000;
 const EXCERPT_CHARS = 200;
 
 /**
- * The notices, each with the message that words it (src/languages). A notice is stored as its kind
+ * The notices, each with the message that words it (the languages folder). A notice is stored as its kind
  * and what it is about, never as words: it is said in its reader's language when the inbox is read.
  *
  *   post_accepted      a server moderator or an admin accepted the post from the moderation queue
  *   post_rejected      ...or rejected it there, which deletes it
  *   post_deleted       an admin deleted the post
  *   tag_removed        a moderator of the hashtag removed it from the post
- *   last_tag_removed   ...and it was the post's last, so the post is deleted
+ *   last_tag_removed   ...and it was the post's last, so the post is in no hashtag's feed
  *   tag_muted          a moderator of the hashtag muted the user on it
  *   tag_unmuted        ...or ended the mute
  *   comment_accepted   a server moderator or an admin accepted the comment from the moderation queue
@@ -69,18 +70,22 @@ export interface Notice {
   comment?: string;
 }
 
-/** The start of a text, as a notice quotes it. Null for no text at all. */
-function excerpt(text: string | null | undefined): string | null {
+/**
+ * The start of a text, as a notice quotes it. Null for no text at all. A `formatted` text (a post's,
+ * a caption, a comment's) is quoted as it reads, without its formatting.
+ */
+function excerpt(text: string | null | undefined, formatted = true): string | null {
   if (!text) return null;
   // By code point, so the cut never splits a character in two.
-  const chars = [...text.replace(/\s+/g, ' ').trim()];
+  const chars = [...(formatted ? plainText(text) : text).replace(/\s+/g, ' ').trim()];
   if (!chars.length) return null;
   return chars.length > EXCERPT_CHARS ? `${chars.slice(0, EXCERPT_CHARS - 1).join('')}…` : chars.join('');
 }
 
 /** The start of a post, as a notice about it quotes it: its text or caption, or a link's URL. Null for a file without a caption. */
 export function excerptOf(meta: Pick<ContentMeta, 'preview'> | null): string | null {
-  return excerpt(meta && (meta.preview.kind === 'link' ? meta.preview.url : meta.preview.text));
+  if (!meta) return null;
+  return meta.preview.kind === 'link' ? excerpt(meta.preview.url, false) : excerpt(meta.preview.text);
 }
 
 /**

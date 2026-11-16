@@ -66,12 +66,15 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
    * asking. Any other user's credentials spare the request no challenge, and wrong ones are 401,
    * as anywhere else.
    *
+   * One address makes `registerRateLimitPerHour` requests an hour, and is refused (429) from then
+   * on. Every request counts, the one that is answered with a challenge and an admin's like anyone's.
+   *
    * The user registers in the language the request names, which can be any of the server's: this
    * request is answered in it, challenge and all, and so is every request the user makes from then
    * on. A request that names none registers in the language it is answered in, which is the one its
    * Accept-Language header asks for, or the server's default; or, sent with credentials, their user's.
    */
-  app.post('/register', async (req, reply) => {
+  app.post('/register', { config: { rateLimit: { max: config.registerRateLimitPerHour, timeWindow: '1 hour' } } }, async (req, reply) => {
     const body = RegisterBody.parse(req.body ?? {});
     // Before the language the request names, which is the one it is answered in whoever sent it.
     const caller = await authenticateIfNamed(db, req, body);
@@ -79,7 +82,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const { language } = req;
     const taken = await db.selectFrom('users').select('id').where('username', '=', body.username).executeTakeFirst();
     if (taken) throw conflict(msg('user.username_taken'));
-    if (!caller?.admin) await challenges.register(body);
+    if (!caller?.admin) await challenges.register(body, language);
     const userId = randomUUID();
     const ts = now();
     await db

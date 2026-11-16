@@ -97,7 +97,7 @@ A command exits with:
 | `comments add <contentId> <text>`                                        | Comments on a post that takes comments (quote the text). A comment the server holds back waits for its moderators, as a post does, and the command says so.                                              |
 | `comments delete <contentId> <commentId>`                                | Deletes a comment: your own, one on your post, or any comment if you're an admin.                                                                                                                        |
 | `moderators list <tag>`                                                  | A hashtag's moderators.                                                                                                                                                                                  |
-| `rules list`                                                             | The server's [rules](API.md#rules), in their order, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is.         |
+| `rules list`                                                             | The server's [rules](API.md#rules), in their order, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is. |
 | `inbox list [--unread] [--limit <n>] [--cursor <cursor>]`                | Your [inbox](API.md#inbox), newest first: the messages users sent you, and the notices of what moderators did to your posts and comments and of your mutes. With `--unread`, only what you haven't read. |
 | `inbox read [--message <messageId>]`                                     | Marks everything in your inbox as read, or with `--message`, one message or notice.                                                                                                                      |
 | `inbox delete <messageId>`                                               | Deletes a message or a notice from your inbox.                                                                                                                                                           |
@@ -145,7 +145,7 @@ Both queue and reports contain posts and comments. Each line starts with `post` 
 | `reports accept <contentId> [--comment <commentId>]`                                 | Accepts a reported post, or with `--comment`, a reported comment on it: it stays as it is, and leaves the report queue.                          |
 | `reports delete <contentId> [--comment <commentId>]`                                 | Deletes a reported post, or with `--comment`, a reported comment on it.                                                                          |
 | `bans list [--limit <n>] [--cursor <cursor>]`                                        | The [banned](API.md#bans) users, most recently banned first: who banned each, when, and why.                                                     |
-| `bans add <userId> [--reason <text>]`                                                | Bans a user: they can't post, comment or send messages, and can still read. They're told. Not an admin or a server moderator.                    |
+| `bans add <userId> [--reason <text>]`                                                | Bans a user: they can't post, comment, like or send messages, and can still read. They're told. Not an admin or a server moderator.              |
 | `bans remove <userId>`                                                               | Ends a ban. The user is told.                                                                                                                    |
 
 
@@ -196,15 +196,20 @@ evieverse rules list
 1  9a41c3d0-…  Read these first.
 2  0b7c0f5e-…  Be kind to each other.
 
+Support: support@example.com
+
 Modification disclosure: this server runs Evieverse 0.1.0, unmodified.
 ```
 
-Appoint a moderator of `#news`, who then blocks a word and a phrase there:
+Appoint a moderator of `#news`, who then blocks a word, a phrase and a pattern there:
 
 ```bash
 evieverse moderators add news 3f6c2c0e-…                 # as an admin
 evieverse words add --tag news spam "buy now"            # as the moderator, or an admin
+evieverse words add --tag news '/垃圾|广告/'              # a pattern, in single quotes
 ```
+
+A pattern is a regular expression between slashes, which matches anywhere in a text ([API.md](API.md#blocked-words)). Put it in single quotes, so the shell passes it on as it's written. `words list` shows it with its slashes, and `words remove` takes it the same way.
 
 Work through a hashtag's queue:
 

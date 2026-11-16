@@ -78,7 +78,7 @@ export interface WhoAmI {
   /** Whether anyone can list whom they follow, and who follows them. */
   showFollowing: boolean;
   showFollowers: boolean;
-  /** Whether a moderator banned them: they can't post, comment or send messages. */
+  /** Whether a moderator banned them: they can't post, comment, like or send messages. */
   banned?: boolean;
 }
 
@@ -104,7 +104,7 @@ function table(rows: string[][]): string {
 function roles(me: WhoAmI): string {
   const held = [me.moderator && 'a server moderator', me.moderates.length > 0 && `moderator of ${hashtags(me.moderates)}`].filter(Boolean);
   const role = me.admin ? 'an admin' : held.length ? held.join(', and ') : 'no moderation role';
-  return me.banned ? `${role}; banned, so you can't post, comment or send messages` : role;
+  return me.banned ? `${role}; banned, so you can't post, comment, like or send messages` : role;
 }
 
 /** A post as the feed and the moderation queue give it, as far as the CLI shows it. */
@@ -349,6 +349,116 @@ const words = (verb: 'list' | 'add' | 'remove', method: Request['method'], summa
     text: (d) => (d.words.length ? d.words.join('\n') : `${d.tag ? `#${d.tag}` : 'The server'} has no blocked words.`),
   });
 
+/** Where a post is read on its server: https://other.example/content/<id>. */
+const POST_ADDRESS = /^(.+)\/content\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+/** A post as its own server gives it at GET /content/:id, as far as a repost of it sends on. */
+interface OriginalPost {
+  publisher: { userId: string; username: string };
+  preview: { kind: string; text?: string; url?: string };
+  mimeType: string;
+  aiGenerated: boolean;
+  /** On one that is itself a repost of a post on yet another server: the original, which is what gets reposted. */
+  origin?: { url: string; publisher: { userId: string; username: string } };
+}
+
+/** What POST /repost takes for a post on another server: its address, who published it, and its summary. */
+type RepostOrigin = Pick<OriginalPost, 'publisher' | 'preview' | 'mimeType' | 'aiGenerated'> & { url: string };
+
+/**
+ * What to repost, for the address of a post: the post's id, if the address is on the profile's own
+ * server, and otherwise the original with its summary, which is read here, from the server the
+ * post is on, since servers don't ask each other. That request carries no key: the key is the
+ * profile's server's, and a post anyone can repost is one anyone can read.
+ *
+ * A post that is itself a repost of one on another server names its original, and that is what is
+ * reposted, so that a post has one address wherever it is reposted from.
+ */
+async function repostSource(io: Io, server: string, address: string): Promise<{ contentId: string } | { origin: RepostOrigin }> {
+  let url: URL;
+  try {
+    url = new URL(address);
+  } catch {
+    throw new CliError(`"${address}" is not the address of a post, such as https://other.example/content/<id>`, 2);
+  }
+  const at = POST_ADDRESS.exec(`${url.origin}${url.pathname}`);
+  if (!['http:', 'https:'].includes(url.protocol) || !at || url.search || url.hash) {
+    throw new CliError(`"${address}" is not the address of a post, such as https://other.example/content/<id>`, 2);
+  }
+  const own = (found: RegExpExecArray) => (found[1] === server ? { contentId: found[2]!.toLowerCase() } : null);
+  const here = own(at);
+  if (here) return here;
+
+  const where = `${at[1]}/content/${at[2]!.toLowerCase()}`;
+  let post: OriginalPost | null = null;
+  let status: number;
+  try {
+    const res = await io.fetch(where, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(60_000) });
+    status = res.status;
+    if (res.ok) post = (await res.json()) as OriginalPost;
+  } catch (err) {
+    const e = err as Error & { cause?: { message?: string } };
+    throw new CliError(`could not read the post at ${where}: ${e.name === 'TimeoutError' ? 'no answer in 60 seconds' : (e.cause?.message ?? e.message)}`);
+  }
+  if (!post) throw new CliError(status === 404 ? `there is no post at ${where}` : `could not read the post at ${where}: its server answered ${status}`);
+  if (typeof post.publisher?.userId !== 'string' || typeof post.preview?.kind !== 'string') throw new CliError(`${where} did not answer with a post`);
+
+  const summary = { preview: post.preview, mimeType: post.mimeType, aiGenerated: post.aiGenerated === true };
+  if (!post.origin) return { origin: { url: where, publisher: post.publisher, ...summary } };
+  const original = POST_ADDRESS.exec(post.origin.url);
+  return (original && own(original)) ?? { origin: { url: post.origin.url, publisher: post.origin.publisher, ...summary } };
+}
+
+/** What POST /repost answers: the hashtags the post got, those it didn't with why, and for a post from another server, the entry made for it here. */
+interface Reposted {
+  contentId: string;
+  tags: string[];
+  removedTags?: { tag: string; reason: string }[];
+  repostedAt?: string;
+  status?: string;
+  origin?: { url: string };
+}
+
+/** Why a repost didn't give a hashtag, as the server names it. */
+const NOT_GIVEN: Record<string, string> = {
+  already_tagged: 'the post has it already',
+  muted: 'you or its publisher are muted on it',
+  removed: 'a moderator removed it from the post',
+  blocked_word: 'the post has a word it blocks',
+};
+
+const repost: Command = {
+  name: 'repost',
+  positionals: ['post'],
+  options: { tags: { type: 'string' } },
+  flags: '--tags <tags>',
+  role: 'anyone',
+  summary:
+    "Reposts a post: gives it hashtags it doesn't have, under which it shows as a new post, as it does to those who follow you. Name the post by its id, or a post on another server by its address there (https://other.example/content/<id>), which is read from that server and reposted here as a link to it. Quote the hashtags: --tags \"news, mumbai\".",
+  async run(ctx, { positionals: [post], values }) {
+    const { tags } = values;
+    if (typeof tags !== 'string' || !tags.trim()) throw new CliError('name the hashtags the repost gives the post: --tags "news, mumbai"', 2);
+    const api = await ctx.api();
+    const source = /^https?:\/\//i.test(post!) ? await repostSource(ctx.io, api.server, post!) : { contentId: post! };
+    const d = await api.request<Reposted>('POST', '/repost', { ...source, tags }).catch((err: unknown) => {
+      // A repost is a post as far as challenges go, and a challenge's image takes a client to show.
+      if (err instanceof ApiError && err.status === 428) {
+        throw new CliError(`${err.message}. The CLI can't show a challenge: repost again later, or with a client that shows its image`);
+      }
+      throw err;
+    });
+    const what = d.origin ? d.origin.url : d.contentId;
+    const notGiven = (d.removedTags ?? []).map((r) => `\nNot #${r.tag}: ${NOT_GIVEN[r.reason] ?? r.reason}.`).join('');
+    const done =
+      d.status === 'pending_review'
+        ? `Your repost of ${what} waits for the server's moderators: ${d.contentId}`
+        : d.origin
+          ? `Reposted ${what} under ${hashtags(d.tags)}: it is ${d.contentId} here.`
+          : `Reposted ${what} under ${hashtags(d.tags)}.`;
+    return { data: d, text: `${done}${notGiven}` };
+  },
+};
+
 export const COMMANDS: Command[] = [
   {
     name: 'login',
@@ -469,6 +579,7 @@ export const COMMANDS: Command[] = [
       };
     },
   },
+  repost,
   endpoint<{ contentId: string; requestedAt: string }>({
     name: 'content delete',
     positionals: ['contentId'],
@@ -576,15 +687,17 @@ export const COMMANDS: Command[] = [
     request: ({ positionals: [tag] }) => ({ method: 'GET', path: path`/tags/${tag!}/moderators` }),
     text: (d) => (d.moderators.length ? table(d.moderators.map((m) => [m.userId, m.username, `since ${m.since}`])) : `#${d.tag} has no moderators.`),
   }),
-  endpoint<{ modificationDisclosure: ModificationDisclosure; rules: RuleRecord[] }>({
+  endpoint<{ modificationDisclosure: ModificationDisclosure; supportEmail: string; rules: RuleRecord[] }>({
     name: 'rules list',
     role: 'anyone',
     summary:
-      "Lists the server's rules, in their order, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is.",
+      "Lists the server's rules, in their order, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is.",
     request: () => ({ method: 'GET', path: '/rules' }),
     text: (d) =>
       [
         d.rules.length ? table(d.rules.map((r) => [String(r.position), r.ruleId, r.text.replace(/\s+/g, ' ').trim()])) : 'The server has no rules.',
+        '',
+        `Support: ${d.supportEmail}`,
         '',
         disclosed(d.modificationDisclosure),
       ].join('\n'),
@@ -660,8 +773,8 @@ export const COMMANDS: Command[] = [
   }),
 
   words('list', 'GET', "Lists a hashtag's blocked words, or with --server the server's (admins)."),
-  words('add', 'POST', 'Blocks words or phrases; quote a phrase. Prints the list as it is then.'),
-  words('remove', 'DELETE', 'Unblocks words or phrases. Prints the list as it is then.'),
+  words('add', 'POST', "Blocks words, phrases or patterns; quote a phrase, and a pattern, which is a regular expression between slashes ('/spam+/'). Prints the list as it is then."),
+  words('remove', 'DELETE', 'Unblocks words, phrases or patterns. Prints the list as it is then.'),
   endpoint<{ tag: string; muted: { userId: string; username: string; mutedAt: string }[]; nextCursor: string | null }>({
     name: 'mute list',
     positionals: ['tag'],
@@ -714,7 +827,7 @@ export const COMMANDS: Command[] = [
     request: ({ positionals: [contentId, tag] }) => ({ method: 'PUT', path: path`/content/${contentId!}/tags/${tag!}` }),
     text: (d) => (d.alreadyApproved ? `${d.contentId} was already approved under #${d.tag}.` : `Approved ${d.contentId} under #${d.tag}.`),
   }),
-  endpoint<{ contentId: string; tag: string; tags: string[]; status?: string; muted: boolean }>({
+  endpoint<{ contentId: string; tag: string; tags: string[]; muted: boolean }>({
     name: 'tag remove',
     positionals: ['contentId', 'tag'],
     options: { mute: { type: 'boolean' } },
@@ -727,9 +840,9 @@ export const COMMANDS: Command[] = [
       ...(values.mute === true && { body: { mute: true } }),
     }),
     text: (d) =>
-      (d.status === 'pending_deletion'
-        ? `#${d.tag} was the last hashtag of ${d.contentId}, so the content is set for deletion.`
-        : `Removed #${d.tag} from ${d.contentId}: it's now under ${hashtags(d.tags)}.`) + (d.muted ? `\nIts publisher is muted on #${d.tag}.` : ''),
+      (d.tags.length
+        ? `Removed #${d.tag} from ${d.contentId}: it's now under ${hashtags(d.tags)}.`
+        : `Removed #${d.tag} from ${d.contentId}: it was its last hashtag, so the content is in no hashtag's feed any more.`) + (d.muted ? `\nIts publisher is muted on #${d.tag}.` : ''),
   }),
 
   {
@@ -895,13 +1008,13 @@ export const COMMANDS: Command[] = [
     flags: '[--reason <text>]',
     role: 'serverModerator',
     summary:
-      "Bans a user: they can't post, comment or send messages, and can still read. They are told. Not an admin or a server moderator. With --reason, what moderators can read of why.",
+      "Bans a user: they can't post, comment, like or send messages, and can still read. They are told. Not an admin or a server moderator. With --reason, what moderators can read of why.",
     request: ({ positionals: [userId], values }) => ({
       method: 'PUT',
       path: path`/banned/${userId!}`,
       ...(typeof values.reason === 'string' && { body: { reason: values.reason } }),
     }),
-    text: (d) => (d.alreadyBanned ? `${d.username} (${d.userId}) was already banned.` : `${d.username} (${d.userId}) is banned: they can't post, comment or send messages.`),
+    text: (d) => (d.alreadyBanned ? `${d.username} (${d.userId}) was already banned.` : `${d.username} (${d.userId}) is banned: they can't post, comment, like or send messages.`),
   }),
   endpoint<{ userId: string; wasBanned: boolean }>({
     name: 'bans remove',

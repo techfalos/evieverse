@@ -1,11 +1,11 @@
-import { readdir } from 'node:fs/promises';
+import { readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { authorIndex } from '../src/tagfeed/layout.js';
 import { DAY, HOUR } from '../src/time.js';
-import { as, createTestContext, JPEG, multipart, PNG, queued, requests, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
+import { as, createTestContext, JPEG, multipart, PNG, queued, requests, sha256, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
 
 for (const target of TARGETS) {
   describe(`API (${target.name})`, () => {
@@ -202,23 +202,29 @@ for (const target of TARGETS) {
       expect(await ctx.db.selectFrom('content').selectAll().execute()).toEqual([]);
     });
 
-    it('writes over a post when it is updated: a file whenever it is sent, with the caption it comes with', async () => {
+    it('writes over a post when it is updated, with the caption the file comes with, and stores nothing for the file and caption it has', async () => {
       const alice = await ctx.register('alice');
       const send = (fields: Record<string, string>) => upload({ ...alice, type: 'image', tags: 'pics', ...fields }, { name: 'pixel.png', type: 'image/png', data: PNG });
       const createdAt = new Date(ctx.clock.now).toISOString();
       const { contentId } = (await send({ text: 'first caption' })).json();
+      // The meta file keeps the hash of the file as stored, which is what an update's file is compared by.
+      const first = await ctx.content.getMeta(contentId);
+      expect(first).toMatchObject({ sha256: sha256(PNG), updatedAt: ctx.clock.now });
       ctx.clock.now += 1000;
-      // A file isn't compared with the one stored, so the same one is an update like any other.
+      // The file the post has, with the caption it has, changes nothing, and nothing is written.
       const same = await send({ contentId, text: 'first caption' });
       expect(same.statusCode, same.body).toBe(200);
-      expect(same.json()).not.toHaveProperty('unchanged');
-      ctx.clock.now += 1000;
+      expect(same.json()).toEqual({ contentId, unchanged: true });
+      expect(await ctx.content.getMeta(contentId)).toEqual(first);
+      // With another caption, or none, the same file is an update like any other.
       expect((await send({ contentId, text: 'second caption' })).json()).toMatchObject({ contentId, preview: { kind: 'image', text: 'second caption' } });
       ctx.clock.now += 1000;
       const bare = (await send({ contentId })).json();
       expect(bare).not.toHaveProperty('version');
       expect(bare.preview).not.toHaveProperty('text');
       const updatedAt = new Date(ctx.clock.now).toISOString();
+      ctx.clock.now += 1000;
+      expect((await send({ contentId })).json()).toEqual({ contentId, unchanged: true });
       const body = await getContent(contentId);
       expect(body).not.toHaveProperty('text');
       expect(body).toMatchObject({ createdAt, updatedAt, size: PNG.length });
@@ -229,6 +235,60 @@ for (const target of TARGETS) {
       // One row, and one set of objects: the updates wrote over them.
       expect(await ctx.db.selectFrom('content').select('id').execute()).toEqual([{ id: contentId }]);
       expect((await readdir(join(ctx.dir, 'content', 'content'))).sort()).toEqual([contentId, `${contentId}.meta.json`]);
+    });
+
+    it('tells the file a post has by its hash: another file is an update, and so is any file where the post has no hash yet', async () => {
+      const alice = await ctx.register('alice');
+      const clip = (data: Buffer, fields: Record<string, unknown> = {}) =>
+        storePost(alice, { type: 'video', content: data.toString('base64'), contentEncoding: 'base64', contentType: 'video/mp4', tags: ['clips'], ...fields });
+      const meta = (contentId: string) => ctx.content.getMeta(contentId);
+      const raw = async (contentId: string) => (await ctx.app.inject({ method: 'GET', url: `/content/${contentId}/raw` })).rawPayload;
+      const one = Buffer.from('one clip');
+      const other = Buffer.from('another clip, of another length');
+
+      const { contentId } = (await clip(one)).json();
+      expect(await meta(contentId)).toMatchObject({ sha256: sha256(one), size: one.length });
+      expect((await clip(one, { contentId })).json()).toEqual({ contentId, unchanged: true });
+      // The same file with other hashtags is an update, which stores it with them.
+      expect((await clip(one, { contentId, tags: ['clips', 'travel'] })).json()).toMatchObject({ contentId, tags: ['clips', 'travel'] });
+      expect((await clip(one, { contentId, tags: ['travel', 'clips'] })).json()).toEqual({ contentId, unchanged: true });
+
+      ctx.clock.now += 1000;
+      const updated = await clip(other, { contentId, tags: ['clips', 'travel'] });
+      expect(updated.statusCode, updated.body).toBe(200);
+      expect(updated.json()).not.toHaveProperty('unchanged');
+      expect((await raw(contentId)).equals(other)).toBe(true);
+      expect(await meta(contentId)).toMatchObject({ sha256: sha256(other), size: other.length, updatedAt: ctx.clock.now });
+      // The hash is of the file the post has now, not of one it had.
+      expect((await clip(other, { contentId, tags: ['clips', 'travel'] })).json()).toEqual({ contentId, unchanged: true });
+      expect((await clip(one, { contentId, tags: ['clips', 'travel'] })).json()).not.toHaveProperty('unchanged');
+      expect((await raw(contentId)).equals(one)).toBe(true);
+
+      // A meta file written before the server kept hashes has none: the file is stored, and compared from then on.
+      const { sha256: _, ...before } = (await meta(contentId))!;
+      await ctx.content.putMeta(before);
+      ctx.clock.now += 1000;
+      expect((await clip(one, { contentId, tags: ['clips', 'travel'] })).json()).not.toHaveProperty('unchanged');
+      expect(await meta(contentId)).toMatchObject({ sha256: sha256(one), updatedAt: ctx.clock.now });
+      expect((await clip(one, { contentId, tags: ['clips', 'travel'] })).json()).toEqual({ contentId, unchanged: true });
+
+      // An update that stops once its file is written leaves no hash of the file the post had: sent again, that file is stored.
+      vi.spyOn(ctx.summaries, 'put').mockRejectedValueOnce(new Error('store unavailable'));
+      expect((await clip(other, { contentId, tags: ['clips', 'travel'] })).statusCode).toBe(500);
+      expect((await raw(contentId)).equals(other)).toBe(true);
+      expect(await meta(contentId)).not.toHaveProperty('sha256');
+      expect((await clip(one, { contentId, tags: ['clips', 'travel'] })).json()).not.toHaveProperty('unchanged');
+      expect((await raw(contentId)).equals(one)).toBe(true);
+      // Nor are bytes of another size than the meta file says the file it hashed, as two updates at once can leave them.
+      await writeFile(join(ctx.dir, 'content', 'content', contentId), other);
+      expect((await clip(one, { contentId, tags: ['clips', 'travel'] })).json()).not.toHaveProperty('unchanged');
+      expect((await raw(contentId)).equals(one)).toBe(true);
+      expect((await clip(one, { contentId, tags: ['clips', 'travel'] })).json()).toEqual({ contentId, unchanged: true });
+
+      // A text or a link post is compared by what it says, and keeps no hash.
+      const text = (await storeText(alice, 'words #news')).json();
+      expect(await meta(text.contentId)).not.toHaveProperty('sha256');
+      expect((await storeText(alice, 'words #news', { contentId: text.contentId })).json()).toEqual({ contentId: text.contentId, unchanged: true });
     });
 
     it("takes only the server's hashtags in server mode, and gives a post the ones its publisher chose of them", async () => {
@@ -317,6 +377,55 @@ for (const target of TARGETS) {
       expect(load({ TAGGING_MODE: 'server', TAGGING_SERVER_TAGS: Array.from({ length: 40 }, (_, i) => `t${i}`).join(',') }).serverTags).toHaveLength(40);
       expect(() => load({ TAGGING_MODE: 'server' })).toThrow('server tagging needs at least one hashtag in TAGGING_SERVER_TAGS');
       expect(() => load({ TAGGING_MODE: 'server', TAGGING_SERVER_TAGS: 'news, 日本' })).toThrow(/日本.* is not a usable hashtag/);
+    });
+
+    it('takes only the types of post that are on, and keeps the posts it has of a type turned off since', async () => {
+      await ctx.close();
+      // A server of pictures and links. The post window is on: a refusal comes before any challenge.
+      ctx = await createTestContext(target, { postTypes: { text: false, video: false, audio: false }, challenge: { postWindowSeconds: 60 } });
+      const alice = await ctx.register('alice');
+      const off = (type: string) => [400, `this server doesn't take ${type} posts: the types it takes are image, link`];
+      const refusal = (res: Awaited<ReturnType<typeof storeText>>) => [res.statusCode, res.json().error];
+
+      const img = await upload({ ...alice, type: 'image', tags: 'pixel' }, { name: 'pixel.png', type: 'image/png', data: PNG });
+      expect(img.statusCode, img.body).toBe(201);
+      ctx.clock.now += 60_000;
+      const link = await storePost(alice, { type: 'link', url: 'https://news.example/story', tags: ['news'] });
+      expect(link.statusCode, link.body).toBe(201);
+
+      // Straight after a post, when one that could be stored would be answered with a challenge.
+      expect(refusal(await storeText(alice, 'Some words #news'))).toEqual(off('text'));
+      expect(refusal(await upload({ ...alice, type: 'video', tags: 'clips' }, { name: 'clip.mp4', type: 'video/mp4', data: PNG }))).toEqual(off('video'));
+      expect(refusal(await storePost(alice, { type: 'audio', content: PNG.toString('base64'), contentEncoding: 'base64', contentType: 'audio/mpeg', tags: ['songs'] }))).toEqual(off('audio'));
+      // Whoever sends it, and before its file is looked at: no key is needed to be told.
+      expect(refusal(await ctx.app.inject({ method: 'POST', url: '/store', payload: { type: 'text', text: 'Some words', tags: ['news'] } }))).toEqual(off('text'));
+      expect(await ctx.db.selectFrom('content').select('id').execute()).toHaveLength(2);
+
+      // A type turned off later, which the server reads when it starts: here, under a running one.
+      ctx.config.postTypes.link = false;
+      const { contentId } = link.json();
+      ctx.clock.now += 60_000;
+      const gone = [400, "this server doesn't take link posts: the types it takes are image"];
+      expect(refusal(await storePost(alice, { type: 'link', url: 'https://news.example/other', tags: ['news'] }))).toEqual(gone);
+      // No update of the post it has, not even one that changes nothing...
+      expect(refusal(await storePost(alice, { type: 'link', url: 'https://news.example/story', tags: ['news'], contentId }))).toEqual(gone);
+      // ...which stays as it was: read, liked, in feeds, and its publisher's to delete.
+      expect(await getContent(contentId)).toMatchObject({ contentId, preview: { kind: 'link', url: 'https://news.example/story' } });
+      expect((await like(await ctx.register('bob'), contentId)).statusCode).toBe(201);
+      await ctx.compact();
+      expect(ids(await feed('tags=news'), 'news')).toEqual([contentId]);
+      expect((await ctx.app.inject({ method: 'DELETE', url: `/content/${contentId}`, headers: as(alice) })).statusCode).toBe(202);
+    });
+
+    it('takes every type of post unless one is turned off, and does not start with all of them off', () => {
+      const load = (env: Record<string, string> = {}) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).postTypes;
+      const all = { text: true, image: true, video: true, audio: true, link: true };
+      expect(load()).toEqual(all);
+      expect(load({ POST_TYPE_TEXT: '', POST_TYPE_LINK: 'true' })).toEqual(all);
+      expect(load({ POST_TYPE_VIDEO: 'false', POST_TYPE_AUDIO: '0' })).toEqual({ ...all, video: false, audio: false });
+      const onlyImages = { POST_TYPE_TEXT: 'false', POST_TYPE_VIDEO: 'false', POST_TYPE_AUDIO: 'false', POST_TYPE_LINK: 'false' };
+      expect(load(onlyImages)).toEqual({ text: false, image: true, video: false, audio: false, link: false });
+      expect(() => load({ ...onlyImages, POST_TYPE_IMAGE: 'false' })).toThrow(/the server needs a type of post to take/);
     });
 
     it("normalises the publisher's hashtags, from a list or one form field, and refuses ones it can't use", async () => {

@@ -453,9 +453,9 @@ for (const target of TARGETS) {
       ok(await req(mod, 'DELETE', `/content/${contentId}/tags/news`));
       expect(await notices(alice)).toEqual([{ kind: 'tag_removed', contentId, tag: 'news', excerpt: 'Two hashtags here #news #sports', text: removed }]);
 
-      // The last hashtag takes the post with it, and with `mute` the publisher is told of that too.
+      // The last hashtag takes the post out of hashtag feeds, and with `mute` the publisher is told of that too.
       ctx.clock.now += 1000;
-      ok(await req(root, 'DELETE', `/content/${contentId}/tags/sports`, { mute: true }), 202);
+      ok(await req(root, 'DELETE', `/content/${contentId}/tags/sports`, { mute: true }), 200);
       // The two are of the same moment, so in either order.
       const byKind = (a: { kind: string }, b: { kind: string }) => a.kind.localeCompare(b.kind);
       expect((await notices(alice)).slice(1).sort(byKind)).toEqual([
@@ -464,7 +464,7 @@ for (const target of TARGETS) {
           contentId,
           tag: 'sports',
           excerpt: 'Two hashtags here #news #sports',
-          text: "A moderator removed #sports from your post. It was the post's last hashtag, so the post was deleted.",
+          text: "A moderator removed #sports from your post. It was the post's last hashtag, so the post is in no hashtag's feed any more. It can still be read, and those who follow you still see it.",
         },
         { kind: 'tag_muted', tag: 'sports', text: "A moderator muted you on #sports: your new posts and updates don't get that hashtag." },
       ]);
@@ -484,7 +484,10 @@ for (const target of TARGETS) {
       ok(await req(mod, 'DELETE', `/content/${own}/tags/news`));
       expect(await notices(mod)).toEqual([]);
 
-      // The notices outlast the post they are about.
+      // The post is still there, with no hashtag, and its publisher can delete it. The notices outlast it.
+      await ctx.compact();
+      expect(ok(await req(null, 'GET', `/content/${contentId}`), 200).tags).toEqual([]);
+      ok(await req(alice, 'DELETE', `/content/${contentId}`), 202);
       for (let i = 0; i < 3; i++) await ctx.compact();
       expect((await req(null, 'GET', `/content/${contentId}`)).statusCode).toBe(404);
       expect(await notices(alice)).toContainEqual(expect.objectContaining({ kind: 'last_tag_removed', contentId, excerpt: 'Two hashtags here #news #sports' }));
@@ -546,7 +549,7 @@ for (const target of TARGETS) {
 
     it("says a notice in its reader's language, whichever it was when the notice was left", async () => {
       dir = await mkdtemp(join(tmpdir(), 'evieverse-languages-'));
-      await copyFile(fileURLToPath(new URL('../src/languages/en.json', import.meta.url)), join(dir, 'en.json'));
+      await copyFile(fileURLToPath(new URL('../languages/en.json', import.meta.url)), join(dir, 'en.json'));
       const spanish = { name: 'Español', messages: { 'notice.tag_muted': 'Un moderador te silenció en #{tag}.', 'inbox.own_only': 'solo puedes leer tu propio buzón' } };
       await writeFile(join(dir, 'es.json'), JSON.stringify(spanish));
       ctx = await createTestContext(target, { languages: loadLanguages('en', dir) });

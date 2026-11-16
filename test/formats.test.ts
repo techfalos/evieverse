@@ -68,6 +68,26 @@ describe('summary text', () => {
     expect(decodeSummary(ID, encodeSummary(s), 'https://api.example.com')).toEqual(s);
   });
 
+  it('adds a line for the original to the summary of a repost from another server, whose file is read there', () => {
+    const origin = { url: `https://other.example/content/${ID}`, publisher: { userId: '11111111-1111-4111-8111-111111111111', username: 'Dana of the North' } };
+    const text = summary({ origin });
+    const encoded = encodeSummary(text);
+    expect(encoded).toBe(
+      `${NOW - 1234} ${NOW} 0 0 1\n7c9e6679-7425-40de-944b-e07fc1f90ae7\ntext/plain\nnews mumbai\ntext\n` +
+        `https://other.example/content/${ID} 11111111-1111-4111-8111-111111111111 Dana of the North\nFlooding closes roads.\n\nMore below.`,
+    );
+    expect(decodeSummary(ID, encoded, 'https://api.example.com')).toEqual(text);
+
+    // Its image is the original's: the link is to the server that has the bytes, not to this one.
+    const image = summary({ origin, mimeType: 'image/png', aiGenerated: true, preview: { kind: 'image', url: `${origin.url}/raw`, text: 'Sunset' } });
+    expect(encodeSummary(image)).not.toContain('/raw');
+    expect(decodeSummary(ID, encodeSummary(image), 'https://api.example.com')).toEqual(image);
+    expect(() => decodeSummary(ID, encoded.replace(` ${origin.publisher.userId} Dana of the North`, ''), '')).toThrow(/names no original/);
+
+    // When it was reposted says where a summary is kept, and is no part of what it says.
+    expect(encodeSummary(summary({ repostedAt: [NOW] }))).toBe(encodeSummary(summary()));
+  });
+
   it('rejects truncated text and preview kinds it does not know', () => {
     const text = encodeSummary(summary());
     expect(() => decodeSummary(ID, text.slice(0, 20), '')).toThrow(/truncated/);
@@ -78,25 +98,28 @@ describe('summary text', () => {
 describe('day index entries', () => {
   it('packs each entry into 25 bytes, keeping whole seconds of the creation time', () => {
     const entries: IndexEntry[] = [
-      { contentId: ID, createdAt: NOW + 999, likes: 4_000_000_000, aiGenerated: true, moderated: false },
-      { contentId: '00000000-0000-4000-8000-000000000001', createdAt: NOW, likes: 0, aiGenerated: false, moderated: false },
-      { contentId: '00000000-0000-4000-8000-000000000002', createdAt: NOW, likes: 1, aiGenerated: false, moderated: true },
-      { contentId: '00000000-0000-4000-8000-000000000003', createdAt: NOW, likes: 2, aiGenerated: true, moderated: true },
+      { contentId: ID, createdAt: NOW + 999, likes: 4_000_000_000, aiGenerated: true, moderated: false, repost: false },
+      { contentId: '00000000-0000-4000-8000-000000000001', createdAt: NOW, likes: 0, aiGenerated: false, moderated: false, repost: false },
+      { contentId: '00000000-0000-4000-8000-000000000002', createdAt: NOW, likes: 1, aiGenerated: false, moderated: true, repost: false },
+      { contentId: '00000000-0000-4000-8000-000000000003', createdAt: NOW, likes: 2, aiGenerated: true, moderated: true, repost: false },
+      { contentId: '00000000-0000-4000-8000-000000000004', createdAt: NOW, likes: 3, aiGenerated: false, moderated: false, repost: true },
+      { contentId: '00000000-0000-4000-8000-000000000005', createdAt: NOW, likes: 4, aiGenerated: true, moderated: true, repost: true },
     ];
     const buf = packDay(entries);
     expect(DAY_ENTRY_BYTES).toBe(25);
-    expect(buf.length).toBe(4 * DAY_ENTRY_BYTES);
+    expect(buf.length).toBe(6 * DAY_ENTRY_BYTES);
     expect(unpackDay(buf)).toEqual([{ ...entries[0]!, createdAt: NOW }, ...entries.slice(1)]);
-    // The flags are the entry's last byte: 1 for AI-generated, 2 for moderated.
-    expect(entries.map((_, i) => buf[(i + 1) * DAY_ENTRY_BYTES - 1])).toEqual([1, 0, 2, 3]);
+    // The flags are the entry's last byte: 1 for AI-generated, 2 for moderated, 4 for an entry a repost made.
+    expect(entries.map((_, i) => buf[(i + 1) * DAY_ENTRY_BYTES - 1])).toEqual([1, 0, 2, 3, 4, 7]);
   });
 
   it('clamps likes to 32 bits, and refuses ids that are not UUIDs', () => {
-    const [e] = unpackDay(packDay([{ contentId: ID, createdAt: NOW, likes: 2 ** 40, aiGenerated: true, moderated: false }]));
+    const flags = { moderated: false, repost: false };
+    const [e] = unpackDay(packDay([{ contentId: ID, createdAt: NOW, likes: 2 ** 40, aiGenerated: true, ...flags }]));
     expect(e).toMatchObject({ likes: 0xffffffff, aiGenerated: true });
-    const [none] = unpackDay(packDay([{ contentId: ID, createdAt: NOW, likes: -5, aiGenerated: false, moderated: false }]));
+    const [none] = unpackDay(packDay([{ contentId: ID, createdAt: NOW, likes: -5, aiGenerated: false, ...flags }]));
     expect(none).toMatchObject({ likes: 0, aiGenerated: false });
-    expect(() => packDay([{ contentId: 'c-1', createdAt: NOW, likes: 0, aiGenerated: false, moderated: false }])).toThrow(/UUID/);
+    expect(() => packDay([{ contentId: 'c-1', createdAt: NOW, likes: 0, aiGenerated: false, ...flags }])).toThrow(/UUID/);
   });
 });
 
@@ -200,5 +223,52 @@ describe('SummaryStore', () => {
     expect(await store.purgeBefore(today - 11)).toEqual([today - 12]);
     expect((await readdir(join(dir, 'summaries'))).sort()).toEqual([dirName(today - 10), dirName(today)]);
     expect(await store.getMany(days)).toEqual([null, days[1], days[2]]);
+  });
+
+  it('keeps the summary of reposted content under the day of each repost too, and in Redis while the latest is recent', async () => {
+    const clock = { now: NOW };
+    const { hot, store } = await create(() => clock.now);
+    const today = Math.floor(NOW / DAY);
+    const dirName = (day: number) => String(day).padStart(5, '0');
+    const filesOf = async () =>
+      (await readdir(join(dir, 'summaries'), { recursive: true, withFileTypes: true }))
+        .filter((f) => f.isFile())
+        .map((f) => `${f.parentPath.split('/').pop()}/${f.name}`)
+        .sort();
+
+    // A post of 100 days ago, reposted 20 days ago and again yesterday.
+    const createdAt = NOW - 100 * DAY;
+    const repostedAt = [NOW - 20 * DAY, NOW - DAY, NOW - DAY + 5];
+    const { repostedAt: _, ...read } = summary({ createdAt, repostedAt });
+    await store.put({ ...read, repostedAt });
+    const copies = [today - 100, today - 20, today - 1].map((day) => `${dirName(day)}/${ID}.br`);
+    expect(await filesOf()).toEqual(copies);
+    expect(await hot.exists([summaryKey(read)])).toEqual([true]);
+    // An entry finds it by its own time: the post's, or a repost's.
+    for (const at of [createdAt, ...repostedAt]) expect(await store.getMany([{ contentId: ID, createdAt: at }])).toEqual([read]);
+    expect(await store.getMany([{ contentId: ID, createdAt: NOW - 50 * DAY }])).toEqual([null]);
+
+    // The post's own day goes with retention; the reposts' copies stay, and ensure writes whichever is missing.
+    expect(await store.purgeBefore(today - 90)).toEqual([today - 100]);
+    await rm(join(dir, 'summaries', dirName(today - 20)), { recursive: true });
+    await hot.del([summaryKey(read)]);
+    expect(await store.ensureMany([{ ...read, repostedAt }])).toEqual([null]);
+    expect(await filesOf()).toEqual(copies);
+    expect(await hot.exists([summaryKey(read)])).toEqual([true]);
+
+    // An update writes every copy, and Redis lets go of it once the latest repost is past the hot window.
+    const updated = { ...read, updatedAt: NOW + 5, tags: ['news', 'sports'] };
+    await store.put({ ...updated, repostedAt });
+    clock.now += 61_000;
+    for (const at of [createdAt, ...repostedAt]) expect(await store.getMany([{ contentId: ID, createdAt: at }])).toEqual([updated]);
+    clock.now = NOW + 7 * DAY + 10;
+    expect(await hot.exists([summaryKey(read)])).toEqual([false]);
+
+    // Erasing it erases every copy.
+    await store.erase({ contentId: ID, createdAt, repostedAt });
+    expect(await filesOf()).toEqual([]);
+    await store.put({ ...updated, repostedAt });
+    await store.remove([{ contentId: ID, createdAt, repostedAt }]);
+    expect(await filesOf()).toEqual([]);
   });
 });

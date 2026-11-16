@@ -6,8 +6,8 @@ import { badRequest } from './http/errors.js';
 import { IMAGE_HEAD_BYTES, ImageError, imageType, stripImage, type ImageType } from './image.js';
 import { resolveMimeType } from './http/mime.js';
 import { msg } from './language.js';
-import { LINK_MIME, mediaType, TEXT_MIME, type MediaType, type PostType } from './posts.js';
-import { spoolToTemp, UploadTooLargeError, type BytesOwner, type ContentStore, type SpooledFile, type StoredBytes } from './storage/index.js';
+import { LINK_MIME, mediaType, POST_TYPES, TEXT_MIME, type MediaType, type PostType } from './posts.js';
+import { hashFile, spoolToTemp, UploadTooLargeError, type BytesOwner, type ContentStore, type SpooledFile, type StoredBytes } from './storage/index.js';
 
 /** Where uploads are spooled (the system's temp directory if not set), and how large one can be. */
 export interface UploadLimits {
@@ -28,6 +28,13 @@ export interface PostBytes {
    * the server takes. These bytes are then released by the ones returned.
    */
   image(): Promise<{ type: ImageType; file: PostBytes }>;
+  /**
+   * The SHA-256, in hex, of the bytes `place` stores: what a post's meta file keeps of its file, and
+   * what says a file sent as an update is the one the content has. Null for a video or audio file
+   * sent with an upload link: it is copied within the content store where that can be, not stored
+   * from a file here, and reading it to hash it would bring it through this process.
+   */
+  hash(): Promise<string | null>;
   /** Writes the bytes as the content's, over the ones it had, or as a comment's image or video, and returns their size as stored. */
   place(content: ContentStore, of: BytesOwner, mimeType: string): Promise<StoredBytes>;
   /**
@@ -50,19 +57,27 @@ async function strip(...args: Parameters<typeof stripImage>) {
   }
 }
 
-const spooled = (file: SpooledFile, tmpPath?: string): PostBytes => ({
-  size: file.size,
-  async image() {
-    const stripped = await strip(createReadStream(file.path), tmpPath);
-    await file.cleanup();
-    return { type: stripped.type, file: spooled(stripped.file, tmpPath) };
-  },
-  async place(content, of, mimeType) {
-    await content.putFile(of, file.path, mimeType);
-    return { size: file.size };
-  },
-  release: () => file.cleanup(),
-});
+const spooled = (file: SpooledFile, tmpPath?: string): PostBytes => {
+  let sha256: Promise<string> | undefined;
+  return {
+    size: file.size,
+    async image() {
+      const stripped = await strip(createReadStream(file.path), tmpPath);
+      await file.cleanup();
+      return { type: stripped.type, file: spooled(stripped.file, tmpPath) };
+    },
+    hash: () => (sha256 ??= hashFile(file.path)),
+    async place(content, of, mimeType) {
+      await content.putFile(of, file.path, mimeType);
+      return { size: file.size };
+    },
+    release: () => file.cleanup(),
+  };
+};
+
+/** Bytes the server made itself, to store as a piece of content's: a text post's text, a link's URL, the address of a repost's original. */
+export const spoolBytes = async (bytes: Buffer, { tmpPath, maxUploadBytes }: UploadLimits): Promise<PostBytes> =>
+  spooled(await spoolToTemp(Readable.from([bytes]), tmpPath, maxUploadBytes), tmpPath);
 
 /** A request's file: a multipart part spooled to a temp file, or an upload already in the content store. */
 export interface Upload {
@@ -87,25 +102,40 @@ export async function readUploaded(content: ContentStore, userId: string, upload
     size: found.size,
     /**
      * Only the upload's first bytes are read now, to say which image it is. The rest is read once
-     * the post is to be stored, when it comes through this process to a temp file, without its
-     * metadata, and goes to the content store from there: nothing is fetched for a request that is
-     * refused or challenged, and nothing is written over the content unless the whole image is good.
+     * the post is to be stored, or once all that is left to tell an update from the content it has
+     * is the image, when it comes through this process to a temp file, without its metadata. It is
+     * hashed there, and goes to the content store from there: nothing is fetched for a request that
+     * is refused or challenged before then, and nothing is written over the content unless the whole
+     * image is good. The temp file is read from the upload once, and is what is stored: whoever holds
+     * the upload link can replace the upload meanwhile, and the hash is of what the content gets.
      */
     async image() {
       const type = imageType(await content.uploadHead(userId, uploadId, Math.min(found.size, IMAGE_HEAD_BYTES)));
       if (!type) throw notAnImage(new ImageError(null));
-      const place: PostBytes['place'] = async (_content, of) => {
-        // It must still be a `type`: whoever holds the upload link may have replaced the upload since.
-        const stripped = await strip(await content.streamUpload(userId, uploadId, maxUploadBytes), tmpPath, type);
-        try {
-          await content.putFile(of, stripped.file.path, type);
-          return { size: stripped.file.size };
-        } finally {
-          await stripped.file.cleanup();
-        }
+      let fetched: Promise<SpooledFile> | undefined;
+      let sha256: Promise<string> | undefined;
+      // It must still be a `type`: whoever holds the upload link may have replaced the upload since.
+      const stripped = () =>
+        (fetched ??= content.streamUpload(userId, uploadId, maxUploadBytes).then(async (upload) => (await strip(upload, tmpPath, type)).file));
+      const image: PostBytes = {
+        ...file,
+        hash: () => (sha256 ??= stripped().then(({ path }) => hashFile(path))),
+        async place(_content, of) {
+          const { path, size } = await stripped();
+          await content.putFile(of, path, type);
+          return { size };
+        },
+        async release(stored) {
+          await fetched?.then(
+            ({ cleanup }) => cleanup(),
+            () => {},
+          );
+          await file.release(stored);
+        },
       };
-      return { type, file: { ...file, place } };
+      return { type, file: image };
     },
+    hash: async () => null,
     place: (_content, of, mimeType) => content.adoptUpload(userId, uploadId, of, mimeType, maxUploadBytes),
     release: async (stored) => {
       if (stored) await content.removeUpload(userId, uploadId);
@@ -132,6 +162,15 @@ export type Post = { file: PostBytes; filename: string | null; mimeType: string 
   | { type: 'text'; text: string }
   | { type: 'link'; url: string }
 );
+
+/**
+ * 400 for a post of a type the server has turned off (`postTypes` of the configuration), new or an
+ * update, which names the types it takes. Checked before anything of the post is read or sent.
+ */
+export function requirePostType(postTypes: Record<PostType, boolean>, type: PostType) {
+  if (postTypes[type]) return;
+  throw badRequest(msg('post.type_off', { type, types: POST_TYPES.filter((taken) => postTypes[taken]).join(', ') }));
+}
 
 /** 400 for a file that isn't of the type its post is: an image post takes image/* files, and so on. */
 export const wrongFileType = (type: MediaType, mimeType: string) => badRequest(msg('post.wrong_file_type', { type, mimeType }));
@@ -187,14 +226,21 @@ export interface CommentFile {
  * The image or video a request sends with a comment, from the upload or inline in `content`, as a
  * post's file is sent; undefined for a request that sends none. It is held to what an image or a
  * video post's file is (see readPost): an image is checked by its bytes and stored without its
- * metadata, and a video's type is the one it was sent as. Any other file is refused, audio too.
+ * metadata, and a video's type is the one it was sent as. Any other file is refused, audio too,
+ * and so is an image or a video where the server takes no posts of that type (`postTypes`).
  */
-export async function readCommentFile({ content, contentEncoding, contentType, filename }: FileFields, upload: Upload | undefined, limits: UploadLimits): Promise<CommentFile | undefined> {
+export async function readCommentFile(
+  { content, contentEncoding, contentType, filename }: FileFields,
+  upload: Upload | undefined,
+  limits: UploadLimits,
+  postTypes: Record<CommentFile['kind'], boolean>,
+): Promise<CommentFile | undefined> {
   if (!upload && content === undefined) return undefined;
   const fields = { content, contentEncoding, contentType, filename };
   const { mimeType } = sentAs(fields, upload);
   const kind = mediaType(mimeType);
   if (kind !== 'image' && kind !== 'video') throw badRequest(msg('comment.wrong_file_type', { mimeType }));
+  if (!postTypes[kind]) throw badRequest(msg('comment.file_type_off', { type: kind }));
   const post = await readPost({ ...fields, type: kind }, upload, limits);
   return { kind, file: post.file, filename: post.filename, mimeType: post.mimeType };
 }
@@ -206,8 +252,8 @@ export async function readCommentFile({ content, contentEncoding, contentType, f
  * A video's or audio's type is the one it was sent as, and its bytes are stored as they came. An
  * image is checked by its bytes and stored without its metadata (see PostBytes.image).
  */
-export async function readPost(fields: PostFields, upload: Upload | undefined, { tmpPath, maxUploadBytes }: UploadLimits): Promise<Post> {
-  const spool = async (bytes: Buffer) => spooled(await spoolToTemp(Readable.from([bytes]), tmpPath, maxUploadBytes), tmpPath);
+export async function readPost(fields: PostFields, upload: Upload | undefined, limits: UploadLimits): Promise<Post> {
+  const spool = (bytes: Buffer) => spoolBytes(bytes, limits);
   const { type } = fields;
   const text = fields.text?.trim() || undefined;
   if (type !== 'link' && fields.url !== undefined) throw badRequest(msg('post.url_only_for_links'));

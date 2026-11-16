@@ -11,7 +11,9 @@ import { Credentials } from '../http/schemas.js';
 import { notify } from '../inbox.js';
 import { msg } from '../language.js';
 import { adRecord, eligibleAds, type PublishedAd } from '../monetization.js';
-import { previewOf } from '../posts.js';
+import { originMediaUrl, previewOf } from '../posts.js';
+import type { Publisher } from '../storage/index.js';
+import { indexAuthor } from '../tagfeed/layout.js';
 import { iso } from '../time.js';
 
 const Params = z.object({ contentId: z.string().uuid() });
@@ -59,12 +61,21 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    * whole text or caption, and hashtags. `status: "pending_review"` on content that waits in the
    * moderation queue. Who may read it is in loadReadable. `ad`, last, is the ad to show at the
    * end of the post (see postAd); content that waits in the moderation queue has none.
+   *
+   * `reposts`, on a post that was reposted (src/reposts.ts): each repost, oldest first, with who
+   * made it, the hashtags it gave the post that the post still has from it, and when. `likes` is
+   * the post's one count, all of them, whichever feed a like came from.
+   *
+   * `origin`, on a repost of a post on another server: the original's address and who published
+   * it there, with `publisher` the one who reposted it here. The preview is the original's, and so
+   * are the bytes, which this server doesn't hold: `contentUrl` leads to them, and there is no
+   * `size` or whole `text` to give.
    */
   app.get('/content/:contentId', async (req) => {
     const { contentId } = Params.parse(req.params);
     const row = await loadReadable(db, req, contentId);
     // The row says whose the content is and how liked; what it is, is in the meta file beside its bytes.
-    const meta = await requireMeta(content, contentId);
+    const [meta, reposts] = await Promise.all([requireMeta(content, contentId), repostsMade(contentId)]);
     const ad = row.queued ? undefined : await postAd(req, meta.tags);
     return {
       publisher: publisherOf(row),
@@ -77,13 +88,39 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
       mimeType: meta.mimeType,
       aiGenerated: row.ai_generated === 1,
       comments: takesComments(meta),
-      size: meta.size,
+      ...(!meta.origin && { size: meta.size }),
       contentUrl: `/content/${row.id}/raw`,
       createdAt: iso(row.created_at),
       updatedAt: iso(meta.updatedAt),
+      ...(reposts.length > 0 && { reposts }),
+      ...(meta.origin && { origin: meta.origin }),
       ...(ad && { ad: adRecord(ad, say(req, msg('ad.sponsored')), config.publicBaseUrl) }),
     };
   });
+
+  /**
+   * The reposts of a piece of content, oldest first: one for each user and time in `reposts`,
+   * with the hashtags it gave. `by` is left out of one whose user's account is gone, or closed.
+   */
+  async function repostsMade(contentId: string): Promise<{ by?: Publisher; tags: string[]; at: string }[]> {
+    const rows = await db
+      .selectFrom('reposts')
+      .leftJoin('users', (join) => join.onRef('users.id', '=', 'reposts.user_id').on('users.deleted_at', 'is', null))
+      .select(['reposts.tag', 'reposts.created_at', 'users.id as user_id', 'users.username'])
+      .where('reposts.content_id', '=', contentId)
+      .orderBy('reposts.created_at')
+      .orderBy('reposts.tag')
+      .execute();
+    const made = new Map<string, { by?: Publisher; tags: string[]; at: string }>();
+    for (const r of rows) {
+      const key = `${r.created_at} ${r.user_id ?? ''}`;
+      let repost = made.get(key);
+      if (!repost) made.set(key, (repost = { ...(r.user_id !== null && r.username !== null && { by: { userId: r.user_id, username: r.username } }), tags: [], at: iso(r.created_at) }));
+      // The row of the reposter's own index says the repost was made, and names no hashtag.
+      if (indexAuthor(r.tag) === null) repost.tags.push(r.tag);
+    }
+    return [...made.values()];
+  }
 
   /**
    * The content's bytes as they are now: an update writes over them. A redirect to the store where
@@ -92,11 +129,19 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    * read the content (see loadReadable).
    *
    * Streamed from here, a user's file is served from the API's own origin, so it goes out as
-   * something to show and nothing more (see rawHeaders).
+   * something to show and nothing more (see rawHeaders), and never compressed: they are the
+   * bytes as stored, with their size.
+   *
+   * A repost of a post on another server has no bytes of its own here: it is a link to the
+   * original, and this is a redirect to the original's bytes, on its own server.
    */
-  app.get('/content/:contentId/raw', async (req, reply) => {
+  app.get('/content/:contentId/raw', { compress: false }, async (req, reply) => {
     const { contentId } = Params.parse(req.params);
-    await loadReadable(db, req, contentId);
+    const row = await loadReadable(db, req, contentId);
+    if (row.origin_hash !== null) {
+      const { origin } = await requireMeta(content, contentId);
+      if (origin) return reply.redirect(originMediaUrl(origin), 302);
+    }
 
     const signed = await content.signedUrl(contentId);
     if (signed) return reply.redirect(signed, 302);

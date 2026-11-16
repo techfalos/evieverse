@@ -25,7 +25,10 @@ describe('trust scores', () => {
   });
 
   it('take their thresholds from the environment, which must leave them in order', () => {
-    const load = (env: Record<string, string> = {}) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).trust;
+    const load = (env: Record<string, string> = {}) => {
+      const { deleteBelow, allowFrom } = loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).trust;
+      return { deleteBelow, allowFrom };
+    };
     expect(load()).toEqual({ deleteBelow: 25, allowFrom: 75 });
     expect(load({ TRUST_SCORE_DELETE_BELOW: '0', TRUST_SCORE_ALLOW_FROM: '101' })).toEqual({ deleteBelow: 0, allowFrom: 101 });
     expect(load({ TRUST_SCORE_DELETE_BELOW: '75' })).toEqual({ deleteBelow: 75, allowFrom: 75 });

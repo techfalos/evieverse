@@ -48,6 +48,11 @@ export function functionConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return loadConfig({}, merged);
 }
 
+/** Functions share one feed index, which only Redis can hold for them: so a function doesn't start without it. */
+export function requireRedis(config: Config): void {
+  if (!config.redis.url) throw new Error('functions need REDIS_URL: without it the feed index would live inside each instance');
+}
+
 /**
  * One route group as a function, for any platform: the app is built once per instance, on the first
  * request (or by `ready()`, where the platform gives time to start), and each request passed through

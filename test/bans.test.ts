@@ -4,7 +4,7 @@ import { setAdmin } from '../src/moderation/policy.js';
 import { as, createTestContext, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 const NO_USER = '00000000-0000-4000-8000-000000000000';
-const BANNED = "your account is banned: you can't post, comment or send messages";
+const BANNED = "your account is banned: you can't post, comment, like or send messages";
 const STAFF_ONLY = 'only an admin or a server moderator can do this';
 
 type Banned = { userId: string; username: string; bannedAt: string; reason: string | null; bannedBy: { userId: string; username: string } | null };
@@ -72,10 +72,13 @@ for (const target of TARGETS) {
       expect((await req(null, 'GET', '/banned')).statusCode).toBe(401);
     });
 
-    it('refuses a banned user what posts, comments and sends, and nothing else', async () => {
+    it('refuses a banned user what posts, comments, likes and sends, and nothing else', async () => {
       const { mod, alice, bob } = await setup();
       const first = await post(alice, 'Before the ban #news', { comments: true });
       const bobs = await post(bob, 'Open to comments #news', { comments: true });
+      const { commentId } = ok(await req(bob, 'POST', `/content/${bobs}/comments`, { text: 'First' }), 201);
+      const like = (u: User, contentId: string, comment?: string) => req(u, 'POST', '/like', { contentId, ...(comment && { commentId: comment }) });
+      ok(await like(alice, bobs), 201);
       ok(await ban(mod, alice, 'Spam'), 201);
       const refusal = [403, BANNED];
 
@@ -85,6 +88,13 @@ for (const target of TARGETS) {
       expect(await refused(req(alice, 'POST', `/content/${bobs}/comments`, { text: 'Hello' }))).toEqual(refusal);
       expect(await refused(send(alice, bob, 'Hello'))).toEqual(refusal);
       expect(await refused(req(alice, 'POST', '/uploads', { type: 'image', contentType: 'image/png', size: 100 }))).toEqual(refusal);
+      // A like of a post or of a comment, and of what isn't there. The like she made before the ban stays, and is refused like any other.
+      expect(await refused(like(alice, first))).toEqual(refusal);
+      expect(await refused(like(alice, bobs, commentId))).toEqual(refusal);
+      expect(await refused(like(alice, NO_USER))).toEqual(refusal);
+      expect(await refused(like(alice, bobs))).toEqual(refusal);
+      expect(ok(await req(null, 'GET', `/content/${bobs}`))).toMatchObject({ likes: 1 });
+      expect(ok(await req(null, 'GET', `/content/${bobs}/comments`)).comments).toMatchObject([{ commentId, likes: 0 }]);
 
       // Her post is as it was, and she can read, be written to, and take her posts and her account away.
       expect(ok(await req(null, 'GET', `/content/${first}`))).toMatchObject({ contentId: first });
@@ -95,6 +105,8 @@ for (const target of TARGETS) {
       ok(await req(alice, 'DELETE', `/content/${first}`), 202);
       // The refusal is hers alone.
       ok(await req(bob, 'POST', `/content/${bobs}/comments`, { text: 'Bob can' }), 201);
+      ok(await like(bob, bobs), 201);
+      ok(await like(bob, bobs, commentId), 201);
     });
 
     it('lets a user who is no longer banned do it all again, and tells them', async () => {
@@ -109,8 +121,10 @@ for (const target of TARGETS) {
       expect(ok(await unban(root, alice))).toEqual({ userId: alice.userId, wasBanned: true });
       expect(ok(await req(alice, 'GET', '/whoami'))).toMatchObject({ banned: false });
       ok(await storeText(alice, 'Back again #news'), 201);
-      ok(await req(alice, 'POST', `/content/${bobs}/comments`, { text: 'Hello' }), 201);
+      const { commentId } = ok(await req(alice, 'POST', `/content/${bobs}/comments`, { text: 'Hello' }), 201);
       ok(await send(alice, bob, 'Hello'), 201);
+      ok(await req(alice, 'POST', '/like', { contentId: bobs }), 201);
+      ok(await req(alice, 'POST', '/like', { contentId: bobs, commentId }), 201);
       expect((await banned(mod)).banned).toEqual([]);
       expect((await inbox(alice)).map((m) => m.kind)).toEqual(['user_unbanned', 'user_banned']);
 

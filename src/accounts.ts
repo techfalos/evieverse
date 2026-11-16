@@ -20,6 +20,12 @@ import { msg } from './language.js';
  *      cascades goes with it (likes, inbox, keys). The request does it when there is no content to
  *      wait for, and the compactor does it otherwise, after it has deleted the content.
  *
+ * What they reposted is in their own index (`reposts`, src/reposts.ts), which following feeds read,
+ * and goes the same way: nobody follows them from step 1 on, the compactor's next run drops those
+ * entries and deletes their rows (see markGoneReposters), and the account's row waits for that
+ * like it waits for content. The hashtags their reposts gave other users' posts stay on the posts,
+ * with nobody named as who added them.
+ *
  * What an account leaves behind: its comments on other users' posts, which comments' own store has
  * no index by author to find them by, and which are shown with no username from then on; and the
  * messages it sent, which stay in their recipients' inboxes without a sender.
@@ -150,8 +156,9 @@ export async function sweepContent({ db, now = Date.now }: SweepDeps, userId: st
 
 /**
  * Deletes the rows of deleted accounts (all of them, or `userIds`') that have no content left, and
- * returns whose. What references a user and doesn't cascade is set to null (who moderated a
- * hashtag's post, who banned a user, who sent a message).
+ * nothing they reposted left in their own index, and returns whose. What references a user and
+ * doesn't cascade is set to null (who moderated a hashtag's post, who banned a user, who sent a
+ * message, who gave a post a hashtag by reposting it).
  *
  * The check is part of the DELETE, not before it: an insert of content for the user that comes
  * between a check and a delete would be cascaded away, with the post's entries still in the index.
@@ -169,6 +176,8 @@ export async function purgeAccounts(db: Db, userIds?: string[]): Promise<string[
       .where('id', '=', id)
       .where('deleted_at', 'is not', null)
       .where((eb) => eb.not(eb.exists(eb.selectFrom('content').select('content.id').whereRef('content.user_id', '=', 'users.id'))))
+      // Nor a post of someone else's that they reposted, still in their own index: the compactor finds those by this row.
+      .where((eb) => eb.not(eb.exists(eb.selectFrom('reposts').select('reposts.content_id').whereRef('reposts.user_id', '=', 'users.id').where('reposts.tag', 'like', '@%'))))
       .executeTakeFirst();
     if (Number(res.numDeletedRows) > 0) purged.push(id);
   }

@@ -18,6 +18,7 @@ function item(tags: string[], ageMs: number, likes = 0, aiGenerated = false): It
     likes,
     aiGenerated,
     moderated: false,
+    repost: false,
     tags,
   };
 }

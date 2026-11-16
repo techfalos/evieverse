@@ -7,7 +7,7 @@ import { loadLanguages, msg } from '../src/language.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { as, createTestContext, TARGETS, type TestContext, type User } from './helpers.js';
 
-const ENGLISH = fileURLToPath(new URL('../src/languages/en.json', import.meta.url));
+const ENGLISH = fileURLToPath(new URL('../languages/en.json', import.meta.url));
 
 /** A language that has some of the server's messages, and says the others in the default language. */
 const SPANISH = {
@@ -55,7 +55,7 @@ describe('language files', () => {
     dir = undefined;
   });
 
-  it('reads the languages the server comes with from src/languages, English among them', () => {
+  it('reads the languages the server comes with from the languages folder, English among them', () => {
     const languages = loadLanguages();
     expect(languages.default).toBe('en');
     expect(languages.list()).toContainEqual({ code: 'en', name: 'English' });
@@ -320,6 +320,17 @@ for (const target of TARGETS) {
       expect(await whoami(ana)).toMatchObject({ language: 'en' });
       const own = await ctx.app.inject({ method: 'PUT', url: `/users/${ana.userId}/following/${ana.userId}`, headers: { ...as(ana), ...SPANISH_FIRST } });
       expect(own.json()).toEqual({ error: "you can't follow yourself" });
+    });
+
+    it('says how long a registration past the limit has to wait', async () => {
+      await ctx.close();
+      await rm(dir, { recursive: true, force: true });
+      // As many requests as one registration takes: the one answered with a challenge, and the one that solves it.
+      await start({ registerRateLimitPerHour: 2 });
+      expect((await register({ username: 'ana' })).done.statusCode).toBe(201);
+      const refused = await ctx.app.inject({ method: 'POST', url: '/register', payload: { username: 'bob' } });
+      expect([refused.statusCode, refused.json()]).toEqual([429, { error: 'Rate limit exceeded, retry in 60 minutes' }]);
+      expect(Number(refused.headers['retry-after'])).toBeGreaterThan(3500);
     });
   });
 }

@@ -51,6 +51,7 @@ export const TABLES = [
   'tag_moderators',
   'follows',
   'likes',
+  'reposts',
   'feed_queue',
   'compactor_lease',
   'tag_pairs',
@@ -99,7 +100,9 @@ export const queued = async (ctx: { db: Db }) =>
  * Registering takes a challenge, as on any server, which `register` and `registration` solve. Its
  * proof of work is quick enough for tests, and an answer is accepted at once, so solving one leaves
  * the clock where it was, unless `challenge` says otherwise. The post window is off unless `challenge`
- * turns it on, and so are the limits on posts and on comments a minute.
+ * turns it on, as the challenges for comments are, and so are the limits on posts and on comments a
+ * minute. So is the limit on registrations from one address, which every test's are, unless
+ * `registerRateLimitPerHour` sets one.
  */
 export async function createTestContext(
   target: TestTarget,
@@ -110,8 +113,14 @@ export async function createTestContext(
     publicBaseUrl?: string;
     challenge?: Partial<Config['challenge']>;
     tagging?: Partial<Config['tagging']>;
+    /** The types of post the server takes: all of them, but for the ones turned off here. */
+    postTypes?: Partial<Config['postTypes']>;
     /** The trust scores that have a post refused, queued or published; the server's defaults unless given. */
     trust?: Partial<Config['trust']>;
+    /** What the urlhaus trust plugin downloads its list with. No Auth-Key, so the plugin is off, unless given. */
+    urlhaus?: Partial<Config['urlhaus']>;
+    /** Requests to /register from one address in an hour, of which a registration takes two. More than any test makes, unless given. */
+    registerRateLimitPerHour?: number;
     postRateLimitPerMinute?: number;
     maxFollowing?: number;
     /** The posts a user can report in an hour; the server's default unless given. */
@@ -126,6 +135,8 @@ export async function createTestContext(
     modified?: boolean;
     /** Where the server says its source code can be obtained. Nowhere, unless given. */
     sourceUrl?: string;
+    /** The address GET /rules gives to write to for support. The server's default, unless given. */
+    supportEmail?: string;
     corsOrigins?: string | string[];
     compact?: Partial<Config['compact']>;
     /** Replaces the content store, which is otherwise a directory of the test's own. */
@@ -137,7 +148,7 @@ export async function createTestContext(
     cli?: CliRelease;
     /** The trust plugins, in place of the server's own (src/plugins/trust). */
     trustPlugins?: TrustPlugin[];
-    /** The languages the server answers in, in place of its own (src/languages). */
+    /** The languages the server answers in, in place of its own (the languages folder). */
     languages?: Languages;
   } = {},
 ) {
@@ -158,9 +169,12 @@ export async function createTestContext(
       },
       ...(opts.audit && { audit: { scheme: 'fs', options: { root: join(dir, 'audit') } } }),
       feed: { headCacheMs: 0, ...opts.feed },
-      challenge: { postWindowSeconds: 0, powBits: 8, minSolveMs: 0, ...opts.challenge },
+      challenge: { postWindowSeconds: 0, commentsPerMinute: 0, powBits: 8, minSolveMs: 0, ...opts.challenge },
       ...(opts.tagging && { tagging: opts.tagging }),
+      ...(opts.postTypes && { postTypes: opts.postTypes }),
       ...(opts.trust && { trust: opts.trust }),
+      ...(opts.urlhaus && { urlhaus: opts.urlhaus }),
+      registerRateLimitPerHour: opts.registerRateLimitPerHour ?? 1_000_000,
       postRateLimitPerMinute: opts.postRateLimitPerMinute ?? 0,
       ...(opts.maxFollowing && { maxFollowing: opts.maxFollowing }),
       ...(opts.reportsPerHour !== undefined && { reportsPerHour: opts.reportsPerHour }),
@@ -169,6 +183,7 @@ export async function createTestContext(
       ...(opts.monetization && { monetization: opts.monetization }),
       ...(opts.modified !== undefined && { modified: opts.modified }),
       ...(opts.sourceUrl !== undefined && { sourceUrl: opts.sourceUrl }),
+      ...(opts.supportEmail !== undefined && { supportEmail: opts.supportEmail }),
       ...(opts.corsOrigins && { corsOrigins: opts.corsOrigins }),
       ...(opts.compact && { compact: opts.compact }),
       ...(opts.trustProxy !== undefined && { trustProxy: opts.trustProxy }),
@@ -280,6 +295,9 @@ export const JPEG = Buffer.from(
   'base64',
 );
 
+/** The hash a post's meta file keeps of its file: of the bytes as stored, in hex. */
+export const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+
 /** A registered user's credentials, as the fields of a request. */
 export type User = { userId: string; apiKey: string };
 
@@ -297,6 +315,10 @@ export type FeedItem = {
   moderated?: boolean;
   createdAt: string;
   updatedAt: string;
+  /** On a record a repost put where it was read: when, and in a following feed, who reposted it. */
+  repost?: { at: string; by?: { userId: string; username: string } };
+  /** On a repost of a post on another server: the original. */
+  origin?: { url: string; publisher: { userId: string; username: string } };
 };
 
 export type Feed = {

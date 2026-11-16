@@ -1,3 +1,4 @@
+import type { FastifyBaseLogger } from 'fastify';
 import { existsSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -12,7 +13,8 @@ import type { Text } from '../language.js';
  *
  * The score is worked out by plugins. Every folder of src/plugins/trust is one: an algorithm that
  * looks at a post and may lower its score. Every post and update starts at 100 and goes through
- * each of them (see trustOf).
+ * each of the ones the server runs (see trustOf): all of them, but for the optional ones it didn't
+ * turn on (see loadTrustPlugins).
  *
  * A comment on a post is scored the same way, by the same plugins, and its score sends it where a
  * post's would. A plugin tells one from a post by `commentOn`.
@@ -30,7 +32,11 @@ export interface TrustPost {
   commentOn?: string;
   /** The hashtags it was sent with, normalised, before moderation drops any. A comment has none. */
   tags: string[];
-  /** What there is of it to read: its text or caption or link, and its filename. A comment's text, and the name of its image or video. */
+  /**
+   * What there is of it to read: its text or caption or link, and its filename. A comment's text, and the name of its image or video.
+   * A text, a caption and a comment's text are as their readers read them: without their formatting, and with each link's address
+   * after its label, with a space after it where the text goes on (plainText in format.ts).
+   */
   texts: string[];
 }
 
@@ -39,6 +45,8 @@ export interface TrustContext {
   db: Db;
   config: Config;
   now: () => number;
+  /** The log of the request that sent the post, for what its operator should know. Absent where a post is scored outside a request. */
+  log?: FastifyBaseLogger;
   /** The post's score as the plugins before this one left it. */
   score: number;
 }
@@ -55,6 +63,11 @@ export type TrustChange = ({ set: number; reduce?: never } | { reduce: number; s
 
 /** What a plugin's index file exports as its default. */
 export interface TrustAlgorithm {
+  /**
+   * Whether the plugin is optional: one that runs only on a server that turns it on, by naming it
+   * in `trust.optionalPlugins` (TRUST_OPTIONAL_PLUGINS). A plugin that doesn't say runs on every server.
+   */
+  optional?: boolean;
   /** Looks at a post, and says what to do to its score. null, or nothing, leaves it as it is. */
   assess(post: TrustPost, ctx: TrustContext): TrustChange | null | undefined | void | Promise<TrustChange | null | undefined | void>;
 }
@@ -116,15 +129,23 @@ const isAlgorithm = (value: unknown): value is TrustAlgorithm =>
   typeof value === 'object' && value !== null && typeof (value as TrustAlgorithm).assess === 'function';
 
 /**
- * The trust plugins: one per folder of `dir`, each the default export of the folder's index file,
- * in the order of the folders' names. A folder that doesn't hold a plugin is an error, so the
- * server doesn't start without an algorithm it was meant to have.
+ * The trust plugins the server runs: one per folder of `dir`, each the default export of the
+ * folder's index file, in the order of the folders' names. A plugin that says it is optional is
+ * one of them only if `optional` names it, which is the server's `trust.optionalPlugins`; any
+ * other runs whatever that says.
+ *
+ * A folder that doesn't hold a plugin is an error, whether or not its plugin would run, and so is
+ * a name that no folder has, so the server doesn't start without an algorithm it was meant to have.
  */
-export async function loadTrustPlugins(dir = TRUST_PLUGINS_DIR): Promise<TrustPlugin[]> {
+export async function loadTrustPlugins(optional: readonly string[] = [], dir = TRUST_PLUGINS_DIR): Promise<TrustPlugin[]> {
   const names = readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort();
+  const unknown = optional.filter((name) => !names.includes(name));
+  if (unknown.length) {
+    throw new Error(`TRUST_OPTIONAL_PLUGINS names ${unknown.join(', ')}, which ${unknown.length === 1 ? "isn't a folder" : "aren't folders"} of ${dir}: it has ${names.join(', ') || 'none'}`);
+  }
   const plugins: TrustPlugin[] = [];
   for (const name of names) {
     // Built, or run from source.
@@ -132,6 +153,8 @@ export async function loadTrustPlugins(dir = TRUST_PLUGINS_DIR): Promise<TrustPl
     if (!file) throw new Error(`the trust plugin ${name} has no index file in ${join(dir, name)}`);
     const algorithm = ((await import(pathToFileURL(file).href)) as { default?: unknown }).default;
     if (!isAlgorithm(algorithm)) throw new Error(`the trust plugin ${name} must export an object with an assess function as its default (${file})`);
+    // The gate: an optional plugin the server didn't turn on is left out, and never sees a post.
+    if (algorithm.optional === true && !optional.includes(name)) continue;
     plugins.push({ name, assess: (post, ctx) => algorithm.assess(post, ctx) });
   }
   return plugins;
@@ -143,7 +166,7 @@ export async function loadTrustPlugins(dir = TRUST_PLUGINS_DIR): Promise<TrustPl
  */
 export type TrustRoute = 'delete' | 'queue' | 'allow';
 
-export function routeOf(score: number, { deleteBelow, allowFrom }: Config['trust']): TrustRoute {
+export function routeOf(score: number, { deleteBelow, allowFrom }: Pick<Config['trust'], 'deleteBelow' | 'allowFrom'>): TrustRoute {
   if (score < deleteBelow) return 'delete';
   return score < allowFrom ? 'queue' : 'allow';
 }

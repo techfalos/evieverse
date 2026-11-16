@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 make g+
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json ./
+COPY languages ./languages
 COPY src ./src
 COPY testbed/seed ./testbed/seed
 CMD ["node_modules/.bin/tsx", "testbed/seed/seed.ts"]

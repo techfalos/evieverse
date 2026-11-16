@@ -84,12 +84,14 @@ export const publisherOf = (row: { user_id: string; username: string }): Publish
 
 /**
  * The summary of the content `meta` describes, rebuilt from the database and the meta file, which
- * outlives the summary store's retention.
+ * outlives the summary store's retention. `repostedAt` is when the content was reposted, once for
+ * each repost (see repostTimes): it says where the summary is kept, beside the content's own day.
  */
 export const summaryOf = (
   row: { id: string; user_id: string; created_at: number; ai_generated: number },
   meta: ContentMeta,
   publicBaseUrl: string,
+  repostedAt: number[] = [],
 ): Summary => ({
   contentId: row.id,
   createdAt: row.created_at,
@@ -100,4 +102,6 @@ export const summaryOf = (
   comments: takesComments(meta),
   tags: meta.tags,
   preview: previewOf(meta, publicBaseUrl),
+  ...(meta.origin && { origin: meta.origin }),
+  ...(repostedAt.length > 0 && { repostedAt }),
 });

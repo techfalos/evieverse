@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadConfig } from '../src/config.js';
+import { DEFAULT_SUPPORT_EMAIL, loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { RELEASE } from '../src/release.js';
 import { MAX_RULE_CHARS, MAX_RULES } from '../src/routes/rules.js';
@@ -10,11 +10,12 @@ import { as, createTestContext, readAudit, TARGETS, type TestContext, type User 
 const NO_RULE = '00000000-0000-4000-8000-000000000000';
 const ADMIN_ONLY = 'only an admin can do this';
 const SOURCE = 'https://git.example.com/our-evieverse';
+const SUPPORT = 'support@our-evieverse.example';
 /** What a server that runs a release says of itself, as every server does unless it is told otherwise. */
 const AS_RELEASED = { modified: false, release: RELEASE, sourceUrl: null };
 
 type Rule = { ruleId: string; position: number; text: string; createdAt: string; updatedAt: string };
-type Rules = { modificationDisclosure: { modified: boolean; release: string; sourceUrl: string | null }; rules: Rule[] };
+type Rules = { modificationDisclosure: { modified: boolean; release: string; sourceUrl: string | null }; supportEmail: string; rules: Rule[] };
 
 for (const target of TARGETS) {
   describe(`rules (${target.name})`, () => {
@@ -48,7 +49,7 @@ for (const target of TARGETS) {
 
     it('gives the rules and the modification disclosure to anyone, with a key or without', async () => {
       const { root, alice } = await setup();
-      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, rules: [] });
 
       const at = now();
       const first = await add(root, '  Be kind.  ');
@@ -56,7 +57,7 @@ for (const target of TARGETS) {
       const second = await add(root, 'No spam.\nNot even a little.');
       expect(second).toMatchObject({ position: 2, text: 'No spam.\nNot even a little.' });
 
-      const expected = { modificationDisclosure: AS_RELEASED, rules: [first, second] };
+      const expected = { modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, rules: [first, second] };
       expect(await published()).toEqual(expected);
       expect(ok(await req(alice, 'GET', '/rules'))).toEqual(expected);
       // The body's credentials are as good as the headers', as on every route.
@@ -66,9 +67,9 @@ for (const target of TARGETS) {
     it('says it runs a modified version, the release that is based on and where its source is, on a server whose operator says so', async () => {
       const { root } = await setup({ modified: true, sourceUrl: SOURCE });
       const modificationDisclosure = { modified: true, release: RELEASE, sourceUrl: SOURCE };
-      expect(await published()).toEqual({ modificationDisclosure, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, rules: [] });
       const rule = await add(root, 'Be kind.');
-      expect(await published()).toEqual({ modificationDisclosure, rules: [rule] });
+      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, rules: [rule] });
       // No request changes it: not an admin's, and not one that names it.
       ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', modified: false, modificationDisclosure: AS_RELEASED }));
       expect((await published()).modificationDisclosure).toEqual(modificationDisclosure);
@@ -76,7 +77,21 @@ for (const target of TARGETS) {
 
     it('says where its source is on a server that runs a release, if its operator says', async () => {
       await setup({ sourceUrl: SOURCE });
-      expect(await published()).toEqual({ modificationDisclosure: { ...AS_RELEASED, sourceUrl: SOURCE }, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: { ...AS_RELEASED, sourceUrl: SOURCE }, supportEmail: DEFAULT_SUPPORT_EMAIL, rules: [] });
+    });
+
+    it('gives the address to write to for support: the one its operator set, and a placeholder until they do', async () => {
+      await setup();
+      expect((await published()).supportEmail).toBe('noreply@yoururl.com');
+      await ctx.close();
+
+      const { root, alice } = await setup({ supportEmail: SUPPORT });
+      expect((await published()).supportEmail).toBe(SUPPORT);
+      expect(ok(await req(alice, 'GET', '/rules')).supportEmail).toBe(SUPPORT);
+      // No request changes it: not an admin's, and not one that names it.
+      const rule = await add(root, 'Be kind.');
+      ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', supportEmail: 'someone@else.example' }));
+      expect((await published()).supportEmail).toBe(SUPPORT);
     });
 
     it('has only an admin add, change and remove rules', async () => {
@@ -167,7 +182,7 @@ for (const target of TARGETS) {
       expect(await add(root, 'E', 2)).toMatchObject({ position: 2 });
       expect(await texts()).toEqual(['A', 'E', 'C', 'D']);
       for (const rule of (await published()).rules) ok(await req(root, 'DELETE', `/rules/${rule.ruleId}`));
-      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, rules: [] });
     });
 
     it(`has at most ${MAX_RULES} rules`, async () => {
@@ -205,6 +220,28 @@ for (const target of TARGETS) {
     });
   });
 }
+
+describe('the support address', () => {
+  const supportEmail = (env: Record<string, string>, overrides = {}) => loadConfig(overrides, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).supportEmail;
+
+  it('is noreply@yoururl.com unless SUPPORT_EMAIL says otherwise', () => {
+    expect(DEFAULT_SUPPORT_EMAIL).toBe('noreply@yoururl.com');
+    expect(supportEmail({})).toBe(DEFAULT_SUPPORT_EMAIL);
+    // An empty value counts as unset, as it does for every setting.
+    for (const unset of ['', '   ']) expect(supportEmail({ SUPPORT_EMAIL: unset }), `"${unset}"`).toBe(DEFAULT_SUPPORT_EMAIL);
+    expect(supportEmail({}, { supportEmail: '' })).toBe(DEFAULT_SUPPORT_EMAIL);
+    expect(supportEmail({ SUPPORT_EMAIL: ` ${SUPPORT} ` })).toBe(SUPPORT);
+    expect(supportEmail({}, { supportEmail: SUPPORT })).toBe(SUPPORT);
+    // The environment is over the config file, and what a caller passes is over both.
+    expect(supportEmail({ SUPPORT_EMAIL: SUPPORT }, { supportEmail: 'help@elsewhere.example' })).toBe('help@elsewhere.example');
+  });
+
+  it('does not start a server whose support address is no email address', () => {
+    for (const address of ['support', 'support@', '@example.com', 'support at example.com', 'https://example.com/support', 'a@example.com, b@example.com']) {
+      expect(() => supportEmail({ SUPPORT_EMAIL: address }), address).toThrow(/SUPPORT_EMAIL is the address people write to for support/);
+    }
+  });
+});
 
 describe('the modification disclosure', () => {
   const disclosure = (env: Record<string, string>, overrides = {}) => {

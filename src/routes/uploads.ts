@@ -11,7 +11,7 @@ import { refuseBanned } from '../moderation/policy.js';
 import { mediaType } from '../posts.js';
 import { UploadTooLargeError } from '../storage/index.js';
 import { iso } from '../time.js';
-import { wrongFileType } from '../upload.js';
+import { requirePostType, wrongFileType } from '../upload.js';
 
 const Body = Credentials.extend({
   /** What the file will be posted as. */
@@ -37,6 +37,8 @@ export function uploadRoutes(app: FastifyInstance, { db, config, content, hot, n
     const user = await authenticate(db, req, body);
     // A link is for posting the file, which a banned user can't.
     refuseBanned(user);
+    // Nor can anyone post it where the server has turned its type off.
+    requirePostType(config.postTypes, body.type);
     const mimeType = resolveMimeType(body.contentType, body.filename);
     if (mediaType(mimeType) !== body.type) throw wrongFileType(body.type, mimeType);
     const { maxUploadBytes, uploadLinksPerMinute } = config.storage;

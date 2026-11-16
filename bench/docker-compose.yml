@@ -1,0 +1,48 @@
+# The benchmark: a server with a set number of CPUs and amount of memory, and a second container
+# that sends it requests and writes BENCHMARKS.md.
+#
+#   npm run bench
+#
+# Which is bench/run.mjs: it gives this file its settings (every ${...} here, from the environment
+# or bench/settings.json), starts it, takes BENCHMARKS.md out of the load container, and removes
+# it all. Started by itself, this file has no settings and says so.
+name: evieverse-bench
+
+services:
+  # The server that is measured (bench/serve.ts), which stores its posts before it answers on 3001.
+  # It may use these CPUs and this memory, and no swap: the report says what they were, and how
+  # much of them the server used.
+  server:
+    build: &build
+      context: ..
+      dockerfile: bench/Dockerfile
+    image: evieverse-bench
+    command: ['node_modules/.bin/tsx', 'bench/serve.ts']
+    init: true
+    cpus: ${BENCH_SERVER_CPUS:?is set by npm run bench}
+    mem_limit: ${BENCH_SERVER_MEMORY:?is set by npm run bench}
+    memswap_limit: ${BENCH_SERVER_MEMORY:?is set by npm run bench}
+    environment:
+      - BENCH_POSTS
+    # Its database and its content store: on a volume, as a server's are, not in the container's own layer.
+    volumes: [data:/data]
+
+  # What sends the requests (bench/benchmark.test.ts), with CPUs of its own, a thread to each, so
+  # that sending them takes none of the server's. It waits for the server, and when it ends the run does.
+  load:
+    # The server's image, built the same way, so that there is nothing to look for anywhere else.
+    build: *build
+    image: evieverse-bench
+    depends_on: [server]
+    command: ['node_modules/.bin/vitest', 'run', '--config', 'vitest.bench.config.ts']
+    init: true
+    cpus: ${BENCH_LOAD_CPUS:?is set by npm run bench}
+    environment:
+      - BENCH_SERVER=http://server:3001
+      - BENCH_LOAD_CPUS
+      - BENCH_DURATION_SECONDS
+      - BENCH_CONNECTIONS
+      - BENCH_HOST
+
+volumes:
+  data:

@@ -14,7 +14,7 @@ import { messageKey, msg } from '../language.js';
 import { moderates, moderatesServer } from '../moderation/policy.js';
 import { kindColumn, queueItems } from '../moderation/queues.js';
 import { approveTag, removeTag } from '../moderation/tagDecisions.js';
-import { MAX_LIST_WORDS, MAX_PHRASE_WORDS, MAX_WORD_CHARS, normalizeWord, SERVER_LIST } from '../moderation/words.js';
+import { isPattern, MAX_LIST_PATTERNS, MAX_LIST_WORDS, MAX_PHRASE_WORDS, MAX_WORD_CHARS, normalizeWord, SERVER_LIST } from '../moderation/words.js';
 import { normalizeTag } from '../tags.js';
 import { iso } from '../time.js';
 
@@ -172,7 +172,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     return { userId, wasModerator: Number(res.numUpdatedRows) > 0 };
   });
 
-  // Bans: who can't post, comment or send messages.
+  // Bans: who can't post, comment, like or send messages.
 
   /**
    * Users who are banned, most recently banned first, a page at a time, with who banned each and why.
@@ -209,7 +209,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
 
   /**
    * Bans a user: they keep their account and can read, but are refused whatever writes a post, a
-   * comment or a message (see refuseBanned). `reason` is kept for moderators. Server moderators and
+   * comment, a like or a message (see refuseBanned). `reason` is kept for moderators. Server moderators and
    * admins, and never of an admin or a server moderator, whose role has to end first, or of
    * oneself. The user is told, once: `201`, or `200` with `alreadyBanned` and the first ban's time
    * and reason for one who already was.
@@ -269,7 +269,8 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     for (const input of inputs) {
       const word = normalizeWord(input);
       if (!word) {
-        throw badRequest(msg('moderation.word_unblockable', { word: input.slice(0, 100), maxWords: MAX_PHRASE_WORDS, maxChars: MAX_WORD_CHARS }));
+        const params = { word: input.slice(0, 100), maxWords: MAX_PHRASE_WORDS, maxChars: MAX_WORD_CHARS };
+        throw badRequest(msg(isPattern(input) ? 'moderation.pattern_unblockable' : 'moderation.word_unblockable', params));
       }
       words.add(word);
     }
@@ -283,6 +284,10 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     const have = new Set(await listWords(list));
     const words = normalizeWords(inputs).filter((w) => !have.has(w));
     if (have.size + words.length > MAX_LIST_WORDS) throw conflict(msg('moderation.list_full', { max: MAX_LIST_WORDS }));
+    // Fewer patterns than words: each is run over every post the list applies to.
+    if (words.some(isPattern) && [...have, ...words].filter(isPattern).length > MAX_LIST_PATTERNS) {
+      throw conflict(msg('moderation.patterns_full', { max: MAX_LIST_PATTERNS }));
+    }
     const ts = now();
     for (let i = 0; i < words.length; i += INSERT_BATCH) {
       const insert = db.insertInto('blocked_words').values(words.slice(i, i + INSERT_BATCH).map((word) => ({ tag: list, word, created_at: ts })));
@@ -300,6 +305,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   /**
    * The server's blocked words, which admins keep: a post containing one isn't published. And each
    * hashtag's, which its moderators and admins keep: a post containing one doesn't get the hashtag.
+   * An entry is a word, a phrase, or a pattern written between slashes (src/moderation/words.ts).
    */
   const wordLists = [
     {
@@ -427,18 +433,18 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
 
   /**
    * Removes a hashtag from content (see removeTag), and with `mute`, mutes its publisher on it too.
-   * Its moderators and admins. The publisher is told of the removal, which may have deleted the
-   * post, and of a mute it brought them.
+   * Its moderators and admins. The publisher is told of the removal, which may have left the post
+   * with no hashtag and so in no hashtag's feed, and of a mute it brought them.
    */
-  app.delete('/content/:contentId/tags/:tag', async (req, reply) => {
+  app.delete('/content/:contentId/tags/:tag', async (req) => {
     const { contentId, tag } = ContentTagParams.parse(req.params);
     const body = RemoveTagBody.parse(req.body ?? {});
     const moderator = await asModerator(req, tag, body);
-    const { userId, ...removal } = await removeTag(deps, contentId, tag, moderator.id);
+    const { userId, tags } = await removeTag(deps, contentId, tag, moderator.id);
     const muted = body.mute ? await mute(tag, userId) : null;
-    await notify(deps, { userId, kind: removal.status ? 'last_tag_removed' : 'tag_removed', contentId, tag, by: moderator.id }, req.log);
+    await notify(deps, { userId, kind: tags.length ? 'tag_removed' : 'last_tag_removed', contentId, tag, by: moderator.id }, req.log);
     if (muted && !muted.already) await notify(deps, { userId, kind: 'tag_muted', tag, by: moderator.id }, req.log);
-    return reply.status(removal.status ? 202 : 200).send({ contentId, tag, ...removal, muted: body.mute });
+    return { contentId, tag, tags, muted: body.mute };
   });
 
   // The moderation queue: the posts, under any hashtag, and the comments, whose trust score neither had them refused nor published.

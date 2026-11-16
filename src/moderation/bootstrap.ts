@@ -20,11 +20,21 @@ export interface EnsuredAdmin {
   created: boolean;
   /** Whether the key was added, or other keys of the account revoked. */
   keyChanged: boolean;
+  /** Whether the key was the account's once and has been replaced since: it stays revoked, and the account keeps the key it has. */
+  keyReplaced: boolean;
 }
 
 /**
- * Makes sure the account exists, is an admin, and has the key as its only one, so a deploy can run it
- * every time: with the same values it changes nothing, and with a new key it replaces the old one.
+ * Makes sure the account exists and is an admin, and gives it the key, as its only one, if the key
+ * is new to it. So a deploy can run it every time: with the same values it changes nothing, and with
+ * a new key it replaces the one the account has.
+ *
+ * A key the account had, and which was replaced through the API since (POST /users/:id/key), is
+ * left revoked. The replacement lasts, whichever deploys follow, and a key that was replaced
+ * because it leaked never works again. The key's revoked row in api_keys is what says it was
+ * replaced, so this depends on those rows being kept. A deployment that needs the account back
+ * issues a new key.
+ *
  * Throws if the account has to be created and another user has its username.
  */
 export function ensureAdmin(db: Db, admin: BootstrapAdmin, now = Date.now()): Promise<EnsuredAdmin> {
@@ -45,29 +55,28 @@ export function ensureAdmin(db: Db, admin: BootstrapAdmin, now = Date.now()): Pr
       await trx.updateTable('users').set({ admin: 1 }).where('id', '=', userId).execute();
     }
 
-    const key = await trx.selectFrom('api_keys').select(['id', 'revoked_at']).where('user_id', '=', userId).where('key_hash', '=', keyHash).executeTakeFirst();
-    if (!key) {
-      await trx
-        .insertInto('api_keys')
-        .values({ id: randomUUID(), user_id: userId, key_hash: keyHash, created_at: now, revoked_at: null })
-        .execute();
-    } else if (key.revoked_at !== null) {
-      await trx.updateTable('api_keys').set({ revoked_at: null }).where('id', '=', key.id).execute();
+    const key = await trx.selectFrom('api_keys').select('revoked_at').where('user_id', '=', userId).where('key_hash', '=', keyHash).executeTakeFirst();
+    // Revoked: the account replaced it, or another admin did. Bringing it back would undo that.
+    const keyReplaced = key != null && key.revoked_at !== null;
+    let keyChanged = false;
+    if (!keyReplaced) {
+      const others = await trx
+        .updateTable('api_keys')
+        .set({ revoked_at: now })
+        .where('user_id', '=', userId)
+        .where('key_hash', '<>', keyHash)
+        .where('revoked_at', 'is', null)
+        .executeTakeFirst();
+      if (!key) {
+        await trx
+          .insertInto('api_keys')
+          .values({ id: randomUUID(), user_id: userId, key_hash: keyHash, created_at: now, revoked_at: null })
+          .execute();
+      }
+      keyChanged = !key || Number(others.numUpdatedRows) > 0;
     }
-    const others = await trx
-      .updateTable('api_keys')
-      .set({ revoked_at: now })
-      .where('user_id', '=', userId)
-      .where('key_hash', '<>', keyHash)
-      .where('revoked_at', 'is', null)
-      .executeTakeFirst();
 
-    return {
-      userId,
-      username: user?.username ?? admin.username,
-      created: !user,
-      keyChanged: !key || key.revoked_at !== null || Number(others.numUpdatedRows) > 0,
-    };
+    return { userId, username: user?.username ?? admin.username, created: !user, keyChanged, keyReplaced };
   });
 }
 
@@ -88,5 +97,11 @@ export async function bootstrapAdmin(db: Db, env: NodeJS.ProcessEnv = process.en
   return ensureAdmin(db, parsed.data);
 }
 
-export const describeAdmin = ({ username, userId, created, keyChanged }: EnsuredAdmin) =>
-  `Admin account ${username} (${userId}) ${created ? 'created' : 'is in place'}${keyChanged && !created ? ', with a new API key' : ''}.`;
+export const describeAdmin = ({ username, userId, created, keyChanged, keyReplaced }: EnsuredAdmin) =>
+  `Admin account ${username} (${userId}) ${created ? 'created' : 'is in place'}${
+    keyReplaced
+      ? ". The key in BOOTSTRAP_ADMIN is not its key any more: it was replaced, and stays revoked. To give the account a new key from here, put a new key's hash in BOOTSTRAP_ADMIN"
+      : keyChanged && !created
+        ? ', with a new API key'
+        : ''
+  }.`;

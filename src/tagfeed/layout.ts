@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import type { Preview, Publisher, Summary } from '../storage/index.js';
+import type { Origin, Preview, Publisher, Summary } from '../storage/index.js';
 import { iso, wholeSeconds } from '../time.js';
 
 /**
@@ -20,6 +20,11 @@ import { iso, wholeSeconds } from '../time.js';
  *
  * Each publisher's own posts have an index of the same layout, named authorIndex(userId), which
  * following feeds read. Its day indexes hold the day's newest posts instead, up to a fixed quota.
+ *
+ * A repost (src/reposts.ts) puts content in the index of each hashtag it gave it, and in the
+ * reposter's own, as a new post: the entry's time is the repost's, which is the day it is in and
+ * where feeds order it, and its likes are those since the repost. Such an entry is flagged as a
+ * repost. It is still the one piece of content: the entry names it, and its summary is the same.
  */
 
 /** A publisher's own index, named so no hashtag (letters, digits and _) can be the same. */
@@ -43,12 +48,31 @@ export interface FeedRecord {
    * the records of a hashtag's feed: moderation is per hashtag.
    */
   moderated?: boolean;
+  /** When the post was published, which for a reposted one is before it was placed here (see `repost`). */
   createdAt: string;
   updatedAt: string;
+  /**
+   * On a record a repost put where it was read: under a hashtag the repost gave the post, or in a
+   * following feed, by someone the user follows. `at` is when, which is where the feed orders the
+   * record, and `likes` are those since. `by` is who reposted it, in a following feed, where the
+   * record is read from their own index; a hashtag's feed doesn't say.
+   */
+  repost?: { at: string; by?: Publisher };
+  /**
+   * On a repost of a post on another server: the original, which the record is a link to, and who
+   * published it there. `publisher` is who reposted it here.
+   */
+  origin?: Origin;
+}
+
+/** The repost that put a record where it was read: when, and by whom if the index it was read from says. */
+export interface RepostMark {
+  at: number;
+  by?: Publisher;
 }
 
 /** `moderated` is the record's flag in the hashtag's index it was read from; omitted where it wasn't read from one. */
-export const toFeedRecord = (s: Summary, likes: number, publisher: Publisher, moderated?: boolean): FeedRecord => ({
+export const toFeedRecord = (s: Summary, likes: number, publisher: Publisher, moderated?: boolean, repost?: RepostMark): FeedRecord => ({
   contentId: s.contentId,
   publisher,
   mimeType: s.mimeType,
@@ -60,13 +84,19 @@ export const toFeedRecord = (s: Summary, likes: number, publisher: Publisher, mo
   ...(moderated !== undefined && { moderated }),
   createdAt: iso(s.createdAt),
   updatedAt: iso(s.updatedAt),
+  ...(repost && { repost: { at: iso(repost.at), ...(repost.by && { by: repost.by }) } }),
+  ...(s.origin && { origin: s.origin }),
 });
 
 /** One post in a day index. */
 export interface IndexEntry {
   contentId: string;
-  /** UTC epoch ms; day indexes keep whole seconds. */
+  /**
+   * When the content was placed in this index, which is where feeds order it: its creation, or
+   * for a repost's entry, the repost. UTC epoch ms; day indexes keep whole seconds.
+   */
   createdAt: number;
+  /** The content's likes; for a repost's entry, those since the repost. */
   likes: number;
   /** Declared by the publisher at /store. */
   aiGenerated: boolean;
@@ -75,6 +105,11 @@ export interface IndexEntry {
    * `tag_moderation`, when it builds a day index. Never set in a publisher's own index.
    */
   moderated: boolean;
+  /**
+   * A repost put the content here: under a hashtag it gave it, or in the reposter's own index.
+   * The entry's time and likes are then the repost's (see above).
+   */
+  repost: boolean;
 }
 
 /** contentId (16 bytes) | likes u32 | createdAt seconds u32 | flags u8, big-endian. */
@@ -85,8 +120,9 @@ const clamp = (n: number, max: number) => Math.min(max, Math.max(0, Math.floor(n
 /** Flag bits of a day index entry. */
 const AI_GENERATED = 1;
 const MODERATED = 2;
-const flagsOf = (e: IndexEntry) => (e.aiGenerated ? AI_GENERATED : 0) | (e.moderated ? MODERATED : 0);
-const flagged = (flags: number) => ({ aiGenerated: (flags & AI_GENERATED) !== 0, moderated: (flags & MODERATED) !== 0 });
+const REPOST = 4;
+const flagsOf = (e: IndexEntry) => (e.aiGenerated ? AI_GENERATED : 0) | (e.moderated ? MODERATED : 0) | (e.repost ? REPOST : 0);
+const flagged = (flags: number) => ({ aiGenerated: (flags & AI_GENERATED) !== 0, moderated: (flags & MODERATED) !== 0, repost: (flags & REPOST) !== 0 });
 
 export function packDay(entries: IndexEntry[]): Buffer {
   const buf = Buffer.alloc(entries.length * DAY_ENTRY_BYTES);

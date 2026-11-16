@@ -6,14 +6,18 @@ import { readHead, readJson } from './read.js';
 /** One post available to the feed: an entry of a day index. Never mutated once built. */
 export interface Candidate {
   contentId: string;
+  /** When the content was placed in the index: its creation, or the repost that put it there (see IndexEntry). */
   createdAt: number;
+  /** For a repost's entry, the likes since the repost. */
   likes: number;
   aiGenerated: boolean;
   /** Approved by a moderator of the hashtag whose index this is: flagged in its day index. */
   moderated: boolean;
+  /** A repost put the content in this index, at `createdAt`. */
+  repost: boolean;
 }
 
-const toCandidate = ({ contentId, createdAt, likes, aiGenerated, moderated }: IndexEntry): Candidate => ({ contentId, createdAt, likes, aiGenerated, moderated });
+const toCandidate = ({ contentId, createdAt, likes, aiGenerated, moderated, repost }: IndexEntry): Candidate => ({ contentId, createdAt, likes, aiGenerated, moderated, repost });
 
 export interface TagView {
   tag: string;

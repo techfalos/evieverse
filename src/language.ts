@@ -2,13 +2,13 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import english from './languages/en.json' with { type: 'json' };
+import english from '../languages/en.json' with { type: 'json' };
 
 /**
  * What the server says: the errors it answers with, and the notes that come with some results.
  * Never what users post, and not the machine-readable values of a response (`status`, `reason`).
  *
- * Each file of src/languages is one language, named after its code: en.json is English, and
+ * Each file of the languages folder is one language, named after its code: en.json is English, and
  * pt-BR.json would be Brazilian Portuguese. A file holds the language's own name, and its messages
  * by key:
  *
@@ -207,8 +207,8 @@ export class Languages {
   }
 }
 
-/** src/languages, or dist/languages beside the built server. */
-const LANGUAGES_DIR = join(dirname(fileURLToPath(import.meta.url)), 'languages');
+/** The languages folder at the root of the project, which is beside src and beside the built server's dist alike. */
+const LANGUAGES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'languages');
 
 /**
  * The server's languages: one per .json file of `dir`, whose name is the language's code. A file

@@ -5,7 +5,7 @@ import { Readable } from 'node:stream';
 import { crc32 } from 'node:zlib';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ImageError, stripImage, type ImageType } from '../src/image.js';
-import { createTestContext, JPEG, multipart, PNG, requests, TARGETS, type TestContext, type User } from './helpers.js';
+import { createTestContext, JPEG, multipart, PNG, requests, sha256, TARGETS, type TestContext, type User } from './helpers.js';
 
 // 1x1 GIF and 1x1 lossless WebP, with nothing in them but the image
 const GIF = Buffer.from('R0lGODdhAQABAIAAAAAAAAAAACwAAAAAAQABAAAIBAABBAQAOw==', 'base64');
@@ -306,6 +306,45 @@ for (const target of TARGETS) {
         expect(await ctx.content.getMeta(contentId)).toMatchObject({ mimeType: 'image/jpeg', size: PHOTO_STRIPPED.length });
       }
       expect(await uploads(alice)).toEqual([]);
+    });
+
+    it('stores nothing for the image a post has, compared as stored: without its metadata, however it is sent', async () => {
+      const alice = await ctx.register('alice');
+      const { contentId } = (await send(alice, { name: 'photo.jpg', type: 'image/jpeg', data: PHOTO })).json();
+      const before = await ctx.content.getMeta(contentId);
+      // The hash is of the bytes stored, not of the ones sent.
+      expect(before).toMatchObject({ sha256: sha256(PHOTO_STRIPPED), size: PHOTO_STRIPPED.length });
+      ctx.clock.now += 1000;
+
+      // The photo again, and the same picture with no metadata, which is stored as the same bytes.
+      await put(alice, id(1), PHOTO);
+      const again = [
+        await send(alice, { name: 'again.jpg', type: 'image/jpeg', data: PHOTO }, { contentId }),
+        await inline(alice, PHOTO_STRIPPED, { filename: 'photo.jpg', contentId }),
+        await uploaded(alice, id(1), { contentId }),
+      ];
+      for (const res of again) expect([res.statusCode, res.json()]).toEqual([200, { contentId, unchanged: true }]);
+      expect(await ctx.content.getMeta(contentId)).toEqual(before);
+      // The server has the post, so the upload goes.
+      expect(await uploads(alice)).toEqual([]);
+
+      // Another picture is an update. An upload is read once, to a file that is hashed and then stored.
+      const turned3 = jpegWith(jpegExif(turned(3)));
+      await put(alice, id(2), jpegWith(jpegExif(exif(3))));
+      const read = vi.spyOn(ctx.content, 'streamUpload');
+      const other = await uploaded(alice, id(2), { contentId });
+      expect(other.statusCode, other.body).toBe(200);
+      expect(other.json()).not.toHaveProperty('unchanged');
+      expect(read).toHaveBeenCalledTimes(1);
+      expect((await raw(contentId)).rawPayload.equals(turned3)).toBe(true);
+      expect(await ctx.content.getMeta(contentId)).toMatchObject({ sha256: sha256(turned3), size: turned3.length, updatedAt: ctx.clock.now });
+      expect((await send(alice, { name: 'photo.jpg', type: 'image/jpeg', data: turned3 }, { contentId })).json()).toEqual({ contentId, unchanged: true });
+
+      // An upload that turns out to be no image is refused when it is read to be compared, as when it is read to be stored.
+      await put(alice, id(3), PHOTO.subarray(0, 200));
+      const cut = await uploaded(alice, id(3), { contentId });
+      expect([cut.statusCode, cut.json().error]).toEqual([400, 'the file is not a complete, well-formed image/jpeg image']);
+      expect((await raw(contentId)).rawPayload.equals(turned3)).toBe(true);
     });
 
     it('takes an image for what its bytes are, not for what it is sent as', async () => {

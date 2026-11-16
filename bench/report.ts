@@ -1,0 +1,138 @@
+import { readFileSync } from 'node:fs';
+import type { LoadResult } from './load.js';
+
+/** A load that was run, what it measured, and what the server used while it ran. */
+export interface Measured {
+  /** The request, as it is written: `GET /feed?tags=news`. */
+  name: string;
+  what: string;
+  result: LoadResult;
+  /**
+   * `cpus`: the CPU time the server's process used for each second of the load, from before its
+   * connections opened to after its last response (1: one CPU, busy throughout).
+   * `memoryBytes`: the memory the process held when the load ended.
+   */
+  used: { cpus: number; memoryBytes: number };
+}
+
+/** The machine the containers are on, and the code they were built from: what run.mjs, outside them, says of both. */
+export interface Host {
+  cpu: string;
+  cores: number;
+  memoryBytes: number;
+  /** As `Darwin 24.6.0 (x64)`. */
+  os: string;
+  /** Over the minute before the run (0 where there is none to read, on Windows). */
+  loadAverage: number;
+  /** Docker's version and what it runs on, and the CPUs and memory it has for containers, which on a Mac or on Windows are a virtual machine's. */
+  docker: { version: string; os: string; cpus: number; memoryBytes: number };
+  /** The commit the code is at, and whether the server's code has changes that aren't in it. Null where there is no repository to ask. */
+  commit: string | null;
+  changed: boolean;
+}
+
+export interface Report {
+  startedAt: Date;
+  host: Host;
+  /** The server's container: the CPUs and memory it may use, the most memory its process held during the run, how long its disk took to flush a file, and what runs in it. */
+  server: { cpus: number; memoryBytes: number; peakMemoryBytes: number; flushMs: number; node: string; kernel: string };
+  /** `threads`: the load generator's threads, and the CPUs its container has. */
+  settings: { connections: number; durationSeconds: number; warmupSeconds: number; threads: number };
+  data: { users: number; posts: number; hashtags: number; likes: number; comments: number; days: number };
+  reads: Measured[];
+  writes: Measured[];
+  /** What the mixed load sends, by share of its requests. */
+  mix: { percent: number; what: string }[];
+  mixed: Measured;
+  /** The mixed load over each number of connections it was sent over, fewest first, `mixed` among them. */
+  ramp: Measured[];
+}
+
+const KB = 1024;
+const MB = KB * 1024;
+const GB = MB * 1024;
+
+const count = (n: number) => Math.round(n).toLocaleString('en-US');
+const ms = (n: number) => (n < 1000 ? `${n.toFixed(n < 10 ? 2 : n < 100 ? 1 : 0)} ms` : `${(n / 1000).toFixed(2)} s`);
+const size = (bytes: number) => (bytes < KB ? `${Math.round(bytes)} B` : bytes < MB ? `${(bytes / KB).toFixed(1)} KB` : bytes < GB ? `${(bytes / MB).toFixed(1)} MB` : `${(bytes / GB).toFixed(1)} GB`);
+/** Memory, in whole megabytes below a gigabyte. */
+const memory = (bytes: number) => (bytes < GB ? `${Math.round(bytes / MB)} MB` : `${Number((bytes / GB).toFixed(1))} GB`);
+const cpus = (n: number) => `${Number(n.toFixed(2))} ${n === 1 ? 'CPU' : 'CPUs'}`;
+
+function table(head: string[], rows: string[][]): string {
+  // Numbers to the right, under their headings.
+  const rule = head.map((_, i) => (rows.every((row) => /^[\d,.]+( (ms|s|B|KB|MB|GB))?$/.test(row[i]!)) ? '---:' : '---'));
+  return [head, rule, ...rows].map((cells) => `| ${cells.join(' | ')} |`).join('\n');
+}
+
+const timings = ({ requestsPerSecond, mean, p50, p90, p99, max }: LoadResult) => [count(requestsPerSecond), ms(mean), ms(p50), ms(p90), ms(p99), ms(max)];
+const TIMINGS = ['Requests/s', 'Mean', 'p50', 'p90', 'p99', 'Max'];
+const usage = ({ used }: Measured) => [used.cpus.toFixed(2), memory(used.memoryBytes)];
+const USAGE = ['CPUs', 'Memory'];
+
+const requests = (measured: Measured[]) =>
+  table(
+    ['Request', 'What it is', ...TIMINGS, ...USAGE, 'Response'],
+    measured.map((m) => [`\`${m.name}\``, m.what, ...timings(m.result), ...usage(m), size(m.result.responseBytes)]),
+  );
+
+/** BENCHMARKS.md, whole. Its links are from the root of the repository, where it is. */
+export function render({ startedAt, host, server, settings, data, reads, writes, mix, mixed, ramp }: Report): string {
+  const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string };
+  const { connections, durationSeconds, warmupSeconds, threads } = settings;
+  const all = [...new Set([...reads, ...writes, mixed, ...ramp])];
+  const total = all.reduce((n, m) => n + m.result.requests, 0);
+  const mostCpus = Math.max(...all.map((m) => m.used.cpus));
+  const code = host.commit ? `, commit \`${host.commit}\`${host.changed ? ' with uncommitted changes to the server' : ''}` : '';
+  const busy = host.loadAverage <= 0 ? '' : ` Its load average was ${host.loadAverage.toFixed(1)} when the run started${host.loadAverage >= 1 ? ', so it had other work to do at the same time' : ''}.`;
+
+  return `<!-- This file is generated by robots. Do not edit it by hand: \`npm run bench\` writes it again, whole. -->
+
+# Benchmarks
+
+> **This file is generated by robots.** [\`bench/benchmark.test.ts\`](bench/benchmark.test.ts) measures the API under load and writes this file, whole, each time it runs. Don't edit it by hand, as the next run replaces whatever is here: to change what it says, change the benchmark and run it again.
+
+## What was measured
+
+- **When:** ${startedAt.toISOString().slice(0, 16).replace('T', ' ')} UTC. ${count(total)} requests were counted.
+- **Code:** Evieverse ${version}${code}.
+- **Server:** one process, in a container that may use ${cpus(server.cpus)} and ${memory(server.memoryBytes)} of memory, with no swap (Linux ${server.kernel}, Node ${server.node}). The most it used over a load was ${mostCpus.toFixed(2)} CPUs, and the most memory it held at any time was ${memory(server.peakMemoryBytes)}. It runs from source, as \`npm run dev\` runs it, with every setting at its [default](docs/CONFIG.md): SQLite in a file, content and summaries in a directory, the feed index in the process's memory, and the compactor running in the same process. Its files are on a Docker volume, which took ${ms(server.flushMs)} to flush a small file. It logs every request, as a server does, to nowhere. Four settings differ, without which there would be no load to measure: users post and comment as often as they like (\`POST_RATE_LIMIT_PER_MINUTE=0\`, \`COMMENTS_PER_MINUTE=0\`), and are never asked to solve a challenge for a post or a comment (\`CHALLENGE_POST_WINDOW_SECONDS=0\`, \`CHALLENGE_COMMENTS_PER_MINUTE=0\`).
+- **Data:** ${count(data.posts)} posts under ${count(data.hashtags)} hashtags by ${count(data.users)} users, spread over the last ${data.days} days with the newest days the fullest, with ${count(data.likes)} likes and ${count(data.comments)} comments. They are the [testbed](testbed)'s made-up posts, and the same on every run.
+- **Load:** ${count(connections)} HTTP connections from a second container, over Docker's network, opened before a load starts and kept open, each sending its next request as soon as its last is answered, for ${durationSeconds} seconds a load, after ${warmupSeconds} seconds of the same requests that aren't counted. Every request says it takes compressed responses (\`Accept-Encoding: gzip, deflate, br\`), as a browser's does. The connections belong to ${threads} ${threads === 1 ? 'thread' : 'threads'}, and their container has ${cpus(threads)} of its own, so sending requests takes none of the server's.
+- **Machine:** ${host.cpu}, ${host.cores} cores, ${memory(host.memoryBytes)} of memory, ${host.os}.${busy} Docker ${host.docker.version} (${host.docker.os}) runs both containers, and has ${host.docker.cpus} of the machine's CPUs and ${memory(host.docker.memoryBytes)} of its memory to run them with.
+
+## Results
+
+Times are from sending a request to the end of its response. *p50*, *p90* and *p99* are the times that 50%, 90% and 99% of requests were answered within. *CPUs* is the CPU time the server's process used for each second of the load, its warm-up included: 1.00 is one CPU busy throughout, and it may use ${cpus(server.cpus)}. *Memory* is the memory the process held when the load ended, of the ${memory(server.memoryBytes)} it may use. *Response* is the average size of a response's body as it was sent, which is compressed where the server compresses it. Every request was answered, with the response expected: a run in which one isn't fails, and writes no file.
+
+### Reads
+
+${requests(reads)}
+
+### Writes
+
+${requests(writes)}
+
+### A mix of requests
+
+What is sent, by share of the requests: ${mix.map(({ percent, what }) => `${percent}% ${what}`).join(', ')}.
+
+${table([...TIMINGS, ...USAGE], [[...timings(mixed.result), ...usage(mixed)]])}
+
+### More connections
+
+The same mix, with fewer and with more connections sending it. The row of ${count(connections)} connections is the run above.
+
+${table(['Connections', ...TIMINGS, ...USAGE], ramp.map((m) => [count(m.result.connections), ...timings(m.result), ...usage(m)]))}
+
+## Reading the numbers
+
+- **They are those of a server with ${cpus(server.cpus)} and ${memory(server.memoryBytes)} of memory, on one machine.** The limits say what the server had, and keep the rest of the machine out of its reach. They don't make this machine's CPUs or its disk another's: compare a run with another on the same machine, not with this file.
+- **They are a single process's,** on SQLite and a local disk. A server answers requests on one thread, and uses others to read and write files and to compress: the *CPUs* column is how much of its CPUs it had a use for. A deployment with several nodes, Postgres or MySQL, Redis and an object store ([DEPLOY.md](docs/DEPLOY.md)) has other limits, which this doesn't measure.
+- **The network is Docker's.** The requests come from a container on the same machine as the server's, so there is no distance in the times.
+- **Requests a second are the most the server answered,** not a rate it was sent: a connection waits for its answer before it sends again. So more connections get more out of the server only until it is busy, and past that each request waits longer. [More connections](#more-connections) shows where that is for the mix.
+- **The connections were already open.** Each load's connections are opened first, while the server has nothing else to do, so the times above have no connecting in them. A server that is busy takes new connections slowly, so clients that keep their connections open get these numbers, and ones that connect for every request to a busy server don't.
+- **Writes are flushed to the disk.** A post is three files in the content store (its bytes, its summary and its meta file) and a comment is one, and each is flushed to the disk before the request is answered. So a write has two things to wait for, and the numbers say which it was: how long the server's disk took to flush a file is under [What was measured](#what-was-measured), and a write whose *CPUs* are close to ${Number(server.cpus.toFixed(2))} had every CPU the server may use busy: it was those it waited for, more than the disk.
+- **Writes reach feeds later.** A post or a like is answered once it is stored; the compactor puts it in feeds within a few seconds, and its work is part of what the server was doing during every load here.
+`;
+}

@@ -53,7 +53,7 @@ output "admin_user_id" {
 }
 
 output "admin_api_key" {
-  description = "API key of the admin account: `terraform output -raw admin_api_key`."
+  description = "The API key the deployment made for the admin account: `terraform output -raw admin_api_key`. It no longer works if the account's key was replaced through the API since."
   value       = local.admin_api_key
   sensitive   = true
 }

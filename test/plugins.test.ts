@@ -92,12 +92,14 @@ describe('trust plugins', () => {
       return dir;
     };
 
-    it('are the folders of src/plugins/trust, of which blocked_words is one', async () => {
+    it('are the folders of src/plugins/trust: blocked_words, and urlhaus on a server that turns it on', async () => {
       expect((await loadTrustPlugins()).map((plugin) => plugin.name)).toEqual(['blocked_words']);
+      expect((await loadTrustPlugins(['urlhaus'])).map((plugin) => plugin.name)).toEqual(['blocked_words', 'urlhaus']);
     });
 
     it('are loaded from each folder, in the order of their names', async () => {
       const plugins = await loadTrustPlugins(
+        [],
         await folders({
           b_links: 'export default { assess: (post, ctx) => ({ set: ctx.score - 1, reason: post.texts[0] }) };',
           a_length: 'export default { assess: async () => ({ reduce: 30 }) };',
@@ -108,10 +110,31 @@ describe('trust plugins', () => {
       expect(await trustOf(plugins, POST, CTX)).toEqual({ score: 69, reason: 'hello' });
     });
 
+    it('leave out an optional plugin unless the server names it, and run any other whatever it names', async () => {
+      const dir = await folders({
+        a_always: 'export default { assess: () => ({ reduce: 10 }) };',
+        b_optional: 'export default { optional: true, assess: () => ({ reduce: 20 }) };',
+        c_optional: 'export default { optional: true, assess: () => ({ reduce: 40 }) };',
+        d_not_optional: 'export default { optional: false, assess() {} };',
+      });
+      const loaded = async (...optional: string[]) => {
+        const plugins = await loadTrustPlugins(optional, dir);
+        return [plugins.map((plugin) => plugin.name), (await trustOf(plugins, POST, CTX)).score];
+      };
+      expect(await loaded()).toEqual([['a_always', 'd_not_optional'], 90]);
+      expect(await loaded('c_optional')).toEqual([['a_always', 'c_optional', 'd_not_optional'], 50]);
+      // In the order of the folders' names, whatever order they are named in. Naming one that always runs changes nothing.
+      expect(await loaded('c_optional', 'b_optional', 'a_always')).toEqual([['a_always', 'b_optional', 'c_optional', 'd_not_optional'], 30]);
+      // A name no folder has stops the server: a plugin it was meant to run isn't there.
+      await expect(loadTrustPlugins(['b_optional', 'urlhouse'], dir)).rejects.toThrow(/TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't a folder of .*: it has a_always, b_optional, c_optional, d_not_optional/);
+    });
+
     it('stop the server that has a folder without a plugin in it', async () => {
-      await expect(loadTrustPlugins(await folders({ empty: null }))).rejects.toThrow(/the trust plugin empty has no index file/);
-      await expect(loadTrustPlugins(await folders({ wrong: 'export const assess = () => null;' }))).rejects.toThrow(/the trust plugin wrong must export an object with an assess function/);
-      await expect(loadTrustPlugins(await folders({ broken: 'throw new Error("cannot start");' }))).rejects.toThrow('cannot start');
+      await expect(loadTrustPlugins([], await folders({ empty: null }))).rejects.toThrow(/the trust plugin empty has no index file/);
+      await expect(loadTrustPlugins([], await folders({ wrong: 'export const assess = () => null;' }))).rejects.toThrow(/the trust plugin wrong must export an object with an assess function/);
+      await expect(loadTrustPlugins([], await folders({ broken: 'throw new Error("cannot start");' }))).rejects.toThrow('cannot start');
+      // Whether or not its plugin would run.
+      await expect(loadTrustPlugins([], await folders({ fine: 'export default { optional: true, assess() {} };', empty: null }))).rejects.toThrow(/the trust plugin empty has no index file/);
     });
   });
 });

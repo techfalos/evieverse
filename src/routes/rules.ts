@@ -53,7 +53,7 @@ async function arrange(trx: Db, rules: Pick<RuleRow, 'id' | 'sort_order'>[]): Pr
 }
 
 /**
- * The server's rules, and its modification disclosure.
+ * The server's rules, its support address and its modification disclosure.
  *
  * The rules are what the operator asks of the people who use the server, a list its admins keep
  * (`server_rules`): they add a rule, change its text or its place among the others, and remove
@@ -65,8 +65,11 @@ async function arrange(trx: Db, rules: Pick<RuleRow, 'id' | 'sort_order'>[]): Pr
  * obtained (`EVIEVERSE_SOURCE_URL`). A server that runs a release says that instead. It is the
  * operator's statement, set where the server is deployed: no request changes it.
  *
- * GET /rules gives both to anyone, with a key or without, so a client can show them to someone
- * before they register.
+ * The support address is the email address people write to for support (`SUPPORT_EMAIL`), which
+ * is the operator's to set too, and a placeholder until they do. The server sends it nothing.
+ *
+ * GET /rules gives all three to anyone, with a key or without, so a client can show them to
+ * someone before they register.
  */
 export function rulesRoutes(app: FastifyInstance, { db, config, now = Date.now }: AppDeps) {
   async function asAdmin(req: FastifyRequest, body: Credentials): Promise<AuthUser> {
@@ -75,9 +78,10 @@ export function rulesRoutes(app: FastifyInstance, { db, config, now = Date.now }
     return user;
   }
 
-  /** The rules, in their order, and the modification disclosure. For anyone: it needs no key, and reads none. */
+  /** The rules, in their order, the support address and the modification disclosure. For anyone: it needs no key, and reads none. */
   app.get('/rules', async () => ({
     modificationDisclosure: { modified: config.modified, release: RELEASE, sourceUrl: config.sourceUrl },
+    supportEmail: config.supportEmail,
     rules: (await inOrder(db)).map(record),
   }));
 

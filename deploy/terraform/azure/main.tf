@@ -7,7 +7,7 @@
 
 locals {
   root          = abspath("${path.module}/../../..")
-  source_hash   = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json", "scripts/build-cli.mjs"]) : filesha1("${local.root}/${f}")]))
+  source_hash   = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), sort(fileset(local.root, "languages/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json", "scripts/build-cli.mjs"]) : filesha1("${local.root}/${f}")]))
   compact       = replace(var.name, "-", "")
   image         = var.image != "" ? var.image : "${azurerm_container_registry.main.login_server}/app:${substr(local.source_hash, 0, 12)}"
   url           = "https://${azurerm_cdn_frontdoor_endpoint.main.host_name}"
@@ -23,6 +23,7 @@ locals {
     DB_DIALECT         = "postgres"
     CONTENT_SCHEME     = "azblob"
     PUBLIC_BASE_URL    = local.url
+    SUPPORT_EMAIL      = var.support_email
     COMPACT_IN_PROCESS = "false"
   }, var.environment)
 
@@ -58,6 +59,13 @@ locals {
     AUDIT_OPTIONS        = jsonencode(merge(local.blob_options, { container = azurerm_storage_container.audit.name }))
   })
   function_secret_names = setunion(local.secret_names, ["FUNCTION_EDGE_SECRET", "AUDIT_OPTIONS"])
+
+  # What `environment` and `secrets` set, and the optional trust plugins they turn on, read as the
+  # server reads TRUST_OPTIONAL_PLUGINS (names separated by commas or spaces): for the one mistake
+  # that is caught in the plan, before the migrate job is started (see the preconditions of
+  # terraform_data.migrate).
+  settings         = merge(var.environment, var.secrets)
+  optional_plugins = regexall("[^\\s,]+", lookup(local.settings, "TRUST_OPTIONAL_PLUGINS", ""))
 }
 
 resource "random_password" "edge" {
@@ -258,6 +266,9 @@ locals {
 # migrate job below creates the account from the key's hash (src/moderation/bootstrap.ts), so
 # the key itself is only in the state and in the profile file. To replace the key:
 #   terraform apply -replace=random_password.admin_key
+# A key that replaces it through the API (POST /users/:userId/key) lasts, and never reaches the
+# state: the output and the profile file keep the key made here, which stays revoked, until it is
+# replaced as above.
 resource "random_uuid" "admin" {}
 
 resource "random_id" "admin_key_prefix" {
@@ -305,9 +316,17 @@ resource "local_sensitive_file" "admin_profile" {
 
 # ---------------------------------------------------------------- migrations
 
-# Functions never migrate the database when they start (many start at once), so each apply that
-# changes the image or the admin account starts this job first and waits for it. The job also sets
-# up the admin account.
+# The step every apply that changes the image, the settings or the admin account starts first, and
+# waits for (src/functions/deploy.ts). With the settings the apps are about to get, the job checks
+# that they start with them, and only then brings the schema up to date and sets up the admin
+# account.
+#
+# The check is what keeps a mistake in `environment` or `secrets` from reaching the deployment: the
+# job starts each route group as its app would, and a setting the server refuses (a misspelt plugin
+# name, say) fails it, which stops the apply here, before the apps and the compactor, which all
+# wait for it: they keep what they have.
+#
+# Functions never migrate the database when they start, as many start at once.
 resource "azurerm_container_app_job" "migrate" {
   name                         = "${var.name}-migrate"
   container_app_environment_id = azurerm_container_app_environment.main.id
@@ -329,29 +348,39 @@ resource "azurerm_container_app_job" "migrate" {
     name  = "acr-password"
     value = azurerm_container_registry.main.admin_password
   }
-  secret {
-    name  = "database-url"
-    value = local.secret_env["DATABASE_URL"]
+  dynamic "secret" {
+    for_each = local.function_secret_names
+    content {
+      name  = lower(replace(secret.value, "_", "-"))
+      value = local.function_secret_env[secret.value]
+    }
   }
 
   template {
     container {
       name    = "migrate"
       image   = local.image
-      command = ["node", "dist/db/migrate.js"]
+      command = ["node", "dist/functions/migrate.js"]
       cpu     = 0.5
       memory  = "1Gi"
-      env {
-        name  = "DB_DIALECT"
-        value = "postgres"
-      }
       env {
         name  = "BOOTSTRAP_ADMIN"
         value = local.bootstrap_admin
       }
-      env {
-        name        = "DATABASE_URL"
-        secret_name = "database-url"
+      # What the apps are about to get, which is what the job checks.
+      dynamic "env" {
+        for_each = local.function_env
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+      dynamic "env" {
+        for_each = local.function_secret_names
+        content {
+          name        = env.value
+          secret_name = lower(replace(env.value, "_", "-"))
+        }
       }
     }
   }
@@ -360,7 +389,9 @@ resource "azurerm_container_app_job" "migrate" {
 }
 
 resource "terraform_data" "migrate" {
-  triggers_replace = [local.image, local.bootstrap_admin]
+  # The last is a hash of everything the job is given, so a change to `environment` or `secrets`
+  # alone starts it again, and is checked before it reaches an app.
+  triggers_replace = [local.image, local.bootstrap_admin, nonsensitive(sha256(jsonencode([local.function_env, local.function_secret_env])))]
   provisioner "local-exec" {
     command = <<-EOT
       set -e
@@ -370,7 +401,7 @@ resource "terraform_data" "migrate" {
         status=$(az containerapp job execution show $job --job-execution-name "$run" --query properties.status --output tsv)
         case "$status" in
           Succeeded) exit 0 ;;
-          Failed | Stopped | Degraded) echo "the migration job ended as $status: see its logs" >&2; exit 1 ;;
+          Failed | Stopped | Degraded) echo "the migration job ended as $status, so nothing else was changed: its logs say why, which may be a setting in environment or secrets that the server refuses" >&2; exit 1 ;;
         esac
         sleep 5
       done
@@ -385,6 +416,13 @@ resource "terraform_data" "migrate" {
     precondition {
       condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", local.admin_user_id))
       error_message = "The admin account's id isn't a version 4 UUID, which is what the server's user ids are."
+    }
+    # The server refuses to start with urlhaus turned on and no Auth-Key (src/config.ts), which the
+    # migrate job would find too. This one is known from the variables alone, so the plan fails,
+    # before anything is changed.
+    precondition {
+      condition     = !contains(local.optional_plugins, "urlhaus") || trimspace(lookup(local.settings, "URLHAUS_AUTH_KEY", "")) != ""
+      error_message = "TRUST_OPTIONAL_PLUGINS turns on urlhaus, which needs URLHAUS_AUTH_KEY in `secrets`: the Auth-Key of an abuse.ch account, which is free (https://auth.abuse.ch). Without it no app and no compactor would start."
     }
   }
 }

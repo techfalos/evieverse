@@ -8,6 +8,10 @@ import type { AdKind, MonetizationTable } from './db/schema.js';
  *
  * Feeds read no database, so ads are shown from Redis: each compactor run publishes the ads that
  * haven't ended there (AdStore), and whoever shows one picks from those.
+ *
+ * An ad that leads somewhere is shown with the server's own link, not the one its admin gave it
+ * (adClickUrl): following it counts a click on the ad, and then redirects to where the ad leads.
+ * Clicks are all that is counted: nothing counts how often an ad was shown.
  */
 
 export const AD_KINDS = ['text', 'image'] as const satisfies readonly AdKind[];
@@ -36,7 +40,7 @@ export interface PublishedAd {
   kind: AdKind;
   /** A text ad's text, or an image ad's caption. */
   text?: string;
-  /** Where the ad leads when it is followed. */
+  /** Where the ad leads when it is followed. Whoever shows the ad only reads whether it leads anywhere: what it sends is adClickUrl. */
   url?: string;
   /** The hashtags it is targeted at; null for one that appears all the time. */
   tags: string[] | null;
@@ -55,6 +59,7 @@ export interface AdRecord {
   /** An image ad's image. */
   imageUrl?: string;
   text?: string;
+  /** Where the ad is followed, if it leads anywhere: the server's link, which counts the click and redirects to where the ad leads (adClickUrl). */
   url?: string;
 }
 
@@ -98,14 +103,21 @@ export function eligibleAds(ads: PublishedAd[], tags: string[], at: number): Pub
 /** Where an image ad's image is read. */
 export const adImageUrl = (publicBaseUrl: string, adId: string) => `${publicBaseUrl}/monetization/ads/${adId}/image`;
 
-/** An ad as a response carries it, under `label`. */
+/**
+ * Where an ad that leads somewhere is followed: the server counts the click there, and redirects
+ * to where the ad leads (GET /monetization/ads/:adId/click). It names the ad and nothing else, so
+ * it stays the same whatever the ad's link is changed to.
+ */
+export const adClickUrl = (publicBaseUrl: string, adId: string) => `${publicBaseUrl}/monetization/ads/${adId}/click`;
+
+/** An ad as a response carries it, under `label`. Its link, where it has one, is the one that counts the click. */
 export const adRecord = (ad: Pick<PublishedAd, 'adId' | 'kind' | 'text' | 'url'>, label: string, publicBaseUrl: string): AdRecord => ({
   adId: ad.adId,
   label,
   kind: ad.kind,
   ...(ad.kind === 'image' && { imageUrl: adImageUrl(publicBaseUrl, ad.adId) }),
   ...(ad.text !== undefined && { text: ad.text }),
-  ...(ad.url !== undefined && { url: ad.url }),
+  ...(ad.url !== undefined && { url: adClickUrl(publicBaseUrl, ad.adId) }),
 });
 
 /** A 32-bit hash of `text` (FNV-1a, then murmur3's final mix), which spreads similar strings apart. */

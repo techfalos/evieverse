@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { sql } from 'kysely';
 import { z } from 'zod';
 import { authenticate, type AuthUser } from '../auth/apiKey.js';
-import type { MonetizationTable } from '../db/schema.js';
+import type { MonetizationRow } from '../db/schema.js';
 import type { RouteDeps } from '../deps.js';
 import { badRequest, conflict, forbidden, HttpError, notFound } from '../http/errors.js';
 import { listPage, listQuery } from '../http/listCursor.js';
@@ -59,7 +60,8 @@ const adNotFound = () => notFound(msg('ad.not_found'));
  * which is when an ad that was created, changed or deleted here shows as it now is.
  *
  * The image of an ad is read by anyone who has the ad, with no credentials: it is what feeds and
- * posts tell their readers to show.
+ * posts tell their readers to show. So is its link followed (/monetization/ads/:adId/click), which
+ * is where the server counts the ad's clicks before it sends the reader on.
  */
 export function monetizationRoutes(app: FastifyInstance, { db, config, content, now = Date.now }: RouteDeps) {
   /** An ad's image is held to what an image post's is (see readPost), and to a size of its own. */
@@ -117,8 +119,12 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
     if (Number(open) >= MAX_OPEN_ADS) throw conflict(msg('ad.limit', { max: MAX_OPEN_ADS }));
   }
 
-  /** An ad as its admins read it: what it is, its schedule, and where that has it now. */
-  const record = (row: MonetizationTable, at: number) => ({
+  /**
+   * An ad as its admins read it: what it is, its schedule, where that has it now, and how many
+   * times its link was followed. `url` is where the ad leads, as they gave it: the link that counts
+   * the click is what its readers get (adClickUrl).
+   */
+  const record = (row: MonetizationRow, at: number) => ({
     adId: row.id,
     kind: row.kind,
     ...(row.kind === 'image' && { imageUrl: adImageUrl(config.publicBaseUrl, row.id) }),
@@ -128,6 +134,7 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
     startsAt: iso(row.starts_at),
     endsAt: row.ends_at === null ? null : iso(row.ends_at),
     status: adStatus({ startsAt: row.starts_at, endsAt: row.ends_at }, at),
+    clicks: row.clicks,
     createdBy: row.created_by,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
@@ -158,11 +165,12 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
       if (!ended(endsAt, t)) await requireRoom(t);
 
       image = await readImage(fields, upload);
-      const row: MonetizationTable = {
+      const row: MonetizationRow = {
         id: randomUUID(),
         kind,
         text,
         url: fields.url ?? null,
+        clicks: 0,
         image_type: image?.type ?? null,
         tags,
         starts_at: startsAt,
@@ -237,7 +245,7 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
       if (ended(row.ends_at, t) && !ended(endsAt, t)) await requireRoom(t);
 
       image = await readImage(fields, upload);
-      const next: MonetizationTable = {
+      const next: MonetizationRow = {
         ...row,
         text,
         url: fields.url === undefined ? row.url : fields.url,
@@ -249,7 +257,8 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
       };
       // Written over the one it had, which is where the ad's image is read.
       if (image) await image.file.place(content, { adId }, image.type);
-      const { id: _id, ...changed } = next;
+      // All of it but its clicks, which are counted meanwhile: the count read above may be behind by now.
+      const { id: _id, clicks: _clicks, ...changed } = next;
       const res = await db.updateTable('monetization').set(changed).where('id', '=', adId).executeTakeFirst();
       // Deleted meanwhile, and its image with it: the one just written goes too.
       if (Number(res.numUpdatedRows) === 0) {
@@ -278,7 +287,7 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
    * redirect to the store where it can sign links; else streamed from here, as a post's bytes are
    * (see rawHeaders). The image of any ad the server holds, whatever its schedule.
    */
-  app.get('/monetization/ads/:adId/image', async (req, reply) => {
+  app.get('/monetization/ads/:adId/image', { compress: false }, async (req, reply) => {
     const { adId } = Params.parse(req.params);
     const row = await db.selectFrom('monetization').select(['kind', 'image_type']).where('id', '=', adId).executeTakeFirst();
     if (!row || row.kind !== 'image') throw adNotFound();
@@ -292,5 +301,41 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
     reply.header('content-type', type);
     reply.header('content-length', String(size));
     return reply.send(await content.stream(bytes));
+  });
+
+  /**
+   * An ad's link, for anyone: it is what `url` names wherever an ad that leads somewhere is shown
+   * (adClickUrl). It counts a click on the ad, and redirects to where the ad leads.
+   *
+   * It goes where the ad's row says, which is its admins' to say, and nowhere a request names: the
+   * link can't be made to redirect anywhere else. The row is read as it is now, so a link an admin
+   * changed is the one followed from then on, with no compactor run between, and the link of an ad
+   * that is over, or isn't shown yet, still leads where the ad does. 404 for an ad that isn't
+   * there, and for one that leads nowhere.
+   *
+   * Every time the link is followed is a click: nothing tells one reader from another, or a person
+   * from a program. A HEAD request is none, as it follows nothing. If the click can't be counted,
+   * that is logged and the reader is sent on all the same.
+   */
+  app.get('/monetization/ads/:adId/click', async (req, reply) => {
+    const { adId } = Params.parse(req.params);
+    const row = await db.selectFrom('monetization').select('url').where('id', '=', adId).executeTakeFirst();
+    if (!row?.url) throw adNotFound();
+
+    if (req.method !== 'HEAD') {
+      try {
+        // Before the response goes out: a function may be frozen straight after it.
+        await db
+          .updateTable('monetization')
+          .set({ clicks: sql`clicks + 1` })
+          .where('id', '=', adId)
+          .execute();
+      } catch (err) {
+        req.log.error({ err, adId }, 'could not count the click on an ad; its reader is sent on without it');
+      }
+    }
+    // Asked for again each time it is followed: a redirect that was kept would be a click nobody counted.
+    reply.header('cache-control', 'no-store');
+    return reply.redirect(row.url, 302);
   });
 }

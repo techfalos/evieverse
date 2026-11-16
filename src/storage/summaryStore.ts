@@ -1,12 +1,12 @@
 import { promisify } from 'node:util';
 import { brotliCompress, brotliDecompressSync, constants } from 'node:zlib';
 import type { Operator } from 'opendal';
-import { mediaUrl, readPreview, type StoredPreview } from '../posts.js';
+import { mediaUrl, originMediaUrl, readPreview, type StoredPreview } from '../posts.js';
 import { DAY, utcDay } from '../time.js';
 import { Lru, mapLimit } from '../util.js';
-import type { Preview } from './contentStore.js';
+import type { Origin, Preview } from './contentStore.js';
 import type { HotStore } from './hotStore.js';
-import { createOperator, isNotFound } from './opendal.js';
+import { createOperator, isNotFound, readObject } from './opendal.js';
 
 const compress = promisify(brotliCompress);
 const HEADER_LINES = 5;
@@ -26,17 +26,41 @@ export interface Summary {
   comments: boolean;
   tags: string[];
   preview: Preview;
+  /** On a repost of a post on another server: the original, which the preview is of. */
+  origin?: Origin;
+  /**
+   * When the content was reposted, once for each repost of it. It isn't part of what a summary
+   * says, and a summary that is read has none: it says where one that is written is kept (see
+   * SummaryRef).
+   */
+  repostedAt?: number[];
 }
 
-/** What locates a summary: the content's creation day picks its object-store prefix and its tier. */
+/**
+ * What locates a summary. A feed finds one by its index entry, which holds the content's id and a
+ * time: the content's creation, or, where a repost placed the content in the index, the repost's.
+ * That time's UTC day picks the object-store prefix, and its age the tier.
+ *
+ * So a summary is kept under the day the content was created and under each day it was reposted
+ * (`repostedAt`), the same bytes under each. To read one, `createdAt` is the entry's time, whichever
+ * it is. To write or erase one, `createdAt` is the content's and `repostedAt` its reposts', which
+ * covers every copy.
+ */
 export interface SummaryRef {
   contentId: string;
   createdAt: number;
+  repostedAt?: number[];
 }
 
 export const summaryKey = (r: { contentId: string }) => `sum:${r.contentId}`;
 const dayPrefix = (day: number) => `summaries/${String(day).padStart(5, '0')}/`;
-export const summaryObjectKey = (r: SummaryRef) => `${dayPrefix(utcDay(r.createdAt))}${r.contentId}.br`;
+const objectKey = (contentId: string, day: number) => `${dayPrefix(day)}${contentId}.br`;
+/** Where a feed reads the summary of an entry placed at `createdAt`. */
+export const summaryObjectKey = (r: { contentId: string; createdAt: number }) => objectKey(r.contentId, utcDay(r.createdAt));
+/** Every key a summary is kept under: one for the day the content was created, and one for each day it was reposted. */
+export const summaryObjectKeys = (r: SummaryRef) => [...new Set([r.createdAt, ...(r.repostedAt ?? [])].map(utcDay))].map((day) => objectKey(r.contentId, day));
+/** The latest time a summary is found by: for as long as that is young, Redis keeps the summary. */
+const latest = (r: SummaryRef) => Math.max(r.createdAt, ...(r.repostedAt ?? []));
 
 /** What a summary holds after its header: a text post's text or a caption, or a link's URL. */
 const body = (p: Preview) => (p.kind === 'link' ? p.url : (p.text ?? ''));
@@ -56,22 +80,38 @@ function storedPreview(contentId: string, kind: string, text: string): StoredPre
  * or audio's URL isn't stored; it's built when read.
  *
  * A summary written before posts took comments has three numbers, and reads as one that takes none.
+ *
+ * The summary of a repost of a post on another server has a fifth number, 1, and with it a sixth
+ * header line, for the original: its address, then its publisher's id and username there,
+ * separated by single spaces (neither of the first two holds one). Its image's, video's or audio's
+ * URL is built from that address. Any other summary is as it was before there were reposts.
  */
 export function encodeSummary(s: Summary): string {
-  const numbers = `${s.createdAt} ${s.updatedAt} ${s.aiGenerated ? 1 : 0} ${s.comments ? 1 : 0}`;
-  return [numbers, s.userId, s.mimeType, s.tags.join(' '), s.preview.kind, body(s.preview)].join('\n');
+  const numbers = `${s.createdAt} ${s.updatedAt} ${s.aiGenerated ? 1 : 0} ${s.comments ? 1 : 0}${s.origin ? ' 1' : ''}`;
+  const origin = s.origin ? [`${s.origin.url} ${s.origin.publisher.userId} ${s.origin.publisher.username}`] : [];
+  return [numbers, s.userId, s.mimeType, s.tags.join(' '), s.preview.kind, ...origin, body(s.preview)].join('\n');
+}
+
+/** The original a summary's sixth header line names. */
+function storedOrigin(contentId: string, line: string): Origin {
+  const [url, userId, ...username] = line.split(' ');
+  if (!url || !userId || !username.length) throw new Error(`summary of ${contentId} names no original`);
+  return { url, publisher: { userId, username: username.join(' ') } };
 }
 
 export function decodeSummary(contentId: string, text: string, publicBaseUrl: string): Summary {
   const lines: string[] = [];
   let pos = 0;
-  for (let i = 0; i < HEADER_LINES; i++) {
+  const line = () => {
     const nl = text.indexOf('\n', pos);
     if (nl < 0) throw new Error(`summary of ${contentId} is truncated`);
     lines.push(text.slice(pos, nl));
     pos = nl + 1;
-  }
-  const [createdAt, updatedAt, ai, comments] = lines[0]!.split(' ').map(Number);
+  };
+  for (let i = 0; i < HEADER_LINES; i++) line();
+  const [createdAt, updatedAt, ai, comments, reposted] = lines[0]!.split(' ').map(Number);
+  if (reposted === 1) line();
+  const origin = reposted === 1 ? storedOrigin(contentId, lines[5]!) : undefined;
   return {
     contentId,
     createdAt: createdAt!,
@@ -81,7 +121,8 @@ export function decodeSummary(contentId: string, text: string, publicBaseUrl: st
     aiGenerated: ai === 1,
     comments: comments === 1,
     tags: lines[3] ? lines[3].split(' ') : [],
-    preview: readPreview(storedPreview(contentId, lines[4]!, text.slice(pos)), mediaUrl(publicBaseUrl, contentId)),
+    preview: readPreview(storedPreview(contentId, lines[4]!, text.slice(pos)), origin ? originMediaUrl(origin) : mediaUrl(publicBaseUrl, contentId)),
+    ...(origin && { origin }),
   };
 }
 
@@ -104,6 +145,12 @@ export interface SummaryStoreOptions {
  * bytes until the post is `hotDays` old: reads of younger posts take one MGET; older posts, and
  * anything Redis lost, are read from the object store (and the hot copy is restored while it's
  * still due).
+ *
+ * Content that was reposted is in indexes at the time of the repost as well as at its own (see
+ * SummaryRef), and a repost can be of a post older than the retention period. So its summary is
+ * also under the day of each repost, where the entries the repost made find it, and where it
+ * lasts as long as they do; and Redis holds it until the latest repost is `hotDays` old. It is
+ * still one summary: every copy is written by the same write, with the same bytes.
  */
 export class SummaryStore {
   private readonly op: Operator;
@@ -119,7 +166,7 @@ export class SummaryStore {
     this.cache = new Lru(opts.cacheSize);
   }
 
-  /** How much longer the post counts as hot; zero or less once it's `hotDays` old. */
+  /** How much longer a post created, or reposted, at `createdAt` counts as hot; zero or less once that is `hotDays` ago. */
   private hotTtl(createdAt: number) {
     return createdAt + this.opts.hotDays * DAY - this.now();
   }
@@ -139,12 +186,14 @@ export class SummaryStore {
     return decodeSummary(contentId, brotliDecompressSync(blob).toString('utf8'), this.opts.publicBaseUrl);
   }
 
-  /** Writes the object store, then Redis while the post is younger than `hotDays`. */
+  /** Writes the object store, under every day the summary is kept (see SummaryRef), then Redis while the post, or its latest repost, is younger than `hotDays`. */
   async put(s: Summary, blob?: Buffer): Promise<void> {
     blob ??= await this.compress(s);
-    await this.op.write(summaryObjectKey(s), blob);
-    this.cache.delete(summaryObjectKey(s));
-    const ttl = this.hotTtl(s.createdAt);
+    for (const key of summaryObjectKeys(s)) {
+      await this.op.write(key, blob);
+      this.cache.delete(key);
+    }
+    const ttl = this.hotTtl(latest(s));
     if (ttl > 0) await this.hot.set(summaryKey(s), blob, ttl);
   }
 
@@ -161,7 +210,7 @@ export class SummaryStore {
    * looked at.
    */
   async ensureMany(list: Summary[]): Promise<(Error | null)[]> {
-    const hot = list.map((s) => this.hotTtl(s.createdAt) > 0);
+    const hot = list.map((s) => this.hotTtl(latest(s)) > 0);
     const found = await this.hot.exists(list.filter((_, i) => hot[i]).map(summaryKey));
     let next = 0;
     const inHot = hot.map((due) => (due ? found[next++]! : true));
@@ -169,8 +218,10 @@ export class SummaryStore {
     await mapLimit([...list.keys()], COLD_READS, async (i) => {
       const s = list[i]!;
       try {
-        if (!(await this.op.exists(summaryObjectKey(s)))) await this.put(s);
-        else if (!inHot[i]) await this.hot.set(summaryKey(s), await this.compress(s), this.hotTtl(s.createdAt));
+        // Every copy: one under a day the content was reposted on is the only one an entry of that day finds.
+        const there = await Promise.all(summaryObjectKeys(s).map((key) => this.op.exists(key)));
+        if (there.includes(false)) await this.put(s);
+        else if (!inHot[i]) await this.hot.set(summaryKey(s), await this.compress(s), this.hotTtl(latest(s)));
       } catch (err) {
         errors[i] = err instanceof Error ? err : new Error(String(err));
       }
@@ -178,8 +229,12 @@ export class SummaryStore {
     return errors;
   }
 
-  /** The summaries, in order; null where neither tier has one (e.g. erased since it was planned). */
-  async getMany(refs: SummaryRef[]): Promise<(Summary | null)[]> {
+  /**
+   * The summaries, in order; null where neither tier has one (e.g. erased since it was planned).
+   * Each is found by the time of the index entry it is read for (`createdAt`), which is the
+   * content's creation or a repost of it (see SummaryRef).
+   */
+  async getMany(refs: { contentId: string; createdAt: number }[]): Promise<(Summary | null)[]> {
     const blobs: (Buffer | null)[] = refs.map(() => null);
     const hot: number[] = [];
     const cold: number[] = [];
@@ -194,7 +249,7 @@ export class SummaryStore {
       const cached = this.cache.get(key);
       let blob = cached && this.now() - cached.at < this.opts.cacheSeconds * 1000 ? cached.blob : null;
       if (!blob) {
-        blob = await this.readObject(key);
+        blob = await readObject(this.op, key);
         if (!blob) return;
         this.cache.set(key, { blob, at: this.now() });
         const ttl = this.hotTtl(ref.createdAt);
@@ -214,20 +269,24 @@ export class SummaryStore {
   }
 
   /**
-   * Erases one summary from both tiers, and fails if it can't: for content that must leave feeds
-   * now, which leave out a record with no summary. One that isn't there is no error.
+   * Erases one summary from both tiers, every copy of it (see SummaryRef), and fails if it can't:
+   * for content that must leave feeds now, which leave out a record with no summary. One that
+   * isn't there is no error.
    */
   async erase(r: SummaryRef): Promise<void> {
-    this.cache.delete(summaryObjectKey(r));
-    await this.op.delete(summaryObjectKey(r));
+    for (const key of summaryObjectKeys(r)) {
+      this.cache.delete(key);
+      await this.op.delete(key);
+    }
     await this.hot.del([summaryKey(r)]);
   }
 
-  /** Erases the summaries from both tiers, as far as it can: one it couldn't is left behind. */
+  /** Erases the summaries from both tiers, every copy of each, as far as it can: one it couldn't is left behind. */
   async remove(refs: SummaryRef[]): Promise<void> {
     if (!refs.length) return;
-    for (const r of refs) this.cache.delete(summaryObjectKey(r));
-    await mapLimit(refs, COLD_READS, (r) => this.op.delete(summaryObjectKey(r)).catch(() => {}));
+    const keys = refs.flatMap(summaryObjectKeys);
+    for (const key of keys) this.cache.delete(key);
+    await mapLimit(keys, COLD_READS, (key) => this.op.delete(key).catch(() => {}));
     await this.hot.del(refs.map(summaryKey));
   }
 
@@ -247,14 +306,5 @@ export class SummaryStore {
       .filter((d) => d < day);
     for (const d of days) await this.op.removeAll(dayPrefix(d));
     return days;
-  }
-
-  private async readObject(key: string): Promise<Buffer | null> {
-    try {
-      return await this.op.read(key);
-    } catch (err) {
-      if (isNotFound(err)) return null;
-      throw err;
-    }
   }
 }

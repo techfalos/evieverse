@@ -160,13 +160,13 @@ for (const target of TARGETS) {
       expect((await whoami(first.user)).statusCode).toBe(401);
 
       const env = { BOOTSTRAP_ADMIN: JSON.stringify(first.admin) };
-      expect(await bootstrapAdmin(ctx.db, env)).toEqual({ userId: first.admin.userId, username: 'operator', created: true, keyChanged: true });
+      expect(await bootstrapAdmin(ctx.db, env)).toEqual({ userId: first.admin.userId, username: 'operator', created: true, keyChanged: true, keyReplaced: false });
       // An account the operator set up registered in no language, so it is answered in the server's default.
       expect(ok(await whoami(first.user))).toEqual({ userId: first.admin.userId, username: 'operator', language: 'en', admin: true, moderator: false, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false });
 
       // Every later deploy runs it again, and changes nothing: not a profile renamed since, either.
       ok(await ctx.app.inject({ method: 'PATCH', url: `/users/${first.admin.userId}`, headers: as(first.user), payload: { username: 'root' } }));
-      expect(await bootstrapAdmin(ctx.db, env)).toEqual({ userId: first.admin.userId, username: 'root', created: false, keyChanged: false });
+      expect(await bootstrapAdmin(ctx.db, env)).toEqual({ userId: first.admin.userId, username: 'root', created: false, keyChanged: false, keyReplaced: false });
       expect(await keys()).toEqual({ [first.admin.keyHash]: null });
 
       // A new key for the same account replaces the old one, and makes it an admin again if it stopped being one.
@@ -174,10 +174,14 @@ for (const target of TARGETS) {
       ctx.clock.now += 1000;
       const second = terraformAdmin();
       const rotated = { ...second.admin, userId: first.admin.userId };
-      expect(await ensureAdmin(ctx.db, rotated, ctx.clock.now)).toEqual({ userId: first.admin.userId, username: 'root', created: false, keyChanged: true });
+      expect(await ensureAdmin(ctx.db, rotated, ctx.clock.now)).toEqual({ userId: first.admin.userId, username: 'root', created: false, keyChanged: true, keyReplaced: false });
       expect(await keys()).toEqual({ [first.admin.keyHash]: ctx.clock.now, [rotated.keyHash]: null });
       expect((await whoami(first.user)).statusCode).toBe(401);
       expect(ok(await whoami({ userId: first.admin.userId, apiKey: second.user.apiKey }))).toMatchObject({ username: 'root', admin: true });
+
+      // The key it had before is not brought back by a deploy that names it again.
+      expect(await bootstrapAdmin(ctx.db, env)).toEqual({ userId: first.admin.userId, username: 'root', created: false, keyChanged: false, keyReplaced: true });
+      expect(await keys()).toEqual({ [first.admin.keyHash]: ctx.clock.now, [rotated.keyHash]: null });
 
       // The account's name is someone else's: nothing is created.
       const alice = await ctx.register('alice');
@@ -185,6 +189,47 @@ for (const target of TARGETS) {
       await expect(ensureAdmin(ctx.db, taken.admin)).rejects.toThrow(`the username "alice" belongs to user ${alice.userId}`);
       expect((await whoami(taken.user)).statusCode).toBe(401);
       expect(await admins()).toEqual(['root']);
+    });
+
+    it("keeps a key that replaced the deployment's through the API, whichever deploys follow, until the deployment issues a new one", async () => {
+      ctx = await createTestContext(target);
+      const deployed = terraformAdmin();
+      const whoami = (apiKey: string) => req({ userId: deployed.admin.userId, apiKey }, 'GET', '/whoami');
+      const replace = (by: User): Promise<string> => ctx.app.inject({ method: 'POST', url: `/users/${deployed.admin.userId}/key`, headers: as(by) }).then((res) => ok(res, 201).apiKey);
+      /** How many of the account's keys work, which is one, always. */
+      const live = async () => (await ctx.db.selectFrom('api_keys').select('id').where('user_id', '=', deployed.admin.userId).where('revoked_at', 'is', null).execute()).length;
+      const env = { BOOTSTRAP_ADMIN: JSON.stringify(deployed.admin) };
+      const deploy = () => bootstrapAdmin(ctx.db, env);
+      const kept = { userId: deployed.admin.userId, username: 'operator', created: false, keyChanged: false, keyReplaced: true };
+      await deploy();
+
+      // The account replaces its own key, as it would one that leaked: no deploy undoes that.
+      const own = await replace(deployed.user);
+      for (let i = 0; i < 2; i++) {
+        expect(await deploy()).toEqual(kept);
+        expect((await whoami(deployed.user.apiKey)).statusCode).toBe(401);
+        expect(ok(await whoami(own))).toMatchObject({ username: 'operator', admin: true });
+        expect(await live()).toBe(1);
+      }
+
+      // Nor one that another admin made for it, though the deploy makes the account an admin again.
+      const other = await admin('other');
+      const given = await replace(other);
+      await setAdmin(ctx.db, deployed.admin.userId, false);
+      expect(await deploy()).toEqual(kept);
+      expect((await whoami(own)).statusCode).toBe(401);
+      expect((await whoami(deployed.user.apiKey)).statusCode).toBe(401);
+      expect(ok(await whoami(given))).toMatchObject({ admin: true });
+      expect(await live()).toBe(1);
+
+      // A new key from the deployment is the account's only one again, which is how the deployment takes the account back.
+      const issued = terraformAdmin();
+      const reissued = { BOOTSTRAP_ADMIN: JSON.stringify({ ...issued.admin, userId: deployed.admin.userId }) };
+      expect(await bootstrapAdmin(ctx.db, reissued)).toEqual({ ...kept, keyChanged: true, keyReplaced: false });
+      expect((await whoami(given)).statusCode).toBe(401);
+      expect(ok(await whoami(issued.user.apiKey))).toMatchObject({ admin: true });
+      expect(await bootstrapAdmin(ctx.db, reissued)).toEqual({ ...kept, keyReplaced: false });
+      expect(await live()).toBe(1);
     });
   });
 }
@@ -398,6 +443,9 @@ describe('the CLI', () => {
     expect(await json('words', 'add', '--tag', 'news', 'rumour')).toEqual({ tag: 'news', words: ['rumour'] });
     expect(await ran('words', 'remove', '--server', 'spam')).toBe('buy now');
     expect(await ran('words', 'remove', '--tag', 'news', 'rumour')).toBe('#news has no blocked words.');
+    // A pattern is an entry like any other, kept as it was written.
+    expect(await ran('words', 'add', '--server', '/垃圾|Scam\\w*/')).toBe('/垃圾|Scam\\w*/\nbuy now');
+    expect(await ran('words', 'remove', '--server', '/垃圾|Scam\\w*/')).toBe('buy now');
 
     expect(await ran('mute', 'add', 'news', bob.userId)).toBe(`${bob.userId} is muted on #news.`);
     expect(await ran('mute', 'list', 'news', '--limit', '1')).toMatch(new RegExp(`^${bob.userId}  bob  muted 2026-`));
@@ -407,7 +455,7 @@ describe('the CLI', () => {
     const contentId = await post(ctx, alice, 'both #news and #sports');
     expect(await ran('tag', 'remove', contentId, 'news', '--mute')).toBe(`Removed #news from ${contentId}: it's now under #sports.\nIts publisher is muted on #news.`);
     expect(await cli(['tag', 'remove', contentId, 'news'])).toMatchObject({ code: 1, err: "evieverse: the content isn't tagged #news" });
-    expect(await ran('tag', 'remove', contentId, 'sports')).toBe(`#sports was the last hashtag of ${contentId}, so the content is set for deletion.`);
+    expect(await ran('tag', 'remove', contentId, 'sports')).toBe(`Removed #sports from ${contentId}: it was its last hashtag, so the content is in no hashtag's feed any more.`);
     const other = await post(ctx, alice, 'another #sports');
     expect(await ran('content', 'delete', other)).toBe(`${other} is set for deletion.`);
     expect(await cli(['content', 'delete', NO_USER])).toMatchObject({ code: 1, err: 'evieverse: content not found' });
@@ -415,7 +463,8 @@ describe('the CLI', () => {
 
   it("keeps the server's rules as an admin, and lists them, with its modification disclosure, as anyone", async () => {
     const SOURCE = 'https://git.example.com/our-evieverse';
-    await setup({ modified: true, sourceUrl: SOURCE });
+    const SUPPORT = 'support@our-evieverse.example';
+    await setup({ modified: true, sourceUrl: SOURCE, supportEmail: SUPPORT });
     const root = await ctx.register('root');
     await setAdmin(ctx.db, 'root', true);
     const alice = await ctx.register('alice');
@@ -423,7 +472,8 @@ describe('the CLI', () => {
     await profile('alice', alice);
     const by = (name: string, ...args: string[]) => ran(...args, '--profile', name);
     const refused = (name: string, ...args: string[]) => cli([...args, '--profile', name]);
-    const MODIFIED = `Modification disclosure: this server runs a modified version of Evieverse, based on release ${RELEASE}.\nIts source code: ${SOURCE}`;
+    // What follows the rules: where to write for support, and the modification disclosure.
+    const MODIFIED = `Support: ${SUPPORT}\n\nModification disclosure: this server runs a modified version of Evieverse, based on release ${RELEASE}.\nIts source code: ${SOURCE}`;
     const ruleId = (out: string) => out.split(': ')[1]!;
 
     expect(await by('alice', 'rules', 'list')).toBe(`The server has no rules.\n\n${MODIFIED}`);
@@ -437,6 +487,7 @@ describe('the CLI', () => {
     );
     expect(await json('rules', 'list', '--profile', 'alice')).toMatchObject({
       modificationDisclosure: { modified: true, release: RELEASE, sourceUrl: SOURCE },
+      supportEmail: SUPPORT,
       rules: [{ ruleId: first, position: 1 }, { ruleId: kind, position: 2, text: 'Be kind.' }, { ruleId: ruleId(spam), position: 3, text: 'No spam.\nNot even a little.' }],
     });
 
@@ -464,11 +515,13 @@ describe('the CLI', () => {
     expect(help).toMatch(/^  - rules update <ruleId> \[--text <text>\] \[--position <n>\] /m);
     expect(help).toMatch(/^  - rules remove <ruleId> /m);
 
-    // A server whose operator says nothing of the kind runs a release, and names no source.
+    // A server whose operator says nothing of the kind runs a release, names no source, and gives the placeholder for a support address.
     await ctx.close();
     ctx = await createTestContext(TARGETS[0]!);
     await profile('alice', await ctx.register('alice'));
-    expect(await by('alice', 'rules', 'list')).toBe(`The server has no rules.\n\nModification disclosure: this server runs Evieverse ${RELEASE}, unmodified.`);
+    expect(await by('alice', 'rules', 'list')).toBe(
+      `The server has no rules.\n\nSupport: noreply@yoururl.com\n\nModification disclosure: this server runs Evieverse ${RELEASE}, unmodified.`,
+    );
   });
 
   it('registers a user as an admin, without the challenge anyone else is asked to solve', async () => {
@@ -905,21 +958,21 @@ describe('the CLI', () => {
     const by = (name: string, ...args: string[]) => ran(...args, '--profile', name);
     const refused = (name: string, ...args: string[]) => cli([...args, '--profile', name]);
     await by('root', 'server-moderators', 'add', mod.userId);
-    const BANNED = "evieverse: your account is banned: you can't post, comment or send messages";
+    const BANNED = "evieverse: your account is banned: you can't post, comment, like or send messages";
     const CONFIRM = "can't be undone: run the command again with --yes to go ahead";
 
     // Bans are for server moderators and admins.
     expect(await by('mod', 'bans', 'list')).toBe('Nobody is banned.');
     expect(await refused('alice', 'bans', 'list')).toMatchObject({ code: 1, err: 'evieverse: only an admin or a server moderator can do this' });
     expect(await refused('alice', 'bans', 'add', bob.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin or a server moderator can do this' });
-    expect(await by('mod', 'bans', 'add', alice.userId, '--reason', 'Spam\nand more')).toBe(`alice (${alice.userId}) is banned: they can't post, comment or send messages.`);
+    expect(await by('mod', 'bans', 'add', alice.userId, '--reason', 'Spam\nand more')).toBe(`alice (${alice.userId}) is banned: they can't post, comment, like or send messages.`);
     expect(await by('mod', 'bans', 'add', alice.userId)).toBe(`alice (${alice.userId}) was already banned.`);
     expect(await by('mod', 'bans', 'list')).toMatch(new RegExp(`^${alice.userId}\\s+alice\\s+since 2026-\\S+\\s+by mod\\s+Spam and more$`));
     expect(await json('bans', 'list', '--profile', 'root')).toMatchObject({ banned: [{ userId: alice.userId, reason: 'Spam\nand more', bannedBy: { username: 'mod' } }] });
     expect(await refused('mod', 'bans', 'add', root.userId)).toMatchObject({ code: 1, err: "evieverse: admins and server moderators can't be banned: end their role first" });
 
     // A banned user is told so by whoami, and is refused by the server what writes.
-    expect(await by('alice', 'whoami')).toContain("banned, so you can't post, comment or send messages");
+    expect(await by('alice', 'whoami')).toContain("banned, so you can't post, comment, like or send messages");
     expect(await json('whoami', '--profile', 'alice')).toMatchObject({ banned: true });
     expect(await refused('alice', 'messages', 'send', bob.userId, 'Hi')).toMatchObject({ code: 1, err: BANNED });
     expect(await by('mod', 'bans', 'remove', alice.userId)).toBe(`${alice.userId} is no longer banned.`);
@@ -1006,6 +1059,102 @@ describe('the CLI', () => {
     expect(await by('root', 'words', 'list')).toMatchObject({ code: 2, err: 'evieverse: name one list: --tag <tag> for a hashtag, or --server for the whole server' });
     expect(await by('root', 'mute', 'list', 'news', '--force')).toMatchObject({ code: 2, err: 'evieverse: usage: evieverse mute list <tag> [--limit <n>] [--cursor <cursor>]' });
     expect((await cli(['--version'])).out).toBe(`evieverse dev (build ${BUILD})`);
+  });
+
+  it('reposts a post by its id, and a post on another server by its address, which it reads from that server', async () => {
+    const OTHER = 'https://other.example';
+    await setup();
+    const other = await createTestContext(TARGETS[0]!, { publicBaseUrl: OTHER });
+    try {
+      const [alice, bob, carol] = await Promise.all(['alice', 'bob', 'carol'].map((name) => ctx.register(name)));
+      const [dana, erin] = await Promise.all(['dana', 'erin'].map((name) => other.register(name)));
+      for (const [name, u] of [['alice', alice], ['bob', bob], ['carol', carol]] as const) await profile(name, u!);
+      await writeProfile(home, 'erin', { server: OTHER, ...erin! });
+      // Two servers: each is asked what is addressed to it.
+      const asked: [method: string, path: string, headers: string[]][] = [];
+      const fetch: Io['fetch'] = async (input, init) => {
+        const url = new URL(String(input));
+        if (url.origin === SERVER) return fetchFrom(ctx.app)(input, init);
+        expect(url.origin).toBe(OTHER);
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        asked.push([init?.method ?? 'GET', url.pathname, Object.keys(headers).sort()]);
+        const res = await other.app.inject({ method: (init?.method ?? 'GET') as 'GET', url: `${url.pathname}${url.search}`, headers, ...(init?.body != null && { payload: init.body as string }) });
+        return new Response(res.rawPayload, { status: res.statusCode, headers: { 'content-type': String(res.headers['content-type'] ?? '') } });
+      };
+      const by = (name: string, ...args: string[]) => cli([...args, '--profile', name], { fetch });
+      const done = async (name: string, ...args: string[]) => {
+        const res = await by(name, ...args);
+        expect(res, res.err).toMatchObject({ code: 0, err: '' });
+        return res.out;
+      };
+      const read = async (server: TestContext, contentId: string) => (await server.app.inject({ method: 'GET', url: `/content/${contentId}` })).json();
+
+      // A post on the profile's own server, by its id or by its address.
+      const contentId = await post(ctx, alice!, 'Flooding downtown #news');
+      expect(await done('bob', 'repost', contentId, '--tags', 'Weather, #news')).toBe(`Reposted ${contentId} under #weather.\nNot #news: the post has it already.`);
+      ctx.clock.now += 1000;
+      expect(await done('carol', 'repost', `${SERVER}/content/${contentId.toUpperCase()}`, '--tags', 'rain')).toBe(`Reposted ${contentId} under #rain.`);
+      expect(asked).toEqual([]);
+      await ctx.compact();
+      expect((await read(ctx, contentId)).tags).toEqual(['news', 'weather', 'rain']);
+      expect(await by('alice', 'repost', contentId, '--tags', 'storms')).toMatchObject({ code: 1, err: "evieverse: you can't repost your own post: update it to give it other hashtags" });
+      expect(await by('bob', 'repost', contentId, '--tags', 'storms')).toMatchObject({ code: 1, err: 'evieverse: you already reposted this post' });
+      expect(await by('bob', 'repost', NO_USER, '--tags', 'storms')).toMatchObject({ code: 1, err: 'evieverse: content not found' });
+
+      // A post on another server: the CLI reads it there, with no key, and sends what it read to its own server.
+      const original = await post(other, dana!, 'Sunset over the bay #pics');
+      const address = `${OTHER}/content/${original}`;
+      const made = /^Reposted (\S+) under #pics: it is (\S+) here\.$/.exec(await done('bob', 'repost', address, '--tags', 'pics'));
+      expect(made?.[1]).toBe(address);
+      const entry = made![2]!;
+      expect(asked).toEqual([['GET', `/content/${original}`, ['accept']]]);
+      expect(await read(ctx, entry)).toMatchObject({
+        publisher: { userId: bob!.userId, username: 'bob' },
+        mimeType: 'text/plain',
+        preview: { kind: 'text', text: 'Sunset over the bay #pics' },
+        tags: ['pics'],
+        origin: { url: address, publisher: { userId: dana!.userId, username: 'dana' } },
+      });
+      // The server has one entry for it, which the next repost of the address gives hashtags.
+      expect(await done('carol', 'repost', address, '--tags', 'art, pics')).toBe(`Reposted ${entry} under #art.\nNot #pics: the post has it already.`);
+      expect(await by('bob', 'repost', address, '--tags', 'art')).toMatchObject({ code: 1, err: 'evieverse: you already reposted this post' });
+      const data = JSON.parse(await done('alice', 'repost', address, '--tags', 'sunsets', '--json'));
+      expect(data).toMatchObject({ contentId: entry, tags: ['sunsets'] });
+
+      // The entry's own address names the original, so that is what a repost of it from elsewhere is of: here, a post on erin's own server.
+      asked.length = 0;
+      expect(await done('erin', 'repost', `${SERVER}/content/${entry}`, '--tags', 'art')).toBe(`Reposted ${original} under #art.`);
+      expect(asked.map(([method, path]) => `${method} ${path}`)).toContain('POST /repost');
+      await other.compact();
+      expect((await read(other, original)).tags).toEqual(['pics', 'art']);
+
+      // What isn't a post's address, or has no post at it, is said before the server is asked for anything.
+      const NOT_AN_ADDRESS = (address: string) => `evieverse: "${address}" is not the address of a post, such as https://other.example/content/<id>`;
+      for (const bad of [`${OTHER}/posts/${original}`, `${address}/raw`, `${address}?a=b`, `${OTHER}/content/1`]) {
+        expect(await by('bob', 'repost', bad, '--tags', 'pics')).toMatchObject({ code: 2, err: NOT_AN_ADDRESS(bad) });
+      }
+      expect(await by('bob', 'repost', `${OTHER}/content/${NO_USER}`, '--tags', 'pics')).toMatchObject({ code: 1, err: `evieverse: there is no post at ${OTHER}/content/${NO_USER}` });
+      expect(await by('bob', 'repost', `${OTHER}/users/../content/${NO_USER}`, '--tags', 'pics')).toMatchObject({ code: 1 });
+      expect(await by('bob', 'repost', contentId)).toMatchObject({ code: 2, err: 'evieverse: name the hashtags the repost gives the post: --tags "news, mumbai"' });
+      expect(await by('bob', 'repost', '--tags', 'pics')).toMatchObject({ code: 2, err: 'evieverse: usage: evieverse repost <post> --tags <tags>' });
+      expect((await cli(['--help'])).out).toContain('\n  repost <post> --tags <tags> ');
+    } finally {
+      await other.close();
+    }
+  });
+
+  it("says that a repost was challenged, which it can't show", async () => {
+    await setup({ challenge: { postWindowSeconds: 60 } });
+    const [alice, bob] = await Promise.all(['alice', 'bob'].map((name) => ctx.register(name)));
+    await profile('bob', bob!);
+    const contentId = await post(ctx, alice!, 'Flooding downtown #news');
+    await post(ctx, bob!, 'Bob was here #local');
+    expect(await cli(['repost', contentId, '--tags', 'weather', '--profile', 'bob'])).toMatchObject({
+      code: 1,
+      err: "evieverse: you posted or were challenged less than 60 seconds ago; solve the challenge to post. The CLI can't show a challenge: repost again later, or with a client that shows its image",
+    });
+    ctx.clock.now += 61_000;
+    expect(await ran('repost', contentId, '--tags', 'weather', '--profile', 'bob')).toBe(`Reposted ${contentId} under #weather.`);
   });
 
   it('replaces itself with the build the server ships when the server asks, and runs the command again', async () => {

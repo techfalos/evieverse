@@ -1,5 +1,7 @@
-// Evieverse testbed: reads /feed with either algorithm and exercises /store, /like, DELETE /content and /register.
+// Evieverse testbed: reads /feed with either algorithm and exercises /store, /like, /repost, DELETE /content and /register.
 // Everything goes through /api, which nginx proxies to the app on this page's origin.
+
+import { parseFormatted } from './format.js';
 
 const API = '/api';
 const LATEST_TAG_COUNT = 12;
@@ -68,6 +70,29 @@ function h(tag, attrs = {}, ...children) {
   for (const c of children.flat()) if (c !== null && c !== undefined && c !== false) el.append(c instanceof Node ? c : String(c));
   return el;
 }
+
+const MARK_TAGS = { bold: 'strong', italic: 'em', strike: 's' };
+
+/** What is within a block of a formatted text, as nodes. A link's address is http or https: the parser makes a link of nothing else. */
+const inlineNodes = (nodes) =>
+  nodes.map((n) => {
+    if (n.type === 'text') return n.text;
+    if (n.type === 'code') return h('code', {}, n.text);
+    if (n.type === 'break') return h('br');
+    if (n.type === 'link') return h('a', { href: n.url, target: '_blank', rel: 'noopener noreferrer nofollow' }, inlineNodes(n.children));
+    return h(MARK_TAGS[n.type], {}, inlineNodes(n.children));
+  });
+
+/**
+ * A post's text or caption as elements, with its formatting (format.js): bold, italic, struck through, code, links,
+ * quotes and lists. The elements are this page's own, built from what the parser read, so a tag someone posted is
+ * still the text it was written with.
+ */
+const formatted = (text) =>
+  parseFormatted(text).map((b) => {
+    if (b.type === 'list') return h(b.ordered ? 'ol' : 'ul', b.ordered ? { start: b.start } : {}, b.items.map((item) => h('li', {}, inlineNodes(item))));
+    return h(b.type === 'quote' ? 'blockquote' : 'p', {}, inlineNodes(b.children));
+  });
 
 const normalizeTag = (t) => t.trim().replace(/^#+/, '').toLowerCase().replace(/[^a-z0-9_]/g, '');
 const parseTags = (s) => [...new Set(s.split(/[\s,]+/).map(normalizeTag).filter(Boolean))];
@@ -165,6 +190,9 @@ function solveChallenge(challenge, reason) {
   $('#challenge-title').textContent = challenge.steps > 1 ? `Solve challenge ${challenge.step} of ${challenge.steps}` : 'Solve the challenge';
   $('#challenge-reason').textContent = `The server says: ${reason}.`;
   $('#challenge-img').src = challenge.image;
+  // The same characters, read out: fetched only if it's played.
+  const audio = $('#challenge-audio');
+  audio.src = challenge.audio;
   $('#challenge-answer').value = '';
   const ctrl = new AbortController();
   const started = performance.now();
@@ -187,6 +215,8 @@ function solveChallenge(challenge, reason) {
   return new Promise((resolve, reject) => {
     const done = () => {
       clearInterval(timer);
+      audio.pause();
+      audio.removeAttribute('src');
       form.onsubmit = null;
       $('#challenge-cancel').onclick = null;
       dialog.oncancel = null;
@@ -391,8 +421,8 @@ function renderPage(data, asked, page, algorithm) {
   const lists = tags.map((t) => data.tags[t] ?? []);
   let picks = [];
   if (algorithm === 'chronological') {
-    // Each tag's list is newest first; merged by creation time, they are the feed's order.
-    picks = lists.flatMap((l, j) => l.map((rec) => ({ rec, via: tags[j] }))).sort((a, b) => Date.parse(b.rec.createdAt) - Date.parse(a.rec.createdAt));
+    // Each tag's list is newest first; merged by the time each post was placed there, they are the feed's order.
+    picks = lists.flatMap((l, j) => l.map((rec) => ({ rec, via: tags[j] }))).sort((a, b) => Date.parse(placedAt(b.rec)) - Date.parse(placedAt(a.rec)));
   } else {
     // Each tag's list is its most liked first, and the planner gives tags equal turns; interleaving shows that order.
     for (let k = 0; k < Math.max(...lists.map((l) => l.length)); k++) {
@@ -420,7 +450,7 @@ function renderPage(data, asked, page, algorithm) {
 
 function preview(rec) {
   const p = rec.preview;
-  const caption = p.text ? h('p', { class: 'preview' }, p.text) : null;
+  const caption = p.text ? h('div', { class: 'preview' }, formatted(p.text)) : null;
   switch (p.kind) {
     case 'text':
       return caption;
@@ -435,9 +465,30 @@ function preview(rec) {
   }
 }
 
+/** When a record was placed where the feed read it, which is where the feed orders it: when it was reposted there, or else posted. */
+const placedAt = (rec) => rec.repost?.at ?? rec.createdAt;
+
+/** The original of a repost of a post on another server: where it is, and who published it there. */
+const originLine = (origin) =>
+  h(
+    'div',
+    { class: 'origin' },
+    'A link to a post on another server: ',
+    h('a', { href: origin.url, target: '_blank', rel: 'noopener noreferrer nofollow' }, hostOf(origin.url)),
+    `, by ${origin.publisher.username}`,
+  );
+
 function card(rec, via) {
   const mine = state.actor && rec.publisher.userId === state.actor.userId;
   const likes = h('span', { class: 'likes' }, `♥ ${rec.likes}`);
+  // A repost put the post under this hashtag as a new post: at the repost's time, with the likes since.
+  const reposted = rec.repost
+    ? h(
+        'span',
+        { class: 'badge repost', title: `Reposted here ${rec.repost.at}. Its likes are counted from then; GET /content has them all.` },
+        `reposted ${ago(rec.repost.at)}${rec.repost.by ? ` by ${rec.repost.by.username}` : ''}`,
+      )
+    : null;
   return h(
     'article',
     { class: `card${mine ? ' mine' : ''}`, 'data-id': rec.contentId },
@@ -446,11 +497,13 @@ function card(rec, via) {
       { class: 'meta' },
       h('strong', {}, rec.publisher.username || '(unknown)'),
       h('span', { class: 'muted', title: rec.createdAt }, ago(rec.createdAt)),
-      rec.updatedAt !== rec.createdAt ? h('span', { class: 'badge', title: `updated ${rec.updatedAt}` }, 'edited') : null,
+      reposted,
+      rec.updatedAt !== rec.createdAt && !rec.repost ? h('span', { class: 'badge', title: `updated ${rec.updatedAt}` }, 'edited') : null,
       rec.aiGenerated ? h('span', { class: 'badge ai', title: 'The publisher says this was created with AI.' }, 'created with AI') : null,
-      rec.likes === 0 ? h('span', { class: 'badge fresh' }, 'no likes yet') : null,
+      rec.likes === 0 ? h('span', { class: 'badge fresh' }, rec.repost ? 'no likes since' : 'no likes yet') : null,
       h('span', { class: 'via' }, `via ${via}`),
     ),
+    rec.origin ? originLine(rec.origin) : null,
     preview(rec),
     h('div', { class: 'chips' }, rec.tags.map((t) => h('button', { type: 'button', class: 'chip', onclick: () => toggleTag(t) }, `#${t}`))),
     h(
@@ -458,9 +511,12 @@ function card(rec, via) {
       { class: 'actions' },
       likes,
       h('button', { type: 'button', onclick: (e) => like(rec, e.currentTarget, likes) }, 'Like'),
+      // A post is its publisher's to give other hashtags with an update; anyone else reposts it.
+      mine ? null : h('button', { type: 'button', onclick: (e) => repost(rec, e.currentTarget) }, 'Repost'),
       h('a', { href: `${API}/content/${rec.contentId}`, target: '_blank' }, 'JSON'),
       h('a', { href: `${API}/content/${rec.contentId}/raw`, target: '_blank' }, 'raw'),
-      mine ? h('button', { type: 'button', onclick: () => edit(rec) }, 'Edit') : null,
+      // A repost of a post on another server is a link to it, with nothing here to edit.
+      mine && !rec.origin ? h('button', { type: 'button', onclick: () => edit(rec) }, 'Edit') : null,
       mine ? h('button', { type: 'button', class: 'danger', onclick: () => remove(rec) }, 'Delete') : null,
       h('code', { class: 'muted', title: rec.contentId }, rec.contentId.slice(0, 8)),
     ),
@@ -511,6 +567,31 @@ async function like(rec, btn, likesEl) {
     toast(data.alreadyLiked ? 'Already liked: likes are once per user.' : 'Liked. Feeds show the new count after the next compactor run.');
   } catch (err) {
     toast(`Like failed: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** Reposts a post under hashtags it doesn't have: POST /repost, which is a post as far as challenges go. */
+async function repost(rec, btn) {
+  if (!state.actor) return toast('Pick a user to act as first.');
+  const asked = prompt(`Repost under which hashtags? The post has ${rec.tags.map((t) => `#${t}`).join(' ') || 'none'}; a repost gives it others.`);
+  const tags = parseTags(asked ?? '');
+  if (!tags.length) return;
+  btn.disabled = true;
+  try {
+    const { data } = await withChallenges((solution) => api('POST', '/repost', { contentId: rec.contentId, tags, ...solution }));
+    const not = (data.removedTags ?? []).map((r) => `#${r.tag} (${r.reason})`).join(', ');
+    toast(
+      `Reposted under ${data.tags.map((t) => `#${t}`).join(' ')}${not ? `; not ${not}` : ''}. ` +
+        'It shows there as a new post, and to those who follow you, after the next compactor run.',
+      7000,
+    );
+    state.tags[state.tab] = [...new Set([...currentTags(), ...data.tags])].slice(0, 20);
+    state.highlight = { contentId: data.contentId, tags: data.tags, tries: 0 };
+    loadFeed();
+  } catch (err) {
+    toast(err.cancelled ? 'Cancelled the challenge: nothing was reposted.' : `Repost failed: ${err.message}`, 6000);
   } finally {
     btn.disabled = false;
   }
@@ -576,7 +657,8 @@ function fillSample() {
   $('#content').value =
     `${SAMPLE_MARK} ${a?.username ?? 'someone'} at ${new Date().toLocaleTimeString()}.\n\n` +
     'Its hashtags are below, so it shows up in those feeds after the next compactor run, a few seconds from now. ' +
-    'Edit the text, change the hashtags, or switch to an image, video, audio or link post.';
+    'Edit the text, change the hashtags, or switch to an image, video, audio or link post.\n\n' +
+    'Text can be **bold**, *italic*, ~~struck through~~ or `code`, and can [link](https://example.com) somewhere.';
   if (!$('#post-tags').value.trim() || $('#post-tags').value === sampleTags) $('#post-tags').value = tags;
   sampleTags = tags;
 }

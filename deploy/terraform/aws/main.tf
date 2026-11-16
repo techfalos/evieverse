@@ -7,7 +7,7 @@
 
 locals {
   root        = abspath("${path.module}/../../..")
-  source_hash = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json", "scripts/build-cli.mjs"]) : filesha1("${local.root}/${f}")]))
+  source_hash = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), sort(fileset(local.root, "languages/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json", "scripts/build-cli.mjs"]) : filesha1("${local.root}/${f}")]))
   image       = var.image != "" ? var.image : "${aws_ecr_repository.app.repository_url}:${substr(local.source_hash, 0, 12)}"
   url         = "https://${aws_cloudfront_distribution.app.domain_name}"
   azs         = slice(data.aws_availability_zones.available.names, 0, 2)
@@ -404,6 +404,10 @@ resource "aws_secretsmanager_secret_version" "app" {
     DATABASE_URL = local.database_url
     REDIS_URL    = local.redis_url
   }))
+  # The compactor reads these whenever its task starts, which ECS can do at any time. So they are
+  # written only once the migrate function has checked them: a task that restarts never finds
+  # secrets the server refuses.
+  depends_on = [aws_lambda_invocation.migrate]
 }
 
 # ---------------------------------------------------------------- database proxy
@@ -482,6 +486,7 @@ locals {
     CONTENT_SCHEME     = "s3"
     CONTENT_OPTIONS    = jsonencode({ bucket = aws_s3_bucket.content.id, region = var.region })
     PUBLIC_BASE_URL    = local.url
+    SUPPORT_EMAIL      = var.support_email
     COMPACT_IN_PROCESS = "false"
     STORAGE_TMP_PATH   = "/tmp/evieverse"
     # /store checks a file sent with an upload link by reading it back from the bucket, inside API
@@ -501,6 +506,22 @@ locals {
     TRUST_PROXY          = "1"
     FUNCTION_EDGE_SECRET = random_password.edge.result
   }, var.secrets)
+
+  # The migrate function is given what the functions are about to get, so that it can check that
+  # they start with it before any of them is updated (src/functions/deploy.ts). It goes straight to
+  # the database, where they go through the proxy.
+  migrate_env = merge(local.function_env, {
+    FUNCTION_GROUP  = "migrate"
+    DATABASE_URL    = local.database_url
+    BOOTSTRAP_ADMIN = local.bootstrap_admin
+  })
+
+  # What `environment` and `secrets` set, and the optional trust plugins they turn on, read as the
+  # server reads TRUST_OPTIONAL_PLUGINS (names separated by commas or spaces): for the one mistake
+  # that is caught in the plan, before the migrate function is asked (see the preconditions of
+  # aws_lambda_invocation.migrate).
+  settings         = merge(var.environment, var.secrets)
+  optional_plugins = regexall("[^\\s,]+", lookup(local.settings, "TRUST_OPTIONAL_PLUGINS", ""))
 }
 
 # CloudFront sends this to the gateway, whose own address is public; functions refuse requests without it.
@@ -604,6 +625,9 @@ resource "aws_iam_role_policy" "task" {
 # migrate function below creates the account from the key's hash (src/moderation/bootstrap.ts), so
 # the key itself is only in the state and in the profile file. To replace the key:
 #   terraform apply -replace=random_password.admin_key
+# A key that replaces it through the API (POST /users/:userId/key) lasts, and never reaches the
+# state: the output and the profile file keep the key made here, which stays revoked, until it is
+# replaced as above.
 resource "random_uuid" "admin" {}
 
 resource "random_id" "admin_key_prefix" {
@@ -657,17 +681,27 @@ resource "aws_cloudwatch_log_group" "function" {
   retention_in_days = 30
 }
 
-# Brings the schema up to date, and sets up the admin account. Functions never migrate when they
-# start (many start at once), so each apply that changes the image or the admin account runs this
-# first, straight against the database.
+# The step every apply that changes the image, the settings or the admin account runs first
+# (src/functions/deploy.ts). With the settings the functions are about to get, it checks that they
+# start with them, and only then brings the schema up to date, straight against the database, and
+# sets up the admin account.
+#
+# The check is what keeps a mistake in `environment` or `secrets` from taking the deployment down:
+# updating a function doesn't start it, so a setting the server refuses (a misspelt plugin name,
+# say) would otherwise pass the apply and then fail every request. The migrate function starts each
+# route group as its function would, and its failure stops the apply here, before the functions,
+# the compactor and the compactor's secrets, which all wait for it: they keep what they have.
+#
+# Functions never migrate when they start, as many start at once.
 resource "aws_lambda_function" "migrate" {
   function_name = "${var.name}-migrate"
   role          = aws_iam_role.function.arn
   package_type  = "Image"
   image_uri     = local.image
   architectures = ["x86_64"]
-  memory_size   = 512
-  timeout       = 300
+  # The functions' own, as it starts what they start.
+  memory_size = var.function_memory
+  timeout     = 300
 
   image_config {
     entry_point       = ["node"]
@@ -679,12 +713,7 @@ resource "aws_lambda_function" "migrate" {
     security_group_ids = [aws_security_group.app.id]
   }
   environment {
-    variables = {
-      FUNCTION_GROUP  = "migrate"
-      DB_DIALECT      = "postgres"
-      DATABASE_URL    = local.database_url
-      BOOTSTRAP_ADMIN = local.bootstrap_admin
-    }
+    variables = local.migrate_env
   }
   depends_on = [
     terraform_data.image,
@@ -697,8 +726,14 @@ resource "aws_lambda_function" "migrate" {
 resource "aws_lambda_invocation" "migrate" {
   function_name = aws_lambda_function.migrate.function_name
   input         = jsonencode({ image = local.image })
-  triggers      = { image = local.image, admin = local.bootstrap_admin }
-  depends_on    = [aws_db_instance.main]
+  # `settings` is a hash of everything the function is given, so a change to `environment` or
+  # `secrets` alone invokes it again, and is checked before it reaches a function.
+  triggers = {
+    image    = local.image
+    admin    = local.bootstrap_admin
+    settings = nonsensitive(sha256(jsonencode(local.migrate_env)))
+  }
+  depends_on = [aws_db_instance.main]
 
   lifecycle {
     precondition {
@@ -708,6 +743,13 @@ resource "aws_lambda_invocation" "migrate" {
     precondition {
       condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", local.admin_user_id))
       error_message = "The admin account's id isn't a version 4 UUID, which is what the server's user ids are."
+    }
+    # The server refuses to start with urlhaus turned on and no Auth-Key (src/config.ts), which the
+    # migrate function would find too. This one is known from the variables alone, so the plan
+    # fails, before anything is changed.
+    precondition {
+      condition     = !contains(local.optional_plugins, "urlhaus") || trimspace(lookup(local.settings, "URLHAUS_AUTH_KEY", "")) != ""
+      error_message = "TRUST_OPTIONAL_PLUGINS turns on urlhaus, which needs URLHAUS_AUTH_KEY in `secrets`: the Auth-Key of an abuse.ch account, which is free (https://auth.abuse.ch). Without it no function and no compactor would start."
     }
   }
 }

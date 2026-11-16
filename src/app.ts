@@ -1,5 +1,7 @@
+import compress from '@fastify/compress';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
+import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyServerOptions } from 'fastify';
 import { createAuditLog, registerAudit, type AuditLog } from './audit.js';
 import { Challenges } from './challenge/challenges.js';
@@ -7,9 +9,10 @@ import type { Db } from './db/index.js';
 import type { RouteDeps, StoreDeps } from './deps.js';
 import { requireEdgeSecret } from './functions/edge.js';
 import { GROUP_NAMES, GROUPS, type GroupName } from './functions/groups.js';
-import { registerErrorHandler } from './http/errors.js';
+import { HttpError, registerErrorHandler } from './http/errors.js';
 import { registerLanguages } from './http/language.js';
-import { loadLanguages, type Languages } from './language.js';
+import { rateLimitStore } from './http/rateLimitStore.js';
+import { loadLanguages, msg, type Languages } from './language.js';
 import { loadTrustPlugins, type TrustPlugin } from './moderation/trust.js';
 import { loadCliRelease, requireCliBuild, type CliRelease } from './routes/cli.js';
 import { contentWriter } from './write.js';
@@ -21,7 +24,7 @@ export interface AppOptions extends FastifyServerOptions {
   cli?: CliRelease | null;
   /** The trust plugins, in the order they run. By default, the folders of src/plugins/trust (moderation/trust.ts). */
   trustPlugins?: TrustPlugin[];
-  /** The languages the server answers in. By default, the files of src/languages (language.ts). */
+  /** The languages the server answers in. By default, the files of the languages folder (language.ts). */
   languages?: Languages;
   /** Where changes are written down, or null for nowhere. By default, the store `config.audit` names, if it names one (audit.ts). */
   audit?: AuditLog | null;
@@ -65,10 +68,26 @@ export async function buildApp(
       origin: corsOrigins.includes('*') ? '*' : corsOrigins,
       // The plugin allows only GET, HEAD and POST unless told otherwise.
       methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
-      exposedHeaders: ['retry-after', 'content-disposition'],
+      exposedHeaders: ['retry-after', 'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset', 'content-disposition'],
       maxAge: 600,
     });
   }
+  // Only for the routes that ask for it (POST /register), which it counts by the client's address.
+  await app.register(rateLimit, {
+    global: false,
+    store: rateLimitStore(deps.hot),
+    // The plugin's own words are English only. It sets Retry-After itself.
+    errorResponseBuilder: (_req, { statusCode, ttl }) => new HttpError(statusCode, msg('error.rate_limited', { count: Math.max(1, Math.ceil(ttl / 60_000)) })),
+  });
+  // Responses of a kilobyte or more, and a feed whatever its size (it is streamed), go out compressed
+  // to a client that says it takes gzip or Brotli (Accept-Encoding), and as they are to one that
+  // doesn't. Gzip to a client that takes both, as a browser does: on a page of feed records Brotli at
+  // the quality a response can afford came out no smaller, and cost twice the CPU (docs/APP.md, section 12).
+  //
+  // After the audit log, whose hook reads the response as the route sent it, and before the routes,
+  // as it only applies to routes added after it. A route that streams stored bytes opts out
+  // (`compress: false`). Requests are read as they are sent: a compressed one isn't unpacked.
+  await app.register(compress, { encodings: ['gzip', 'br'], globalDecompression: false });
   await app.register(multipart, {
     limits: {
       fileSize: deps.config.storage.maxUploadBytes,
@@ -87,7 +106,7 @@ export async function buildApp(
     challenges: new Challenges(deps),
     writer: contentWriter({ ...deps, db }, app.log),
     // Loaded once, as the app starts: a plugin that can't be loaded stops it there, not at the first post.
-    trustPlugins: trustPlugins ?? (await loadTrustPlugins()),
+    trustPlugins: trustPlugins ?? (await loadTrustPlugins(deps.config.trust.optionalPlugins)),
   };
   if (writing) app.log.info({ trustPlugins: writing.trustPlugins.map((plugin) => plugin.name) }, 'trust plugins loaded');
   for (const name of new Set(groups)) {

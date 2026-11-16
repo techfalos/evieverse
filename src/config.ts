@@ -13,6 +13,9 @@ const bool = (def: boolean) =>
     )
     .default(def);
 
+/** The support address GET /rules gives on a server whose operator has set none (SUPPORT_EMAIL). */
+export const DEFAULT_SUPPORT_EMAIL = 'noreply@yoururl.com';
+
 const ConfigSchema = z.object({
   host: z.string().default('0.0.0.0'),
   port: z.coerce.number().int().default(3000),
@@ -20,7 +23,7 @@ const ConfigSchema = z.object({
 
   /**
    * The code of the language the server answers in when a request asks for none it speaks, and that
-   * users register in when they choose none: one of the files of src/languages, such as en.
+   * users register in when they choose none: one of the files of the languages folder, such as en.
    */
   defaultLanguage: z.string().trim().min(1).default(REFERENCE_LANGUAGE),
 
@@ -45,6 +48,22 @@ const ConfigSchema = z.object({
       if (!v) return null;
       if (URL.canParse(v) && ['http:', 'https:'].includes(new URL(v).protocol)) return v;
       ctx.addIssue({ code: 'custom', message: `"${v}" is not an address such as https://example.com/evieverse-source: EVIEVERSE_SOURCE_URL is an http or https URL` });
+      return z.NEVER;
+    }),
+
+  /**
+   * The address people write to for support, which GET /rules gives to anyone who asks, beside the
+   * rules. The server sends it nothing and checks only that it reads as an email address: the
+   * default is a placeholder, for the operator to replace with an address that someone reads.
+   */
+  supportEmail: z
+    .string()
+    .trim()
+    .default(DEFAULT_SUPPORT_EMAIL)
+    .transform((v, ctx) => {
+      if (!v) return DEFAULT_SUPPORT_EMAIL;
+      if (z.email().safeParse(v).success) return v;
+      ctx.addIssue({ code: 'custom', message: `"${v}" is not an email address such as support@example.com: SUPPORT_EMAIL is the address people write to for support` });
       return z.NEVER;
     }),
 
@@ -78,10 +97,11 @@ const ConfigSchema = z.object({
 
   /**
    * The proxies in front of the server whose X-Forwarded-For is believed, which decides the client
-   * address the audit log and the request log record: how many of them there are, true for any, or
-   * their addresses and CIDR ranges (separated by commas or spaces). Empty: none, so the address is
-   * the connection's own. A count is only safe where the server can't be reached except through
-   * those proxies: anyone who connects directly chooses the address they are recorded under.
+   * address that registrations are limited by (`registerRateLimitPerHour`) and that the audit log
+   * and the request log record: how many of them there are, true for any, or their addresses and
+   * CIDR ranges (separated by commas or spaces). Empty: none, so the address is the connection's
+   * own. A count is only safe where the server can't be reached except through those proxies:
+   * anyone who connects directly chooses the address they are counted and recorded under.
    */
   trustProxy: z
     .union([z.boolean(), z.number().int().min(0), z.string()])
@@ -150,6 +170,38 @@ const ConfigSchema = z.object({
       path: ['serverTags'],
       message: 'server tagging needs at least one hashtag in TAGGING_SERVER_TAGS',
     }),
+
+  /**
+   * Which types of post the server takes (POST_TYPES in src/posts.ts): all five unless turned off,
+   * and at least one. A type that is off takes no new post and no update of one, and POST /uploads
+   * gives no link for its files. The posts of it the server already holds stay as they are, to
+   * read, like and delete.
+   *
+   * A comment comes with an image or a video only where posts of that type are taken: a server
+   * that takes no video takes none with a comment either. A comment's text is no text post, so
+   * comments are written whether text posts are on or off.
+   */
+  postTypes: z
+    .object({ text: bool(true), image: bool(true), video: bool(true), audio: bool(true), link: bool(true) })
+    .refine((types) => Object.values(types).some(Boolean), {
+      message: 'the server needs a type of post to take: POST_TYPE_TEXT, POST_TYPE_IMAGE, POST_TYPE_VIDEO, POST_TYPE_AUDIO and POST_TYPE_LINK are all off',
+    }),
+
+  /**
+   * Reposts (POST /repost): a user gives a post that is there more hashtags, which puts it in those
+   * hashtags' feeds and in the following feeds of their own followers, as a new post there. The
+   * post isn't copied: it stays the one piece of content it was, its publisher's.
+   */
+  reposts: z.object({
+    /** Whether the server takes reposts at all. Off: POST /repost is refused, and what was reposted stays as it is. */
+    enabled: bool(true),
+    /**
+     * Whether it takes reposts of posts on other servers. Such a repost is stored here as a link to
+     * the original with the original's summary, which the reposter's client sends: this server asks
+     * the other one nothing. Off: only posts on this server are reposted.
+     */
+    remote: bool(true),
+  }),
 
   feed: z.object({
     /** Posts per feed page when the request doesn't pass `limit`. */
@@ -233,8 +285,9 @@ const ConfigSchema = z.object({
   }),
 
   /**
-   * Challenges people solve to register, and to post again soon after posting. They're kept in Redis.
-   * Registering always takes one, which no setting turns off: only an admin's request is spared it.
+   * Challenges people solve to register, to post again soon after posting, and to comment past a few
+   * comments a minute. They're kept in Redis. Registering always takes one, which no setting turns
+   * off: only an admin's request is spared it.
    */
   challenge: z.object({
     /**
@@ -242,6 +295,11 @@ const ConfigSchema = z.object({
      * solve a challenge, or two from the third such post in a row (0: never).
      */
     postWindowSeconds: z.coerce.number().int().min(0).default(60),
+    /**
+     * A user's comment, or edit of one, past this many in any minute must solve a challenge, or two
+     * from the third such comment in a row (0: never). `comments.perMinute` is where they stop.
+     */
+    commentsPerMinute: z.coerce.number().int().min(0).default(3),
     /** How long a challenge can be solved for. */
     ttlSeconds: int(120),
     /** Zero bits the proof of work's SHA-256 must start with; each doubles the client's work (0: none). */
@@ -260,12 +318,51 @@ const ConfigSchema = z.object({
       deleteBelow: z.coerce.number().int().min(0).max(100).default(25),
       /** A post that scores at least this is published. One that scores less, and isn't deleted, waits in the moderation queue for an admin. 101: every post waits. */
       allowFrom: z.coerce.number().int().min(0).max(101).default(75),
+      /**
+       * The optional trust plugins the server runs, by the names of their folders in
+       * src/plugins/trust (separated by commas or spaces in the environment), such as urlhaus. A
+       * plugin that isn't optional runs whatever this says. Empty: no optional plugin runs.
+       */
+      optionalPlugins: z
+        .union([z.string(), z.array(z.string())])
+        .default([])
+        .transform((v) => [...new Set((typeof v === 'string' ? v.split(/[\s,]+/) : v).map((name) => name.trim()).filter(Boolean))]),
     })
     .refine((t) => t.deleteBelow <= t.allowFrom, {
       path: ['deleteBelow'],
       message: 'TRUST_SCORE_DELETE_BELOW can be at most TRUST_SCORE_ALLOW_FROM',
     }),
 
+  /**
+   * The urlhaus trust plugin (src/plugins/trust/urlhaus), which gives a post or a comment with a
+   * link that spreads malware a trust score of 0. It checks links against the list URLhaus
+   * publishes (https://urlhaus.abuse.ch), which each process downloads and keeps in memory.
+   * It is optional: these are read only where `trust.optionalPlugins` names urlhaus.
+   */
+  urlhaus: z.object({
+    /** The Auth-Key the list is downloaded with: that of an abuse.ch account, which is free (https://auth.abuse.ch). A server that runs the plugin needs one. */
+    authKey: z.string().trim().min(1).optional(),
+    /**
+     * Where the list is downloaded from, with {key} where the Auth-Key goes: one of URLhaus's
+     * database dumps as a CSV, or its plain list of URLs. By default, the URLs added in the last 30 days.
+     */
+    listUrl: z
+      .string()
+      .trim()
+      .refine((url) => /^https?:\/\//i.test(url) && URL.canParse(url.replaceAll('{key}', 'key')), {
+        message: 'URLHAUS_LIST_URL is an http or https URL, with {key} where the Auth-Key goes',
+      })
+      .default('https://urlhaus-api.abuse.ch/v2/files/exports/{key}/recent.csv'),
+    /** Minutes between two downloads of the list, by each process. URLhaus writes its lists every 5 minutes, and asks not to be asked more often. */
+    refreshMinutes: z.coerce.number().int().min(5).default(15),
+  }),
+
+  /**
+   * Requests to /register from one address in an hour, past which they are refused. Every attempt
+   * counts, an admin's included, so registering takes two: one for the challenge, one with its answer.
+   * The address is the connection's own, or the one `trustProxy` has read from X-Forwarded-For.
+   */
+  registerRateLimitPerHour: int(10),
   /**
    * A user's posts (/store) in any minute past this many are refused outright, before any
    * challenge, however many challenges they'd solve (0: no limit).
@@ -278,7 +375,10 @@ const ConfigSchema = z.object({
 
   /** Comments on posts, which each post's publisher turns on for it. They are objects in the content store, with Redis as a cache over them. */
   comments: z.object({
-    /** Comments one user can send in a minute, edits of comments among them (0: no limit). */
+    /**
+     * A user's comments in any minute past this many, edits of comments among them, are refused
+     * outright, before any challenge, however many challenges they'd solve (0: no limit).
+     */
     perMinute: z.coerce.number().int().min(0).default(10),
     /**
      * How long Redis keeps a post's index of its comments, each comment, and each comment's number
@@ -310,6 +410,9 @@ const ConfigSchema = z.object({
 }).refine((c) => !c.modified || c.sourceUrl !== null, {
   path: ['sourceUrl'],
   message: 'EVIEVERSE_MODIFIED needs EVIEVERSE_SOURCE_URL: where the source code of this modified version can be obtained',
+}).refine((c) => !c.trust.optionalPlugins.includes('urlhaus') || c.urlhaus.authKey !== undefined, {
+  path: ['urlhaus', 'authKey'],
+  message: 'TRUST_OPTIONAL_PLUGINS turns on urlhaus, which needs URLHAUS_AUTH_KEY: the Auth-Key of an abuse.ch account, which is free (https://auth.abuse.ch)',
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -346,6 +449,7 @@ const ENV_MAP: Record<string, string> = {
   DEFAULT_LANGUAGE: 'defaultLanguage',
   EVIEVERSE_MODIFIED: 'modified',
   EVIEVERSE_SOURCE_URL: 'sourceUrl',
+  SUPPORT_EMAIL: 'supportEmail',
   DB_DIALECT: 'db.dialect',
   DATABASE_URL: 'db.url',
   DB_POOL_SIZE: 'db.poolSize',
@@ -368,6 +472,13 @@ const ENV_MAP: Record<string, string> = {
   AUDIT_OPTIONS: 'audit.options',
   TAGGING_MODE: 'tagging.mode',
   TAGGING_SERVER_TAGS: 'tagging.serverTags',
+  POST_TYPE_TEXT: 'postTypes.text',
+  POST_TYPE_IMAGE: 'postTypes.image',
+  POST_TYPE_VIDEO: 'postTypes.video',
+  POST_TYPE_AUDIO: 'postTypes.audio',
+  POST_TYPE_LINK: 'postTypes.link',
+  REPOSTS: 'reposts.enabled',
+  REPOSTS_REMOTE: 'reposts.remote',
   FEED_PAGE_SIZE: 'feed.pageSize',
   FEED_MAX_PAGE_SIZE: 'feed.maxPageSize',
   FEED_TAG_DAY_MAX_POSTS: 'feed.tagDayMaxPosts',
@@ -396,11 +507,17 @@ const ENV_MAP: Record<string, string> = {
   COMPACT_CONCURRENCY: 'compact.concurrency',
   COMPACT_LEASE_SECONDS: 'compact.leaseSeconds',
   CHALLENGE_POST_WINDOW_SECONDS: 'challenge.postWindowSeconds',
+  CHALLENGE_COMMENTS_PER_MINUTE: 'challenge.commentsPerMinute',
   CHALLENGE_TTL_SECONDS: 'challenge.ttlSeconds',
   CHALLENGE_POW_BITS: 'challenge.powBits',
   CHALLENGE_MIN_SOLVE_MS: 'challenge.minSolveMs',
   TRUST_SCORE_DELETE_BELOW: 'trust.deleteBelow',
   TRUST_SCORE_ALLOW_FROM: 'trust.allowFrom',
+  TRUST_OPTIONAL_PLUGINS: 'trust.optionalPlugins',
+  URLHAUS_AUTH_KEY: 'urlhaus.authKey',
+  URLHAUS_LIST_URL: 'urlhaus.listUrl',
+  URLHAUS_REFRESH_MINUTES: 'urlhaus.refreshMinutes',
+  REGISTER_RATE_LIMIT_PER_HOUR: 'registerRateLimitPerHour',
   POST_RATE_LIMIT_PER_MINUTE: 'postRateLimitPerMinute',
   MAX_FOLLOWING: 'maxFollowing',
   REPORTS_PER_HOUR: 'reportsPerHour',
@@ -418,10 +535,13 @@ const EMPTY_SECTIONS: Json = {
   storage: { content: {}, summaries: {} },
   audit: {},
   tagging: {},
+  postTypes: {},
+  reposts: {},
   feed: {},
   compact: {},
   challenge: {},
   trust: {},
+  urlhaus: {},
   comments: {},
   inbox: {},
   monetization: {},

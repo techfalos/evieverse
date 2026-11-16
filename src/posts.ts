@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { cutFormatted } from './format.js';
 import type { Preview } from './storage/contentStore.js';
 
 /**
@@ -49,24 +50,20 @@ export function readPreview(stored: StoredPreview, bytesUrl: string): Preview {
   return { kind: stored.kind, url: bytesUrl, ...(stored.text ? { text: stored.text } : {}) };
 }
 
-/** The preview of the content a meta file describes, its link to the bytes built for this server. */
-export const previewOf = (meta: { contentId: string; preview: StoredPreview }, publicBaseUrl: string) =>
-  readPreview(meta.preview, mediaUrl(publicBaseUrl, meta.contentId));
+/** Where the bytes of the original of a repost from another server are read: on that server. */
+export const originMediaUrl = (origin: { url: string }) => `${origin.url}/raw`;
 
-/** The first `maxWords` words of `text`, cut to `maxChars` characters, which bounds text written without spaces. */
-function firstWords(text: string, maxWords: number, maxChars: number): string {
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  let out = words.slice(0, maxWords).join(' ');
-  let cut = words.length > maxWords;
-  if (out.length > maxChars) {
-    // Not between the halves of a surrogate pair.
-    const code = out.charCodeAt(maxChars - 1);
-    out = out.slice(0, code >= 0xd800 && code <= 0xdbff ? maxChars - 1 : maxChars).trimEnd();
-    cut = true;
-  }
-  return cut ? `${out} …` : out;
-}
+/**
+ * The preview of the content a meta file describes, its link to the bytes built for this server.
+ * A repost of a post on another server links to the original's bytes, which this server doesn't hold.
+ */
+export const previewOf = (meta: { contentId: string; preview: StoredPreview; origin?: { url: string } }, publicBaseUrl: string) =>
+  readPreview(meta.preview, meta.origin ? originMediaUrl(meta.origin) : mediaUrl(publicBaseUrl, meta.contentId));
 
-/** Cuts a text post's text or a caption to the length of this server's previews. */
+/**
+ * Cuts a text post's text or a caption to the length of this server's previews. The text is
+ * formatted (format.ts), and so is its preview: what is bold or a link where the text is cut is
+ * closed there.
+ */
 export const previewCutter = (feed: { previewWords: number; previewChars: number }) => (text: string) =>
-  firstWords(text, feed.previewWords, feed.previewChars);
+  cutFormatted(text, feed.previewWords, feed.previewChars);

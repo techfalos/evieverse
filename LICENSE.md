@@ -22,6 +22,8 @@ b. adding, removing or changing language files: files whose only content is the 
 
 c. adding an official trust plugin, unchanged, under src/plugins/trust, including one from an official release other than the one the rest of your copy is based on. Official trust plugins never need to be disclosed under Term 2. A trust plugin that is not an official trust plugin, or an official one that you have changed, does make the version a modified version.
 
+d. adding, removing or changing files under deploy/terraform (the Terraform deployment modules): files that describe the infrastructure the Program is deployed on and how it is configured there. Changes to these files never need to be disclosed under Term 2. This does not cover a change there that alters, when the Program is built or deployed, the source code of the rest of the Program; such a change does make the version a modified version.
+
 "The disclosure" means the statement described in Term 2.
 
 "The rules endpoint" means the GET /rules endpoint of the Program's HTTP API, which publicly reports how the server is configured and run.

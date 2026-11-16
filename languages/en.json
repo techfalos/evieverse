@@ -5,6 +5,10 @@
     "error.internal": "Internal server error",
     "error.forbidden": "forbidden",
     "error.upload_too_large": "Upload exceeds the maximum size of {limit} bytes",
+    "error.rate_limited": {
+      "one": "Rate limit exceeded, retry in {count} minute",
+      "other": "Rate limit exceeded, retry in {count} minutes"
+    },
 
     "auth.invalid": "Invalid userId or apiKey",
     "auth.required": "userId and apiKey are required",
@@ -20,7 +24,7 @@
     "user.api_key_replaced_note": "Store this apiKey now; it cannot be retrieved again. The key it replaces no longer works.",
     "user.api_key_passed_on_note": "Pass this apiKey on to the user now; it cannot be retrieved again. Every key they had no longer works.",
     "user.delete_own_only": "you can only delete your own account, unless you're an admin",
-    "user.banned": "your account is banned: you can't post, comment or send messages",
+    "user.banned": "your account is banned: you can't post, comment, like or send messages",
 
     "content.not_found": "content not found",
     "content.meta_missing": "the meta file of the content is missing",
@@ -29,7 +33,22 @@
     "content.pending_deletion": "content is set for deletion",
     "content.type_changed": "an update must have the same content type as the original ({original}), got {mimeType}",
     "content.not_tagged": "the content isn't tagged #{tag}",
+    "content.is_repost": "a repost of a post on another server can't be updated: it is a link to the original. Delete it, or repost the original to give it other hashtags",
 
+    "repost.off": "this server doesn't take reposts",
+    "repost.remote_off": "this server doesn't take reposts of posts on other servers",
+    "repost.one_source": "say what to repost: a contentId, for a post on this server, or an origin, for a post on another server: one of them",
+    "repost.tags_required": "tags is required: a repost gives the post hashtags it doesn't have",
+    "repost.own": "you can't repost your own post: update it to give it other hashtags",
+    "repost.already": "you already reposted this post",
+    "repost.too_many_tags": "reposts can give a post at most {max} hashtags",
+    "repost.no_tags_left": "none of the repost's hashtags is one the post can have and doesn't have already, so it wasn't reposted",
+    "repost.origin_url": "origin.url must be the address of a post on its own server, with nothing after its id: https://other.example/content/<id>",
+    "repost.origin_username": "origin.publisher.username must be a single line of at most 64 characters",
+    "repost.origin_mime_type": "the original is {kind}, so origin.mimeType must be its {kind}/* content type",
+    "repost.origin_unavailable": "this server's entry for the original isn't published: it waits in the moderation queue, or is being deleted",
+
+    "post.type_off": "this server doesn't take {type} posts: the types it takes are {types}",
     "post.file_or_field": "Send content either as a file or as a field, not both",
     "post.one_source": "Send content as an uploadId, a file or a field: one of them",
     "post.one_file_part": "Exactly one file part named \"content\" is allowed",
@@ -86,6 +105,19 @@
       "one": "{reason}; solve the new challenge to post",
       "other": "{reason}; solve {count} new challenges to post"
     },
+    "challenge.commented_recently": {
+      "one": "you commented once in the last minute",
+      "other": "you commented {count} times in the last minute"
+    },
+    "challenge.comment_overtaken": "another comment went through meanwhile",
+    "challenge.to_comment": {
+      "one": "{reason}; solve the challenge to comment",
+      "other": "{reason}; solve {count} challenges to comment"
+    },
+    "challenge.to_comment_new": {
+      "one": "{reason}; solve the new challenge to comment",
+      "other": "{reason}; solve {count} new challenges to comment"
+    },
 
     "follow.own_only": "you can only change whom you follow",
     "follow.yourself": "you can't follow yourself",
@@ -112,13 +144,13 @@
     "notice.post_rejected": "Your post was rejected from the moderation queue, and deleted.",
     "notice.post_deleted": "An admin deleted your post.",
     "notice.tag_removed": "A moderator removed #{tag} from your post. Updates of the post don't get it back.",
-    "notice.last_tag_removed": "A moderator removed #{tag} from your post. It was the post's last hashtag, so the post was deleted.",
+    "notice.last_tag_removed": "A moderator removed #{tag} from your post. It was the post's last hashtag, so the post is in no hashtag's feed any more. It can still be read, and those who follow you still see it.",
     "notice.tag_muted": "A moderator muted you on #{tag}: your new posts and updates don't get that hashtag.",
     "notice.tag_unmuted": "You are no longer muted on #{tag}.",
     "notice.comment_accepted": "Your comment was accepted from the moderation queue, and is published.",
     "notice.comment_rejected": "Your comment was rejected from the moderation queue, and deleted.",
     "notice.comment_deleted": "Your comment was deleted.",
-    "notice.user_banned": "A moderator banned your account: you can't post, comment or send messages. You can still read, and your inbox still works.",
+    "notice.user_banned": "A moderator banned your account: you can't post, comment, like or send messages. You can still read, and your inbox still works.",
     "notice.user_unbanned": "Your account is no longer banned.",
 
     "comment.not_found": "comment not found",
@@ -126,16 +158,19 @@
     "comment.text_or_file": "a comment needs a text, an image or a video",
     "comment.text_required": "text is required: the comment has no image or video",
     "comment.wrong_file_type": "comments take image/* and video/* files, got {mimeType}",
+    "comment.file_type_off": "this server doesn't take {type} files, as posts or with comments",
     "comment.no_media": "this comment has no image or video",
     "comment.edit_own_only": "only the comment's author can edit this comment",
     "comment.reply_to_gone": "the comment it replies to is gone, so this comment was deleted",
     "comment.delete_not_allowed": "only the comment's author, the post's publisher or an admin can delete this comment",
     "comment.not_trusted": "this server doesn't trust the comment enough to keep it, so it wasn't published",
     "comment.blocked_word": "the comment contains a word or phrase this server doesn't allow, so it wasn't published",
+    "comment.malware_link": "the comment has a link that is known to spread malware, so it wasn't published",
     "comment.rate_limited": {
       "one": "too many comments; try again in {count} second",
       "other": "too many comments; try again in {count} seconds"
     },
+    "comment.too_many_at_once": "too many comments at once; try again in 1 second",
     "comment.not_queued": "the comment is not in the moderation queue",
     "comment.not_reported": "the comment has no reports waiting for a decision",
 
@@ -150,6 +185,7 @@
 
     "moderation.not_trusted": "this server doesn't trust the post enough to keep it, so it wasn't published",
     "moderation.blocked_word": "the post contains a word or phrase this server doesn't allow, so it wasn't published",
+    "moderation.malware_link": "the post has a link that is known to spread malware, so it wasn't published",
     "moderation.no_tags_left": "none of the post's hashtags is allowed on it, and a post needs one, so it wasn't published",
     "moderation.not_queued": "the content is not in the moderation queue",
     "moderation.admin_only": "only an admin can do this",
@@ -160,7 +196,9 @@
     "moderation.ban_staff": "admins and server moderators can't be banned: end their role first",
     "moderation.admins_changed": "the admins changed concurrently; retry",
     "moderation.word_unblockable": "\"{word}\" can't be blocked: block words or phrases of letters and digits, of at most {maxWords} words and {maxChars} characters",
-    "moderation.list_full": "a list can hold at most {max} words and phrases",
+    "moderation.pattern_unblockable": "\"{word}\" can't be blocked: an entry that starts with a slash is a pattern, which is a regular expression between two slashes, with nothing after the second (/spam+/); it can't match empty text, and has at most {maxChars} characters",
+    "moderation.list_full": "a list can hold at most {max} words, phrases and patterns",
+    "moderation.patterns_full": "a list can hold at most {max} patterns",
 
     "report.not_reported": "the content has no reports waiting for a decision",
     "report.rate_limited": {

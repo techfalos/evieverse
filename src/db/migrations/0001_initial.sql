@@ -27,7 +27,7 @@
 -- are set apart: an admin needs no 1 here, and losing the admin role leaves this as it is.
 --
 -- language: the code of the language the server answers the user in, which is the name of a file
--- of src/languages (en, pt-BR). The user registers in it, and can change it (PATCH /users/:userId).
+-- of the languages folder (en, pt-BR). The user registers in it, and can change it (PATCH /users/:userId).
 -- NULL for an account the operator set up, which is answered in the server's default language
 -- (DEFAULT_LANGUAGE), as is a user whose language the server no longer has a file for.
 --
@@ -50,9 +50,10 @@
 -- deleted_at: when the account was deleted (DELETE /users/:userId); NULL for one that wasn't. The
 -- row is not deleted with it, since content references it and cascades: the account's keys are
 -- revoked, its relations to other users go, and its content is set for deletion (see content), which
--- the compactor completes. It then deletes the row, once no content of the user's is left. Until
--- then the account is gone as far as anyone is concerned (it can't sign in, and no lookup finds it),
--- but its username stays taken. An account with no content is deleted at once, with no stage in between.
+-- the compactor completes. It then deletes the row, once no content of the user's is left, and
+-- nothing they reposted is left in their own index (see reposts). Until then the account is gone as
+-- far as anyone is concerned (it can't sign in, and no lookup finds it), but its username stays
+-- taken. An account with neither is deleted at once, with no stage in between.
 CREATE TABLE users (
   id              varchar(36)  NOT NULL,
   username        varchar(64)  NOT NULL,
@@ -100,7 +101,13 @@ CREATE INDEX api_keys_user_hash_idx ON api_keys (user_id, key_hash);
 -- delete_requested_at: DELETE /content/:id only sets it. The content stays in the database and in the
 -- feed index until a compactor run removes its entries from every hashtag's day indexes. That run then
 -- deletes the row (the rows referencing it cascade) and the bytes, so the feed never shows content
--- the database no longer has. Once set, updates and likes are refused.
+-- the database no longer has. Once set, updates, likes and reposts are refused.
+--
+-- origin_hash: NULL for a post written here. On a repost of a post that is on another server (POST
+-- /repost with an origin), the SHA-256, in hex, of the original's address. Such content is a link to
+-- the original with the original's summary: its bytes are that address, and its meta file holds the
+-- rest. The hash is unique, so a server holds one entry per original however many users repost it:
+-- the first makes it, and the others repost that entry, as they would a post written here.
 CREATE TABLE content (
   id                   varchar(36)  NOT NULL,
   user_id              varchar(36)  NOT NULL,
@@ -108,8 +115,10 @@ CREATE TABLE content (
   like_count           integer      NOT NULL DEFAULT 0,
   created_at           bigint       NOT NULL,
   delete_requested_at  bigint,
+  origin_hash          varchar(64),
   CONSTRAINT content_pk PRIMARY KEY (id),
-  CONSTRAINT content_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+  CONSTRAINT content_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  CONSTRAINT content_origin_uq UNIQUE (origin_hash)
 );
 CREATE INDEX content_user_idx ON content (user_id);
 CREATE INDEX content_delete_requested_idx ON content (delete_requested_at);
@@ -202,6 +211,41 @@ CREATE TABLE feed_queue (
 );
 CREATE INDEX feed_queue_token_idx ON feed_queue (token);
 
+-- reposts: the places a repost gave a piece of content (POST /repost), beside the ones its own
+-- write gave it. A repost copies nothing: the content stays one row, with one like count, and its
+-- publisher's. What a repost adds is rows here, one per index it puts the content in:
+--
+--   * a hashtag the reposter gave the content, which it then carries like any other (the compactor
+--     writes it into the meta file and the summary), and
+--   * the reposter's own index ("@<userId>"), which is what puts the content in the following feeds
+--     of those who follow them. That row is also what says the user reposted the content, and the
+--     primary key keeps it to once.
+--
+-- In such an index the content is placed as a new post: its entry is at created_at, the time of the
+-- repost, not at the content's own, and counts only the likes since (like_count - likes_before). In
+-- the indexes its own write gave it, it stays where it was, with all its likes.
+--
+-- user_id: who reposted. NULL once that user is gone: the hashtags they gave the content stay.
+-- likes_before: the content's like_count when it was reposted.
+-- created_at: when it was reposted. The rows of one repost hold the same.
+--
+-- A hashtag's row goes when the hashtag is removed from the content (see tag_moderation), once the
+-- compactor has applied the removal. The rows of a user's own index go when their account is
+-- deleted: the compactor drops the entries and deletes the rows, and the account's row waits for
+-- that (see users.deleted_at).
+CREATE TABLE reposts (
+  content_id    varchar(36) NOT NULL,
+  tag           varchar(64) NOT NULL,
+  user_id       varchar(36),
+  likes_before  integer     NOT NULL DEFAULT 0,
+  created_at    bigint      NOT NULL,
+  CONSTRAINT reposts_pk PRIMARY KEY (content_id, tag),
+  CONSTRAINT reposts_content_fk FOREIGN KEY (content_id) REFERENCES content (id) ON DELETE CASCADE,
+  CONSTRAINT reposts_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE SET NULL
+);
+CREATE INDEX reposts_user_idx ON reposts (user_id);
+CREATE INDEX reposts_created_idx ON reposts (created_at);
+
 -- Moderation is decided when content is written, and what moderators decide afterwards is copied into
 -- the feed index, so feeds never read the next six tables.
 --
@@ -227,9 +271,10 @@ CREATE TABLE tag_mutes (
 CREATE INDEX tag_mutes_tag_idx ON tag_mutes (tag, created_at);
 
 -- blocked_words: words and phrases, normalised (lowercase, without accents, words separated by single
--- spaces). The list of tag '*' is the server's: a post containing one of them gets a trust score of
--- 0, which by default has it refused. Any other tag's list only drops that hashtag from a post
--- containing one of them.
+-- spaces), and patterns, which are regular expressions kept between slashes as they were written.
+-- The list of tag '*' is the server's: a post containing one of them gets a trust score of 0, which
+-- by default has it refused. Any other tag's list only drops that hashtag from a post containing
+-- one of them.
 CREATE TABLE blocked_words (
   tag         varchar(64)  NOT NULL,
   word        varchar(100) NOT NULL,
@@ -265,11 +310,13 @@ CREATE INDEX moderation_queue_created_idx ON moderation_queue (created_at);
 -- decision: 'approved' flags the content's entry in the hashtag's index as moderated, which takes it
 -- out of the queue; an update of the content deletes the row, so it is unmoderated again. 'removed'
 -- takes the hashtag off the content, and stays: later updates don't get the hashtag back.
--- moderator_id: who decided; NULL once that user is gone.
+-- moderator_id: who decided; NULL once that user is gone, and on a removal nobody decided: a hashtag
+--   a repost gave the content, which an update of the content was then refused by the hashtag's own
+--   rules (its publisher is muted on it, or the content now has its blocked words).
 -- applied_at: NULL until a compactor run has applied the decision: rebuilt the content's entry in
 -- the hashtag's day index and, for 'removed', written the content's meta file and summary again
--- without the hashtag (or set the content for deletion, if it was its last). Feeds show the decision
--- from then on.
+-- without the hashtag. Feeds show the decision from then on. Content whose last hashtag is removed
+-- stays, in no hashtag's feed.
 CREATE TABLE tag_moderation (
   content_id    varchar(36) NOT NULL,
   tag           varchar(64) NOT NULL,
@@ -439,7 +486,10 @@ CREATE TABLE server_rules (
 -- kind: 'text' or 'image'. A text ad is its text. An image ad is an image, whose bytes are at
 --   ads/<id> in the content store, with an optional caption in text. An ad keeps its kind.
 -- text: a text ad's text, or an image ad's caption (NULL for an image ad with none).
--- url: where the ad leads when it is followed, if anywhere.
+-- url: where the ad leads when it is followed, if anywhere. Whoever is shown the ad is given the
+--   server's own link instead (GET /monetization/ads/<id>/click), which counts the click and
+--   redirects here.
+-- clicks: how many times that link was followed. Counted as it happens, and never taken off.
 -- image_type: the content type of an image ad's image, read from its bytes. NULL on a text ad.
 -- tags: NULL for an ad that appears all the time, under every hashtag. Otherwise the hashtags it
 --   is targeted at, normalised and separated by single spaces, at most 10: the ad is shown in a
@@ -454,6 +504,7 @@ CREATE TABLE monetization (
   kind        varchar(16)   NOT NULL,
   text        varchar(500),
   url         varchar(2048),
+  clicks      integer       NOT NULL DEFAULT 0,
   image_type  varchar(64),
   tags        varchar(700),
   starts_at   bigint        NOT NULL,

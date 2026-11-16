@@ -717,6 +717,27 @@ for (const target of TARGETS) {
       expect(texts(await list(contentId))).toEqual(['Two']);
     });
 
+    it('takes an image or a video with a comment only where the server takes posts of that type, and a text either way', async () => {
+      // A server of pictures: no text posts, and no video.
+      ctx = await createTestContext(target, { postTypes: { text: false, video: false } });
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const png = { name: 'pixel.png', type: 'image/png', data: PNG };
+      const form = multipart({ type: 'image', tags: 'news', comments: 'true' }, png);
+      const { contentId } = ok(await ctx.app.inject({ method: 'POST', url: '/store', payload: form.payload, headers: { ...form.headers, ...as(alice) } }));
+
+      // A comment's text is no text post.
+      expect(ok(await comment(bob, contentId, 'Only words'))).toMatchObject({ text: 'Only words', media: null });
+      expect(ok(await attach(bob, contentId, { text: 'Look' }, png))).toMatchObject({ media: { kind: 'image' } });
+      // No video, however it is sent, and nothing of the comment is kept: its text neither.
+      const NO_VIDEO = "this server doesn't take video files, as posts or with comments";
+      expect(refusal(await attach(bob, contentId, { text: 'Watch' }, { name: 'clip.mp4', type: 'video/mp4', data: CLIP }))).toEqual([400, NO_VIDEO]);
+      await putUpload(bob, uploadId(1), CLIP);
+      expect(refusal(await req(bob, 'POST', `/content/${contentId}/comments`, { uploadId: uploadId(1), filename: 'clip.mp4' }))).toEqual([400, NO_VIDEO]);
+      expect(texts(await list(contentId))).toEqual(['Only words', 'Look']);
+      expect(await filed(contentId)).toHaveLength(1);
+    });
+
     it('takes an image or a video with a comment, with a text or without, and serves it to whoever reads the comment', async () => {
       ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com' });
       const alice = await ctx.register('alice');
@@ -844,6 +865,28 @@ for (const target of TARGETS) {
       expect((await list(contentId)).count).toBe(2);
       expect(await filed(contentId)).toHaveLength(2);
       expect(await readdir(join(ctx.dir, 'tmp')).catch(() => [])).toEqual([]);
+    });
+
+    it('keeps an upload for a comment to be sent again with its challenge solved, and stores nothing until then', async () => {
+      ctx = await createTestContext(target, { challenge: { commentsPerMinute: 1 } });
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const contentId = await post(alice, 'Show me #news', { comments: true });
+      ok(await comment(bob, contentId, 'One'));
+
+      await putUpload(bob, uploadId(1), CLIP);
+      const payload = { text: 'Two', uploadId: uploadId(1), filename: 'clip.mp4' };
+      const challenged = await req(bob, 'POST', `/content/${contentId}/comments`, payload);
+      expect(challenged.statusCode).toBe(428);
+      expect(challenged.json()).toMatchObject({ error: 'you commented once in the last minute; solve the challenge to comment', challenge: { step: 1, steps: 1 } });
+      expect(await uploads(bob)).toEqual([uploadId(1)]);
+      expect(await filed(contentId)).toEqual([]);
+      expect(texts(await list(contentId))).toEqual(['One']);
+
+      const solved = ok(await req(bob, 'POST', `/content/${contentId}/comments`, { ...payload, ...(await ctx.solve(challenged.json().challenge)) }));
+      expect(solved).toMatchObject({ text: 'Two', media: { kind: 'video', size: CLIP.length } });
+      expect(await uploads(bob)).toEqual([]);
+      expect(await filed(contentId)).toEqual([solved.commentId]);
     });
 
     it("keeps a comment's image or video through an edit of its text, and until the comment goes: deleted, or with the post", async () => {

@@ -3,6 +3,7 @@ import type { Publisher, PublisherStore, Summary, SummaryStore } from '../storag
 import { toFeedRecord, type FeedRecord } from '../tagfeed/layout.js';
 import type { Candidate } from '../tagfeed/reader.js';
 import { iso } from '../time.js';
+import type { FollowingPick } from './following.js';
 import type { FeedPlan } from './plan.js';
 
 const refKey = (c: { contentId: string }) => c.contentId;
@@ -19,14 +20,17 @@ export const planned = (plan: FeedPlan) => plan.picks.flat();
  * The summary of every picked record (one MGET for posts younger than the hot window, parallel
  * object-store reads for older ones) and its publisher's credit (one more MGET).
  */
-export async function loadBodies(picked: Candidate[], summaries: SummaryStore, publishers: PublisherStore): Promise<FeedBodies> {
+export async function loadBodies(picked: (Candidate & { by?: string })[], summaries: SummaryStore, publishers: PublisherStore): Promise<FeedBodies> {
+  // Content picked twice (as its publisher's post and as a repost, say) has one summary, kept under the day of each entry.
   const refs = [...new Map(picked.map((c) => [refKey(c), c])).values()];
   const found = await summaries.getMany(refs);
   const byRef = new Map<string, Summary>();
   refs.forEach((c, i) => {
     if (found[i]) byRef.set(refKey(c), found[i]!);
   });
-  return { summaries: byRef, publishers: await publishers.getMany([...byRef.values()].map((s) => s.userId)) };
+  // And the credits of those who reposted them, where a following feed says who did.
+  const reposters = picked.flatMap((c) => (c.by !== undefined && byRef.has(refKey(c)) ? [c.by] : []));
+  return { summaries: byRef, publishers: await publishers.getMany([...new Set([...[...byRef.values()].map((s) => s.userId), ...reposters])]) };
 }
 
 /**
@@ -67,7 +71,7 @@ export function* renderFeed(
   const records = tags.map((tag, t) =>
     plan.picks[t]!.flatMap((c) => {
       const s = shown(bodies, c, tag);
-      return s ? [JSON.stringify(toFeedRecord(s, c.likes, bodies.publishers.get(s.userId)!, c.moderated))] : [];
+      return s ? [JSON.stringify(toFeedRecord(s, c.likes, bodies.publishers.get(s.userId)!, c.moderated, c.repost ? { at: c.createdAt } : undefined))] : [];
     }),
   );
   const count = records.reduce((n, list) => n + list.length, 0);
@@ -90,10 +94,15 @@ export function* renderFeed(
   yield Buffer.from('}}');
 }
 
-/** The records of a following feed's picks, in order; one whose summary is gone is left out. */
-export function followingRecords(picks: Candidate[], bodies: FeedBodies): FeedRecord[] {
+/**
+ * The records of a following feed's picks, in order; one whose summary is gone is left out. A
+ * repost's record says who reposted it: the followed user whose index it was read from.
+ */
+export function followingRecords(picks: FollowingPick[], bodies: FeedBodies): FeedRecord[] {
   return picks.flatMap((c) => {
     const s = bodies.summaries.get(refKey(c));
-    return s ? [toFeedRecord(s, c.likes, bodies.publishers.get(s.userId)!)] : [];
+    if (!s) return [];
+    const repost = c.repost ? { at: c.createdAt, by: c.by === undefined ? undefined : bodies.publishers.get(c.by) } : undefined;
+    return [toFeedRecord(s, c.likes, bodies.publishers.get(s.userId)!, undefined, repost)];
   });
 }

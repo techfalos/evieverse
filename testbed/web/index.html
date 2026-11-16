@@ -139,7 +139,10 @@
     <form method="dialog" id="challenge-form" class="stack">
       <h2 id="challenge-title">Solve the challenge</h2>
       <p id="challenge-reason" class="muted small"></p>
-      <img id="challenge-img" alt="Distorted characters to type" width="360" height="120">
+      <img id="challenge-img" alt="Distorted characters to type. They are read out by the audio below." width="360" height="120">
+      <label>Or listen to the characters
+        <audio id="challenge-audio" controls preload="none"></audio>
+      </label>
       <label>Type the characters
         <input id="challenge-answer" autocomplete="off" spellcheck="false" autocapitalize="characters" maxlength="16" required>
       </label>

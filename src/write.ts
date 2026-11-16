@@ -1,14 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
-import { summaryOf, takesComments } from './content.js';
+import { contentNotFound, summaryOf, takesComments } from './content.js';
 import { updateOnConflict } from './db/index.js';
 import type { AppDeps } from './deps.js';
-import { badRequest, conflict } from './http/errors.js';
+import { badRequest, conflict, unprocessable } from './http/errors.js';
 import { msg } from './language.js';
 import { previewOf } from './posts.js';
+import { MAX_REPOSTED_TAGS, reposterIndexes, repostedTags, repostsOf, repostTimes, type Repost } from './reposts.js';
 import type { ContentMeta, Publisher, StoredBytes, Summary } from './storage/index.js';
 import { countTagPairs, touchTags } from './tags.js';
 import { authorIndex } from './tagfeed/layout.js';
+import { wholeSeconds } from './time.js';
 
 export const pendingDeletion = () => conflict(msg('content.pending_deletion'));
 
@@ -34,9 +36,40 @@ export interface ContentWrite {
    * summary and is in no feed index until an admin accepts it. Absent: it is published.
    */
   queued?: { trustScore: number };
+  /**
+   * An update of content that was reposted: the places reposts gave it (see `reposts`), as the
+   * request read them. The hashtags among them are the content's like its publisher's own, and are
+   * in `summary.tags` and `meta.tags` unless `droppedReposts` names them.
+   */
+  reposts?: Repost[];
+  /**
+   * The hashtags a repost gave the content that this update is refused: its publisher is muted on
+   * them now, or what it now says has their blocked words. They aren't the publisher's to send
+   * again, so the write's commit records each as removed from the content (`tag_moderation`, with
+   * no moderator), which keeps it off the content for good, as a moderator's removal does.
+   */
+  droppedReposts?: string[];
+  /** New content that is a repost of a post on another server: the hash of the original's address (see `content.origin_hash`). */
+  originHash?: string;
 }
 
-/** Writes content for /store, and publishes what an admin accepts from the moderation queue. */
+/** A repost of content that is there (see contentWriter's repost). */
+export interface RepostWrite {
+  contentId: string;
+  /** Who reposts it. */
+  userId: string;
+  /** The hashtags the repost gives the content. */
+  tags: string[];
+  /** The hashtags the content's meta file has. */
+  carried: string[];
+}
+
+/** 409: a user reposts a post once. */
+export const alreadyReposted = () => conflict(msg('repost.already'));
+/** 409: reposts have given the post all the hashtags they can. */
+export const tooManyReposted = () => conflict(msg('repost.too_many_tags', { max: MAX_REPOSTED_TAGS }));
+
+/** Writes content for /store and reposts for /repost, and publishes what an admin accepts from the moderation queue. */
 export function contentWriter({ db, config, content, summaries, publishers, now = Date.now }: AppDeps, log: FastifyBaseLogger) {
   const { dialect } = config.db;
 
@@ -59,10 +92,12 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
   /**
    * Writes new content, or over content that is there: content has one version, and the last write
    * wins. Its bytes, summary and meta file go to the stores (the meta file last: what it says is
-   * there), then the database commits the write, and with it a row in the feed queue for every
-   * hashtag of the content and for the publisher's own index. Nothing is written to the feed index
-   * here: the compactor's next run takes the rows and rebuilds the content's entries, so the index
-   * never holds content the database rejected, and a write is queued if and only if it committed.
+   * there; it also keeps the hash of a file's bytes, which an update that writes another file
+   * takes out before it does), then the database commits the write, and with it a row in the feed
+   * queue for every hashtag of the content and for the publisher's own index. Nothing is written
+   * to the feed index here: the compactor's next run takes the rows and rebuilds the content's
+   * entries, so the index never holds content the database rejected, and a write is queued if and
+   * only if it committed.
    *
    * So a new post is in feeds once that run has published its indexes. An update shows at once
    * where the content already is, since feeds read its summary, which is written over; and it is
@@ -87,21 +122,42 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
    * content unmoderated again under its hashtags: the approvals of their moderators were of what
    * it was.
    *
+   * Content that was reposted is also in the indexes its reposts put it in (`reposts`): an update
+   * queues those too, the reposters' own among them, so its entries there are rebuilt like the
+   * others. The hashtags a repost gave it are the content's, and an update keeps them: they aren't
+   * its publisher's to drop. One the update is refused, by the hashtag's own rules, is recorded as
+   * removed from the content (see ContentWrite.droppedReposts). A repost that commits while an update is under way may be one the
+   * update never read, and whose hashtags it wrote the meta file without: the update's commit
+   * reads the content's places again, with the content's row locked as a repost locks it, and
+   * queues the ones it didn't know of, which has the compactor write them back (see applyReposts).
+   *
    * Last, the write's hashtags are counted in `tag_pairs`, from which related hashtags are worked
    * out: all of new content's, and those an update added. It is counted once the write is
    * committed, queued or not, and outside its transaction, which then holds no lock on rows every
    * post of a busy hashtag counts on. A count that fails is lost, and the write stands.
    */
-  async function write({ publisher, previous, summary, meta, putBytes, queued }: ContentWrite): Promise<void> {
+  async function write({ publisher, previous, summary, meta, putBytes, queued, reposts = [], droppedReposts = [], originHash }: ContentWrite): Promise<void> {
     const { contentId, createdAt, updatedAt: ts, aiGenerated } = summary;
     const own = authorIndex(publisher.userId);
-    const tags = queued ? [] : [...summary.tags, own];
+    const reposters = reposterIndexes(reposts);
+    // The indexes the content is published in: its hashtags', its publisher's own, and those of whoever reposted it.
+    const tags = queued ? [] : [...summary.tags, own, ...reposters];
     // Queued: also the hashtags it has now, should an admin accept what it was while this is under way.
-    const dropped = !previous ? [] : queued ? [...new Set([...previous.tags, ...summary.tags, own])] : previous.tags.filter((tag) => !summary.tags.includes(tag));
-    const touched = [...tags, ...dropped];
+    const dropped = !previous
+      ? []
+      : queued
+        ? [...previous.tags, ...summary.tags, own, ...reposters, ...droppedReposts]
+        : [...previous.tags.filter((tag) => !summary.tags.includes(tag)), ...droppedReposts];
+    const touched = [...new Set([...tags, ...dropped])];
 
     if (previous && touched.length) await enqueue(db, contentId, touched, false);
     try {
+      // The hash the meta file keeps is of the bytes there now. An update that writes others takes it out
+      // first: if it then stops before its own meta file is written, nothing says the bytes are a file they aren't.
+      if (previous?.sha256 !== undefined && previous.sha256 !== meta.sha256) {
+        const { sha256: _, ...unhashed } = previous;
+        await content.putMeta(unhashed);
+      }
       const stored = await putBytes();
       // A held update: erased, and the request fails if it can't be, since feeds would go on showing the content.
       if (queued && previous) await summaries.erase(summary);
@@ -130,7 +186,7 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
         } else {
           await trx
             .insertInto('content')
-            .values({ id: contentId, user_id: publisher.userId, ai_generated: aiGenerated ? 1 : 0, created_at: createdAt, delete_requested_at: null })
+            .values({ id: contentId, user_id: publisher.userId, ai_generated: aiGenerated ? 1 : 0, created_at: createdAt, delete_requested_at: null, origin_hash: originHash ?? null })
             .execute();
         }
         if (queued) {
@@ -142,8 +198,18 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
         }
         if (previous) await trx.deleteFrom('tag_moderation').where('content_id', '=', contentId).where('decision', '=', 'approved').execute();
         // The hashtags it is published under, not the ones it dropped: this is what /tags lists them by.
-        if (tags.length) await touchTags(trx, dialect, tags, ts);
-        if (touched.length) await enqueue(trx, contentId, touched, true);
+        if (!queued) await touchTags(trx, dialect, [...summary.tags, own], ts);
+        // The places of reposts this write didn't read, which committed since: the row is locked, so there are no more to come before this commits.
+        let late: string[] = [];
+        if (previous) {
+          // Recorded as removals, with no moderator: the compactor takes them off the content as it does any (see applyDecisions).
+          const removal = { decision: 'removed', moderator_id: null, decided_at: ts, applied_at: null } as const;
+          for (const tag of droppedReposts) {
+            await updateOnConflict(trx.insertInto('tag_moderation').values({ content_id: contentId, tag, ...removal }), dialect, ['content_id', 'tag'], removal).execute();
+          }
+          late = (await repostsOf(trx, contentId)).map((r) => r.tag).filter((tag) => !touched.includes(tag));
+        }
+        if (touched.length + late.length) await enqueue(trx, contentId, [...touched, ...late], true);
       });
     } catch (err) {
       if (previous) {
@@ -159,7 +225,9 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
     }
 
     await publishers.put(publisher).catch((err) => log.warn({ err, userId: publisher.userId }, 'could not refresh the publisher credit in Redis'));
-    const added = previous ? summary.tags.filter((tag) => !previous.tags.includes(tag)) : summary.tags;
+    // Not the hashtags a repost gave it, which the repost counted, whether the meta file had them yet or not.
+    const reposted = new Set(repostedTags(reposts));
+    const added = previous ? summary.tags.filter((tag) => !previous.tags.includes(tag) && !reposted.has(tag)) : summary.tags;
     // Stamped now, not when the write began: the compactor goes by it, and must find the rows written by then.
     await countTagPairs(db, dialect, summary.tags, added, now()).catch((err) =>
       log.warn({ err, contentId }, 'could not count the hashtags of the write; related hashtags go without it'),
@@ -168,9 +236,10 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
 
   /**
    * Publishes content that waits in the moderation queue, as an admin accepting it does: takes it
-   * out of the queue, queues its entry in the index of each of its hashtags and in its publisher's
-   * own, as the write that was held back would have, and writes its summary, which content that
-   * waits has none of. Returns the content's hashtags, or null if it isn't in the queue (any more).
+   * out of the queue, queues its entry in the index of each of its hashtags, in its publisher's
+   * own and in each that a repost put it in, as the write that was held back would have, and writes
+   * its summary, which content that waits has none of. Returns the content's hashtags, or null if
+   * it isn't in the queue (any more).
    *
    * The content's row is locked first, as an update of it does, so the two take turns: whichever
    * commits last decides whether the content is in the queue.
@@ -186,20 +255,81 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
       const meta = await content.getMeta(contentId);
       if (!meta) throw new Error(`the meta file of ${contentId} is missing`);
       const tags = [...meta.tags, authorIndex(row.user_id)];
+      // Content that was reposted before an update of it was held is back where the reposts put it.
+      const reposts = await repostsOf(trx, contentId);
       await touchTags(trx, dialect, tags, now());
-      await enqueue(trx, contentId, tags, true);
-      return { meta };
+      await enqueue(trx, contentId, [...new Set([...tags, ...reposts.map((r) => r.tag)])], true);
+      return { meta, reposts };
     });
     if (!accepted) return null;
-    const { meta } = accepted;
+    const { meta, reposts } = accepted;
 
     const publisher: Publisher = { userId: row.user_id, username: row.username };
     // Written, not only looked for: whatever summary a write that failed may have left is not of what was accepted.
     // The compactor writes it when it rebuilds the content's entries, should this fail.
-    const summary = summaryOf({ ...row, ai_generated: meta.aiGenerated ? 1 : 0 }, meta, config.publicBaseUrl);
+    const summary = summaryOf({ ...row, ai_generated: meta.aiGenerated ? 1 : 0 }, meta, config.publicBaseUrl, repostTimes(reposts));
     await summaries.put(summary).catch((err) => log.warn({ err, contentId }, 'could not write the summary of accepted content; the compactor will'));
     await publishers.put(publisher).catch((err) => log.warn({ err, userId: publisher.userId }, 'could not refresh the publisher credit in Redis'));
     return meta.tags;
+  }
+
+  /**
+   * Reposts content that is there: gives it `tags`, which it doesn't have, in the name of `userId`,
+   * who isn't its publisher. All of it is one commit, and nothing is written to the stores: a row
+   * of `reposts` for each hashtag and one for the reposter's own index, which say where the
+   * content is placed as a new post (at the repost's time, with the likes it had then to count
+   * from), and a row in the feed queue for each. The compactor's next run writes the hashtags into
+   * the content's meta file and summary and builds the entries (see applyReposts), which is when
+   * feeds show the repost. So a repost never writes a file an update of the content may be
+   * writing: only the compactor and the content's publisher write its meta file, and the compactor
+   * leaves alone what an update has queued and not yet committed.
+   *
+   * The content's row is locked first, as an update and an acceptance from the moderation queue
+   * lock it, so what is checked here holds when it commits: the content is published (404
+   * otherwise), this user hasn't reposted it (409), and the hashtags reposts gave it stay within
+   * MAX_REPOSTED_TAGS (409). A hashtag another repost gave it meanwhile isn't given twice; a
+   * repost left with none that way is refused (422), since it would place the content nowhere but
+   * the reposter's own index.
+   *
+   * `carried` is the hashtags the content's meta file has, for the count of related hashtags (see
+   * write). Returns the hashtags the repost gave the content, and when it was made: in whole
+   * seconds, which is all an index entry keeps of it.
+   */
+  async function repost({ contentId, userId, tags, carried }: RepostWrite): Promise<{ tags: string[]; at: number }> {
+    const own = authorIndex(userId);
+    const at = wholeSeconds(now());
+    const result = await db.transaction().execute(async (trx) => {
+      await trx.updateTable('content').set((eb) => ({ ai_generated: eb.ref('ai_generated') })).where('id', '=', contentId).execute();
+      const live = await trx
+        .selectFrom('content')
+        .leftJoin('moderation_queue', 'moderation_queue.content_id', 'content.id')
+        .select(['content.like_count', 'moderation_queue.content_id as queued_id'])
+        .where('content.id', '=', contentId)
+        .where('content.delete_requested_at', 'is', null)
+        .executeTakeFirst();
+      if (!live || live.queued_id !== null) throw contentNotFound();
+
+      const places = await repostsOf(trx, contentId);
+      if (places.some((r) => r.tag === own)) throw alreadyReposted();
+      const given = repostedTags(places);
+      const added = tags.filter((tag) => !given.includes(tag));
+      if (!added.length) throw unprocessable(msg('repost.no_tags_left'), { removedTags: tags.map((tag) => ({ tag, reason: 'already_tagged' })) });
+      if (given.length + added.length > MAX_REPOSTED_TAGS) throw tooManyReposted();
+
+      const indexes = [...added, own];
+      await trx
+        .insertInto('reposts')
+        .values(indexes.map((tag) => ({ content_id: contentId, tag, user_id: userId, likes_before: live.like_count, created_at: at })))
+        .execute();
+      await touchTags(trx, dialect, indexes, at);
+      await enqueue(trx, contentId, indexes, true);
+      return { added, all: [...new Set([...carried, ...given, ...added])] };
+    });
+
+    await countTagPairs(db, dialect, result.all, result.added, now()).catch((err) =>
+      log.warn({ err, contentId }, 'could not count the hashtags of the repost; related hashtags go without it'),
+    );
+    return { tags: result.added, at };
   }
 
   /** Whether the content waits in the moderation queue. */
@@ -239,7 +369,7 @@ export function contentWriter({ db, config, content, summaries, publishers, now 
     await summaries.remove([summary]).catch(() => {});
   }
 
-  return { write, publish };
+  return { write, publish, repost };
 }
 
 export type ContentWriter = ReturnType<typeof contentWriter>;

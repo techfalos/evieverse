@@ -3,12 +3,13 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createCompactor } from '../src/compact/compactor.js';
 import { loadConfig } from '../src/config.js';
 import { createDb } from '../src/db/index.js';
 import { migrateToLatest } from '../src/db/migrator.js';
 import { bootstrap } from '../src/deps.js';
+import { checkSettings, migrateDeployment } from '../src/functions/deploy.js';
 import { GROUP_NAMES, type GroupName } from '../src/functions/groups.js';
 import { createFunction, functionConfig, type FunctionResponse, type RouteFunction } from '../src/functions/handler.js';
 import { EDGE_SECRET_HEADER, httpApiHandler, runLambda, toRequest, toResult, type HttpApiEvent } from '../src/functions/lambdaRuntime.js';
@@ -251,13 +252,14 @@ describe('Lambda adapter', () => {
     expect(JSON.parse(large.body)).toEqual({ error: 'the response is too large for a function to return' });
   });
 
-  it('takes a request’s address to be the one the gateway saw, and refuses one that did not come through the edge', async () => {
+  it('counts a request by the address the gateway saw, and refuses one that did not come through the edge', async () => {
     const d = await deployment();
     try {
       await d.migrate();
-      // The audit log is where the address a request is taken to come from is written down.
+      // One registration an hour from an address: it takes two requests. The audit log is where the
+      // address a request is taken to come from is written down.
       const audit = join(d.dir, 'audit');
-      const config = loadConfig({ ...d.config, trustProxy: 1, audit: { scheme: 'fs', options: { root: audit } } }, {});
+      const config = loadConfig({ ...d.config, trustProxy: 1, registerRateLimitPerHour: 2, audit: { scheme: 'fs', options: { root: audit } } }, {});
       // Over the deployment's hot store, where the challenges it asks for are read from to be solved.
       const fn = createFunction('api', config, { hot: d.hot, server: { logger: false } });
       const handler = httpApiHandler(fn, { edgeSecret: 's3cret' });
@@ -280,6 +282,7 @@ describe('Lambda adapter', () => {
       };
       try {
         expect((await register('alice', '203.0.113.1')).statusCode).toBe(201);
+        expect((await register('bob', '203.0.113.1')).statusCode).toBe(429);
         expect((await register('carol', '203.0.113.2')).statusCode).toBe(201);
         expect((await register('dave', '203.0.113.3', {})).statusCode).toBe(403);
         expect((await register('erin', '203.0.113.3', { [EDGE_SECRET_HEADER]: 'guess' })).statusCode).toBe(403);
@@ -358,5 +361,105 @@ describe('Lambda adapter', () => {
     await expect(failing).rejects.toThrow('no database');
     await runtime.close();
     expect(runtime.calls).toEqual([{ path: '/init/error', body: expect.objectContaining({ errorMessage: 'no database' }), errorType: 'Unhandled' }]);
+  });
+
+  it('tells the deploy that invoked the migrate function which setting was refused, and stays up for the next try', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'evieverse-deploy-'));
+    const runtime = await runtimeApi([{ image: 'a' }, { image: 'a' }]);
+    const stop = new AbortController();
+    // As lambda.ts runs it: the settings are read by each invocation, here a bad set and then a good one.
+    const settings = [deploySettings(dir, { TRUST_OPTIONAL_PLUGINS: 'urlhouse' }), deploySettings(dir)];
+    const loop = runLambda(() => migrateDeployment(settings.shift()!, { hot: new MemoryHotStore() }), { api: runtime.api, signal: stop.signal, log: () => {} });
+    await runtime.idle;
+    stop.abort();
+    await loop;
+    await runtime.close();
+    await rm(dir, { recursive: true, force: true });
+
+    expect(runtime.calls).toEqual([
+      {
+        path: '/invocation/req-1/error',
+        body: expect.objectContaining({ errorMessage: expect.stringMatching(/^the functions would not start with these settings, so nothing was changed: TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't a folder of /) }),
+        errorType: 'Unhandled',
+      },
+      { path: '/invocation/req-2/response', body: { migrated: true, dialect: 'sqlite' }, errorType: undefined },
+    ]);
+  });
+});
+
+/** The settings of a deployment as its migrate step is given them: in the environment, as the functions are. */
+function deploySettings(dir: string, more: Record<string, string> = {}): Record<string, string> {
+  return {
+    EVIEVERSE_CONFIG: '/nonexistent.json',
+    LOG_LEVEL: 'silent',
+    DB_DIALECT: 'sqlite',
+    DATABASE_URL: join(dir, 'db.sqlite'),
+    CONTENT_SCHEME: 'fs',
+    CONTENT_OPTIONS: JSON.stringify({ root: join(dir, 'content') }),
+    STORAGE_TMP_PATH: join(dir, 'tmp'),
+    ...more,
+  };
+}
+
+describe('the deploy step', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'evieverse-deploy-'));
+  });
+  afterEach(() => rm(dir, { recursive: true, force: true }));
+
+  const hot = () => ({ hot: new MemoryHotStore() });
+  /** The tables of the deployment's database: none until the step has migrated it. */
+  const tables = async () => {
+    const db = await createDb({ dialect: 'sqlite', url: join(dir, 'db.sqlite'), poolSize: 1 });
+    try {
+      return (await db.introspection.getTables()).map((table) => table.name);
+    } finally {
+      await db.destroy();
+    }
+  };
+
+  it('starts every route group with the settings, and only then migrates and sets up the admin account', async () => {
+    const admin = { userId: '7b0e3a52-5f0c-4e06-9d6c-0d8b1f3f5a10', username: 'root', keyHash: 'a'.repeat(64) };
+    const env = deploySettings(dir, { BOOTSTRAP_ADMIN: JSON.stringify(admin), TRUST_OPTIONAL_PLUGINS: 'urlhaus', URLHAUS_AUTH_KEY: 'KEY' });
+    expect(await tables()).toEqual([]);
+    expect(await migrateDeployment(env, hot())).toEqual({
+      migrated: true,
+      dialect: 'sqlite',
+      admin: { userId: admin.userId, username: 'root', created: true, keyChanged: true, keyReplaced: false },
+    });
+    expect(await tables()).toContain('users');
+    // Again, as every deploy that changes a setting runs it: nothing is left to do.
+    expect(await migrateDeployment(env, hot())).toMatchObject({ migrated: true, admin: { created: false, keyChanged: false } });
+    expect(await checkSettings(env, hot())).toMatchObject({ trust: { optionalPlugins: ['urlhaus'] }, db: { migrateOnStart: false } });
+  });
+
+  it('refuses settings a function would not start with, by name, and changes nothing', async () => {
+    const refused: [Record<string, string>, RegExp][] = [
+      // A typo in a plugin's name, which only loading the plugins finds.
+      [{ TRUST_OPTIONAL_PLUGINS: 'urlhouse' }, /TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't a folder of /],
+      [{ TRUST_OPTIONAL_PLUGINS: 'urlhaus' }, /TRUST_OPTIONAL_PLUGINS turns on urlhaus, which needs URLHAUS_AUTH_KEY/],
+      // Settings that are refused when they are read.
+      [{ TRUST_SCORE_DELETE_BELOW: '80' }, /TRUST_SCORE_DELETE_BELOW can be at most TRUST_SCORE_ALLOW_FROM/],
+      [{ TAGGING_MODE: 'server' }, /TAGGING_SERVER_TAGS/],
+      [{ MAX_UPLOAD_BYTES: 'lots' }, /storage\.maxUploadBytes: /],
+      [{ CONTENT_OPTIONS: '{"root":' }, /Unexpected end of JSON input/],
+      // A language the server has no file for, which only loading the languages finds.
+      [{ DEFAULT_LANGUAGE: 'xx' }, /the default language is "xx" \(DEFAULT_LANGUAGE\)/],
+      // A kind of store there isn't, which only opening the stores finds, and a proxy list only the app reads.
+      [{ CONTENT_SCHEME: 's4' }, /scheme: s4/],
+      [{ TRUST_PROXY: 'yes please' }, /invalid IP address: yes/],
+    ];
+    for (const [setting, why] of refused) {
+      const failed = await migrateDeployment(deploySettings(dir, setting), hot()).then(
+        () => null,
+        (err: Error) => err.message,
+      );
+      expect(failed, JSON.stringify(setting)).toMatch(/^the functions would not start with these settings, so nothing was changed: /);
+      expect(failed, JSON.stringify(setting)).toMatch(why);
+      expect(await tables(), JSON.stringify(setting)).toEqual([]);
+    }
+    // Functions share one feed index, so their settings need Redis: only a test stands in for it.
+    await expect(checkSettings(deploySettings(dir))).rejects.toThrow(/nothing was changed: functions need REDIS_URL/);
   });
 });

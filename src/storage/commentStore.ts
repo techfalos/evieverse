@@ -1,7 +1,7 @@
 import type { Operator } from 'opendal';
 import { mapLimit } from '../util.js';
 import type { HotStore, LexRange } from './hotStore.js';
-import { createOperator, isNotFound } from './opendal.js';
+import { createOperator, isNotFound, readObject } from './opendal.js';
 
 /** A comment on a post, as it is stored. */
 export interface Comment {
@@ -201,15 +201,6 @@ export class CommentStore {
     this.op = createOperator(cfg.scheme, cfg.options);
   }
 
-  private async readObject(key: string): Promise<Buffer | null> {
-    try {
-      return await this.op.read(key);
-    } catch (err) {
-      if (isNotFound(err)) return null;
-      throw err;
-    }
-  }
-
   private async write(key: string, comment: Comment): Promise<void> {
     await this.op.write(key, JSON.stringify(comment), { contentType: 'application/json' });
   }
@@ -360,7 +351,7 @@ export class CommentStore {
 
   /** A comment that waits in the moderation queue; null if the post has none by that id. */
   async getHeld(postId: string, commentId: string): Promise<Comment | null> {
-    const blob = await this.readObject(heldCommentObjectKey(postId, commentId));
+    const blob = await readObject(this.op, heldCommentObjectKey(postId, commentId));
     return blob && parse(blob);
   }
 
@@ -390,7 +381,7 @@ export class CommentStore {
         const id = ids[i]!;
         let blob = cached[i] ?? null;
         if (!blob) {
-          blob = await this.readObject(commentObjectKey(postId, id));
+          blob = await readObject(this.op, commentObjectKey(postId, id));
           // Only where Redis has nothing, so a comment read just before it was deleted never replaces what its deletion left there.
           if (blob) await this.hot.setIfAbsent(commentKey(id), blob, this.opts.hotMs).catch(() => {});
         }

@@ -7,7 +7,7 @@
 
 locals {
   root        = abspath("${path.module}/../../..")
-  source_hash = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json", "scripts/build-cli.mjs"]) : filesha1("${local.root}/${f}")]))
+  source_hash = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), sort(fileset(local.root, "languages/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json", "scripts/build-cli.mjs"]) : filesha1("${local.root}/${f}")]))
   registry    = "${var.region}-docker.pkg.dev"
   image       = var.image != "" ? var.image : "${local.registry}/${var.project_id}/${google_artifact_registry_repository.app.repository_id}/app:${substr(local.source_hash, 0, 12)}"
   url         = "https://${google_api_gateway_gateway.main.default_hostname}"
@@ -64,6 +64,7 @@ locals {
     DB_DIALECT         = "postgres"
     CONTENT_SCHEME     = "gcs"
     PUBLIC_BASE_URL    = local.url
+    SUPPORT_EMAIL      = var.support_email
     COMPACT_IN_PROCESS = "false"
     MAX_UPLOAD_BYTES   = local.max_upload_bytes
   }, var.environment)
@@ -77,12 +78,29 @@ locals {
     AUDIT_OPTIONS = jsonencode({ bucket = google_storage_bucket.audit.name })
   }, local.env)
 
+  # What `environment` and `secrets` set, and the optional trust plugins they turn on, read as the
+  # server reads TRUST_OPTIONAL_PLUGINS (names separated by commas or spaces): for the one mistake
+  # that is caught in the plan, before the migrate job is run (see the preconditions of
+  # terraform_data.migrate).
+  settings         = merge(var.environment, var.secrets)
+  optional_plugins = regexall("[^\\s,]+", lookup(local.settings, "TRUST_OPTIONAL_PLUGINS", ""))
+
   builtin_secrets = {
     DATABASE_URL    = google_secret_manager_secret.db_url.secret_id
     REDIS_URL       = google_secret_manager_secret.redis_url.secret_id
     CONTENT_OPTIONS = google_secret_manager_secret.content_options.secret_id
   }
   secret_env = merge(local.builtin_secrets, { for key in local.secret_keys : key => google_secret_manager_secret.extra[key].secret_id })
+
+  # Which version of each secret the services, the compactor and the jobs read. Those of `secrets`
+  # are the version this apply wrote, by its number, and not "latest". An instance reads its secrets
+  # when it starts, and services start instances all the time: with "latest", a new value would
+  # reach them the moment it was written, before the migrate job had checked it. By number, a new
+  # value is a new revision, which waits for the job like any other change.
+  secret_versions = merge(
+    { for key in keys(local.builtin_secrets) : key => "latest" },
+    { for key in local.secret_keys : key => google_secret_manager_secret_version.extra[key].version },
+  )
 }
 
 data "google_project" "this" {}
@@ -341,6 +359,13 @@ resource "google_secret_manager_secret_version" "extra" {
   for_each    = local.secret_keys
   secret      = google_secret_manager_secret.extra[each.value].id
   secret_data = var.secrets[each.value]
+
+  # A new value is a new version, and the one before it is destroyed only once every service reads
+  # the new one: the revisions that are running read theirs by its number (local.secret_versions),
+  # and keep it if the apply stops at the migrate job.
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # ---------------------------------------------------------------- identity
@@ -391,6 +416,9 @@ locals {
 # migrate job below creates the account from the key's hash (src/moderation/bootstrap.ts), so
 # the key itself is only in the state and in the profile file. To replace the key:
 #   terraform apply -replace=random_password.admin_key
+# A key that replaces it through the API (POST /users/:userId/key) lasts, and never reaches the
+# state: the output and the profile file keep the key made here, which stays revoked, until it is
+# replaced as above.
 resource "random_uuid" "admin" {}
 
 resource "random_id" "admin_key_prefix" {
@@ -438,9 +466,17 @@ resource "local_sensitive_file" "admin_profile" {
 
 # ---------------------------------------------------------------- migrations
 
-# Functions never migrate the database when they start (many start at once), so each apply that
-# changes the image or the admin account runs this job first and waits for it. The job also sets up
-# the admin account.
+# The step every apply that changes the image, the settings or the admin account runs first, and
+# waits for (src/functions/deploy.ts). With the settings the services are about to get, the job
+# checks that they start with them, and only then brings the schema up to date and sets up the
+# admin account.
+#
+# The check is what keeps a mistake in `environment` or `secrets` from reaching the deployment: the
+# job starts each route group as its service would, and a setting the server refuses (a misspelt
+# plugin name, say) fails it, which stops the apply here, before the services and the compactor,
+# which all wait for it: they keep what they have.
+#
+# Functions never migrate the database when they start, as many start at once.
 resource "google_cloud_run_v2_job" "migrate" {
   name                = "${var.name}-migrate"
   location            = var.region
@@ -464,24 +500,32 @@ resource "google_cloud_run_v2_job" "migrate" {
       containers {
         image   = local.image
         command = ["node"]
-        args    = ["dist/db/migrate.js"]
+        args    = ["dist/functions/migrate.js"]
         resources {
-          limits = { cpu = "1", memory = "512Mi" }
-        }
-        env {
-          name  = "DB_DIALECT"
-          value = "postgres"
+          # The services' own, as it starts what they start.
+          limits = { cpu = "1", memory = "1Gi" }
         }
         env {
           name  = "BOOTSTRAP_ADMIN"
           value = local.bootstrap_admin
         }
-        env {
-          name = "DATABASE_URL"
-          value_source {
-            secret_key_ref {
-              secret  = google_secret_manager_secret.db_url.secret_id
-              version = "latest"
+        # What the services are about to get, which is what the job checks.
+        dynamic "env" {
+          for_each = local.function_env
+          content {
+            name  = env.key
+            value = env.value
+          }
+        }
+        dynamic "env" {
+          for_each = local.secret_env
+          content {
+            name = env.key
+            value_source {
+              secret_key_ref {
+                secret  = env.value
+                version = local.secret_versions[env.key]
+              }
             }
           }
         }
@@ -494,17 +538,16 @@ resource "google_cloud_run_v2_job" "migrate" {
   }
 
   depends_on = [
-    terraform_data.image,
-    google_project_iam_member.sql,
-    google_secret_manager_secret_iam_member.app,
-    google_secret_manager_secret_version.db_url,
+    local.ready,
     google_sql_database.main,
     google_sql_user.app,
   ]
 }
 
 resource "terraform_data" "migrate" {
-  triggers_replace = [local.image, local.bootstrap_admin]
+  # The last is a hash of everything the job is given, so a change to `environment` or `secrets`
+  # alone runs it again, and is checked before it reaches a service.
+  triggers_replace = [local.image, local.bootstrap_admin, nonsensitive(sha256(jsonencode([local.function_env, var.secrets])))]
   provisioner "local-exec" {
     command = "gcloud run jobs execute ${google_cloud_run_v2_job.migrate.name} --project ${var.project_id} --region ${var.region} --wait"
   }
@@ -517,6 +560,13 @@ resource "terraform_data" "migrate" {
     precondition {
       condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", local.admin_user_id))
       error_message = "The admin account's id isn't a version 4 UUID, which is what the server's user ids are."
+    }
+    # The server refuses to start with urlhaus turned on and no Auth-Key (src/config.ts), which the
+    # migrate job would find too. This one is known from the variables alone, so the plan fails,
+    # before anything is changed.
+    precondition {
+      condition     = !contains(local.optional_plugins, "urlhaus") || trimspace(lookup(local.settings, "URLHAUS_AUTH_KEY", "")) != ""
+      error_message = "TRUST_OPTIONAL_PLUGINS turns on urlhaus, which needs URLHAUS_AUTH_KEY in `secrets`: the Auth-Key of an abuse.ch account, which is free (https://auth.abuse.ch). Without it no service and no compactor would start."
     }
   }
 }
@@ -587,7 +637,7 @@ resource "google_cloud_run_v2_service" "group" {
           value_source {
             secret_key_ref {
               secret  = env.value
-              version = "latest"
+              version = local.secret_versions[env.key]
             }
           }
         }
@@ -725,7 +775,7 @@ resource "google_cloud_run_v2_worker_pool" "compactor" {
           value_source {
             secret_key_ref {
               secret  = env.value
-              version = "latest"
+              version = local.secret_versions[env.key]
             }
           }
         }
@@ -792,7 +842,7 @@ resource "google_cloud_run_v2_job" "rebuild" {
             value_source {
               secret_key_ref {
                 secret  = env.value
-                version = "latest"
+                version = local.secret_versions[env.key]
               }
             }
           }

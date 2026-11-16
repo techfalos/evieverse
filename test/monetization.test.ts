@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { LightMyRequestResponse } from 'fastify';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { AD_POSITIONS, adStatus, eligibleAds, MAX_OPEN_ADS, orderAds, placeAds, type PublishedAd } from '../src/monetization.js';
@@ -21,6 +21,7 @@ type Ad = {
   startsAt: string;
   endsAt: string | null;
   status: 'scheduled' | 'live' | 'ended';
+  clicks: number;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -122,6 +123,9 @@ for (const target of TARGETS) {
     const list = async (by: User, query = ''): Promise<{ ads: Ad[]; nextCursor: string | null }> => ok(await req(by, 'GET', `/monetization/ads${query}`));
     const patch = (by: User | null, adId: string, fields: Record<string, unknown>) => req(by, 'PATCH', `/monetization/ads/${adId}`, fields);
     const image = (adId: string) => ctx.app.inject({ method: 'GET', url: `/monetization/ads/${adId}/image` });
+    /** Follows an ad's link as its reader does, with no credentials: `url` is what the ad was shown with. */
+    const follow = (url: string, method: 'GET' | 'HEAD' = 'GET') => ctx.app.inject({ method, url });
+    const clickUrl = (adId: string) => `/monetization/ads/${adId}/click`;
     /** `count` posts under #`tag`, in feeds. */
     const posts = async (user: User, count: number, tag = 'news') => {
       const ids: string[] = [];
@@ -166,6 +170,7 @@ for (const target of TARGETS) {
         startsAt: now(),
         endsAt: null,
         status: 'live',
+        clicks: 0,
         createdBy: root.userId,
         createdAt: now(),
         updatedAt: now(),
@@ -201,6 +206,7 @@ for (const target of TARGETS) {
         kind: 'text',
         text: 'Winter sale',
         url: 'https://shop.example/winter?ref=evieverse',
+        clicks: 0,
         image_type: null,
         tags: 'cats dogs',
         starts_at: startsAt,
@@ -349,7 +355,8 @@ for (const target of TARGETS) {
       await ctx.compact();
       const page = await feed('tags=news&limit=20');
       expect(page.count).toBe(20);
-      const shown: FeedAdItem = { adId: ad.adId, label: 'Sponsored', kind: 'text', text: 'Fresh coffee', url: 'https://coffee.example/', position: 3 };
+      // Its link is the server's, which counts the click, not the one its admin gave it.
+      const shown: FeedAdItem = { adId: ad.adId, label: 'Sponsored', kind: 'text', text: 'Fresh coffee', url: clickUrl(ad.adId), position: 3 };
       // One ad for three places: it takes each of them.
       expect(page.ads).toEqual([shown, { ...shown, position: 10 }, { ...shown, position: 17 }]);
       // The records are the ones the feed has without ads.
@@ -497,7 +504,7 @@ for (const target of TARGETS) {
       await ctx.compact();
       const shown = await content(cats);
       // The ad is the last thing of the post, and has no position: it goes at the end.
-      expect(shown.ad).toEqual({ adId: ad.adId, label: 'Sponsored', kind: 'image', imageUrl: `/monetization/ads/${ad.adId}/image`, text: 'Cat food', url: 'https://cats.example/' });
+      expect(shown.ad).toEqual({ adId: ad.adId, label: 'Sponsored', kind: 'image', imageUrl: `/monetization/ads/${ad.adId}/image`, text: 'Cat food', url: clickUrl(ad.adId) });
       expect(Object.keys(shown).at(-1)).toBe('ad');
       expect(shown).toMatchObject({ contentId: cats, text: 'A cat #cats', tags: ['cats'] });
       expect(await content(dogs)).not.toHaveProperty('ad');
@@ -515,6 +522,100 @@ for (const target of TARGETS) {
       const waiting = await content(held, alice);
       expect(waiting.status).toBe('pending_review');
       expect(waiting).not.toHaveProperty('ad');
+    });
+
+    it('counts a click each time the link an ad is shown with is followed, then sends the reader where the ad leads', async () => {
+      const { root, alice } = await setup({ trust: { deleteBelow: 0 } });
+      const [contentId] = await posts(alice, 3);
+      const ad = await textAd(root, 'Fresh coffee', { url: 'https://coffee.example/menu?ref=evieverse#today' });
+      // Its admins read where it leads, as they gave it, and how often it was followed.
+      expect(ad).toMatchObject({ url: 'https://coffee.example/menu?ref=evieverse#today', clicks: 0 });
+      await ctx.compact();
+
+      // A feed and a post show it with the same link, which names the ad and not where it leads.
+      const [inFeed] = (await feed('tags=news')).ads!;
+      const atEnd = ok(await req(null, 'GET', `/content/${contentId}`)).ad;
+      expect(inFeed!.url).toBe(clickUrl(ad.adId));
+      expect(atEnd.url).toBe(clickUrl(ad.adId));
+      // Being shown is no click.
+      expect((await read(root, ad.adId)).clicks).toBe(0);
+
+      // Followed by anyone, with no credentials: counted, and sent on.
+      const followed = await follow(inFeed!.url!);
+      expect(followed.statusCode).toBe(302);
+      expect(followed.headers.location).toBe('https://coffee.example/menu?ref=evieverse#today');
+      // Not a redirect to keep: the next click has to be asked for too.
+      expect(followed.headers['cache-control']).toBe('no-store');
+      expect((await read(root, ad.adId)).clicks).toBe(1);
+      await follow(atEnd.url);
+      await follow(atEnd.url);
+      expect((await read(root, ad.adId)).clicks).toBe(3);
+      expect((await list(root)).ads).toMatchObject([{ adId: ad.adId, clicks: 3 }]);
+      // A HEAD request follows nothing.
+      expect((await follow(clickUrl(ad.adId), 'HEAD')).statusCode).toBe(302);
+      expect((await read(root, ad.adId)).clicks).toBe(3);
+
+      // Each ad has its own count.
+      const other = await textAd(root, 'Tea', { url: 'https://tea.example/' });
+      expect((await follow(clickUrl(other.adId))).headers.location).toBe('https://tea.example/');
+      expect((await read(root, other.adId)).clicks).toBe(1);
+      expect((await read(root, ad.adId)).clicks).toBe(3);
+
+      // A link that was changed is the one followed from then on, with no run between, and the clicks are kept.
+      ctx.clock.now += 1000;
+      expect(ok(await patch(root, ad.adId, { url: 'https://coffee.example/new', text: 'Fresher coffee' }))).toMatchObject({ url: 'https://coffee.example/new', clicks: 3 });
+      expect((await follow(clickUrl(ad.adId))).headers.location).toBe('https://coffee.example/new');
+      expect((await read(root, ad.adId)).clicks).toBe(4);
+      // Nobody sets the count: it isn't a request's to say.
+      ok(await patch(root, ad.adId, { text: 'Freshest coffee', clicks: 1000 }));
+      expect((await read(root, ad.adId)).clicks).toBe(4);
+
+      // An ad that is over still leads where it did, for whoever has it on a page from before.
+      ok(await patch(root, ad.adId, { endsAt: now() }));
+      expect((await read(root, ad.adId)).status).toBe('ended');
+      expect((await follow(clickUrl(ad.adId))).statusCode).toBe(302);
+      expect((await read(root, ad.adId)).clicks).toBe(5);
+    });
+
+    it('gives an ad that leads nowhere no link, and follows only the ads there are', async () => {
+      const { root, alice } = await setup({ publicBaseUrl: 'https://api.example.com' });
+      await posts(alice, 3);
+      const plain = await textAd(root, 'Just words');
+      await ctx.compact();
+      expect((await feed('tags=news')).ads![0]).not.toHaveProperty('url');
+      expect(await refused(follow(clickUrl(plain.adId)))).toEqual([404, 'ad not found']);
+      expect((await read(root, plain.adId)).clicks).toBe(0);
+      expect(await refused(follow(clickUrl(NO_AD)))).toEqual([404, 'ad not found']);
+      expect((await follow('/monetization/ads/not-an-id/click')).statusCode).toBe(400);
+      // Where it goes is the ad's to say: a request can't name somewhere else.
+      const linked = await textAd(root, 'Linked', { url: 'https://shop.example/' });
+      expect((await follow(`${clickUrl(linked.adId)}?url=https://evil.example/`)).headers.location).toBe('https://shop.example/');
+
+      // The link is absolute where the server knows its address, as an image's is.
+      await ctx.compact();
+      const urls = new Set<string | undefined>();
+      for (let i = 0; i < 40; i++) urls.add((await feed('tags=news')).ads![0]!.url);
+      expect([...urls].sort()).toEqual([`https://api.example.com${clickUrl(linked.adId)}`, undefined]);
+
+      // Once its link is cleared, the ad is shown without one, and the one it was shown with leads nowhere.
+      ok(await patch(root, linked.adId, { url: null }));
+      expect(await refused(follow(clickUrl(linked.adId)))).toEqual([404, 'ad not found']);
+      expect((await read(root, linked.adId)).clicks).toBe(1);
+    });
+
+    it('counts the clicks made while an ad is being changed', async () => {
+      const { root } = await setup();
+      const ad = await create(root, { kind: 'image', content: PNG.toString('base64'), url: 'https://shoes.example/' });
+      await follow(clickUrl(ad.adId));
+      // An update reads the ad, stores its new image, and then writes the ad: these clicks come in between.
+      const putFile = ctx.content.putFile.bind(ctx.content);
+      vi.spyOn(ctx.content, 'putFile').mockImplementationOnce(async (...args) => {
+        for (let i = 0; i < 3; i++) await follow(clickUrl(ad.adId));
+        return putFile(...args);
+      });
+      // The update answers with the count it read, and leaves the one there is alone.
+      expect(ok(await patch(root, ad.adId, { content: JPEG.toString('base64'), text: 'Shoes that last' }))).toMatchObject({ text: 'Shoes that last', clicks: 1 });
+      expect(await read(root, ad.adId)).toMatchObject({ text: 'Shoes that last', clicks: 4 });
     });
 
     it('shows ads only where the server turns them on, and keeps them either way', async () => {

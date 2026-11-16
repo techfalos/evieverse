@@ -2,7 +2,7 @@ import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Operator } from 'opendal';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { as, createTestContext, PNG, requests, TARGETS, type TestContext, type User } from './helpers.js';
+import { as, createTestContext, PNG, requests, sha256, TARGETS, type TestContext, type User } from './helpers.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -67,6 +67,19 @@ for (const target of TARGETS) {
       expect((await askLink(await ctx.register('bob'), { type: 'image', filename: 'pixel.png', size: 10 })).statusCode).toBe(201);
     });
 
+    it('gives no link for a file of a type of post the server has turned off', async () => {
+      const s3 = { bucket: 'media', region: 'us-east-1', endpoint: 'https://s3.example.com', access_key_id: 'key', secret_access_key: 'secret', disable_config_load: 'true', disable_ec2_metadata: 'true' };
+      ctx = await createTestContext(target, { content: { scheme: 's3', options: s3 }, postTypes: { video: false, audio: false } });
+      const alice = await ctx.register('alice');
+      expect((await askLink(alice, { type: 'image', filename: 'pixel.png', size: PNG.length })).statusCode).toBe(201);
+      for (const [type, filename] of [['video', 'clip.mp4'], ['audio', 'song.mp3']]) {
+        const res = await askLink(alice, { type, filename, size: 10 });
+        expect([res.statusCode, res.json().error]).toEqual([400, `this server doesn't take ${type} posts: the types it takes are image, text, link`]);
+      }
+      // Only to a user, as ever.
+      expect((await askLink({ userId: alice.userId, apiKey: 'tu_wrong' }, { type: 'video', filename: 'clip.mp4', size: 10 })).statusCode).toBe(401);
+    });
+
     it('gives no link where the content store signs none: files then go in the request to /store', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
@@ -95,6 +108,7 @@ for (const target of TARGETS) {
         like_count: 0,
         created_at: ctx.clock.now,
         delete_requested_at: null,
+        origin_hash: null,
       });
       expect(await meta(contentId)).toEqual({
         contentId,
@@ -112,7 +126,8 @@ for (const target of TARGETS) {
       // An upload is stored once.
       expect((await store(alice, { type: 'video', uploadId: id(1), filename: 'clip.mp4', tags: ['clips'] })).statusCode).toBe(400);
 
-      // A file sent as an update is written over the post's, whether it is the same file or not.
+      // The server never read the file, which the content store copied itself, so the meta file above has no
+      // hash of it: a video or audio file sent this way is written over the post's, whether it is the same file or not.
       ctx.clock.now += 1000;
       await put(alice, id(2), CLIP);
       const same = await store(alice, { contentId, type: 'video', uploadId: id(2), filename: 'clip.mp4', text: 'One clip', tags: ['clips'] });
@@ -129,6 +144,18 @@ for (const target of TARGETS) {
       expect(updated.rawPayload.equals(other)).toBe(true);
       expect(updated.headers['content-length']).toBe(String(other.length));
       expect(await kept()).toEqual([contentId, `${contentId}.meta.json`]);
+
+      // Sent in a request, the file is hashed, and told from then on. Sent with a link after that, it is stored
+      // again, and the hash goes: it would be of bytes the server didn't see stored.
+      const inline = { contentId, type: 'video', content: CLIP.toString('base64'), contentEncoding: 'base64', contentType: 'video/mp4', text: 'One clip', tags: ['clips'] };
+      expect((await store(alice, inline)).json()).not.toHaveProperty('unchanged');
+      expect(await meta(contentId)).toMatchObject({ sha256: sha256(CLIP) });
+      expect((await store(alice, inline)).json()).toEqual({ contentId, unchanged: true });
+      await put(alice, id(4), CLIP);
+      const linked = await store(alice, { contentId, type: 'video', uploadId: id(4), filename: 'clip.mp4', text: 'One clip', tags: ['clips'] });
+      expect(linked.json()).not.toHaveProperty('unchanged');
+      expect(await meta(contentId)).not.toHaveProperty('sha256');
+      expect(await uploads(alice)).toEqual([]);
     });
 
     it('refuses an upload that is missing, empty, too large, another user’s or not what the post says', async () => {

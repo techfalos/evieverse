@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { createWriteStream } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -49,4 +49,11 @@ export async function spoolToTemp(
     throw new UploadTooLargeError(maxBytes);
   }
   return { path, size, cleanup };
+}
+
+/** The SHA-256 of a file's bytes, in hex. */
+export async function hashFile(path: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
+  return hash.digest('hex');
 }

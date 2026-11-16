@@ -10,18 +10,21 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && node -e \"for(const d of ['db/migrations','languages'])require('fs').cpSync('src/'+d,'dist/'+d,{recursive:true})\" && node scripts/build-cli.mjs",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json && node -e \"for(const d of ['db/migrations','challenge/voices'])require('fs').cpSync('src/'+d,'dist/'+d,{recursive:true})\" && node scripts/build-cli.mjs",
     "start": "node dist/server.js",
     "compact": "node dist/compact/main.js",
     "migrate": "node dist/db/migrate.js",
     "admin": "node dist/moderation/admin.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bench": "node bench/run.mjs"
   },
   "dependencies": {
+    "@fastify/compress": "^9.3.0",
     "@fastify/cors": "^11.4.1",
     "@fastify/multipart": "^10.1.8",
+    "@fastify/rate-limit": "^11.2.2",
     "better-sqlite3": "^12.11.1",
     "fastify": "^5.12.8",
     "ioredis": "^5.11.1",

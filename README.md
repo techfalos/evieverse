@@ -17,20 +17,22 @@ Provide an open source alternative to traditional social media that allows for:
 
 Evieverse is designed with the idea that clients will enable users to connect to multiple different Evieverse instances. Content is not federated from server-to-server, but from client to servers they have subscribed to.
 
+
 | To                                               | Read                                           |
 | ------------------------------------------------ | ---------------------------------------------- |
 | Deploy an instance to AWS, Google Cloud or Azure | [docs/DEPLOY.md](docs/DEPLOY.md)               |
 | Configure an instance, and deploy a change       | [docs/CONFIG.md](docs/CONFIG.md)               |
 | Administer or moderate an instance               | [docs/CLI.md](docs/CLI.md)                     |
 | Build a client, or call the API                  | [docs/API.md](docs/API.md)                     |
+| Write or show formatted posts and comments       | [docs/TEXT_EDITORS.md](docs/TEXT_EDITORS.md)   |
 | Add a language the server answers in             | [docs/LANGUAGES.md](docs/LANGUAGES.md)         |
 | Write a trust plugin, to score posts             | [docs/TRUST_PLUGINS.md](docs/TRUST_PLUGINS.md) |
 | Understand how it works inside                   | [docs/APP.md](docs/APP.md)                     |
 
 
-## Getting started
 
-These steps put an instance in your cloud account and sign you in as its admin. To try one on your own machine first, see [On your own machine](#on-your-own-machine).
+
+## Getting started
 
 You need Terraform 1.5 or newer, your cloud's CLI signed in, Docker (for AWS and Google Cloud), and Node.js 20 or newer for the Evieverse CLI.
 
@@ -62,12 +64,10 @@ The script says how to add `evieverse` to your `PATH` if it isn't there. `evieve
 
 ### 3. Create another user
 
-The admin account the deployment made is for emergencies, so give yourself an account of your own.
-
-Accounts are created by registering with the instance. To keep bots out, registering takes a challenge that a person solves, but not when an admin registers the user. So register your account as the deployment's admin, which the CLI is signed in as:
+To keep bots out, registering requires solving a challenge, but not when an admin registers the user. So to register your account as the deployment's admin you can do:
 
 ```sh
-evieverse register evelynn
+evieverse register <username>  #e.g. evelynn
 ```
 
 ```
@@ -94,6 +94,8 @@ Apart from its admin CLI, an instance has no client of its own. It's designed fo
 3. **Let the user set the parameters of each request,** such as a feed's tags, window and algorithm, so the experience is theirs to shape.
 4. **Syndicate a post to several instances** by posting it to each one. Instances don't pass posts on to each other, so a user's key for one instance never goes to another.
 
+
+
 ## Bring your own client
 
 Every instance serves the same API, so anyone can register on an instance directly, keep their own key, and use whatever client they like, including one they wrote. [API.md](docs/API.md) is the contract: every endpoint, what it takes and what it returns.
@@ -115,9 +117,9 @@ In both modes, a post with no valid tags is rejected.
 
 **Moderators** 
 
-- **Admins** can delete any post, comment or account, ban users, accept or reject held posts and comments, keep the instance's blocked words, and appoint the other two roles. They also [register users without a challenge](#user-registration-and-api-keys).
+- **Admins** can delete any post, comment or account, ban users, accept or reject held posts and comments, keep the instance's blocked words, and appoint the other two roles.
 - **Server moderators** accept or reject the posts and comments held in the moderation queue, accept or delete the posts and comments users reported, and ban users.
-- **Tag moderators** look after one or more tags. Under their tag, they can approve a post or remove the tag from it, block words, and mute a user, whose later posts then don't get the tag. They have no say over comments.
+- **Tag moderators** look after one or more tags. Under their tag, they can remove a tag from a post and mute a user, whose later posts then don't get the tag. They have no say over comments.
 
 **Bans.** A server moderator or an admin can ban a user (`evieverse bans add <userId>`). A banned user can't post, comment or send messages, but can still read, receive messages, and delete their own posts and account. The user is told, with a notice, and again when the ban ends. Admins and server moderators can't be banned until their role ends. See [API.md](docs/API.md#bans).
 
@@ -143,21 +145,25 @@ A post is one of five types:
 - text, of up to 40,000 characters;
 - a link, which is also how any other kind of file, such as a PDF, is shared.
 
+A text post's text, a caption and a comment's text can be formatted: bold, italic, struck through, code, links, quotes and lists, written in a small subset of Markdown. There's no HTML: a tag is shown as the characters it is. [TEXT_EDITORS.md](docs/TEXT_EDITORS.md) has the format, and how a client writes and shows it.
+
 With each post, its publisher declares whether it was created with AI, and readers can filter feeds on that. 
 
-To keep bots from flooding an instance, a user who posts again within a minute first solves a challenge, or two if they keep posting. By default nobody posts more than 3 times a minute.
+To keep bots from flooding an instance, a user who posts or comments again within a minute first solves a challenge, or two if they keep posting. By default nobody posts more than 3 times a minute.
 
 ## Comments
 
 A post takes comments if its publisher turns them on, which they do post by post, and can change later. They're off unless the publisher says.
 
-- A comment is text, of up to 2,000 characters, an image or a video
+- A comment can consist of text, an image, or a video
 - Comments are stored in a tree form on each post (users may respond to other users comments)
 - Anyone can read a post's comments, oldest or newest first, and any user can add one, up to 10 a minute by default.
-- **Comments are moderated as posts are.** Each gets a trust score from the same checks, and by the same thresholds is published, held in the moderation queue or rejected outright. Held comments wait in the same queue as held posts, for a server moderator or an admin.
-- **Comments can be reported,** and then wait in the same report queue as reported posts.
+- Comments are moderated as posts are. Each gets a trust score from the same checks, and by the same thresholds is published, held in the moderation queue or rejected outright. Held comments wait in the same queue as held posts, for a server moderator or an admin.
+- Comments can be reported, and then wait in the same report queue as reported posts.
 - A comment can be deleted by its author, by the publisher of the post it's on, and by an admin.
-- Turning comments off on a post closes and hides them without deleting them. Deleting the post deletes them.
+- Turning comments off on a post closes and hides them without deleting them. 
+- Deleting the post deletes all comments on it.
+- Clients are responsible for providing sort options for comments
 
 The details are in [API.md](docs/API.md#comments).
 
@@ -167,31 +173,22 @@ A user can like any post once and cannot be taken back. A post's likes are shown
 
 ## Following
 
-A user can follow any other user, up to 1,000 of them by default, and read a feed of everything those users post, newest first. Whom a user follows, and who follows them, is hidden: only the user can list either. They can show one list or both to everyone, each with a setting of its own. Their following feed shows whose posts they follow, so it goes with the list of them: it's theirs alone to read, with their key, unless they show whom they follow.
+A user can follow any other user, up to 1,000 of them by default. Followers and whom one follows can be optionally hidden by the user.
 
 ## Inbox
 
-Every user has an inbox, which only they can read. Two things arrive in it:
-
-- **Notices.** When a moderator or an admin removes a tag from a user's post, accepts or rejects it in the moderation queue, deletes it, or mutes or bans the user, a message is sent to the user. 
-- **Messages from other users.** A user can turn these off, and is then sent none and sends none. A user can also block other users: no message goes between the two, and the blocked user isn't told.
-
-By default a user sends at most 10 messages a minute, and an inbox keeps what arrives for 90 days. The details are in [API.md](docs/API.md#inbox).
+Users receive notices and messages from other users in their inbox. Notices include server messages (e.g. moderated posts, bans).
 
 ## Feed
 
 A feed is what the reader asks for. The reader chooses:
 
-- **Tags:** one or more, and optionally the tags related to them, which are the ones that tend to appear on the same posts.
+- **Tags:** The system will return filtered content for one or more tags. If the related option is used, it will also return results for related tags. 
 - **A window:** from the past hour to the past 90 days. A feed holds the posts of its window and no others.
 - **An algorithm:**
   - `popular` (the default) returns the window's most liked posts first. The tags asked for take turns, and some places go to new posts nobody has liked yet, so that new posts get seen.
   - `chronological` returns the window's posts in order of time, newest first.
 - **Filters:** AI-usage content filter. There is also a filter for only posts a tag's moderators have approved, or only posts they haven't.
-
-A second kind of feed returns the posts of the users someone follows, newest first.
-
-Feeds come a page at a time, 50 posts by default. Reading one needs no account, and nothing about the reader goes into it: the same request is answered by the same rules for everyone. The rules are spelled out in [API.md](docs/API.md#get-feed), and [APP.md](docs/APP.md#9-how-a-feed-is-built) explains how the server carries them out.
 
 ## Running an instance locally
 
@@ -214,16 +211,17 @@ The server listens on `http://localhost:3000`. Other ways to run it:
 
 Things to know:
 
-- **The CLI.** A server run from source ships no CLI. `npm run build && npm start` builds and ships it, and `curl -fsSL http://localhost:3000/cli/install.sh | sh` then installs it.
-- **Redis.** Without `REDIS_URL`, the feed index lives inside the process, and the server rebuilds it from the database and the content store each time it starts. To keep it across restarts, point `REDIS_URL` at a local Redis or Valkey (`docker compose up -d redis`, then `REDIS_URL=redis://127.0.0.1:6379`).
-- **Browsers.** The API in Docker (`docker-compose.server.yml`) accepts browser requests from any origin. Set `CORS_ORIGINS` (e.g. `CORS_ORIGINS=http://localhost:5173`) to allow only your frontend's.
+- `curl -fsSL http://localhost:3000/cli/install.sh | sh` downloads and installs the CLI.
+- Without `REDIS_URL`, the feed index lives inside the process, and the server rebuilds it from the database and the content store each time it starts. To keep it across restarts, point `REDIS_URL` at a local Redis or Valkey (`docker compose up -d redis`, then `REDIS_URL=redis://127.0.0.1:6379`).
+- The API in Docker (`docker-compose.server.yml`) accepts browser requests from any origin. Set `CORS_ORIGINS` (e.g. `CORS_ORIGINS=http://localhost:5173`) to allow only your frontend's.
 
-### Configuration
+## Configuration
 
-[CONFIG.md](docs/CONFIG.md) lists every setting, and says how to deploy a changed one.
+See [CONFIG.md](docs/CONFIG.md)
 
-## Development
+## Tests
 
+Commands to run tests:
 ```bash
 npm test     # unit tests, migration tests, API and feed-index tests on SQLite with the in-process store
 docker compose up -d postgres mysql redis
@@ -231,20 +229,34 @@ TEST_POSTGRES_URL=postgres://evieverse:evieverse@localhost:5432/evieverse \
 TEST_MYSQL_URL=mysql://evieverse:evieverse@localhost:3306/evieverse \
 TEST_REDIS_URL=redis://127.0.0.1:6379 npm test
 ```
+Optionally add `--no-file-parallelism` to run the tests one at a time.
 
-Each test against Redis uses its own key prefix and deletes its keys afterwards, so any Redis or Valkey will do. Tests against Postgres or MySQL recreate the database's tables, so give them a database of their own, and add `--no-file-parallelism` to run the test files one at a time.
+## Benchmarks
+
+Running the benchmarks:
+```bash
+npm run bench     # load-tests the API in Docker and writes BENCHMARKS.md again, in about 5 minutes
+# The settings a run can be given, at their defaults:
+BENCH_SERVER_CPUS=2 BENCH_SERVER_MEMORY=2g BENCH_DURATION_SECONDS=10 BENCH_CONNECTIONS=50 BENCH_POSTS=2000 npm run bench
+```
+Requires Docker
+
+See [[BENCHMARKS.md](BENCHMARKS.md)] for the latest benchmark output. Note: this file is regenerated by the benchmark script. Do not edit it. 
+
+Please run the benchmarking script before submitting PRs that touch API operations. If your PR does not show this file changed, it will be rejected. 
 
 ## AI-Usage Disclosure
 
-AI tools, including Generative AI tools, were used in the planning, development, and analysis of Evieverse
+AI tools, including Generative AI tools, were used in the planning, development, and analysis of Evieverse. Use of these tools has become standard practice in the software development world. I, a software engineer with over 20 years of professional experience, would not have been able to create Evieverse in any reasonable timeframe without them. Particular care was taken to "desloppify" AI output and perfect the product's codebase. If you find, and wish to remove, slop from this application, then open a PR. 
 
 ## License
 
 See [[LICENSE.md](LICENSE.md)]
 
-## Implementations
+## Client Implementations
 
-Open a PR to see your implementation here!
+Open a PR to see your client implementation here!
 
 ## Code Owners
-Evelynn McDermott <contact@techfalos.com>
+
+Evelynn McDermott [contact@techfalos.com](mailto:contact@techfalos.com)

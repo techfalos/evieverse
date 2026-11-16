@@ -4,7 +4,7 @@ import { pipeline } from 'node:stream/promises';
 import type { Operator } from 'opendal';
 import type { Config } from '../config.js';
 import { commentMediaKey } from './commentStore.js';
-import { createOperator, isNotFound } from './opendal.js';
+import { createOperator, isNotFound, readObject, streamObject } from './opendal.js';
 import { UploadTooLargeError } from './spool.js';
 
 /**
@@ -16,6 +16,14 @@ export interface ContentMeta {
   mimeType: string;
   /** Of the bytes, as stored. */
   size: number;
+  /**
+   * The SHA-256 of an image's, video's or audio's bytes as stored, in hex: what an update's file is
+   * compared by, so that the file the content already has isn't stored again. Absent on a text or
+   * link post, which is compared by what it says; on a video or audio file sent with an upload
+   * link, which is copied within the content store, not stored from a file here; and in a meta
+   * file written before the server kept one. A file is then stored whenever it is sent.
+   */
+  sha256?: string;
   aiGenerated: boolean;
   /**
    * Whether the post takes comments, which its publisher says at /store. Absent: it doesn't. The
@@ -26,9 +34,27 @@ export interface ContentMeta {
   preview: Preview;
   /** The whole text of a text post, or an image's, video's or audio's caption. */
   text?: string;
+  /**
+   * The content's hashtags: the ones its publisher gave it and, once the compactor has written them
+   * in, the ones reposts gave it (see `reposts` in the database, which says which those are).
+   */
   tags: string[];
-  /** When the content was last written: posted, updated, or a hashtag removed from it. UTC epoch milliseconds. */
+  /** When the content was last written: posted, updated, reposted, or a hashtag removed from it. UTC epoch milliseconds. */
   updatedAt: number;
+  /**
+   * On a repost of a post that is on another server: the original. The content is then a link to
+   * it with its summary: `preview`, `mimeType` and `aiGenerated` are the original's, as the
+   * reposter's client sent them, and the content's bytes are the original's address.
+   */
+  origin?: Origin;
+}
+
+/** The original of a repost of a post on another server: where it is read, and who published it there. */
+export interface Origin {
+  /** The original's address on its own server: https://other.example/content/<id>. Its bytes are read at this address + /raw. */
+  url: string;
+  /** Its publisher there, whom this server has no account of. */
+  publisher: { userId: string; username: string };
 }
 
 /**
@@ -100,12 +126,8 @@ export class ContentStore {
   }
 
   async getMeta(contentId: string): Promise<ContentMeta | null> {
-    try {
-      return JSON.parse((await this.op.read(metaKey(contentId))).toString('utf8')) as ContentMeta;
-    } catch (err) {
-      if (isNotFound(err)) return null;
-      throw err;
-    }
+    const meta = await readObject(this.op, metaKey(contentId));
+    return meta && (JSON.parse(meta.toString('utf8')) as ContentMeta);
   }
 
   /** The size of the content's bytes as the store holds them, and their content type where it keeps one (fs doesn't). */
@@ -115,7 +137,7 @@ export class ContentStore {
   }
 
   async stream(of: BytesOwner): Promise<Readable> {
-    return (await this.op.reader(bytesKey(of))).createReadStream();
+    return streamObject(this.op, bytesKey(of));
   }
 
   async remove(contentId: string): Promise<void> {
@@ -208,7 +230,7 @@ export class ContentStore {
    * it is past `maxBytes`: whoever holds the upload link can replace the upload at any time.
    */
   async streamUpload(userId: string, uploadId: string, maxBytes: number): Promise<Readable> {
-    const source = (await this.op.reader(uploadKey(userId, uploadId))).createReadStream();
+    const source = await streamObject(this.op, uploadKey(userId, uploadId));
     let size = 0;
     return Readable.from(
       (async function* () {
@@ -239,7 +261,7 @@ export class ContentStore {
         cb(null, chunk);
       },
     });
-    await pipeline((await this.op.reader(key)).createReadStream(), meter, into);
+    await pipeline(await streamObject(this.op, key), meter, into);
     return { size };
   }
 

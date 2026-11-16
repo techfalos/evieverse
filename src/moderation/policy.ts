@@ -1,13 +1,19 @@
+import type { FastifyBaseLogger } from 'fastify';
 import type { AuthUser } from '../auth/apiKey.js';
 import type { Config } from '../config.js';
 import type { Db } from '../db/index.js';
+import { plainText } from '../format.js';
 import { forbidden, unprocessable } from '../http/errors.js';
 import { msg } from '../language.js';
 import { routeOf, trustOf, type TrustPlugin, type TrustRoute } from './trust.js';
-import { WordScanner } from './words.js';
+import { scanTexts } from './words.js';
 
-/** Why a post didn't get a hashtag: the publisher is muted on it, a moderator removed it from this content, or its blocked words. */
-type RemovalReason = 'muted' | 'removed' | 'blocked_word';
+/**
+ * Why a post didn't get a hashtag: the publisher is muted on it (or, for a repost, the reposter is),
+ * a moderator removed it from this content, or its blocked words. And, for a repost alone: the
+ * post has the hashtag already.
+ */
+type RemovalReason = 'muted' | 'removed' | 'blocked_word' | 'already_tagged';
 export interface RemovedTag {
   tag: string;
   reason: RemovalReason;
@@ -28,9 +34,9 @@ export async function moderates(db: Db, user: AuthUser, tag: string): Promise<bo
 export const moderatesServer = (user: AuthUser): boolean => user.admin || user.moderator;
 
 /**
- * Refuses (403) a user who was banned: what writes a post, a comment or a message, or a link to
- * upload a post's file with, is not for them. Reading, their inbox, their own posts' deletion and
- * their own account (its settings, its key, its deletion) are.
+ * Refuses (403) a user who was banned: what writes a post, a comment or a message, likes a post or
+ * a comment, or gives a link to upload a post's file with, is not for them. Reading, their inbox,
+ * their own posts' deletion and their own account (its settings, its key, its deletion) are.
  */
 export function refuseBanned(user: AuthUser): void {
   if (user.banned) throw forbidden(msg('user.banned'));
@@ -51,6 +57,8 @@ export interface ModerationDeps {
   config: Config;
   trustPlugins: TrustPlugin[];
   now?: () => number;
+  /** The request's log, which is told of a blocked pattern that took too long to read the post (see scanTexts). */
+  log?: FastifyBaseLogger;
 }
 
 /**
@@ -65,11 +73,12 @@ export interface ModerationDeps {
  * words, its mutes) doesn't reach the comments on posts under it: they have no say over comments.
  */
 export async function moderateComment(
-  { db, config, trustPlugins, now = Date.now }: ModerationDeps,
+  { db, config, trustPlugins, now = Date.now, log }: ModerationDeps,
   comment: { userId: string; contentId: string; text: string; filename?: string | null },
 ): Promise<{ trustScore: number; route: Exclude<TrustRoute, 'delete'> }> {
-  const texts = [comment.text, comment.filename].filter((text): text is string => !!text);
-  const trust = await trustOf(trustPlugins, { userId: comment.userId, commentOn: comment.contentId, tags: [], texts }, { db, config, now });
+  // Its text as its readers read it: without its formatting, with where its links lead (format.ts).
+  const texts = [plainText(comment.text, true), comment.filename].filter((text): text is string => !!text);
+  const trust = await trustOf(trustPlugins, { userId: comment.userId, commentOn: comment.contentId, tags: [], texts }, { db, config, now, log });
   const route = routeOf(trust.score, config.trust);
   if (route === 'delete') throw unprocessable(trust.reason ?? msg('comment.not_trusted'));
   return { trustScore: trust.score, route };
@@ -95,26 +104,62 @@ export interface Moderated {
  * 422 for a post whose score has it deleted: nothing of it is stored.
  *
  * Returns the hashtags the post gets, and those it doesn't with why: one its publisher is muted on,
- * one a moderator removed from this content, and one whose blocked words it has. Hashtags are
- * scanned for blocked words too. Throws 422 if no hashtag is left.
+ * one a moderator removed from this content, and one whose blocked words it has, or whose blocked
+ * patterns match it. Hashtags are scanned for blocked words too. Throws 422 if a new post is left
+ * with no hashtag, since it needs one to be published under. An update can be: the content is
+ * there already, and stays, in no hashtag's feed.
  */
 export async function moderatePost(
-  { db, config, trustPlugins, now = Date.now }: ModerationDeps,
+  { db, config, trustPlugins, now = Date.now, log }: ModerationDeps,
   post: { userId: string; contentId?: string; tags: string[]; texts: (string | null | undefined)[] },
 ): Promise<Moderated> {
   const { userId, contentId, tags } = post;
   const texts = post.texts.filter((text): text is string => !!text);
-  const [trust, words, mutes, removals] = await Promise.all([
-    trustOf(trustPlugins, { userId, contentId, tags, texts }, { db, config, now }),
-    tags.length ? db.selectFrom('blocked_words').select(['tag', 'word']).where('tag', 'in', tags).execute() : [],
-    tags.length ? db.selectFrom('tag_mutes').select('tag').where('user_id', '=', userId).where('tag', 'in', tags).execute() : [],
-    contentId && tags.length
-      ? db.selectFrom('tag_moderation').select('tag').where('content_id', '=', contentId).where('decision', '=', 'removed').where('tag', 'in', tags).execute()
-      : [],
+  const [trust, rules] = await Promise.all([
+    trustOf(trustPlugins, { userId, contentId, tags, texts }, { db, config, now, log }),
+    tagRules(db, { userIds: [userId], contentId, tags }),
   ]);
   const route = routeOf(trust.score, config.trust);
   if (route === 'delete') throw unprocessable(trust.reason ?? msg('moderation.not_trusted'));
 
+  const { kept, removedTags } = rules.apply(texts, log);
+  if (!kept.length && contentId === undefined) throw unprocessable(msg('moderation.no_tags_left'), { removedTags });
+  return { tags: kept, removedTags, trustScore: trust.score, route };
+}
+
+/**
+ * What a repost's hashtags are held to: what the post's publisher's own are, as far as the
+ * hashtags go. Returns the ones the content gets, and those it doesn't with why: one the reposter
+ * or the content's publisher is muted on (a mute keeps a user's posts out of the hashtag, whoever
+ * would put them there), one a moderator removed from this content, and one whose blocked words
+ * the content has. `texts` is what there is of the content to read, as for a post.
+ *
+ * No trust score is worked out: the content got one when it was written, and a repost changes
+ * nothing of what it says.
+ */
+export async function moderateRepost(
+  { db, log }: Pick<ModerationDeps, 'db' | 'log'>,
+  repost: { userId: string; publisherId: string; contentId: string; tags: string[]; texts: (string | null | undefined)[] },
+): Promise<Pick<Moderated, 'tags' | 'removedTags'>> {
+  const { userId, publisherId, contentId, tags } = repost;
+  const rules = await tagRules(db, { userIds: [userId, publisherId], contentId, tags });
+  const { kept, removedTags } = rules.apply(repost.texts.filter((text): text is string => !!text), log);
+  return { tags: kept, removedTags };
+}
+
+/**
+ * What hashtags' moderators keep that says whether content gets their hashtag: the mutes of
+ * `userIds` on these `tags`, the hashtags a moderator removed from `contentId`, and their blocked
+ * words. `apply` holds the hashtags to them, given what there is of the content to read.
+ */
+async function tagRules(db: Db, { userIds, contentId, tags }: { userIds: string[]; contentId?: string; tags: string[] }) {
+  const [words, mutes, removals] = await Promise.all([
+    tags.length ? db.selectFrom('blocked_words').select(['tag', 'word']).where('tag', 'in', tags).execute() : [],
+    tags.length ? db.selectFrom('tag_mutes').select('tag').where('user_id', 'in', userIds).where('tag', 'in', tags).execute() : [],
+    contentId && tags.length
+      ? db.selectFrom('tag_moderation').select('tag').where('content_id', '=', contentId).where('decision', '=', 'removed').where('tag', 'in', tags).execute()
+      : [],
+  ]);
   const lists = new Map<string, string[]>();
   for (const { tag, word } of words) {
     const list = lists.get(tag);
@@ -123,16 +168,17 @@ export async function moderatePost(
   }
   const muted = new Set(mutes.map((r) => r.tag));
   const removed = new Set(removals.map((r) => r.tag));
-  // With no hashtag's list that applies to the post, nothing needs reading.
-  const scanner = lists.size ? new WordScanner(lists) : null;
-  for (const text of [...texts, ...tags]) scanner?.scan(text);
 
-  const removedTags: RemovedTag[] = [];
-  const kept = tags.filter((tag) => {
-    const reason = muted.has(tag) ? 'muted' : removed.has(tag) ? 'removed' : scanner?.matched.has(tag) ? 'blocked_word' : null;
-    if (reason) removedTags.push({ tag, reason });
-    return !reason;
-  });
-  if (!kept.length) throw unprocessable(msg('moderation.no_tags_left'), { removedTags });
-  return { tags: kept, removedTags, trustScore: trust.score, route };
+  const apply = (texts: string[], log?: FastifyBaseLogger) => {
+    // With no hashtag's list that applies to the post, nothing needs reading.
+    const blocked = lists.size ? scanTexts(lists, [...texts, ...tags], log) : null;
+    const removedTags: RemovedTag[] = [];
+    const kept = tags.filter((tag) => {
+      const reason = muted.has(tag) ? 'muted' : removed.has(tag) ? 'removed' : blocked?.has(tag) ? 'blocked_word' : null;
+      if (reason) removedTags.push({ tag, reason });
+      return !reason;
+    });
+    return { kept, removedTags };
+  };
+  return { apply };
 }

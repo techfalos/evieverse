@@ -1,11 +1,12 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
+import { ChallengeFields } from '../challenge/challenges.js';
 import { MAX_COMMENT_CHARS, newCommentId, publishComment, removeComment, toCommentRecord, toCommentRecords } from '../comments.js';
 import { loadContent, loadPublished, loadReadable, readsHeld, requireMeta, takesComments } from '../content.js';
 import { updateOnConflict } from '../db/index.js';
 import type { AppDeps, RouteDeps } from '../deps.js';
-import { badRequest, forbidden, notFound, tooManyRequests } from '../http/errors.js';
+import { badRequest, forbidden, notFound } from '../http/errors.js';
 import { Credentials } from '../http/schemas.js';
 import { notify } from '../inbox.js';
 import { msg } from '../language.js';
@@ -37,9 +38,10 @@ const CommentBody = Credentials.extend({
   /** The file, already sent to the link POST /uploads gave: the id it came with. */
   uploadId: z.string().uuid().optional(),
   contentEncoding: z.enum(['utf8', 'base64']).default('utf8'),
+  ...ChallengeFields,
 });
 /** An edit's text, which may be empty for a comment that has an image or a video to be. */
-const EditBody = Credentials.extend({ text: Text });
+const EditBody = Credentials.extend({ text: Text, ...ChallengeFields });
 
 /** The largest JSON body a comment is sent in, which holds its file when the file is inline: what /store takes. */
 const INLINE_BODY_BYTES = 32 * 1024 * 1024;
@@ -140,7 +142,7 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
    * here as something to show and nothing more (see rawHeaders). Whoever may read the comment may
    * read them. 404 for a comment that is only text, and for a placeholder, which has no file.
    */
-  app.get('/content/:contentId/comments/:commentId/raw', async (req, reply) => {
+  app.get('/content/:contentId/comments/:commentId/raw', { compress: false }, async (req, reply) => {
     const { contentId, commentId } = CommentParams.parse(req.params);
     await commented(req, contentId);
     const { comment } = await readable(req, contentId, commentId);
@@ -168,18 +170,17 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
  * as an update of a post does: its trust score has it refused, held in the moderation queue for a
  * server moderator or an admin, or published. Only a held comment touches the database, for its
  * row in the queue; a published one is an object in the content store and a member in Redis.
+ *
+ * A comment, and an edit of one, is then limited as a post is, by the code that limits posts
+ * (Challenges.admitting), with settings of its own. A user's first `challenge.commentsPerMinute`
+ * in any minute go through as they are. Each one past them is answered with a challenge (428), or
+ * two from the third such comment in a row, to be sent again with the solution. One past
+ * `comments.perMinute` in any minute is refused outright (429), before any challenge. All of it
+ * comes after the gate and before anything is stored, so a comment the gate refuses costs no
+ * challenge and counts for nothing, and neither does one whose write fails.
  */
 export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
-  const { db, config, content, comments, hot, trustPlugins, now = Date.now } = deps;
-
-  /** Counts a comment a user sends, or an edit of one, and refuses it past the comments a user can send in a minute. */
-  async function count(userId: string): Promise<void> {
-    const { perMinute } = config.comments;
-    if (perMinute <= 0) return;
-    const { count, ttlMs } = await hot.incr(`comments:${userId}`, 60_000);
-    const seconds = Math.max(1, Math.ceil(ttlMs / 1000));
-    if (count > perMinute) throw tooManyRequests(msg('comment.rate_limited', { count: seconds }), seconds);
-  }
+  const { db, config, content, comments, challenges, trustPlugins, now = Date.now } = deps;
 
   /** The published post, if it takes comments: what is set for deletion, or waits in the moderation queue, isn't there to comment on. */
   async function commentable(contentId: string): Promise<void> {
@@ -239,12 +240,16 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
    * A comment is a text, an image or a video, or a text with one of the two: it needs a text or a
    * file, and takes one file at most. The file comes as a post's does to /store: as a multipart
    * part, inline in `content`, or as an `uploadId` (see POST /uploads), and it is held to what an
-   * image or a video post's file is (see readCommentFile). It is as large as a post's may be.
+   * image or a video post's file is (see readCommentFile). It is as large as a post's may be. A
+   * server that has turned image or video posts off (POST_TYPE_IMAGE, POST_TYPE_VIDEO) takes no
+   * file of that type with a comment either (400).
    *
    * A banned user is refused (403).
    *
-   * A user sends at most `comments.perMinute` a minute, counted in Redis as messages are, and only
-   * the comments that got through the gate count.
+   * 428 with a challenge for a comment past the ones a user sends in a minute without one, and 429
+   * past the most they send in a minute (see commentWriteRoutes). Only the comments that are
+   * stored count. One answered with a challenge is sent again with its solution, and with the same
+   * `uploadId` if it has one: the upload is kept for it.
    */
   app.post('/content/:contentId/comments', { bodyLimit: INLINE_BODY_BYTES }, async (req, reply) => {
     let raw: Record<string, unknown>;
@@ -274,42 +279,42 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
       if (parentId !== undefined && !(await comments.get(contentId, parentId))) throw commentNotFound();
       // An upload is kept under its user's id, so it is only looked for once the request is known to be theirs.
       if (uploadId) upload = await readUploaded(content, user.id, uploadId, config.storage);
-      file = await readCommentFile(body, upload, config.storage);
+      file = await readCommentFile(body, upload, config.storage, config.postTypes);
 
-      const { route, trustScore } = await moderateComment({ db, config, trustPlugins, now }, { userId: user.id, contentId, text, filename: file?.filename });
-      await count(user.id);
-
-      const createdAt = now();
-      const commentId = newCommentId(createdAt);
+      // Before the limit and any challenge, so nobody solves one for a comment that isn't stored, and a refused one doesn't count.
+      const { route, trustScore } = await moderateComment({ db, config, trustPlugins, now, log: req.log }, { userId: user.id, contentId, text, filename: file?.filename });
       const held = route === 'queue';
-      const media = file && (await place(req, file, contentId, commentId));
-      const comment: Comment = { commentId, contentId, ...(parentId !== undefined && { parentId }), userId: user.id, text, ...(media && { media }), createdAt };
-      const record = toCommentRecord(comment, { userId: user.id, username: user.username }, config.publicBaseUrl);
-      try {
-        await comments.put(comment, { held });
-      } catch (err) {
-        if (media) await discard(req, contentId, commentId);
-        throw err;
-      }
-      if (!held) {
+      const attached = file;
+
+      const record = await challenges.admitting('comment', user.id, body, req.language, async () => {
+        const createdAt = now();
+        const commentId = newCommentId(createdAt);
+        const media = attached && (await place(req, attached, contentId, commentId));
+        const comment: Comment = { commentId, contentId, ...(parentId !== undefined && { parentId }), userId: user.id, text, ...(media && { media }), createdAt };
+        const record = toCommentRecord(comment, { userId: user.id, username: user.username }, config.publicBaseUrl);
+        try {
+          await comments.put(comment, { held });
+        } catch (err) {
+          if (media) await discard(req, contentId, commentId);
+          throw err;
+        }
+        if (held) {
+          // The comment first, then its row: the queue never lists a comment the store doesn't have.
+          try {
+            await queue(comment, trustScore, createdAt);
+          } catch (err) {
+            await comments.remove(contentId, commentId).catch((cause) => req.log.warn({ err: cause, contentId, commentId }, 'could not remove a held comment that has no row in the queue'));
+            // The post was deleted meanwhile, which is why it takes no row: 404, as for a post that isn't there.
+            await loadPublished(db, contentId);
+            throw err;
+          }
+        }
         await answered(comment);
-        stored = true;
-        reply.status(201);
         return record;
-      }
-      // The comment first, then its row: the queue never lists a comment the store doesn't have.
-      try {
-        await queue(comment, trustScore, createdAt);
-      } catch (err) {
-        await comments.remove(contentId, commentId).catch((cause) => req.log.warn({ err: cause, contentId, commentId }, 'could not remove a held comment that has no row in the queue'));
-        // The post was deleted meanwhile, which is why it takes no row: 404, as for a post that isn't there.
-        await loadPublished(db, contentId);
-        throw err;
-      }
-      await answered(comment);
+      });
       stored = true;
-      reply.status(202);
-      return { ...record, ...PENDING_REVIEW };
+      reply.status(held ? 202 : 201);
+      return held ? { ...record, ...PENDING_REVIEW } : record;
     } finally {
       // Before the response goes out (it is what this returns): a function may be frozen straight after it.
       // An upload in the content store is kept unless the comment was stored, for the request to be sent again.
@@ -339,7 +344,8 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
    * - published: a comment that was waiting in the queue leaves it, published.
    *
    * A banned user is refused (403), and a post that doesn't take comments (404), as for a new
-   * comment. An edit counts towards the comments a user can send in a minute.
+   * comment. An edit is limited as a new comment is, and counted with them: 428 with a challenge,
+   * or 429, where a new comment would get one (see commentWriteRoutes).
    */
   app.patch('/content/:contentId/comments/:commentId', async (req, reply) => {
     const { contentId, commentId } = CommentParams.parse(req.params);
@@ -357,39 +363,41 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (body.text === comment.text) return { contentId, commentId, unchanged: true, ...(waiting && PENDING_REVIEW) };
     if (!body.text && !comment.media) throw badRequest(msg('comment.text_required'));
 
-    const { route, trustScore } = await moderateComment({ db, config, trustPlugins, now }, { userId: user.id, contentId, text: body.text });
-    await count(user.id);
-
-    const editedAt = now();
-    const edited: Comment = { ...comment, text: body.text, editedAt };
+    const { route, trustScore } = await moderateComment({ db, config, trustPlugins, now, log: req.log }, { userId: user.id, contentId, text: body.text });
     const held = route === 'queue';
-    if (!waiting && !held) {
-      // Deleted while this was under way, or taken back to the queue by another edit.
-      if (!(await comments.update(edited))) throw commentNotFound();
-    } else if (!waiting) {
-      // Its row first: the queue reads a comment whose row is there from wherever it is, and one held with no row would wait for nobody.
-      await queue(edited, trustScore, editedAt);
-      try {
-        await comments.hold(edited);
-      } catch (err) {
-        await db.deleteFrom('comment_queue').where('comment_id', '=', commentId).where('content_id', '=', contentId).execute().catch((cause) => req.log.warn({ err: cause, contentId, commentId }, 'could not take a comment that is still published out of the moderation queue'));
-        throw err;
+
+    const edited = await challenges.admitting('comment', user.id, body, req.language, async () => {
+      const editedAt = now();
+      const edited: Comment = { ...comment, text: body.text, editedAt };
+      if (!waiting && !held) {
+        // Deleted while this was under way, or taken back to the queue by another edit.
+        if (!(await comments.update(edited))) throw commentNotFound();
+      } else if (!waiting) {
+        // Its row first: the queue reads a comment whose row is there from wherever it is, and one held with no row would wait for nobody.
+        await queue(edited, trustScore, editedAt);
+        try {
+          await comments.hold(edited);
+        } catch (err) {
+          await db.deleteFrom('comment_queue').where('comment_id', '=', commentId).where('content_id', '=', contentId).execute().catch((cause) => req.log.warn({ err: cause, contentId, commentId }, 'could not take a comment that is still published out of the moderation queue'));
+          throw err;
+        }
+        // Again, for a moderator who decided on it between the two, and took the row out: it waits, so it has one.
+        await queue(edited, trustScore, editedAt);
+      } else if (held) {
+        await comments.put(edited, { held: true });
+        await queue(edited, trustScore, editedAt);
+      } else {
+        // Out of the queue as an accepted comment goes: its row first, in the transaction the store's work is done inside.
+        const there = await db.transaction().execute(async (trx) => {
+          const res = await trx.deleteFrom('comment_queue').where('comment_id', '=', commentId).where('content_id', '=', contentId).executeTakeFirst();
+          // Decided on while this was under way: it is published as it was, or gone.
+          if (Number(res.numDeletedRows) === 0) return false;
+          return publishComment(deps, edited);
+        });
+        if (!there) throw commentNotFound();
       }
-      // Again, for a moderator who decided on it between the two, and took the row out: it waits, so it has one.
-      await queue(edited, trustScore, editedAt);
-    } else if (held) {
-      await comments.put(edited, { held: true });
-      await queue(edited, trustScore, editedAt);
-    } else {
-      // Out of the queue as an accepted comment goes: its row first, in the transaction the store's work is done inside.
-      const there = await db.transaction().execute(async (trx) => {
-        const res = await trx.deleteFrom('comment_queue').where('comment_id', '=', commentId).where('content_id', '=', contentId).executeTakeFirst();
-        // Decided on while this was under way: it is published as it was, or gone.
-        if (Number(res.numDeletedRows) === 0) return false;
-        return publishComment(deps, edited);
-      });
-      if (!there) throw commentNotFound();
-    }
+      return edited;
+    });
     req.log.info({ contentId, commentId, by: user.id, held }, 'edited a comment');
     const [record] = await toCommentRecords(deps, [edited]);
     return reply.status(held ? 202 : 200).send({ ...record, ...(held && PENDING_REVIEW) });

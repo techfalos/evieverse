@@ -85,7 +85,7 @@ const json = (statusCode: number, body: object): HttpApiResult => ({
  * otherwise name any client address it liked in X-Forwarded-For.
  *
  * What the handler answers by itself, without the app, it says in the language the request's
- * Accept-Language header asks for, of `languages`: by default the files of src/languages.
+ * Accept-Language header asks for, of `languages`: by default the files of the languages folder.
  */
 export function httpApiHandler(fn: Pick<RouteFunction, 'handle'>, opts: { edgeSecret?: string; languages?: Languages } = {}) {
   const languages = opts.languages ?? loadLanguages();

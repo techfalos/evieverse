@@ -1,10 +1,11 @@
+import type { ExpressionBuilder } from 'kysely';
 import { purgeAccounts, sweepContent } from '../accounts.js';
 import { summaryOf } from '../content.js';
-import type { TagDecision } from '../db/schema.js';
-import { setForDeletion } from '../deletion.js';
+import type { Database, TagDecision } from '../db/schema.js';
 import type { AppDeps } from '../deps.js';
 import { syncFollowing } from '../follows.js';
 import { publishedAd } from '../monetization.js';
+import { repostedTags, repostTimes, type Repost } from '../reposts.js';
 import type { ContentMeta, Summary } from '../storage/index.js';
 import {
   authorIndex,
@@ -71,8 +72,32 @@ interface QueueRow {
   token: string;
   /** When the row was stamped, by the node that wrote it. */
   queued_at: number;
-  /** The content's creation time, which picks the UTC day holding its entry. */
+  /** The content's creation time, which picks the UTC day holding its entry, unless a repost placed it in the tag (see Placement). */
   created_at: number;
+}
+
+/**
+ * Where a piece of content is in an index, and what its entry there counts.
+ *
+ * Content is in the index of each hashtag it carries and in its publisher's own from when it was
+ * created, with all of its likes. A repost (`reposts`) places it elsewhere as a new post: in the
+ * index of each hashtag the repost gave it, and in the reposter's own, from when it was reposted,
+ * with the likes since. The time is the UTC day its entry is in, where feeds order it, and what
+ * its retention is counted from: content older than the retention period is in an index for as
+ * long as a repost that put it there is within it.
+ */
+interface Placement {
+  at: number;
+  /** The content's like count when it was placed: its entry counts the likes since. */
+  likesBefore: number;
+  /** A repost placed it. */
+  repost: boolean;
+}
+
+/** A place in a reposter's own index that a run takes away: the reposter's account is gone (see markGoneReposters). */
+interface GonePlace {
+  id: string;
+  tag: string;
 }
 
 interface State {
@@ -106,6 +131,13 @@ interface RunContext {
   ensured: Map<string, Promise<Error | null>>;
   /** Meta files read this run, so content in several tags is read once. */
   metas: Map<string, Promise<ContentMeta | null>>;
+  /**
+   * The places reposts gave content (`reposts`), by content, read this run: once for each piece
+   * of content, however many tags it is in. Without the places this run takes away (`gone`).
+   */
+  reposts: Map<string, Repost[]>;
+  /** The places in the own index of a reposter whose account is gone, by `decidedKey`: they count as not there. */
+  gone: Set<string>;
   /**
    * Hashtags a moderator removed from content, and a run took off it, that an index still had an
    * entry of the content for: a write that was under way when the hashtag was removed may have
@@ -267,6 +299,13 @@ export interface RunResult {
  * content that waits in the moderation queue, so nothing it does for another reason (a like, a
  * `--rebuild`) undoes them.
  *
+ * It is what makes a repost show (src/reposts.ts). A repost commits rows of `reposts`, which say
+ * where it places the content, and rows in the feed queue for those indexes. The next run writes
+ * the hashtags the repost added into the content's meta file and summary (see applyReposts), and
+ * builds the content's entry in each of those indexes at the time of the repost (see Placement).
+ * Nothing else writes a repost's hashtags to the content, so a write of the content that went on
+ * meanwhile is put right by the run that takes its rows.
+ *
  * And it keeps each hashtag's related hashtags in Redis, where feeds asked to add them read them:
  * those of the hashtags whose counts in `tag_pairs` changed since its last run are worked out again
  * (see syncRelatedTags).
@@ -330,7 +369,7 @@ export class Compactor {
     const { db, hot, content, summaries } = this.deps;
     const runStart = this.now();
     const state = (await readJson<State>(hot, COMPACTOR_STATE_KEY)) ?? { through: 0 };
-    const ctx: RunContext = { rebuild: !!opts.rebuild, ensured: new Map(), metas: new Map(), strays: [], failed: new Set() };
+    const ctx: RunContext = { rebuild: !!opts.rebuild, ensured: new Map(), metas: new Map(), reposts: new Map(), gone: new Set(), strays: [], failed: new Set() };
 
     const work = new Map<string, TagWork>();
     const workFor = (tag: string) => {
@@ -340,17 +379,23 @@ export class Compactor {
     };
     // The queue first, before this run reads any meta file: a write stores its meta file before it
     // commits its rows, so every meta file read from here on is at least as new as the rows taken.
+    // The same goes for the places of reposts, which a repost commits with its rows.
     const queue = await this.readQueue(runStart);
     if (opts.all) for (const r of await db.selectFrom('tags').select('name').execute()) workFor(r.name).all = true;
-    // Next, as it writes meta files: everything below reads them as it left them.
+    // Before any place is read: the ones it finds count as not there for the rest of the run.
+    const gone = await this.markGoneReposters(workFor, ctx);
+    await this.loadReposts(queue.map((r) => r.id), ctx);
+    // Next, as they write meta files: everything below reads them as these left them.
     const decisions = await this.applyDecisions(workFor, runStart, lease, ctx);
+    const unapplied = await this.applyReposts(queue, runStart, lease, ctx);
     if (opts.rebuild) await this.markEverything(workFor, runStart, lease, ctx);
     await this.markNewLikes(workFor, state.through, runStart, ctx);
     await this.syncChangedPublishers(state.through, runStart, lease);
     await this.syncChangedFollowing(state.through, runStart, lease);
     const relatedThrough = await this.syncRelatedTags(state.relatedThrough ?? 0, runStart, !!(opts.all || opts.rebuild), lease);
     await this.syncAds(runStart, lease);
-    this.markQueue(workFor, queue, runStart);
+    this.markQueue(workFor, queue, runStart, ctx);
+    await this.markOutlived(workFor, queue, runStart, ctx);
     const deletions = await this.markDeletions(workFor, ctx);
     await this.prefetch(queue, ctx);
 
@@ -367,18 +412,20 @@ export class Compactor {
     await hot.set(COMPACTOR_STATE_KEY, JSON.stringify(next));
 
     // Everything below relies on the heads this run published still being the current ones.
-    const unerased = await this.eraseHeld(queue, lease);
-    await this.settleQueue(queue.filter((r) => !unerased.has(r.id)), failed, lease);
+    const unerased = await this.eraseHeld(queue, lease, ctx);
+    // The rows of content whose summary couldn't be erased, or that a repost's hashtags couldn't be written to, stay for the next run.
+    await this.settleQueue(queue.filter((r) => !unerased.has(r.id) && !unapplied.has(r.id)), failed, lease);
     await this.settleDecisions(decisions, failed, runStart, lease, ctx);
+    await this.settleGoneReposters(gone, failed, lease);
     const deleted: string[] = [];
     for (const d of deletions) {
       if (d.tags.some((t) => failed.has(t))) continue;
       await lease.check();
       // The post's comments, which only the content store lists by post: while the row is still there, so a run that fails here finds them again.
       await this.deps.comments.removeAll(d.id);
-      // Likes and feed_queue rows cascade, and so do the rows of the comments that waited in a queue.
+      // Likes, feed_queue rows and the places of reposts cascade, and so do the rows of the comments that waited in a queue.
       await db.deleteFrom('content').where('id', '=', d.id).where('delete_requested_at', 'is not', null).execute();
-      await summaries.remove([{ contentId: d.id, createdAt: d.createdAt }]);
+      await summaries.remove([{ contentId: d.id, createdAt: d.createdAt, repostedAt: d.repostedAt }]);
       await content.remove(d.id);
       deleted.push(d.id);
     }
@@ -429,14 +476,16 @@ export class Compactor {
 
   /**
    * `--rebuild`: every content within retention is re-admitted under its tags and its publisher's own
-   * index, and every publisher credit and every user's follows rewritten.
+   * index, and where reposts placed it, and every publisher credit and every user's follows rewritten.
+   * Content older than that which was reposted within it is still in the indexes the repost put it in.
    */
   private async markEverything(workFor: (tag: string) => TagWork, runStart: number, lease: CompactorLease, ctx: RunContext) {
+    const oldest = runStart - this.retentionDays * DAY;
     const rows = await this.deps.db
       .selectFrom('content')
       .select(['id', 'user_id', 'created_at'])
       .where('delete_requested_at', 'is', null)
-      .where('created_at', '>', runStart - this.retentionDays * DAY)
+      .where((eb) => eb.or([eb('content.created_at', '>', oldest), this.repostedSince(eb, oldest)]))
       .execute();
     await this.markContent(workFor, rows, ctx, { readmit: true });
     // Not the accounts that were deleted, whose credits are gone for good.
@@ -447,6 +496,7 @@ export class Compactor {
 
   /** (tag, day) of content liked in [since, until); the liked content is re-admitted if it was trimmed. */
   private async markNewLikes(workFor: (tag: string) => TagWork, since: number, until: number, ctx: RunContext) {
+    const oldest = until - this.retentionDays * DAY;
     const rows = await this.deps.db
       .selectFrom('likes')
       .innerJoin('content', 'content.id', 'likes.content_id')
@@ -454,9 +504,14 @@ export class Compactor {
       .distinct()
       .where('likes.created_at', '>=', since)
       .where('likes.created_at', '<', until)
-      .where('content.created_at', '>', until - this.retentionDays * DAY)
+      .where((eb) => eb.or([eb('content.created_at', '>', oldest), this.repostedSince(eb, oldest)]))
       .execute();
     await this.markContent(workFor, rows, ctx, { readmit: true });
+  }
+
+  /** Whether the content of a query's row was reposted after `oldest`: it is then in an index, however old it is itself. */
+  private repostedSince(eb: ExpressionBuilder<Database, 'content'>, oldest: number) {
+    return eb.exists(eb.selectFrom('reposts').select('reposts.content_id').whereRef('reposts.content_id', '=', 'content.id').where('reposts.created_at', '>', oldest));
   }
 
   /**
@@ -615,16 +670,176 @@ export class Compactor {
    * and its meta file, so it is added where a write gave it the tag, replaced where it kept it, and
    * dropped where it no longer carries it. Several writes of the same content since the last run
    * left one row per tag, and are one entry rebuilt.
+   *
+   * Its entry in the tag is in the day it was created, or, where a repost placed it in the tag, in
+   * the day of the repost. It is rechecked in both: it has an entry in at most one (see rebuilt),
+   * and the other is where it may have had one before.
    */
-  private markQueue(workFor: (tag: string) => TagWork, rows: QueueRow[], until: number) {
+  private markQueue(workFor: (tag: string) => TagWork, rows: QueueRow[], until: number, ctx: RunContext) {
+    const oldest = until - this.retentionDays * DAY;
     for (const r of rows) {
-      // Past retention there is no day to rebuild; the row just goes.
-      if (r.created_at <= until - this.retentionDays * DAY) continue;
-      const day = utcDay(r.created_at);
-      const w = workFor(r.tag);
-      w.days.add(day);
-      addTo(w.recheck, day, r.id);
+      const place = this.placed(r.id, ctx).find((p) => p.tag === r.tag);
+      for (const at of place ? [r.created_at, place.created_at] : [r.created_at]) {
+        // Past retention there is no day to rebuild; the row just goes.
+        if (at <= oldest) continue;
+        const day = utcDay(at);
+        const w = workFor(r.tag);
+        w.days.add(day);
+        addTo(w.recheck, day, r.id);
+      }
     }
+  }
+
+  /**
+   * Has the indexes planned that queued content past retention was in from its creation: its
+   * hashtags' and its publisher's own. Such content is queued when it is reposted, or updated, and
+   * its summary is then written again. An index nothing was written under since the content's day
+   * passed retention still names that day, which no feed showed for want of the summary: planned,
+   * it drops the day (see plan), so the content is only where a repost placed it.
+   */
+  private async markOutlived(workFor: (tag: string) => TagWork, rows: QueueRow[], until: number, ctx: RunContext) {
+    const oldest = until - this.retentionDays * DAY;
+    const old = [...new Set(rows.filter((r) => r.created_at <= oldest).map((r) => r.id))];
+    if (!old.length) return;
+    const found = await this.contentRows(old);
+    await mapLimit(old, META_READS, async (id) => {
+      const row = found.get(id);
+      if (row) workFor(authorIndex(row.user_id));
+      const meta = await this.meta(id, ctx).catch(() => null);
+      for (const tag of meta?.tags ?? []) workFor(tag);
+    });
+  }
+
+  /**
+   * Reads the places reposts gave these pieces of content, for the rest of the run (see
+   * RunContext.reposts): those of content it has read already are not read again.
+   */
+  private async loadReposts(ids: Iterable<string>, ctx: RunContext): Promise<void> {
+    const fresh = [...new Set(ids)].filter((id) => !ctx.reposts.has(id));
+    for (let i = 0; i < fresh.length; i += BATCH) {
+      const batch = fresh.slice(i, i + BATCH);
+      const rows = await this.deps.db
+        .selectFrom('reposts')
+        .select(['content_id', 'tag', 'user_id', 'likes_before', 'created_at'])
+        .where('content_id', 'in', batch)
+        // In the order repostsOf reads them, which is the order the content comes to carry the hashtags in.
+        .orderBy('created_at')
+        .orderBy('tag')
+        .execute();
+      const found = new Map<string, Repost[]>(batch.map((id) => [id, []]));
+      for (const { content_id: id, ...place } of rows) if (!ctx.gone.has(decidedKey(place.tag, id))) found.get(id)!.push(place);
+      for (const [id, places] of found) ctx.reposts.set(id, places);
+    }
+  }
+
+  /** The places reposts gave the content, as this run read them (see loadReposts); none for content it didn't read them of. */
+  private placed(contentId: string, ctx: RunContext): Repost[] {
+    return ctx.reposts.get(contentId) ?? [];
+  }
+
+  /**
+   * Where the content is in an index, or null if it isn't there: see Placement. In a hashtag's
+   * index it is there if it carries the hashtag, which for a hashtag a repost gave it is once a
+   * run has written it to the meta file (see applyReposts). In a user's own index it is there if
+   * it is theirs, or they reposted it.
+   */
+  private placement(plan: Pick<TagPlan, 'tag' | 'author'>, row: ContentRow, meta: ContentMeta, ctx: RunContext): Placement | null {
+    const own: Placement = { at: row.created_at, likesBefore: 0, repost: false };
+    if (plan.author !== null && row.user_id === plan.author) return own;
+    if (plan.author === null && !meta.tags.includes(plan.tag)) return null;
+    const place = this.placed(row.id, ctx).find((p) => p.tag === plan.tag);
+    if (place) return { at: place.created_at, likesBefore: place.likes_before, repost: true };
+    return plan.author === null ? own : null;
+  }
+
+  /**
+   * Finds the places in a user's own index whose reposter's account was deleted: what they
+   * reposted is theirs to show no more. The days they are in are marked, and for the rest of the
+   * run the places count as not there (RunContext.gone), so the entries are dropped. Returns
+   * them, to be deleted once their indexes are compacted (see settleGoneReposters), which is what
+   * lets the account's row go (see purgeAccounts). The hashtags the user gave content stay.
+   */
+  private async markGoneReposters(workFor: (tag: string) => TagWork, ctx: RunContext): Promise<GonePlace[]> {
+    const { db } = this.deps;
+    const closed = await db.selectFrom('users').select('id').where('deleted_at', 'is not', null).execute();
+    const gone: GonePlace[] = [];
+    for (let i = 0; i < closed.length; i += BATCH) {
+      const rows = await db
+        .selectFrom('reposts')
+        .select(['content_id', 'tag', 'created_at'])
+        .where('user_id', 'in', closed.slice(i, i + BATCH).map((u) => u.id))
+        .execute();
+      for (const r of rows) {
+        // Not the hashtags they gave the content: those are the content's now.
+        if (indexAuthor(r.tag) === null) continue;
+        workFor(r.tag).days.add(utcDay(r.created_at));
+        ctx.gone.add(decidedKey(r.tag, r.content_id));
+        gone.push({ id: r.content_id, tag: r.tag });
+      }
+    }
+    return gone;
+  }
+
+  /** Deletes the places markGoneReposters found, of the indexes this run compacted: their entries are gone. */
+  private async settleGoneReposters(gone: GonePlace[], failed: Set<string>, lease: CompactorLease) {
+    for (const g of gone) {
+      if (failed.has(g.tag)) continue;
+      await lease.check();
+      await this.deps.db.deleteFrom('reposts').where('content_id', '=', g.id).where('tag', '=', g.tag).execute();
+    }
+  }
+
+  /**
+   * Writes the hashtags reposts gave content into its meta file and summary, for the content of
+   * the queue's rows: a repost commits its places and queues the content, and this is what makes
+   * the content carry the hashtags, which is when it has an entry under them (see placement) and
+   * feeds show it there. Not a hashtag a moderator removed from the content, which stays off it.
+   *
+   * It is also what puts back a hashtag that a write of the content left out: an update that was
+   * under way when the repost committed wrote the meta file as it knew it, and queued the content
+   * for this (see contentWriter).
+   *
+   * Content that waits in the moderation queue has no summary, and gets none here. Returns the
+   * content it couldn't write: its rows stay in the queue, so the next run tries again.
+   */
+  private async applyReposts(queue: QueueRow[], at: number, lease: CompactorLease, ctx: RunContext): Promise<Set<string>> {
+    const { db, content, summaries, log } = this.deps;
+    const unapplied = new Set<string>();
+    const ids = [...new Set(queue.map((r) => r.id))].filter((id) => repostedTags(this.placed(id, ctx)).length > 0);
+    if (!ids.length) return unapplied;
+
+    const rows = await this.contentRows(ids);
+    const removed = new Map<string, Set<string>>();
+    for (let i = 0; i < ids.length; i += BATCH) {
+      const decided = await db.selectFrom('tag_moderation').select(['content_id', 'tag']).where('content_id', 'in', ids.slice(i, i + BATCH)).where('decision', '=', 'removed').execute();
+      for (const d of decided) {
+        const tags = removed.get(d.content_id);
+        if (tags) tags.add(d.tag);
+        else removed.set(d.content_id, new Set([d.tag]));
+      }
+    }
+    await lease.check();
+    await mapLimit(ids, 16, async (id) => {
+      const row = rows.get(id);
+      // Content set for deletion keeps what it has until it goes.
+      if (!row || row.delete_requested_at !== null) return;
+      try {
+        const meta = await this.meta(id, ctx);
+        if (!meta) return;
+        const places = this.placed(id, ctx);
+        const missing = repostedTags(places).filter((tag) => !meta.tags.includes(tag) && !removed.get(id)?.has(tag));
+        if (!missing.length) return;
+        const next: ContentMeta = { ...meta, tags: [...meta.tags, ...missing], updatedAt: Math.max(meta.updatedAt, at) };
+        // The meta file last, as for any write: what it says is there.
+        if (row.queued_id === null) await summaries.put(summaryOf(row, next, this.cfg.publicBaseUrl, repostTimes(places)));
+        await content.putMeta(next);
+        ctx.metas.set(id, Promise.resolve(next));
+      } catch (err) {
+        unapplied.add(id);
+        log?.error({ err, contentId: id }, 'could not write the hashtags a repost gave the content to it');
+      }
+    });
+    return unapplied;
   }
 
   /**
@@ -647,7 +862,7 @@ export class Compactor {
    * published, since this was read has a row in the queue this run didn't take, and the next run
    * restores its summary. Returns the content whose summary couldn't be erased: its rows stay.
    */
-  private async eraseHeld(rows: QueueRow[], lease: CompactorLease): Promise<Set<string>> {
+  private async eraseHeld(rows: QueueRow[], lease: CompactorLease, ctx: RunContext): Promise<Set<string>> {
     const { db, summaries, log } = this.deps;
     const createdAt = new Map(rows.map((r) => [r.id, r.created_at]));
     const ids = [...createdAt.keys()];
@@ -658,7 +873,8 @@ export class Compactor {
       await lease.check();
       await mapLimit(held, 16, async ({ content_id: contentId }) => {
         try {
-          await summaries.erase({ contentId, createdAt: createdAt.get(contentId)! });
+          // Every copy of it: content that was reposted has one under the day of each repost.
+          await summaries.erase({ contentId, createdAt: createdAt.get(contentId)!, repostedAt: repostTimes(this.placed(contentId, ctx)) });
         } catch (err) {
           unerased.add(contentId);
           log?.error({ err, contentId }, 'could not erase the summary of content that waits in the moderation queue');
@@ -696,6 +912,9 @@ export class Compactor {
    * leaves out what is removed. Returns the decisions, each recorded as applied once its hashtag is
    * compacted (see settleDecisions); a removal that couldn't be taken off the content isn't among
    * them, so the next run tries again.
+   *
+   * A removal with no moderator is one of these too: a hashtag a repost gave the content, which an
+   * update of the content was then refused by the hashtag's own rules (see contentWriter).
    */
   private async applyDecisions(workFor: (tag: string) => TagWork, until: number, lease: CompactorLease, ctx: RunContext): Promise<Decision[]> {
     const rows = await this.deps.db
@@ -720,6 +939,7 @@ export class Compactor {
       .execute();
     if (!rows.length) return [];
 
+    await this.loadReposts(rows.map((r) => r.id), ctx);
     await lease.check();
     const removals = new Map(rows.filter((r) => r.decision === 'removed').map((r) => [r.id, r]));
     const unapplied = new Set<string>();
@@ -734,8 +954,10 @@ export class Compactor {
 
     const applied: Decision[] = [];
     for (const r of rows) {
+      // Where its entry under the hashtag is: at its creation, or at the repost that gave it the hashtag.
+      const at = this.placed(r.id, ctx).find((p) => p.tag === r.tag)?.created_at ?? r.created_at;
       // Past retention no index holds the content.
-      if (r.created_at > until - this.retentionDays * DAY) workFor(r.tag).days.add(utcDay(r.created_at));
+      if (at > until - this.retentionDays * DAY) workFor(r.tag).days.add(utcDay(at));
       if (r.decision === 'removed' && unapplied.has(r.id)) continue;
       applied.push({ id: r.id, tag: r.tag, decision: r.decision, decidedAt: r.decided_at });
     }
@@ -746,8 +968,8 @@ export class Compactor {
    * Takes off a piece of content the hashtags moderators removed from it: writes its summary and
    * meta file again without them, which is what the content carries from then on. Its bytes stay
    * as they are, and its other hashtags' indexes aren't touched: they show the summary as it now
-   * is. Content left with no hashtag is set for deletion instead, since a post needs one, and
-   * content that doesn't carry them (any more) is left as it is.
+   * is. Content left with no hashtag stays, in no hashtag's index: it is still its publisher's,
+   * and in their own. Content that doesn't carry them (any more) is left as it is.
    *
    * The summary is also what takes the content out of the hashtag's feeds in the indexes this run
    * doesn't rebuild, which feed sessions under way still read: a feed leaves out a record whose
@@ -767,14 +989,9 @@ export class Compactor {
     if (!meta) return;
     const tags = meta.tags.filter((tag) => !removed.has(tag));
     if (tags.length === meta.tags.length) return;
-    if (!tags.length) {
-      // The route that removed the last one did this already, unless two moderators each removed one of the last two.
-      await setForDeletion({ ...this.deps, now: this.now }, row);
-      return;
-    }
     const next: ContentMeta = { ...meta, tags, updatedAt: Math.max(meta.updatedAt, at) };
     // The meta file last, as for any write: what it says is there.
-    if (row.queued_id === null) await summaries.put(summaryOf(row, next, this.cfg.publicBaseUrl));
+    if (row.queued_id === null) await summaries.put(summaryOf(row, next, this.cfg.publicBaseUrl, repostTimes(this.placed(row.id, ctx))));
     await content.putMeta(next);
     ctx.metas.set(row.id, Promise.resolve(next));
   }
@@ -783,6 +1000,9 @@ export class Compactor {
    * Records as applied the decisions whose hashtag this run compacted, so the next run doesn't apply
    * them again. A removal that an index turned out to still hold an entry for (see RunContext.strays)
    * is recorded as not applied instead, so the next run does.
+   *
+   * A removed hashtag that a repost had given the content loses its place with it (`reposts`): the
+   * entry is gone from the hashtag's index, and the removal keeps the hashtag off the content.
    */
   private async settleDecisions(decisions: Decision[], failed: Set<string>, runStart: number, lease: CompactorLease, ctx: RunContext) {
     const { db } = this.deps;
@@ -798,6 +1018,7 @@ export class Compactor {
         .where('decided_at', '=', d.decidedAt)
         .where('applied_at', 'is', null)
         .execute();
+      if (d.decision === 'removed') await db.deleteFrom('reposts').where('content_id', '=', d.id).where('tag', '=', d.tag).execute();
     }
     for (const s of ctx.strays) {
       await db.updateTable('tag_moderation').set({ applied_at: null }).where('content_id', '=', s.id).where('tag', '=', s.tag).where('decision', '=', 'removed').execute();
@@ -827,11 +1048,14 @@ export class Compactor {
     }
     return rows.map((r) => {
       const tags = new Set(tagsOf.get(r) ?? []);
+      const places = this.placed(r.id, ctx);
+      // Under a tag a repost placed it in, its day is the repost's, which markContent marked.
       for (const tag of queued.get(r.id) ?? []) {
         tags.add(tag);
         workFor(tag).days.add(utcDay(r.created_at));
       }
-      return { id: r.id, createdAt: r.created_at, tags: [...tags] };
+      // When it was reposted: its summary is under those days too, and goes from them with it.
+      return { id: r.id, createdAt: r.created_at, repostedAt: repostTimes(places), tags: [...tags] };
     });
   }
 
@@ -843,7 +1067,8 @@ export class Compactor {
 
   /**
    * Marks the content's UTC day under each of its hashtags, read from its meta file, and under its
-   * publisher's own index; returns every index marked for each row.
+   * publisher's own index; returns every index marked for each row. Where a repost placed the
+   * content in an index (a hashtag it gave it, the reposter's own), the day is the repost's.
    */
   private async markContent<R extends { id: string; user_id: string; created_at: number }>(
     workFor: (tag: string) => TagWork,
@@ -852,12 +1077,14 @@ export class Compactor {
     opts: { readmit?: boolean } = {},
   ): Promise<Map<R, string[]>> {
     const tagsOf = new Map<R, string[]>();
+    await this.loadReposts(rows.map((r) => r.id), ctx);
     await mapLimit(rows, 16, async (r) => {
-      const day = utcDay(r.created_at);
       const meta = await this.meta(r.id, ctx);
+      const placedAt = new Map(this.placed(r.id, ctx).map((p) => [p.tag, p.created_at]));
       // The content is its publisher's, whatever its meta file holds.
-      const tags = [...(meta?.tags ?? []), authorIndex(r.user_id)];
+      const tags = [...new Set([...(meta?.tags ?? []), authorIndex(r.user_id), ...placedAt.keys()])];
       for (const tag of tags) {
+        const day = utcDay(placedAt.get(tag) ?? r.created_at);
         const w = workFor(tag);
         w.days.add(day);
         if (opts.readmit) addTo(w.readmit, day, r.id);
@@ -979,7 +1206,9 @@ export class Compactor {
     const decided = await this.decisions(hashtags, [...underHashtags]);
     // The meta files of what is rebuilt: read already, unless the run that marked the content couldn't.
     const building = new Set(tags.flatMap((t) => t.days.flatMap((d) => d.build)));
-    await mapLimit([...building].filter((id) => this.indexable(rows.get(id), runStart)), META_READS, async (id) => {
+    // Where reposts placed what is rebuilt, and what the days hold because of one.
+    await this.loadReposts([...building, ...tags.flatMap((t) => t.days.flatMap((d) => d.held.filter((e) => e.repost).map((e) => e.contentId)))], ctx);
+    await mapLimit([...building].filter((id) => this.indexable(rows.get(id), runStart, ctx)), META_READS, async (id) => {
       await this.meta(id, ctx).catch(() => null);
     });
 
@@ -991,7 +1220,7 @@ export class Compactor {
         for (const d of t.days) {
           d.entries = this.refreshed(plan.tag, d.held, rows, decided, runStart, ctx);
           for (const id of d.build) {
-            const made = await this.rebuilt(plan, rows.get(id), decided, runStart, ctx);
+            const made = await this.rebuilt(plan, d.plan.day, rows.get(id), decided, runStart, ctx);
             if (!made) continue;
             d.entries.push(made.entry);
             t.summaries.push(made.summary);
@@ -1099,9 +1328,15 @@ export class Compactor {
     return out;
   }
 
-  /** Whether an index can hold the content at all: it is there, not set for deletion, not waiting in the moderation queue, and within retention. */
-  private indexable(row: ContentRow | undefined, runStart: number): row is ContentRow {
-    return !!row && row.delete_requested_at === null && row.queued_id === null && row.created_at > runStart - this.retentionDays * DAY;
+  /**
+   * Whether an index can hold the content at all: it is there, not set for deletion, not waiting
+   * in the moderation queue, and within retention, which content older than that is for as long
+   * as a repost of it is (see Placement).
+   */
+  private indexable(row: ContentRow | undefined, runStart: number, ctx: RunContext): row is ContentRow {
+    if (!row || row.delete_requested_at !== null || row.queued_id !== null) return false;
+    const oldest = runStart - this.retentionDays * DAY;
+    return row.created_at > oldest || this.placed(row.id, ctx).some((p) => p.created_at > oldest);
   }
 
   /**
@@ -1109,6 +1344,10 @@ export class Compactor {
    * moderators decided, from the database: content they approved is flagged as moderated, and
    * content they removed the hashtag from is dropped. So is content that is deleted, set for
    * deletion, past retention, or waiting in the moderation queue.
+   *
+   * An entry a repost made counts the likes since the repost, and is dropped if the repost's place
+   * in this index is no more: the reposter's account is gone, or the place was given again since,
+   * which is another entry.
    */
   private refreshed(tag: string, entries: IndexEntry[], rows: Map<string, ContentRow>, decided: Decided, runStart: number, ctx: RunContext): IndexEntry[] {
     const oldest = runStart - this.retentionDays * DAY;
@@ -1116,9 +1355,15 @@ export class Compactor {
     for (const e of entries) {
       const row = rows.get(e.contentId);
       if (!row || row.delete_requested_at !== null || row.queued_id !== null || e.createdAt <= oldest) continue;
+      let likes = row.like_count;
+      if (e.repost) {
+        const place = this.placed(e.contentId, ctx).find((p) => p.tag === tag);
+        if (!place || wholeSeconds(place.created_at) !== e.createdAt) continue;
+        likes = Math.max(0, likes - place.likes_before);
+      }
       const moderated = this.moderated(tag, e.contentId, decided, ctx);
       if (moderated === null) continue;
-      out.push({ ...e, likes: row.like_count, aiGenerated: row.ai_generated === 1, moderated });
+      out.push({ ...e, likes, aiGenerated: row.ai_generated === 1, moderated });
     }
     return out;
   }
@@ -1127,23 +1372,36 @@ export class Compactor {
    * An entry rebuilt from the database and the content's meta file, with the summary it is shown
    * by: for the content of the feed queue's rows, which is how every write reaches the index, and
    * for liked content an earlier compaction trimmed. null for content no index can hold (see
-   * indexable), that doesn't carry the tag (or, in a publisher's own index, isn't theirs), or that a
-   * moderator removed the tag from. It then competes for the day's quota like any entry.
+   * indexable), that has no place in this one (see placement: it doesn't carry the tag, or in a
+   * user's own index is neither theirs nor reposted by them), whose place is in another day than
+   * `day` or past retention, or that a moderator removed the tag from. It then competes for the
+   * day's quota like any entry.
    */
   private async rebuilt(
     plan: TagPlan,
+    day: number,
     row: ContentRow | undefined,
     decided: Decided,
     runStart: number,
     ctx: RunContext,
   ): Promise<{ entry: IndexEntry; summary: Summary } | null> {
-    if (!this.indexable(row, runStart)) return null;
+    if (!this.indexable(row, runStart, ctx)) return null;
     const meta = await this.meta(row.id, ctx);
-    if (!meta || (plan.author !== null ? row.user_id !== plan.author : !meta.tags.includes(plan.tag))) return null;
+    if (!meta) return null;
+    const place = this.placement(plan, row, meta, ctx);
+    if (!place || utcDay(place.at) !== day || place.at <= runStart - this.retentionDays * DAY) return null;
     const moderated = this.moderated(plan.tag, row.id, decided, ctx);
     if (moderated === null) return null;
-    const summary = summaryOf(row, meta, this.cfg.publicBaseUrl);
-    return { entry: { contentId: row.id, createdAt: row.created_at, likes: row.like_count, aiGenerated: summary.aiGenerated, moderated }, summary };
+    const summary = summaryOf(row, meta, this.cfg.publicBaseUrl, repostTimes(this.placed(row.id, ctx)));
+    const entry: IndexEntry = {
+      contentId: row.id,
+      createdAt: place.at,
+      likes: Math.max(0, row.like_count - place.likesBefore),
+      aiGenerated: summary.aiGenerated,
+      moderated,
+      repost: place.repost,
+    };
+    return { entry, summary };
   }
 
   /**

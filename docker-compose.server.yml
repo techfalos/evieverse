@@ -34,15 +34,34 @@ services:
       PUBLIC_BASE_URL: http://localhost:${SERVER_PORT:-3000}
       # Set to the frontend's origins, e.g. http://localhost:5173, to allow only those.
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # Docker Desktop gives every request from the host the same source IP, so the per-IP limit on
+      # /register is effectively global.
+      REGISTER_RATE_LIMIT_PER_HOUR: '1000'
       TAGGING_MODE: ${TAGGING_MODE:-user}
       TAGGING_SERVER_TAGS: ${TAGGING_SERVER_TAGS:-}
+      # The types of post the server takes: all of them unless one is set to false.
+      POST_TYPE_TEXT: ${POST_TYPE_TEXT:-true}
+      POST_TYPE_IMAGE: ${POST_TYPE_IMAGE:-true}
+      POST_TYPE_VIDEO: ${POST_TYPE_VIDEO:-true}
+      POST_TYPE_AUDIO: ${POST_TYPE_AUDIO:-true}
+      POST_TYPE_LINK: ${POST_TYPE_LINK:-true}
+      # Reposts (POST /repost), and reposts of posts on other servers: both on unless set to false.
+      REPOSTS: ${REPOSTS:-true}
+      REPOSTS_REMOTE: ${REPOSTS_REMOTE:-true}
       # The modification disclosure, which GET /rules gives beside the rules: true if this instance runs a
       # modified version of Evieverse, which then needs the address its source code can be obtained from.
       EVIEVERSE_MODIFIED: ${EVIEVERSE_MODIFIED:-false}
       EVIEVERSE_SOURCE_URL: ${EVIEVERSE_SOURCE_URL:-}
+      # The email address people write to for support, which GET /rules gives beside the rules.
+      SUPPORT_EMAIL: ${SUPPORT_EMAIL:-noreply@yoururl.com}
       # Ads in hashtag feeds and at the end of posts, which admins keep at /monetization/ads. Off unless set to true.
       MONETIZATION_FEED_ADS: ${MONETIZATION_FEED_ADS:-false}
       MONETIZATION_POST_ADS: ${MONETIZATION_POST_ADS:-false}
+      # The optional trust plugins the server runs, by name. TRUST_OPTIONAL_PLUGINS=urlhaus refuses posts
+      # and comments with a link on URLhaus's list of malware URLs, and then needs the Auth-Key of an
+      # abuse.ch account, which is free (https://auth.abuse.ch). Off unless set.
+      TRUST_OPTIONAL_PLUGINS: ${TRUST_OPTIONAL_PLUGINS:-}
+      URLHAUS_AUTH_KEY: ${URLHAUS_AUTH_KEY:-}
     volumes: [content:/app/data]
 
 volumes:

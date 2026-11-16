@@ -1,10 +1,8 @@
 import { loadPublished, requireMeta } from '../content.js';
 import { isUniqueViolation, updateOnConflict } from '../db/index.js';
-import { setForDeletion } from '../deletion.js';
 import type { AppDeps } from '../deps.js';
 import { notFound } from '../http/errors.js';
 import { msg } from '../language.js';
-import { iso } from '../time.js';
 
 /**
  * What a hashtag's moderators decide about the content under it. Every post is published under its
@@ -67,22 +65,22 @@ export async function approveTag(deps: Deps, contentId: string, tag: string, mod
 export interface Removal {
   /** The content's publisher. */
   userId: string;
-  /** The hashtags the content is left with. */
+  /** The hashtags the content is left with: none, if this was its last. */
   tags: string[];
-  /** No hashtag was left, so the content is set for deletion. */
-  status?: 'pending_deletion';
-  requestedAt?: string;
 }
 
 /**
  * Removes `tag` from content. The removal is recorded, over an approval if there was one. The
  * compactor's next run then takes the hashtag off the content: it writes the meta file and summary
  * again without it (the bytes stay as they are) and drops the content from the hashtag's day index,
- * which is when the hashtag's feeds stop returning it. Content left with no hashtag is set for
- * deletion here and now instead, since a post needs one. 404 if the content doesn't carry the
+ * which is when the hashtag's feeds stop returning it. 404 if the content doesn't carry the
  * hashtag.
  *
- * The removal stays: an update of the content doesn't get the hashtag back (see moderatePost).
+ * Content left with no hashtag stays: it is in no hashtag's feed, and is still read at /content,
+ * and still in its publisher's own index, so in the following feeds of those who follow them.
+ *
+ * The removal stays: an update of the content doesn't get the hashtag back (see moderatePost), and
+ * nor does a repost of it (see repostRoutes).
  */
 export async function removeTag(deps: Deps, contentId: string, tag: string, moderatorId: string): Promise<Removal> {
   const { db, config, now = Date.now } = deps;
@@ -97,10 +95,5 @@ export async function removeTag(deps: Deps, contentId: string, tag: string, mode
     decision,
   ).execute();
 
-  const tags = meta.tags.filter((t) => t !== tag && !removed.has(t));
-  if (!tags.length) {
-    const requestedAt = await setForDeletion(deps, row);
-    return { userId: row.user_id, tags, status: 'pending_deletion', requestedAt: iso(requestedAt) };
-  }
-  return { userId: row.user_id, tags };
+  return { userId: row.user_id, tags: meta.tags.filter((t) => t !== tag && !removed.has(t)) };
 }

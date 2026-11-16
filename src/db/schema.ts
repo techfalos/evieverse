@@ -18,7 +18,7 @@ export interface UsersTable {
   /** 1 for the server's moderators, else 0: set by an admin (/moderators). They work through the moderation queue and the report queue, and nothing else of an admin's. */
   moderator: Generated<number>;
   /**
-   * The code of the language the server answers the user in (a file of src/languages): the one they
+   * The code of the language the server answers the user in (a file of the languages folder): the one they
    * registered in, or changed to since (PATCH /users/:userId). Null: the server's default.
    */
   language: string | null;
@@ -66,6 +66,28 @@ export interface ContentTable {
   created_at: number;
   /** Set by DELETE /content/:id; the compactor removes the content from the feed index, then deletes it. */
   delete_requested_at: number | null;
+  /**
+   * Null for a post written here. On a repost of a post on another server, the SHA-256 (hex) of the
+   * original's address: unique, so the server holds one entry per original.
+   */
+  origin_hash: string | null;
+}
+
+/**
+ * A place a repost gave content: a hashtag the reposter added to it, or the reposter's own index
+ * ("@<userId>"). There the content is placed as a new post, at the time of the repost, counting
+ * the likes since. The content itself isn't copied.
+ */
+export interface RepostsTable {
+  content_id: string;
+  /** A hashtag the repost gave the content, or "@<userId>": the reposter's own index. */
+  tag: string;
+  /** Who reposted; null once that user is gone. */
+  user_id: string | null;
+  /** The content's like count when it was reposted: the entry counts the likes since. */
+  likes_before: Generated<number>;
+  /** When it was reposted, which is where its entry is placed. */
+  created_at: number;
 }
 
 export interface TagsTable {
@@ -136,7 +158,7 @@ export interface TagMutesTable {
   created_at: number;
 }
 
-/** A normalised word or phrase. Tag '*' is the server's list, which brings a post's trust score to 0; any other tag's list drops that tag. */
+/** A normalised word or phrase, or a pattern between slashes. Tag '*' is the server's list, which brings a post's trust score to 0; any other tag's list drops that tag. */
 export interface BlockedWordsTable {
   tag: string;
   word: string;
@@ -160,7 +182,7 @@ export interface TagModerationTable {
   tag: string;
   /** approved: the content is flagged as moderated in the hashtag's index. removed: the hashtag is taken off the content, for good. */
   decision: TagDecision;
-  /** Who decided; null once that user is gone. */
+  /** Who decided; null once that user is gone, and on the removal of a repost's hashtag that an update of the content was refused. */
   moderator_id: string | null;
   decided_at: number;
   /** When a compactor run applied the decision to the content and the hashtag's index; null until one has. */
@@ -255,8 +277,10 @@ export interface MonetizationTable {
   kind: AdKind;
   /** A text ad's text, or an image ad's caption; null for an image ad with none. */
   text: string | null;
-  /** Where the ad leads when it is followed, if anywhere. */
+  /** Where the ad leads when it is followed, if anywhere. Who is shown the ad gets the server's link to it, which counts the click (adClickUrl). */
   url: string | null;
+  /** How many times the ad's link was followed: counted as it happens, and never taken off. */
+  clicks: Generated<number>;
   /** The content type of an image ad's image, read from its bytes; null on a text ad. */
   image_type: string | null;
   /** Null: the ad appears all the time, under every hashtag. Otherwise the hashtags it is targeted at, separated by single spaces. */
@@ -301,6 +325,7 @@ export interface Database {
   likes: LikesTable;
   follows: FollowsTable;
   feed_queue: FeedQueueTable;
+  reposts: RepostsTable;
   compactor_lease: CompactorLeaseTable;
   tag_moderators: TagModeratorsTable;
   tag_mutes: TagMutesTable;
@@ -317,3 +342,5 @@ export interface Database {
 }
 
 export type ContentRow = Selectable<ContentTable>;
+export type RepostRow = Selectable<RepostsTable>;
+export type MonetizationRow = Selectable<MonetizationTable>;

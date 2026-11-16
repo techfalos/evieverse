@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setAdmin } from '../src/moderation/policy.js';
-import { normalizeWord, WordScanner } from '../src/moderation/words.js';
+import { MAX_LIST_PATTERNS, normalizeWord, PATTERN_BUDGET_MS, scanTexts, WordScanner } from '../src/moderation/words.js';
 import { touchTags } from '../src/tags.js';
 import { as, createTestContext, multipart, PNG, queued, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
@@ -44,6 +44,75 @@ describe('blocked words', () => {
     // A word longer than any entry matches none, however long it runs on.
     expect(matched([['spam'.repeat(100), 'spam']])).toEqual([]);
     expect(matched([['x'.repeat(10_000), ' spam']])).toEqual(['*']);
+  });
+
+  it('takes an entry between slashes for a pattern, and refuses one that is not a regular expression or matches everything', () => {
+    expect(normalizeWord('  /垃圾|广告/ ')).toBe('/垃圾|广告/');
+    expect(normalizeWord('/Buy\\s+NOW!/')).toBe('/Buy\\s+NOW!/');
+    expect(normalizeWord('/a\\/b/')).toBe('/a\\/b/');
+    // Stored composed, however it was typed.
+    expect(normalizeWord('/cafe\u0301/')).toBe('/caf\u00e9/');
+    // Not closed by a slash: flags aren't taken, and it isn't the phrase "spam i" either.
+    expect(normalizeWord('/spam/i')).toBeNull();
+    expect(normalizeWord('/spam')).toBeNull();
+    expect(normalizeWord('//')).toBeNull();
+    for (const broken of ['/(/', '/[a-/', '/a{2,1}/', '/\\ｄ/', '/spam\\/']) expect(normalizeWord(broken), broken).toBeNull();
+    // What matches empty text matches every post.
+    for (const empty of ['/a*/', '/(spam)?/', '/^/', '/spam|/', '/何?/']) expect(normalizeWord(empty), empty).toBeNull();
+    expect(normalizeWord('/何？/')).toBe('/何？/');
+    expect(normalizeWord(`/${'x'.repeat(98)}/`)).toBe(`/${'x'.repeat(98)}/`);
+    expect(normalizeWord(`/${'x'.repeat(99)}/`)).toBeNull();
+  });
+
+  it('matches patterns anywhere in a text, whatever its case, accents or width, and words as before', () => {
+    const lists = {
+      '*': ['/垃圾|广告/'],
+      // A word only matches a whole run of a script written without spaces, which is what patterns are for.
+      whole: ['垃圾'],
+      news: ['rumour', '/scam\\w*/', '/^promo/'],
+      cafes: ['/Café/'],
+      wide: ['/ｓｐａｍ/'],
+      // A full-width question mark is one to find, not a quantifier.
+      jp: ['/すごい？/', '/[がぎ]り/', '/ｶﾞｰﾄﾞ/'],
+      phrase: ['/buy.*now/'],
+      digits: ['/\\d{3}-\\d{4}/'],
+    };
+    const matched = (...texts: string[]) => [...scanTexts(new Map(Object.entries(lists)), texts)].sort();
+    expect(matched('这是垃圾邮件')).toEqual(['*']);
+    expect(matched('垃圾')).toEqual(['*', 'whole']);
+    expect(matched('Beware of SCAMMERS')).toEqual(['news']);
+    expect(matched('A rumour, and no rumours')).toEqual(['news']);
+    expect(matched('Promo codes')).toEqual(['news']);
+    expect(matched('A promo code')).toEqual([]);
+    expect(matched('Meet at the CAFÉ')).toEqual(['cafes']);
+    expect(matched('ｃａｆｅ')).toEqual(['cafes']);
+    expect(matched('Free SPAM', 'ｓｐａｍ')).toEqual(['wide']);
+    expect(matched('すごい？')).toEqual(['jp']);
+    expect(matched('すごい?')).toEqual(['jp']);
+    expect(matched('すごい')).toEqual([]);
+    // One letter of the text is one of the pattern's, however either was typed.
+    expect(matched('ぎりぎり')).toEqual(['jp']);
+    expect(matched('き\u3099り')).toEqual(['jp']);
+    expect(matched('ガード')).toEqual(['jp']);
+    expect(matched('call 555-1234')).toEqual(['digits']);
+    // Each text is read on its own.
+    expect(matched('buy it\nnow')).toEqual([]);
+    expect(matched('buy', 'now')).toEqual([]);
+    expect(matched('Buy it now')).toEqual(['phrase']);
+  });
+
+  it('counts a list as matched when its patterns take too long, and tells the log which one', () => {
+    const warn = vi.fn();
+    const lists = new Map(Object.entries({ slow: ['/quick/', '/(a+)+$/'], fine: ['/lazy/'], word: ['aaa', '/(a+)+$/'] }));
+    const text = `${'a'.repeat(60)}!`;
+    const started = performance.now();
+    expect([...scanTexts(lists, [text, 'aaa'], { warn })].sort()).toEqual(['slow', 'word']);
+    // The list's time is all it took, and a list whose word matched ran no pattern.
+    expect(performance.now() - started).toBeLessThan(PATTERN_BUDGET_MS * 3);
+    expect(warn.mock.calls).toEqual([[{ list: 'slow', pattern: '/(a+)+$/', budgetMs: PATTERN_BUDGET_MS }, expect.stringContaining('took too long')]]);
+    // What comes after is read as ever.
+    expect([...scanTexts(lists, ['the lazy dog'], { warn })]).toEqual(['fine']);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -223,6 +292,46 @@ for (const target of TARGETS) {
       expect(await post(alice, 'Another rumour #news')).toMatchObject({ tags: ['news'] });
     });
 
+    it('blocks what a pattern matches, for the server and for a hashtag, and keeps patterns beside the words', async () => {
+      ctx = await createTestContext(target);
+      const root = await admin();
+      const alice = await ctx.register('alice');
+      const words = (method: 'GET' | 'POST' | 'DELETE', list?: string[], url = '/moderation/blocked-words') => req(root, method, url, list && { words: list });
+
+      expect(ok(await words('POST', ['Spam', ' /垃圾|广告/ ', '/Scam\\w*/']), 200)).toEqual({ words: ['/Scam\\w*/', '/垃圾|广告/', 'spam'] });
+      expect(ok(await words('POST', ['/垃圾|广告/']), 200)).toEqual({ words: ['/Scam\\w*/', '/垃圾|广告/', 'spam'] });
+      for (const bad of ['/spam/i', '/(/', '/a*/']) {
+        const res = await words('POST', [bad]);
+        expect([res.statusCode, res.json().error]).toEqual([
+          400,
+          `"${bad}" can't be blocked: an entry that starts with a slash is a pattern, which is a regular expression between two slashes, with nothing after the second (/spam+/); it can't match empty text, and has at most 100 characters`,
+        ]);
+      }
+
+      for (const text of ['这是垃圾邮件 #news', 'Beware of scammers #news', 'Hello #news #scam_alerts']) {
+        const res = await store(alice, text);
+        expect([res.statusCode, res.json().error], text).toEqual([422, REFUSED]);
+      }
+      const comment = await post(alice, 'An honest post #news', { comments: true });
+      const refused = await req(alice, 'POST', `/content/${comment.contentId}/comments`, { text: '垃圾！' });
+      expect([refused.statusCode, refused.json().error]).toEqual([422, "the comment contains a word or phrase this server doesn't allow, so it wasn't published"]);
+
+      expect(ok(await words('DELETE', ['/Scam\\w*/']), 200)).toEqual({ words: ['/垃圾|广告/', 'spam'] });
+      await post(alice, 'Beware of scammers #news');
+
+      // A hashtag's patterns drop the hashtag, as its words do.
+      expect(ok(await words('POST', ['/rumou?r/'], '/tags/news/blocked-words'), 200)).toEqual({ tag: 'news', words: ['/rumou?r/'] });
+      expect(await post(alice, 'Rumors about the match #news #sports')).toMatchObject({ tags: ['sports'], removedTags: [{ tag: 'news', reason: 'blocked_word' }] });
+
+      // A list holds fewer patterns than words.
+      const many = Array.from({ length: MAX_LIST_PATTERNS }, (_, i) => `/pattern ${i}/`);
+      const full = await words('POST', many);
+      expect([full.statusCode, full.json()]).toEqual([409, { error: `a list can hold at most ${MAX_LIST_PATTERNS} patterns` }]);
+      expect(ok(await words('POST', [...many.slice(1), 'more', 'words']), 200).words).toHaveLength(MAX_LIST_PATTERNS + 3);
+      expect((await words('POST', ['/one more/'])).statusCode).toBe(409);
+      expect(ok(await words('POST', ['a word']), 200).words).toHaveLength(MAX_LIST_PATTERNS + 4);
+    });
+
     it('removes a hashtag from a post, which leaves its feeds and loses the hashtag for good once the compactor has run', async () => {
       ctx = await createTestContext(target);
       const root = await admin();
@@ -286,7 +395,7 @@ for (const target of TARGETS) {
       expect(await feedOf('news')).toEqual([]);
     });
 
-    it("applies a removal again when a write that was under way gave the hashtag back, and deletes a post two removals leave with no hashtag", async () => {
+    it("applies a removal again when a write that was under way gave the hashtag back, and keeps a post two removals leave with no hashtag", async () => {
       ctx = await createTestContext(target);
       const root = await admin();
       const alice = await ctx.register('alice');
@@ -321,13 +430,14 @@ for (const target of TARGETS) {
         .insertInto('tag_moderation')
         .values({ content_id: both.contentId, tag: 'mumbai', decision: 'removed', moderator_id: root.userId, decided_at: ctx.clock.now, applied_at: null })
         .execute();
-      // The run that takes the last of them off sets the post for deletion, and deletes it.
-      expect((await ctx.compact()).deleted).toEqual([both.contentId]);
-      expect((await req(null, 'GET', `/content/${both.contentId}`)).statusCode).toBe(404);
+      // The run takes both off. The post stays, with no hashtag: it is in no hashtag's feed.
+      expect((await ctx.compact()).deleted).toEqual([]);
+      expect(ok(await req(null, 'GET', `/content/${both.contentId}`), 200)).toMatchObject({ tags: [], text: 'Rain again #news #mumbai' });
+      expect(await feedOf('news')).toEqual([]);
       expect(await feedOf('mumbai')).toHaveLength(1);
     });
 
-    it("leaves a file's bytes as they are, and takes a post down when its last hashtag is removed", async () => {
+    it("leaves a file's bytes as they are, and keeps a post whose last hashtag is removed, out of every hashtag's feed", async () => {
       ctx = await createTestContext(target);
       const root = await admin();
       const alice = await ctx.register('alice');
@@ -348,12 +458,40 @@ for (const target of TARGETS) {
       expect(ok(await req(null, 'GET', `/content/${contentId}`), 200)).toMatchObject({ preview, text: 'One pixel', tags: ['pics'], size: PNG.length });
       expect((await feedOf('links'))[0]).toMatchObject({ tags: ['links'], preview: { kind: 'link', url: 'https://news.example/a' } });
 
+      // The last hashtag goes like any other, and the post stays: with no hashtag, it is in no hashtag's feed.
+      const bob = await ctx.register('bob');
+      ok(await req(bob, 'PUT', `/users/${bob.userId}/following/${alice.userId}`), 201);
       const last = await req(root, 'DELETE', `/content/${contentId}/tags/pics`);
-      expect(ok(last, 202)).toEqual({ contentId, tag: 'pics', tags: [], status: 'pending_deletion', requestedAt: now(), muted: false });
-      expect((await req(null, 'GET', `/content/${contentId}`)).statusCode).toBe(404);
-      expect((await ctx.compact()).deleted).toEqual([contentId]);
+      expect(ok(last, 200)).toEqual({ contentId, tag: 'pics', tags: [], muted: false });
+      expect((await ctx.compact()).deleted).toEqual([]);
       expect(await feedOf('pics')).toEqual([]);
-      expect(await ctx.content.getMeta(contentId)).toBeNull();
+      expect(ok(await req(null, 'GET', `/content/${contentId}`), 200)).toMatchObject({ preview, text: 'One pixel', tags: [], size: PNG.length });
+      expect((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}/raw` })).rawPayload).toEqual(PNG);
+      expect(await ctx.db.selectFrom('content').select('delete_requested_at').where('id', '=', contentId).executeTakeFirst()).toEqual({ delete_requested_at: null });
+      // It is still its publisher's: those who follow them see it, with no hashtags.
+      const following = ok(await req(bob, 'GET', `/feed/following?userId=${bob.userId}`), 200).records as { contentId: string; tags: string[] }[];
+      expect(following.find((r) => r.contentId === contentId)).toMatchObject({ tags: [], preview });
+
+      // And still theirs to update, with no hashtag, or with others. The ones removed don't come back.
+      const update = (tags: string) => {
+        const again = multipart({ ...alice, contentId, type: 'image', text: 'One pixel, again', tags }, { name: 'pixel.png', type: 'image/png', data: PNG });
+        return ctx.app.inject({ method: 'POST', url: '/store', payload: again.payload, headers: again.headers });
+      };
+      expect(ok(await update(''), 200)).toMatchObject({ contentId, tags: [] });
+      expect(ok(await update('pics'), 200)).toEqual({ contentId, unchanged: true, removedTags: [{ tag: 'pics', reason: 'removed' }] });
+      expect(ok(await update('pics, art'), 200)).toMatchObject({ contentId, tags: ['art'], removedTags: [{ tag: 'pics', reason: 'removed' }] });
+      await ctx.compact();
+      expect((await feedOf('art')).map((i) => [i.contentId, i.tags])).toEqual([[contentId, ['art']]]);
+      expect(await feedOf('pics')).toEqual([]);
+      // A post that has hashtags still has to say them when it is updated, and a new post still needs one.
+      const required = 'tags is required: on this server, publishers choose the hashtags of their posts';
+      for (const tags of [[], undefined]) {
+        const none = await store(alice, 'Nothing', { contentId: link.contentId, type: 'link', text: undefined, url: 'https://news.example/b', tags });
+        expect([none.statusCode, none.json().error]).toEqual([400, required]);
+      }
+      expect((await store(alice, 'No hashtags', { tags: [] })).json().error).toBe(required);
+      expect((await feedOf('links')).map((i) => i.contentId)).toEqual([link.contentId]);
+      expect((await store(alice, 'No hashtags', { contentId: link.contentId, type: 'link', text: undefined, url: 'https://news.example/a', tags: undefined })).statusCode).toBe(400);
     });
   });
 }

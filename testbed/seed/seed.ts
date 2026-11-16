@@ -31,7 +31,7 @@ import {
 } from './corpus.js';
 
 /**
- * Seeds the testbed through the app's own routes (register, store, like), so every write takes the real
+ * Seeds the testbed through the app's own routes (register, store, like, repost), so every write takes the real
  * path: object store, summaries, database and the feed queue. Each request runs on its own clock, set back
  * in time, which spreads the posts over the last SEED_DAYS days while requests run concurrently. Summaries
  * use the real clock, so only posts younger than SUMMARY_HOT_DAYS are also kept in Redis. A final
@@ -44,6 +44,9 @@ const POSTS = Number(process.env.SEED_POSTS ?? 2400);
 const READERS = Number(process.env.SEED_READERS ?? 220);
 const DAYS = Number(process.env.SEED_DAYS ?? 45);
 const UPDATES = Math.round(POSTS / 100);
+/** Posts that a reader reposts under other hashtags, and posts on other servers that a reader reposts here. */
+const REPOSTS = Math.round(POSTS / 60);
+const REMOTE_REPOSTS = Math.round(POSTS / 300);
 /** Share of posts their publisher declares created with AI. */
 const AI_SHARE = Number(process.env.SEED_AI_SHARE ?? 0.2);
 
@@ -51,10 +54,12 @@ const log = (msg: string) => console.log(`${iso(Date.now())} seed: ${msg}`);
 
 // It posts on clocks set back in time, so no person is there to solve a challenge: the post window and
 // the limit on posts a minute are off. No setting spares a registration its challenge, so the users are
-// registered by an admin (see below). Every post carries its planned hashtags, whatever TAGGING_MODE
+// registered by an admin (see below), whose requests the limit on registrations from one address counts
+// like anyone's, so it is set past them. Every post carries its planned hashtags, whatever TAGGING_MODE
 // the app runs with.
 const config = loadConfig({
   logLevel: 'warn',
+  registerRateLimitPerHour: 1_000_000,
   postRateLimitPerMinute: 0,
   challenge: { postWindowSeconds: 0 },
   tagging: { mode: 'user' },
@@ -201,6 +206,52 @@ const updates = shuffle(
     return { post: p, body, tags, time: Math.min(p.time + between(r, 1, 20) * HOUR, start - 10 * 60_000) };
   });
 
+// Some posts older than a few hours are reposted (POST /repost) by a reader who follows one of their hashtags,
+// under one or two of the reader's other interests, some time after they were posted. Draws of their own,
+// so every other draw is as it was.
+const rRepost = rng(20261112);
+interface RepostPlan {
+  post: PostPlan;
+  user: number;
+  tags: string[];
+  time: number;
+}
+const reposts: RepostPlan[] = [];
+for (const p of shuffle(rRepost, posts.filter((p) => p.time < start - 6 * HOUR))) {
+  if (reposts.length >= REPOSTS) break;
+  const others = (i: number) => userPlans[i]!.interests.filter((t) => !p.tags.includes(t));
+  const fans = readerIdx.filter((i) => userPlans[i]!.interests.some((t) => p.tags.includes(t)) && others(i).length > 0);
+  if (!fans.length) continue;
+  const user = pick(rRepost, fans);
+  const tags = shuffle(rRepost, others(user)).slice(0, rRepost() < 0.3 ? 2 : 1);
+  reposts.push({ post: p, user, tags, time: p.time + Math.round((0.2 + 0.75 * rRepost()) * (start - p.time)) });
+}
+
+// And a few readers repost a post that is on another server: the server keeps a link to it with its summary,
+// which the reader's client sends. The other servers are made up, so these are text posts: there are no bytes to read there.
+const OTHER_SERVERS = [
+  { host: 'harbor-dispatch.example.org', username: 'Harbor Dispatch' },
+  { host: 'northline.example.org', username: 'Northline Wire' },
+  { host: 'lantern.example.org', username: 'The Daily Lantern' },
+];
+const remoteReposts = Array.from({ length: REMOTE_REPOSTS }, () => {
+  const user = pick(rRepost, readerIdx);
+  const beat = pick(rRepost, pick(rRepost, PUBLISHERS).beats);
+  const tags = [topicOf(beat), beat];
+  const from = pick(rRepost, OTHER_SERVERS);
+  return {
+    user,
+    tags,
+    time: start - Math.round((0.05 + rRepost() * 5) * DAY),
+    origin: {
+      url: `https://${from.host}/content/${randomUUID()}`,
+      publisher: { userId: randomUUID(), username: from.username },
+      preview: { kind: 'text', text: articleText(article(rRepost, beat, tags)) },
+      aiGenerated: false,
+    },
+  };
+});
+
 // Registering takes a challenge that a person solves, except when an admin registers the user. So the
 // seed registers its users as an admin of its own: an account put straight in the database, as the
 // operator's first admin is, which is no longer an admin, and deleted, once the users are registered.
@@ -259,12 +310,19 @@ await mapLimit(writes, 8, async ({ post: p, update: u }) => {
   if (++stored % 250 === 0) log(`stored ${stored}/${posts.length}`);
 });
 
+// Likes and reposts go in time order together: a repost shows the likes its post got since, so it has to
+// be made between them, not after the last.
 const likes = posts.flatMap((p) => p.likers.map((l) => ({ ...l, contentId: p.contentId! }))).sort((a, b) => a.time - b.time);
-log(`liking: ${likes.length} likes`);
-let liked = 0;
-await mapLimit(likes, 16, async (l) => {
-  await call(l.time, { method: 'POST', url: '/like', payload: { ...creds(l.user), contentId: l.contentId } });
-  if (++liked % 2000 === 0) log(`liked ${liked}/${likes.length}`);
+const reactions = [
+  ...likes.map((l) => ({ time: l.time, url: '/like', payload: { ...creds(l.user), contentId: l.contentId } })),
+  ...reposts.map((p) => ({ time: p.time, url: '/repost', payload: { ...creds(p.user), contentId: p.post.contentId!, tags: p.tags } })),
+  ...remoteReposts.map((p) => ({ time: p.time, url: '/repost', payload: { ...creds(p.user), tags: p.tags, origin: p.origin } })),
+].sort((a, b) => a.time - b.time);
+log(`liking and reposting: ${likes.length} likes, ${reposts.length} reposts, and ${remoteReposts.length} reposts of posts on other servers`);
+let reacted = 0;
+await mapLimit(reactions, 16, async ({ time, url, payload }) => {
+  await call(time, { method: 'POST', url, payload });
+  if (++reacted % 2000 === 0) log(`liked or reposted ${reacted}/${reactions.length}`);
 });
 
 const span = await db
@@ -301,6 +359,7 @@ await writeFile(
     aiGenerated: posts.filter((p) => p.aiGenerated).length,
     updates: updates.length,
     likes: likes.length,
+    reposts: reposts.length + remoteReposts.length,
     users: users.map((u) => ({
       userId: u.userId,
       apiKey: u.apiKey,
@@ -310,7 +369,9 @@ await writeFile(
     })),
   }),
 );
-log(`done: ${users.length} users, ${posts.length} posts (${posts.filter((p) => p.aiGenerated).length} created with AI), ${updates.length} updates, ${likes.length} likes`);
+log(
+  `done: ${users.length} users, ${posts.length} posts (${posts.filter((p) => p.aiGenerated).length} created with AI), ${updates.length} updates, ${likes.length} likes, ${reposts.length + remoteReposts.length} reposts`,
+);
 
 await app.close();
 await close();
