@@ -6,23 +6,6 @@
 
 import type { Address, Link } from './links.types.js';
 
-/** `url` as it is compared, the way the URL parser writes it; null if it isn't an http or https URL. */
-export function addressOf(url: string): Address | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-  // example.com. is example.com.
-  const name = parsed.hostname.replace(/\.+$/, '');
-  if (!name) return null;
-  const host = parsed.port ? `${name}:${parsed.port}` : name;
-  const path = host + parsed.pathname;
-  return { host, path, full: path + parsed.search };
-}
-
 /** What can't be in a link, so ends it: a space, and the characters markup puts around one. Written as the inside of a character class. */
 const END = '\\s<>"`';
 /** The dots domain names are written with: the full stop, and the ones the URL parser reads as it. Written as the inside of a character class. */
@@ -49,6 +32,28 @@ const TAIL = new RegExp(`[\\/?#\\\\][^${END}]{0,2048}`, 'y');
 
 /** What a sentence or markup puts after a host that ends the link: "see https://example.com." */
 const AFTER_HOST = new RegExp(`[${DOT}_%\\-]+$`, 'u');
+
+/** What a sentence or markup puts right after a link, which isn't part of it. */
+const TRAILING = new Set(`.,;:!?'")]}*_~|`);
+/** What markup ends a link with before it goes on without a space, and what the server's own formatting (src/format.ts) ends an address at. */
+const CLOSING = new Set(`)]}[\\'|,;!*`);
+
+/** `url` as it is compared, the way the URL parser writes it; null if it isn't an http or https URL. */
+export function addressOf(url: string): Address | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  // example.com. is example.com.
+  const name = parsed.hostname.replace(/\.+$/, '');
+  if (!name) return null;
+  const host = parsed.port ? `${name}:${parsed.port}` : name;
+  const path = host + parsed.pathname;
+  return { host, path, full: path + parsed.search };
+}
 
 function tailAt(text: string, index: number): string {
   TAIL.lastIndex = index;
@@ -77,11 +82,6 @@ export function findLinks(text: string): Link[] {
   }
   return links;
 }
-
-/** What a sentence or markup puts right after a link, which isn't part of it. */
-const TRAILING = new Set(`.,;:!?'")]}*_~|`);
-/** What markup ends a link with before it goes on without a space, and what the server's own formatting (src/format.ts) ends an address at. */
-const CLOSING = new Set(`)]}[\\'|,;!*`);
 
 /**
  * What `tail` is if the link ends where it could. Nothing in a text marks a link's end, and any of

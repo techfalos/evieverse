@@ -20,6 +20,26 @@ const WORD = /[\p{L}\p{M}\p{N}]+/gu;
 /** Whether a string is made of the characters a word is, and nothing else. `trailingWord` asks it of one character at a time. */
 const WORD_CHAR = /^[\p{L}\p{M}\p{N}]+$/u;
 
+/** Whatever their case, and by code point, so that `.` and a class take a whole character of any script. */
+const PATTERN_FLAGS = 'iu';
+
+/**
+ * The script that runs patterns in the sandbox: it tries each pattern of the sandbox's `job` on
+ * each of its texts, in order, and stops at the first that matches, with `job.hit` set. `job.at`
+ * is the pattern it is at, so the one it was stopped on if its time ran out.
+ */
+const RUN_PATTERNS = new Script(`{
+  const { patterns, texts } = job;
+  run: for (; job.at < patterns.length; job.at++) {
+    for (const text of texts) {
+      if (patterns[job.at].test(text)) {
+        job.hit = true;
+        break run;
+      }
+    }
+  }
+}`);
+
 /**
  * Without the accents of Latin letters, and with one way of writing each character: full-width
  * letters as plain ones, a letter and the mark it was typed with as the one letter. Case is left
@@ -35,9 +55,6 @@ const fold = (text: string) => text.normalize('NFKD').replace(/[\u0300-\u036f]/g
  * a phrase. No normalised word starts with a slash, so the lists tell the two apart as they are.
  */
 export const isPattern = (entry: string): boolean => entry.trimStart().startsWith('/');
-
-/** Whatever their case, and by code point, so that `.` and a class take a whole character of any script. */
-const PATTERN_FLAGS = 'iu';
 
 /**
  * The regular expression of a pattern as stored, which reads text made `plain`. What isn't ASCII
@@ -166,22 +183,6 @@ interface PatternJob {
  * script that outruns the time it is given, whatever the script is doing, so a script runs them.
  */
 let sandbox: Context | undefined;
-/**
- * The script that runs patterns in the sandbox: it tries each pattern of the sandbox's `job` on
- * each of its texts, in order, and stops at the first that matches, with `job.hit` set. `job.at`
- * is the pattern it is at, so the one it was stopped on if its time ran out.
- */
-const RUN_PATTERNS = new Script(`{
-  const { patterns, texts } = job;
-  run: for (; job.at < patterns.length; job.at++) {
-    for (const text of texts) {
-      if (patterns[job.at].test(text)) {
-        job.hit = true;
-        break run;
-      }
-    }
-  }
-}`);
 
 /** Whether one of `patterns` matches one of `texts`; `slow` is the pattern PATTERN_BUDGET_MS ran out on, if it did. */
 function runPatterns(patterns: RegExp[], texts: string[]): { hit: boolean; slow?: number } {

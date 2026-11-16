@@ -10,17 +10,6 @@ export const WIDTH = 240;
 /** How high a challenge's image is, in pixels. */
 export const HEIGHT = 80;
 
-type Pt = [number, number];
-
-/** Points on an ellipse from `from` to `to` degrees, counterclockwise for increasing angles (y grows downwards). */
-function arc(cx: number, cy: number, rx: number, ry: number, from: number, to: number): Pt[] {
-  const steps = Math.max(4, Math.ceil(Math.abs(to - from) / 15));
-  return Array.from({ length: steps + 1 }, (_, i) => {
-    const a = ((from + ((to - from) * i) / steps) * Math.PI) / 180;
-    return [cx + rx * Math.cos(a), cy - ry * Math.sin(a)];
-  });
-}
-
 /** The one stroke of the letter P, which R starts with too: a stem and a bowl, in the unit box of `GLYPHS`. */
 const P: Pt[] = [[0.1, 1], [0.1, 0], [0.5, 0], ...arc(0.5, 0.27, 0.4, 0.27, 90, -90), [0.1, 0.54]];
 
@@ -51,6 +40,27 @@ const GLYPHS: Record<string, Pt[][]> = {
   8: [arc(0.5, 0.26, 0.32, 0.26, 0, 360), arc(0.5, 0.74, 0.4, 0.26, 0, 360)],
   9: [arc(0.5, 0.32, 0.38, 0.32, 0, 360), arc(0.4, 0.32, 0.48, 0.68, 0, -90)],
 };
+
+/**
+ * The lookup table of CRC-32, the checksum every PNG chunk ends with: for each value of a byte,
+ * what eight shifts by the polynomial 0xedb88320 make of it, so `crc32` takes a byte at a time.
+ */
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+
+type Pt = [number, number];
+
+/** Points on an ellipse from `from` to `to` degrees, counterclockwise for increasing angles (y grows downwards). */
+function arc(cx: number, cy: number, rx: number, ry: number, from: number, to: number): Pt[] {
+  const steps = Math.max(4, Math.ceil(Math.abs(to - from) / 15));
+  return Array.from({ length: steps + 1 }, (_, i) => {
+    const a = ((from + ((to - from) * i) / steps) * Math.PI) / 180;
+    return [cx + rx * Math.cos(a), cy - ry * Math.sin(a)];
+  });
+}
 
 /** A random answer, from a cryptographic source. */
 export function challengeText(): string {
@@ -206,16 +216,6 @@ function drawSegment(ink: Float32Array, [ax, ay]: Pt, [bx, by]: Pt, r: number) {
     }
   }
 }
-
-/**
- * The lookup table of CRC-32, the checksum every PNG chunk ends with: for each value of a byte,
- * what eight shifts by the polynomial 0xedb88320 make of it, so `crc32` takes a byte at a time.
- */
-const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
-  let c = n;
-  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-  return c >>> 0;
-});
 
 function crc32(buf: Buffer): number {
   let c = 0xffffffff;

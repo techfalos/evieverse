@@ -28,6 +28,28 @@ import type { FeedRecord, Head, IndexEntry, RepostMark } from './layout.types.js
  * repost. It is still the one piece of content: the entry names it, and its summary is the same.
  */
 
+/** contentId (16 bytes) | likes u32 | createdAt seconds u32 | flags u8, big-endian. */
+export const DAY_ENTRY_BYTES = 25;
+/** The most a u32 field of a day index entry holds: likes and creation seconds above it are stored as this. */
+const U32 = 0xffffffff;
+
+/** Flag bit of a day index entry: its publisher declared the content as created with AI. */
+const AI_GENERATED = 1;
+/** Flag bit of a day index entry: a moderator of the hashtag approved the content under it. */
+const MODERATED = 2;
+/** Flag bit of a day index entry: a repost put the content in the index. */
+const REPOST = 4;
+
+/** What a tag that was never compacted has for a head: no manifest, so no day index, and the tag reads as empty. */
+export const EMPTY_HEAD: Head = { v: 5, manifest: null, compactedAt: 0 };
+
+/**
+ * The key the compactor keeps its progress under from one run to the next, as JSON: the instants
+ * up to which it has applied likes, profile changes and hashtag counts, and the day it has purged
+ * summaries up to (see `State` in src/compact/compactor.ts).
+ */
+export const COMPACTOR_STATE_KEY = 'compactor:state';
+
 /** A publisher's own index, named so no hashtag (letters, digits and _) can be the same. */
 export const authorIndex = (userId: string) => `@${userId}`;
 /** The publisher whose own index this is; null for a hashtag. */
@@ -50,19 +72,9 @@ export const toFeedRecord = (s: Summary, likes: number, publisher: Publisher, mo
   ...(s.origin && { origin: s.origin }),
 });
 
-/** contentId (16 bytes) | likes u32 | createdAt seconds u32 | flags u8, big-endian. */
-export const DAY_ENTRY_BYTES = 25;
-/** The most a u32 field of a day index entry holds: likes and creation seconds above it are stored as this. */
-const U32 = 0xffffffff;
 /** `n` as a whole number from 0 to `max`: its fraction is dropped, and a value outside is brought to the nearer end. */
 const clamp = (n: number, max: number) => Math.min(max, Math.max(0, Math.floor(n)));
 
-/** Flag bit of a day index entry: its publisher declared the content as created with AI. */
-const AI_GENERATED = 1;
-/** Flag bit of a day index entry: a moderator of the hashtag approved the content under it. */
-const MODERATED = 2;
-/** Flag bit of a day index entry: a repost put the content in the index. */
-const REPOST = 4;
 /** The flags byte of a day index entry as the booleans an `IndexEntry` has. */
 const flagged = (flags: number) => ({ aiGenerated: (flags & AI_GENERATED) !== 0, moderated: (flags & MODERATED) !== 0, repost: (flags & REPOST) !== 0 });
 
@@ -102,21 +114,12 @@ export function unpackDay(buf: Buffer): IndexEntry[] {
   return out;
 }
 
-/** What a tag that was never compacted has for a head: no manifest, so no day index, and the tag reads as empty. */
-export const EMPTY_HEAD: Head = { v: 5, manifest: null, compactedAt: 0 };
-
 /** The key of a tag's head. `tag` is a hashtag or the name of a publisher's own index (`authorIndex`), here and in the keys below. */
 export const headKey = (tag: string) => `head:${tag}`;
 /** The key of the manifest `id` of a tag's index. */
 export const manifestKey = (tag: string, id: string) => `man:${tag}:${id}`;
 /** The key of one of a tag's day indexes: `gen` is the one its `DayRef` in the manifest names. */
 export const dayKey = (tag: string, gen: string) => `day:${tag}:${gen}`;
-/**
- * The key the compactor keeps its progress under from one run to the next, as JSON: the instants
- * up to which it has applied likes, profile changes and hashtag counts, and the day it has purged
- * summaries up to (see `State` in src/compact/compactor.ts).
- */
-export const COMPACTOR_STATE_KEY = 'compactor:state';
 
 /** `n` in decimal, with zeros in front up to `width` digits: 13 by default, which is as long as a time in epoch ms. */
 const pad = (n: number, width = 13) => String(n).padStart(width, '0');

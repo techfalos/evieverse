@@ -8,6 +8,9 @@ import type { HttpApiEvent, HttpApiResult, Invocation } from './lambdaRuntime.ty
 
 export { EDGE_SECRET_HEADER };
 
+/** Of the connection the app thinks it answers on, not of the response: the gateway sets its own. */
+const CONNECTION_HEADERS = new Set(['connection', 'keep-alive', 'transfer-encoding', 'content-length']);
+
 /**
  * An HTTP API event as the request a function takes: the path with its query string, the body
  * decoded to bytes, and the cookies back in a `cookie` header. Content-Length and Transfer-Encoding
@@ -40,9 +43,6 @@ export function toRequest(event: HttpApiEvent): FunctionRequest {
     remoteAddress: peer,
   };
 }
-
-/** Of the connection the app thinks it answers on, not of the response: the gateway sets its own. */
-const CONNECTION_HEADERS = new Set(['connection', 'keep-alive', 'transfer-encoding', 'content-length']);
 
 /** `say` puts what this itself has to tell the client in the request's language (see httpApiHandler). */
 export function toResult(res: FunctionResponse, say: (text: Message) => string): HttpApiResult {

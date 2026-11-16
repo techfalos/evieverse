@@ -23,6 +23,9 @@ export const MIN_TRUST_SCORE = 0;
 /** The score every post and comment starts at, and keeps unless a plugin lowers it: the server trusts it wholly. */
 export const MAX_TRUST_SCORE = 100;
 
+/** src/plugins/trust, or dist/plugins/trust beside the built server. */
+const TRUST_PLUGINS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'plugins', 'trust');
+
 /** Whether `n` is a number a score can be worked out with: neither NaN nor infinite. */
 const isNumber = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
 
@@ -62,9 +65,6 @@ export async function trustOf(plugins: TrustPlugin[], post: TrustPost, ctx: Omit
   }
   return trust;
 }
-
-/** src/plugins/trust, or dist/plugins/trust beside the built server. */
-const TRUST_PLUGINS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'plugins', 'trust');
 
 /** Whether `value` is what a plugin's index file must export as its default: an object with an `assess` function. */
 const isAlgorithm = (value: unknown): value is TrustAlgorithm =>

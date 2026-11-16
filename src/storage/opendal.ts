@@ -3,13 +3,13 @@ import { resolve, sep } from 'node:path';
 import type { Readable } from 'node:stream';
 import { Operator } from 'opendal';
 
+/** The directory each local `fs` operator made here keeps its files in. */
+const roots = new WeakMap<Operator, string>();
+
 /** OpenDAL reports missing paths as a generic error whose message starts with "NotFound". */
 export function isNotFound(err: unknown): boolean {
   return /NotFound/.test((err as Error)?.message ?? '');
 }
-
-/** The directory each local `fs` operator made here keeps its files in. */
-const roots = new WeakMap<Operator, string>();
 
 /** Local `fs` roots are created on demand; temp-then-rename writes make overwrites atomic for readers. */
 export function createOperator(scheme: string, options: Record<string, string>): Operator {

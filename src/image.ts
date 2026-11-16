@@ -17,6 +17,35 @@ export const IMAGE_HEAD_BYTES = 12;
 /** The eight bytes every PNG file starts with. */
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
+/** As much of an EXIF block as is read to find its Orientation, which is at its start in any file a camera wrote. */
+const EXIF_HEAD_BYTES = 1 << 16;
+/** What an EXIF block starts with in a JPEG's APP1 segment, before its TIFF file: "Exif" and two zero bytes. Some WebP files' EXIF chunk has it too. */
+const EXIF_PREFIX = Buffer.from('Exif\0\0', 'latin1');
+
+/** The chunks that draw a PNG: its pixels, palette, transparency, colour space, pixel size, and an APNG's frames. */
+const PNG_KEPT = new Set([
+  ...['IHDR', 'PLTE', 'IDAT', 'IEND', 'tRNS', 'gAMA', 'cHRM', 'sRGB', 'iCCP', 'sBIT', 'bKGD', 'pHYs', 'hIST', 'sPLT'],
+  ...['cICP', 'mDCV', 'cLLI', 'acTL', 'fcTL', 'fdAT'],
+]);
+
+/** The application extensions that say how a GIF plays (how often it loops) or what its colours are. */
+const GIF_APPS = new Set(['NETSCAPE2.0', 'ANIMEXTS1.0', 'ICCRGBG1012']);
+
+/** The chunks that draw a WebP: its header, pixels, alpha, colour profile, and an animation's frames. */
+const WEBP_KEPT = new Set(['VP8 ', 'VP8L', 'ALPH', 'ICCP', 'ANIM', 'ANMF']);
+
+/**
+ * What reads an image of each type and gives it without its metadata, in pieces as it reads.
+ * Each throws Malformed for a file that isn't laid out as its format says, or that ends early.
+ * Only WebP adds to `patches`.
+ */
+const STRIP: Record<ImageType, (r: Bytes, patches: Patch[]) => AsyncGenerator<Buffer>> = {
+  'image/jpeg': jpeg,
+  'image/png': png,
+  'image/gif': gif,
+  'image/webp': webp,
+};
+
 /** Which image a file is, by its first bytes (IMAGE_HEAD_BYTES of them), whatever its sender calls it. */
 export function imageType(head: Buffer): ImageType | null {
   if (head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'image/jpeg';
@@ -90,11 +119,6 @@ class Bytes {
 }
 
 // --- EXIF ---
-
-/** As much of an EXIF block as is read to find its Orientation, which is at its start in any file a camera wrote. */
-const EXIF_HEAD_BYTES = 1 << 16;
-/** What an EXIF block starts with in a JPEG's APP1 segment, before its TIFF file: "Exif" and two zero bytes. Some WebP files' EXIF chunk has it too. */
-const EXIF_PREFIX = Buffer.from('Exif\0\0', 'latin1');
 
 /**
  * The Orientation an EXIF block (a TIFF file) gives, if it turns or mirrors the image (2 to 8).
@@ -217,12 +241,6 @@ async function* jpegScan(r: Bytes): AsyncGenerator<Buffer> {
 
 // --- PNG ---
 
-/** The chunks that draw a PNG: its pixels, palette, transparency, colour space, pixel size, and an APNG's frames. */
-const PNG_KEPT = new Set([
-  ...['IHDR', 'PLTE', 'IDAT', 'IEND', 'tRNS', 'gAMA', 'cHRM', 'sRGB', 'iCCP', 'sBIT', 'bKGD', 'pHYs', 'hIST', 'sPLT'],
-  ...['cICP', 'mDCV', 'cLLI', 'acTL', 'fcTL', 'fdAT'],
-]);
-
 function pngChunk(type: string, data: Buffer): Buffer {
   const out = Buffer.alloc(12 + data.length);
   out.writeUInt32BE(data.length, 0);
@@ -269,9 +287,6 @@ async function* png(r: Bytes): AsyncGenerator<Buffer> {
 }
 
 // --- GIF ---
-
-/** The application extensions that say how a GIF plays (how often it loops) or what its colours are. */
-const GIF_APPS = new Set(['NETSCAPE2.0', 'ANIMEXTS1.0', 'ICCRGBG1012']);
 
 /** A GIF without its comments and the application extensions that only describe it (XMP is one), ending at its trailer. */
 async function* gif(r: Bytes): AsyncGenerator<Buffer> {
@@ -331,9 +346,6 @@ async function* gifBlocks(r: Bytes, keep: boolean): AsyncGenerator<Buffer> {
 }
 
 // --- WebP ---
-
-/** The chunks that draw a WebP: its header, pixels, alpha, colour profile, and an animation's frames. */
-const WEBP_KEPT = new Set(['VP8 ', 'VP8L', 'ALPH', 'ICCP', 'ANIM', 'ANMF']);
 
 function riffChunk(type: string, data: Buffer): Buffer {
   const out = Buffer.alloc(8 + data.length + (data.length & 1));
@@ -405,18 +417,6 @@ async function* webp(r: Bytes, patches: Patch[]): AsyncGenerator<Buffer> {
 }
 
 // --- Any of them ---
-
-/**
- * What reads an image of each type and gives it without its metadata, in pieces as it reads.
- * Each throws Malformed for a file that isn't laid out as its format says, or that ends early.
- * Only WebP adds to `patches`.
- */
-const STRIP: Record<ImageType, (r: Bytes, patches: Patch[]) => AsyncGenerator<Buffer>> = {
-  'image/jpeg': jpeg,
-  'image/png': png,
-  'image/gif': gif,
-  'image/webp': webp,
-};
 
 /** The source's image without its metadata. `found` is told which image it is before the first bytes are given. */
 async function* stripped(source: AsyncIterable<Buffer>, found: { type?: ImageType; patches: Patch[] }, expected?: ImageType): AsyncGenerator<Buffer> {

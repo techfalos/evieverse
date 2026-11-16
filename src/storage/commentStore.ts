@@ -5,6 +5,30 @@ import type { HotStore, LexRange } from './hotStore.types.js';
 import { createOperator, isNotFound, readObject } from './opendal.js';
 
 /**
+ * How many reads of the store one call has under way at once, for what Redis doesn't have: the
+ * comments it reads from their objects, and the lists of likes it counts.
+ */
+const COLD_READS = 32;
+/** What an object holds whose name says it all: one byte, since not every backend takes an empty object. */
+const MARK = '1';
+
+/** In a post's index once it holds every comment the store has. It sorts after every member, which begin with a hex digit, a dash or a colon. */
+const COMPLETE = '~';
+
+/**
+ * What matches an id in an object's name, a comment's or a user's: 36 characters, each a lowercase
+ * hex digit or a dash, as a UUID is written. The source of a part of the patterns below, which
+ * say where in a name the id is.
+ */
+const ID = '[0-9a-f-]{36}';
+/** Matches the name of a published comment's object among a post's, `<commentId>.json`, and captures the id. */
+const COMMENT_FILE = new RegExp(`^(${ID})\\.json$`);
+/** Matches the name of an object that says a comment is a reply, `<parentId>.<commentId>.reply`, and captures the two ids, in that order. */
+const REPLY_FILE = new RegExp(`^(${ID})\\.(${ID})\\.reply$`);
+/** Matches the name of a like among the objects under a comment's likes: the id of the user who liked it, and nothing more. */
+const LIKE_FILE = new RegExp(`^${ID}$`);
+
+/**
  * What stands in the place of a published comment that is gone from it: deleted, or taken back to
  * the moderation queue by an edit. It keeps the comment's place in the tree, so the comments that
  * reply to it stay where they are, and nothing of what the comment was: not its author, its text,
@@ -26,14 +50,6 @@ interface Reply {
   /** The comment it replies to. */
   parentId: string;
 }
-
-/**
- * How many reads of the store one call has under way at once, for what Redis doesn't have: the
- * comments it reads from their objects, and the lists of likes it counts.
- */
-const COLD_READS = 32;
-/** What an object holds whose name says it all: one byte, since not every backend takes an empty object. */
-const MARK = '1';
 
 /**
  * The prefix everything of a post's comments is under: the published comments and what says which
@@ -69,22 +85,6 @@ export const commentKey = (commentId: string) => `cmt:${commentId}`;
 export const commentLikesKey = (commentId: string) => `cmtl:${commentId}`;
 /** Says, for a moment, that a user's like of a comment is being made (see like). */
 export const commentLikingKey = (commentId: string, userId: string) => `cmtlk:${commentId}:${userId}`;
-
-/** In a post's index once it holds every comment the store has. It sorts after every member, which begin with a hex digit, a dash or a colon. */
-const COMPLETE = '~';
-
-/**
- * What matches an id in an object's name, a comment's or a user's: 36 characters, each a lowercase
- * hex digit or a dash, as a UUID is written. The source of a part of the patterns below, which
- * say where in a name the id is.
- */
-const ID = '[0-9a-f-]{36}';
-/** Matches the name of a published comment's object among a post's, `<commentId>.json`, and captures the id. */
-const COMMENT_FILE = new RegExp(`^(${ID})\\.json$`);
-/** Matches the name of an object that says a comment is a reply, `<parentId>.<commentId>.reply`, and captures the two ids, in that order. */
-const REPLY_FILE = new RegExp(`^(${ID})\\.(${ID})\\.reply$`);
-/** Matches the name of a like among the objects under a comment's likes: the id of the user who liked it, and nothing more. */
-const LIKE_FILE = new RegExp(`^${ID}$`);
 
 /**
  * A comment in its post's index: the id of the comment it replies to (nothing, for a comment on

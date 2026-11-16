@@ -14,6 +14,9 @@ import type { Boundary } from './plan.types.js';
  */
 const VERSION = 13;
 
+/** The layout of a following feed's cursor, which each cursor carries as `fv`; one with any other value is refused (400). */
+const FOLLOWING_VERSION = 1;
+
 type RawBoundary = [likes: number, createdAt: number, contentId: string] | null;
 
 /** Whether `n` is a whole number, zero or more: what the likes, times and fresh keys of a decoded cursor must be. */
@@ -93,9 +96,6 @@ export function decodeCursor(cursor: string): CursorState {
     throw invalidCursor();
   }
 }
-
-/** The layout of a following feed's cursor, which each cursor carries as `fv`; one with any other value is refused (400). */
-const FOLLOWING_VERSION = 1;
 
 /** A following feed's cursor as the opaque string the feed returns as `nextCursor`: the page's last record, its time cut to whole seconds. */
 export function encodeFollowingCursor(c: FollowingCursor): string {

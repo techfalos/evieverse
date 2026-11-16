@@ -1,14 +1,6 @@
 import { Redis } from 'ioredis';
 import type { HotEntry, HotStore, LexRange } from './hotStore.types.js';
 
-/** An expiry as both stores set it: a whole number of ms, rounded up, and 1 at the least, so nothing is set to expire at once or in the past. */
-const ttl = (ms: number) => Math.max(1, Math.ceil(ms));
-
-/** A range's lower bound as ZRANGEBYLEX takes it: `after`, which is not part of the range, or `-` for none. */
-const lexMin = ({ after }: LexRange) => (after === undefined ? '-' : `(${after}`);
-/** A range's upper bound as ZRANGEBYLEX takes it: `before`, which is not part of the range, or `+` for none. */
-const lexMax = ({ before }: LexRange) => (before === undefined ? '+' : `(${before}`);
-
 /** Members a lexAdd sends in one command. */
 const LEX_BATCH = 1000;
 
@@ -58,6 +50,14 @@ else
   redis.call('SET', KEYS[1], ARGV[4], 'PX', ARGV[5])
 end
 return 1`;
+
+/** An expiry as both stores set it: a whole number of ms, rounded up, and 1 at the least, so nothing is set to expire at once or in the past. */
+const ttl = (ms: number) => Math.max(1, Math.ceil(ms));
+
+/** A range's lower bound as ZRANGEBYLEX takes it: `after`, which is not part of the range, or `-` for none. */
+const lexMin = ({ after }: LexRange) => (after === undefined ? '-' : `(${after}`);
+/** A range's upper bound as ZRANGEBYLEX takes it: `before`, which is not part of the range, or `+` for none. */
+const lexMax = ({ before }: LexRange) => (before === undefined ? '+' : `(${before}`);
 
 function check(results: [Error | null, unknown][] | null): unknown[] {
   if (!results) throw new Error('redis transaction aborted');

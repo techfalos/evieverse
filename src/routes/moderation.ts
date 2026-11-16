@@ -49,13 +49,13 @@ const RemoveTagBody = Credentials.extend({ mute: Flag.default(false) });
 /** A page of the moderation queue: smaller than other lists', as each post's meta file, or each comment, is read for it. */
 const QueueQuery = ListQuery.extend({ limit: z.coerce.number().int().min(1).max(100).default(50) });
 
+/** Rows per insert of blocked words, well within every dialect's limit on parameters. */
+const INSERT_BATCH = 200;
+
 /** 404 for a post that isn't in the moderation queue, which is all a request can accept or reject there. */
 const notQueued = () => notFound(msg('moderation.not_queued'));
 /** 403 for a caller who isn't an admin, where only an admin may ask. */
 const adminOnly = () => forbidden(msg('moderation.admin_only'));
-
-/** Rows per insert of blocked words, well within every dialect's limit on parameters. */
-const INSERT_BATCH = 200;
 
 /**
  * Moderation: admins make and revoke admins, appoint server moderators and tag moderators, and keep

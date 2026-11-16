@@ -21,11 +21,14 @@ import { rawHeaders } from './content.js';
 /** The ad a path names (/monetization/ads/:adId), for the routes that read, change or delete it, and for its image and its link. */
 const Params = z.object({ adId: z.string().uuid() });
 
-/** A field an update can clear: null does, and so does an empty string, which is all a form field can send. */
-const clearable = <T extends z.ZodType>(schema: T) => z.preprocess((value) => (value === '' ? null : value), schema.nullable()).optional();
-
 /** An instant, as ISO 8601 with its offset from UTC ("2026-12-01T00:00:00Z"), in UTC epoch ms. */
 const Instant = z.iso.datetime({ offset: true }).transform((at) => Date.parse(at));
+
+/** A request with an image in it is the size of the image, in base64 where it is inline. */
+const BODY_LIMIT = 16 * 1024 * 1024;
+
+/** A field an update can clear: null does, and so does an empty string, which is all a form field can send. */
+const clearable = <T extends z.ZodType>(schema: T) => z.preprocess((value) => (value === '' ? null : value), schema.nullable()).optional();
 
 /** What a request says of an ad. Creating one, each field left out is the ad's default; updating one, it is left as it is. */
 const Fields = Credentials.extend({
@@ -48,9 +51,6 @@ const Fields = Credentials.extend({
 type Fields = z.infer<typeof Fields>;
 /** What a request that creates an ad says of it: `Fields`, with the `kind` a new ad has to name. */
 const NewFields = Fields.extend({ kind: z.enum(AD_KINDS) });
-
-/** A request with an image in it is the size of the image, in base64 where it is inline. */
-const BODY_LIMIT = 16 * 1024 * 1024;
 
 /** 404 for an ad that isn't there, and for what an ad doesn't have: the image of a text ad, the link of an ad that leads nowhere. */
 const adNotFound = () => notFound(msg('ad.not_found'));

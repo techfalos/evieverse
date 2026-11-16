@@ -4,6 +4,123 @@ import { z } from 'zod';
 import { loadLanguages, REFERENCE_LANGUAGE } from './language.js';
 import { parseTagList } from './tags.js';
 
+/** The support address GET /rules gives on a server whose operator has set none (SUPPORT_EMAIL). */
+export const DEFAULT_SUPPORT_EMAIL = 'noreply@yoururl.com';
+
+/**
+ * Which setting each environment variable sets, as the path of the setting's keys in the
+ * configuration (`db.poolSize`). A variable that is unset or empty sets nothing (see setPath).
+ */
+const ENV_MAP: Record<string, string> = {
+  HOST: 'host',
+  PORT: 'port',
+  LOG_LEVEL: 'logLevel',
+  DEFAULT_LANGUAGE: 'defaultLanguage',
+  EVIEVERSE_MODIFIED: 'modified',
+  EVIEVERSE_SOURCE_URL: 'sourceUrl',
+  SUPPORT_EMAIL: 'supportEmail',
+  DB_DIALECT: 'db.dialect',
+  DATABASE_URL: 'db.url',
+  DB_POOL_SIZE: 'db.poolSize',
+  DB_IDLE_TIMEOUT_MS: 'db.idleTimeoutMs',
+  DB_MIGRATE_ON_START: 'db.migrateOnStart',
+  PUBLIC_BASE_URL: 'publicBaseUrl',
+  CORS_ORIGINS: 'corsOrigins',
+  TRUST_PROXY: 'trustProxy',
+  REDIS_URL: 'redis.url',
+  REDIS_KEY_PREFIX: 'redis.keyPrefix',
+  CONTENT_SCHEME: 'storage.content.scheme',
+  CONTENT_OPTIONS: 'storage.content.options',
+  CONTENT_SIGNED_URL_SECONDS: 'storage.content.signedUrlSeconds',
+  SUMMARY_SCHEME: 'storage.summaries.scheme',
+  SUMMARY_OPTIONS: 'storage.summaries.options',
+  STORAGE_TMP_PATH: 'storage.tmpPath',
+  MAX_UPLOAD_BYTES: 'storage.maxUploadBytes',
+  UPLOAD_LINKS_PER_MINUTE: 'storage.uploadLinksPerMinute',
+  AUDIT_SCHEME: 'audit.scheme',
+  AUDIT_OPTIONS: 'audit.options',
+  TAGGING_MODE: 'tagging.mode',
+  TAGGING_SERVER_TAGS: 'tagging.serverTags',
+  POST_TYPE_TEXT: 'postTypes.text',
+  POST_TYPE_IMAGE: 'postTypes.image',
+  POST_TYPE_VIDEO: 'postTypes.video',
+  POST_TYPE_AUDIO: 'postTypes.audio',
+  POST_TYPE_LINK: 'postTypes.link',
+  REPOSTS: 'reposts.enabled',
+  REPOSTS_REMOTE: 'reposts.remote',
+  FEED_PAGE_SIZE: 'feed.pageSize',
+  FEED_MAX_PAGE_SIZE: 'feed.maxPageSize',
+  FEED_TAG_DAY_MAX_POSTS: 'feed.tagDayMaxPosts',
+  FEED_TAG_DAY_MIN_POSTS: 'feed.tagDayMinPosts',
+  FEED_TAG_RETENTION_DAYS: 'feed.tagRetentionDays',
+  FEED_AUTHOR_DAY_MAX_POSTS: 'feed.authorDayMaxPosts',
+  FEED_MAX_LOOKBACK_DAYS: 'feed.maxLookbackDays',
+  FEED_PREVIEW_WORDS: 'feed.previewWords',
+  FEED_PREVIEW_CHARS: 'feed.previewChars',
+  FEED_FRESH_EVERY: 'feed.freshEvery',
+  FEED_FRESH_MAX_LIKES: 'feed.freshMaxLikes',
+  FEED_FRESH_POOL: 'feed.freshPool',
+  FEED_RELATED_TAGS: 'feed.relatedTags',
+  FEED_RELATED_MIN_POSTS: 'feed.relatedMinPosts',
+  FEED_RELATED_MIN_PERCENT: 'feed.relatedMinPercent',
+  FEED_HEAD_CACHE_MS: 'feed.headCacheMs',
+  FEED_INDEX_CACHE_SIZE: 'feed.indexCacheSize',
+  FEED_AUTHOR_CACHE_SIZE: 'feed.authorIndexCacheSize',
+  SUMMARY_HOT_DAYS: 'feed.summaryHotDays',
+  SUMMARY_BROTLI_QUALITY: 'feed.summaryBrotliQuality',
+  SUMMARY_CACHE_SIZE: 'feed.summaryCacheSize',
+  SUMMARY_CACHE_SECONDS: 'feed.summaryCacheSeconds',
+  COMPACT_IN_PROCESS: 'compact.inProcess',
+  COMPACT_INTERVAL_SECONDS: 'compact.intervalSeconds',
+  COMPACT_GRACE_SECONDS: 'compact.graceSeconds',
+  COMPACT_CONCURRENCY: 'compact.concurrency',
+  COMPACT_LEASE_SECONDS: 'compact.leaseSeconds',
+  CHALLENGE_POST_WINDOW_SECONDS: 'challenge.postWindowSeconds',
+  CHALLENGE_COMMENTS_PER_MINUTE: 'challenge.commentsPerMinute',
+  CHALLENGE_TTL_SECONDS: 'challenge.ttlSeconds',
+  CHALLENGE_POW_BITS: 'challenge.powBits',
+  CHALLENGE_MIN_SOLVE_MS: 'challenge.minSolveMs',
+  TRUST_SCORE_DELETE_BELOW: 'trust.deleteBelow',
+  TRUST_SCORE_ALLOW_FROM: 'trust.allowFrom',
+  TRUST_OPTIONAL_PLUGINS: 'trust.optionalPlugins',
+  URLHAUS_AUTH_KEY: 'urlhaus.authKey',
+  URLHAUS_LIST_URL: 'urlhaus.listUrl',
+  URLHAUS_REFRESH_MINUTES: 'urlhaus.refreshMinutes',
+  REGISTER_RATE_LIMIT_PER_HOUR: 'registerRateLimitPerHour',
+  POST_RATE_LIMIT_PER_MINUTE: 'postRateLimitPerMinute',
+  MAX_FOLLOWING: 'maxFollowing',
+  REPORTS_PER_HOUR: 'reportsPerHour',
+  COMMENTS_PER_MINUTE: 'comments.perMinute',
+  COMMENTS_HOT_HOURS: 'comments.hotHours',
+  INBOX_MESSAGES_PER_MINUTE: 'inbox.messagesPerMinute',
+  INBOX_RETENTION_DAYS: 'inbox.retentionDays',
+  MONETIZATION_FEED_ADS: 'monetization.feedAds',
+  MONETIZATION_POST_ADS: 'monetization.postAds',
+};
+
+/**
+ * Every section of the configuration, empty: what the file, the environment and the overrides are
+ * merged over. A section none of them names is then still an object, which the schema fills with
+ * its defaults; it refuses one that is missing.
+ */
+const EMPTY_SECTIONS: Json = {
+  db: {},
+  redis: {},
+  storage: { content: {}, summaries: {} },
+  audit: {},
+  tagging: {},
+  postTypes: {},
+  reposts: {},
+  feed: {},
+  compact: {},
+  challenge: {},
+  trust: {},
+  urlhaus: {},
+  comments: {},
+  inbox: {},
+  monetization: {},
+};
+
 /** A setting that is a whole number above zero, given as a number or as the string the environment has it in; `def` where it isn't set. */
 const int = (def: number) => z.coerce.number().int().positive().default(def);
 /**
@@ -17,9 +134,6 @@ const bool = (def: boolean) =>
       z.boolean(),
     )
     .default(def);
-
-/** The support address GET /rules gives on a server whose operator has set none (SUPPORT_EMAIL). */
-export const DEFAULT_SUPPORT_EMAIL = 'noreply@yoururl.com';
 
 /**
  * Every setting of the server: its type, its default, and the values it refuses. `loadConfig`
@@ -451,120 +565,6 @@ function deepMerge(base: Json, over: Json): Json {
   }
   return out;
 }
-
-/**
- * Which setting each environment variable sets, as the path of the setting's keys in the
- * configuration (`db.poolSize`). A variable that is unset or empty sets nothing (see setPath).
- */
-const ENV_MAP: Record<string, string> = {
-  HOST: 'host',
-  PORT: 'port',
-  LOG_LEVEL: 'logLevel',
-  DEFAULT_LANGUAGE: 'defaultLanguage',
-  EVIEVERSE_MODIFIED: 'modified',
-  EVIEVERSE_SOURCE_URL: 'sourceUrl',
-  SUPPORT_EMAIL: 'supportEmail',
-  DB_DIALECT: 'db.dialect',
-  DATABASE_URL: 'db.url',
-  DB_POOL_SIZE: 'db.poolSize',
-  DB_IDLE_TIMEOUT_MS: 'db.idleTimeoutMs',
-  DB_MIGRATE_ON_START: 'db.migrateOnStart',
-  PUBLIC_BASE_URL: 'publicBaseUrl',
-  CORS_ORIGINS: 'corsOrigins',
-  TRUST_PROXY: 'trustProxy',
-  REDIS_URL: 'redis.url',
-  REDIS_KEY_PREFIX: 'redis.keyPrefix',
-  CONTENT_SCHEME: 'storage.content.scheme',
-  CONTENT_OPTIONS: 'storage.content.options',
-  CONTENT_SIGNED_URL_SECONDS: 'storage.content.signedUrlSeconds',
-  SUMMARY_SCHEME: 'storage.summaries.scheme',
-  SUMMARY_OPTIONS: 'storage.summaries.options',
-  STORAGE_TMP_PATH: 'storage.tmpPath',
-  MAX_UPLOAD_BYTES: 'storage.maxUploadBytes',
-  UPLOAD_LINKS_PER_MINUTE: 'storage.uploadLinksPerMinute',
-  AUDIT_SCHEME: 'audit.scheme',
-  AUDIT_OPTIONS: 'audit.options',
-  TAGGING_MODE: 'tagging.mode',
-  TAGGING_SERVER_TAGS: 'tagging.serverTags',
-  POST_TYPE_TEXT: 'postTypes.text',
-  POST_TYPE_IMAGE: 'postTypes.image',
-  POST_TYPE_VIDEO: 'postTypes.video',
-  POST_TYPE_AUDIO: 'postTypes.audio',
-  POST_TYPE_LINK: 'postTypes.link',
-  REPOSTS: 'reposts.enabled',
-  REPOSTS_REMOTE: 'reposts.remote',
-  FEED_PAGE_SIZE: 'feed.pageSize',
-  FEED_MAX_PAGE_SIZE: 'feed.maxPageSize',
-  FEED_TAG_DAY_MAX_POSTS: 'feed.tagDayMaxPosts',
-  FEED_TAG_DAY_MIN_POSTS: 'feed.tagDayMinPosts',
-  FEED_TAG_RETENTION_DAYS: 'feed.tagRetentionDays',
-  FEED_AUTHOR_DAY_MAX_POSTS: 'feed.authorDayMaxPosts',
-  FEED_MAX_LOOKBACK_DAYS: 'feed.maxLookbackDays',
-  FEED_PREVIEW_WORDS: 'feed.previewWords',
-  FEED_PREVIEW_CHARS: 'feed.previewChars',
-  FEED_FRESH_EVERY: 'feed.freshEvery',
-  FEED_FRESH_MAX_LIKES: 'feed.freshMaxLikes',
-  FEED_FRESH_POOL: 'feed.freshPool',
-  FEED_RELATED_TAGS: 'feed.relatedTags',
-  FEED_RELATED_MIN_POSTS: 'feed.relatedMinPosts',
-  FEED_RELATED_MIN_PERCENT: 'feed.relatedMinPercent',
-  FEED_HEAD_CACHE_MS: 'feed.headCacheMs',
-  FEED_INDEX_CACHE_SIZE: 'feed.indexCacheSize',
-  FEED_AUTHOR_CACHE_SIZE: 'feed.authorIndexCacheSize',
-  SUMMARY_HOT_DAYS: 'feed.summaryHotDays',
-  SUMMARY_BROTLI_QUALITY: 'feed.summaryBrotliQuality',
-  SUMMARY_CACHE_SIZE: 'feed.summaryCacheSize',
-  SUMMARY_CACHE_SECONDS: 'feed.summaryCacheSeconds',
-  COMPACT_IN_PROCESS: 'compact.inProcess',
-  COMPACT_INTERVAL_SECONDS: 'compact.intervalSeconds',
-  COMPACT_GRACE_SECONDS: 'compact.graceSeconds',
-  COMPACT_CONCURRENCY: 'compact.concurrency',
-  COMPACT_LEASE_SECONDS: 'compact.leaseSeconds',
-  CHALLENGE_POST_WINDOW_SECONDS: 'challenge.postWindowSeconds',
-  CHALLENGE_COMMENTS_PER_MINUTE: 'challenge.commentsPerMinute',
-  CHALLENGE_TTL_SECONDS: 'challenge.ttlSeconds',
-  CHALLENGE_POW_BITS: 'challenge.powBits',
-  CHALLENGE_MIN_SOLVE_MS: 'challenge.minSolveMs',
-  TRUST_SCORE_DELETE_BELOW: 'trust.deleteBelow',
-  TRUST_SCORE_ALLOW_FROM: 'trust.allowFrom',
-  TRUST_OPTIONAL_PLUGINS: 'trust.optionalPlugins',
-  URLHAUS_AUTH_KEY: 'urlhaus.authKey',
-  URLHAUS_LIST_URL: 'urlhaus.listUrl',
-  URLHAUS_REFRESH_MINUTES: 'urlhaus.refreshMinutes',
-  REGISTER_RATE_LIMIT_PER_HOUR: 'registerRateLimitPerHour',
-  POST_RATE_LIMIT_PER_MINUTE: 'postRateLimitPerMinute',
-  MAX_FOLLOWING: 'maxFollowing',
-  REPORTS_PER_HOUR: 'reportsPerHour',
-  COMMENTS_PER_MINUTE: 'comments.perMinute',
-  COMMENTS_HOT_HOURS: 'comments.hotHours',
-  INBOX_MESSAGES_PER_MINUTE: 'inbox.messagesPerMinute',
-  INBOX_RETENTION_DAYS: 'inbox.retentionDays',
-  MONETIZATION_FEED_ADS: 'monetization.feedAds',
-  MONETIZATION_POST_ADS: 'monetization.postAds',
-};
-
-/**
- * Every section of the configuration, empty: what the file, the environment and the overrides are
- * merged over. A section none of them names is then still an object, which the schema fills with
- * its defaults; it refuses one that is missing.
- */
-const EMPTY_SECTIONS: Json = {
-  db: {},
-  redis: {},
-  storage: { content: {}, summaries: {} },
-  audit: {},
-  tagging: {},
-  postTypes: {},
-  reposts: {},
-  feed: {},
-  compact: {},
-  challenge: {},
-  trust: {},
-  urlhaus: {},
-  comments: {},
-  inbox: {},
-  monetization: {},
-};
 
 function parseJson(v: unknown) {
   return typeof v === 'string' ? JSON.parse(v) : v;

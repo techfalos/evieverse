@@ -29,17 +29,6 @@ import type { Language, LanguageMessages, Message, MessageParams } from './langu
 /** The language the code's keys are checked against, and the default one unless DEFAULT_LANGUAGE says otherwise. */
 export const REFERENCE_LANGUAGE = 'en';
 
-export type MessageKey = keyof typeof english.messages;
-
-/** A message, or words that are said as they are: those of a trust plugin that wrote its own. */
-export type Text = Message | string;
-
-/** A message by its key, with the parameters that fill it in. It is in no language yet: `render` says it in one. */
-export const msg = (key: MessageKey, params?: MessageParams): Message => ({ key, params });
-
-/** A key where a string is wanted, such as a zod schema's own message, which the error handler then says in the request's language. */
-export const messageKey = (key: MessageKey): string => key;
-
 /** A message's words in a language file: one string, or its forms by plural category, of which `other` must be there. Any other key is refused. */
 export const Template = z.union([
   z.string(),
@@ -60,6 +49,20 @@ const LanguageFile = z.object({
   name: z.string().trim().min(1).max(64),
   messages: z.record(z.string(), Template),
 });
+
+/** The languages folder at the root of the project, which is beside src and beside the built server's dist alike. */
+const LANGUAGES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'languages');
+
+export type MessageKey = keyof typeof english.messages;
+
+/** A message, or words that are said as they are: those of a trust plugin that wrote its own. */
+export type Text = Message | string;
+
+/** A message by its key, with the parameters that fill it in. It is in no language yet: `render` says it in one. */
+export const msg = (key: MessageKey, params?: MessageParams): Message => ({ key, params });
+
+/** A key where a string is wanted, such as a zod schema's own message, which the error handler then says in the request's language. */
+export const messageKey = (key: MessageKey): string => key;
 
 /** A language as `Languages` keeps it: its file's messages, and the plural rules of its code. */
 interface Loaded extends LanguageMessages {
@@ -189,9 +192,6 @@ export class Languages {
       .filter((language) => language.keys.length > 0);
   }
 }
-
-/** The languages folder at the root of the project, which is beside src and beside the built server's dist alike. */
-const LANGUAGES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'languages');
 
 /**
  * The server's languages: one per .json file of `dir`, whose name is the language's code. A file

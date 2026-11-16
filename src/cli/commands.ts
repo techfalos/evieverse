@@ -12,6 +12,44 @@ interface Request {
   body?: unknown;
 }
 
+/** The largest file `comments add --file` sends: it goes inside the request, which a server takes 32 MB of, a third of that being what base64 adds. */
+const MAX_INLINE_FILE_BYTES = 20 * 1024 * 1024;
+
+/** The option that makes a command about a post one about a comment on it. */
+const COMMENT_OPTION = { comment: { type: 'string' } } as const;
+/** `COMMENT_OPTION`, as the usage line of a command that takes it shows it. */
+const COMMENT_FLAG = '[--comment <commentId>]';
+
+/** The options of a command that lists a page at a time. */
+const PAGE_OPTIONS = { limit: { type: 'string' }, cursor: { type: 'string' } } as const;
+/** `PAGE_OPTIONS`, as the usage line of a command that takes them shows them. */
+const PAGE_FLAGS = '[--limit <n>] [--cursor <cursor>]';
+
+/** Where a post is read on its server: https://other.example/content/<id>. */
+const POST_ADDRESS = /^(.+)\/content\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+/** Why a repost didn't give a hashtag, as the server names it. */
+const NOT_GIVEN: Record<string, string> = {
+  already_tagged: 'the post has it already',
+  muted: 'you or its publisher are muted on it',
+  removed: 'a moderator removed it from the post',
+  blocked_word: 'the post has a word it blocks',
+};
+
+/**
+ * The sections of `help`, in the order it shows them: the role whose commands each one lists, and
+ * its title, which names the hashtags `me` moderates if the server said who the key's user is.
+ */
+const SECTIONS: { role: Role; title: (me?: WhoAmI) => string }[] = [
+  { role: 'anyone', title: () => 'For everyone' },
+  {
+    role: 'moderator',
+    title: (me) => `For a hashtag's moderators${me?.moderates.length ? ` (you moderate ${hashtags(me.moderates)})` : ''}, and admins on every hashtag`,
+  },
+  { role: 'serverModerator', title: () => 'For server moderators, and admins' },
+  { role: 'admin', title: () => 'For admins' },
+];
+
 /** A path with each value encoded as one segment. */
 const path = (parts: TemplateStringsArray, ...values: string[]) => parts.reduce((out, part, i) => out + encodeURIComponent(values[i - 1]!) + part);
 
@@ -87,9 +125,6 @@ const counted = (n: number, one: string, many: string) => `${n} ${n === 1 ? one 
 const commentLine = ({ author, media, text, status }: CommentRecord): string =>
   author === null ? (status === 'deleted' ? '[deleted]' : '[waits for moderators]') : oneLine([media && `[${media.kind}]`, text].filter(Boolean).join(' '));
 
-/** The largest file `comments add --file` sends: it goes inside the request, which a server takes 32 MB of, a third of that being what base64 adds. */
-const MAX_INLINE_FILE_BYTES = 20 * 1024 * 1024;
-
 /** A file to send inside a request, as the server takes one inline: its bytes in base64, and its name, which says what type it is. */
 async function inlineFile(file: string): Promise<{ content: string; contentEncoding: 'base64'; filename: string }> {
   let bytes: Buffer;
@@ -116,10 +151,6 @@ const queueRow = (item: QueueItem, facts: string[]): string[] =>
     ? ['comment', item.commentId, item.author?.username ?? '', ...facts, `on ${item.contentId}`, commentLine(item)]
     : ['post', item.contentId, item.publisher.username, ...facts, hashtags(item.tags), snippet(item)];
 
-/** The option that makes a command about a post one about a comment on it. */
-const COMMENT_OPTION = { comment: { type: 'string' } } as const;
-/** `COMMENT_OPTION`, as the usage line of a command that takes it shows it. */
-const COMMENT_FLAG = '[--comment <commentId>]';
 /** The id of the comment `--comment` names; undefined for a command about the post itself. */
 const commentOf = ({ values }: Args) => (typeof values.comment === 'string' ? values.comment : undefined);
 
@@ -131,10 +162,6 @@ function queuePath(queue: 'queue' | 'reports', args: Args, decision?: string): s
   return decision ? `${about}/${decision}` : about;
 }
 
-/** The options of a command that lists a page at a time. */
-const PAGE_OPTIONS = { limit: { type: 'string' }, cursor: { type: 'string' } } as const;
-/** `PAGE_OPTIONS`, as the usage line of a command that takes them shows them. */
-const PAGE_FLAGS = '[--limit <n>] [--cursor <cursor>]';
 /** The page options a command was given, as the query of its request, after what `query` already asks; "" if neither asks anything. */
 function pageQuery({ values }: Args, query = new URLSearchParams()): string {
   for (const name of ['limit', 'cursor']) if (typeof values[name] === 'string') query.set(name, values[name]);
@@ -271,9 +298,6 @@ const words = (verb: 'list' | 'add' | 'remove', method: Request['method'], summa
     text: (d) => (d.words.length ? d.words.join('\n') : `${d.tag ? `#${d.tag}` : 'The server'} has no blocked words.`),
   });
 
-/** Where a post is read on its server: https://other.example/content/<id>. */
-const POST_ADDRESS = /^(.+)\/content\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
-
 /** A post as its own server gives it at GET /content/:id, as far as a repost of it sends on. */
 interface OriginalPost {
   publisher: { userId: string; username: string };
@@ -340,14 +364,6 @@ interface Reposted {
   status?: string;
   origin?: { url: string };
 }
-
-/** Why a repost didn't give a hashtag, as the server names it. */
-const NOT_GIVEN: Record<string, string> = {
-  already_tagged: 'the post has it already',
-  muted: 'you or its publisher are muted on it',
-  removed: 'a moderator removed it from the post',
-  blocked_word: 'the post has a word it blocks',
-};
 
 /**
  * Every command the CLI has. The arguments name one by its `name` (see `findCommand` in main.ts),
@@ -1062,20 +1078,6 @@ export const COMMANDS: Command[] = [
 /** A command's arguments, as its usage line shows them. */
 export const usage = (c: Command) =>
   [c.name, ...(c.positionals ?? []).map((p) => `<${p}>`), c.flags, c.rest && `<${c.rest}>...`].filter(Boolean).join(' ');
-
-/**
- * The sections of `help`, in the order it shows them: the role whose commands each one lists, and
- * its title, which names the hashtags `me` moderates if the server said who the key's user is.
- */
-const SECTIONS: { role: Role; title: (me?: WhoAmI) => string }[] = [
-  { role: 'anyone', title: () => 'For everyone' },
-  {
-    role: 'moderator',
-    title: (me) => `For a hashtag's moderators${me?.moderates.length ? ` (you moderate ${hashtags(me.moderates)})` : ''}, and admins on every hashtag`,
-  },
-  { role: 'serverModerator', title: () => 'For server moderators, and admins' },
-  { role: 'admin', title: () => 'For admins' },
-];
 
 /**
  * Every command, by who it is for. With a profile whose server answers, the ones its key may use are

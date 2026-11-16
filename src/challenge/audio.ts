@@ -18,6 +18,9 @@ import { ALPHABET } from './image.js';
 /** The rate of the clips, and of the audio made from them: enough for the consonants that tell one letter's name from another's. */
 export const SAMPLE_RATE = 16_000;
 
+/** src/challenge/voices, or dist/challenge/voices beside the built server. */
+const VOICES_DIR = join(dirname(fileURLToPath(import.meta.url)), 'voices');
+
 /** A language's voice: each character of the alphabet, as samples between -1 and 1. */
 export type Voice = ReadonlyMap<string, Float32Array>;
 
@@ -81,9 +84,6 @@ function readClip(path: string): Float32Array {
   }
   throw not('it has no samples');
 }
-
-/** src/challenge/voices, or dist/challenge/voices beside the built server. */
-const VOICES_DIR = join(dirname(fileURLToPath(import.meta.url)), 'voices');
 
 /**
  * The voices of `dir`: one per folder, whose name is the language's code. A voice that lacks a

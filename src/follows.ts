@@ -6,6 +6,12 @@ import { msg } from './language.js';
 import type { FollowStore } from './storage/index.js';
 import { mapLimit } from './util.js';
 
+/** Each side of a user's follows: the setting of theirs that shows it, and what others are told of one they don't show. */
+const SIDES = {
+  following: { shown: 'show_following', hidden: 'follow.following_hidden' },
+  followers: { shown: 'show_followers', hidden: 'follow.followers_hidden' },
+} as const;
+
 /** Rewrites the Redis copy of whom each of these users follows from the database. */
 export async function syncFollowing(db: Db, follows: FollowStore, userIds: string[]): Promise<void> {
   if (!userIds.length) return;
@@ -15,12 +21,6 @@ export async function syncFollowing(db: Db, follows: FollowStore, userIds: strin
   }
   await mapLimit([...following], 16, ([userId, followees]) => follows.put(userId, followees));
 }
-
-/** Each side of a user's follows: the setting of theirs that shows it, and what others are told of one they don't show. */
-const SIDES = {
-  following: { shown: 'show_following', hidden: 'follow.following_hidden' },
-  followers: { shown: 'show_followers', hidden: 'follow.followers_hidden' },
-} as const;
 
 /**
  * Holds a request to what `userId` shows of their follows: whom they follow (`following`), which

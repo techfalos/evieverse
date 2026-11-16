@@ -17,6 +17,15 @@ export const ChallengeFields = {
   challengeNonce: z.union([z.string().max(64), z.number().int().min(0)]).transform(String).optional(),
 };
 
+/** What a refusal or a challenge says of a post, and of a comment. */
+const WORDS = {
+  post: { atOnce: 'post.too_many_at_once', overtaken: 'challenge.overtaken', toSend: 'challenge.to_post', toSendNew: 'challenge.to_post_new' },
+  comment: { atOnce: 'comment.too_many_at_once', overtaken: 'challenge.comment_overtaken', toSend: 'challenge.to_comment', toSendNew: 'challenge.to_comment_new' },
+} as const satisfies Record<Sent, Record<string, MessageKey>>;
+
+/** A minute, in milliseconds: what the limits on posts and on comments count over, and how long a run of challenged comments lasts. */
+const MINUTE = 60_000;
+
 /** Where a challenge stands in the run a request needs; for a post or a comment, `streak` is what set `steps`. */
 interface Step {
   step: number;
@@ -72,15 +81,6 @@ interface Pace {
    */
   unchallenged?: number;
 }
-
-/** What a refusal or a challenge says of a post, and of a comment. */
-const WORDS = {
-  post: { atOnce: 'post.too_many_at_once', overtaken: 'challenge.overtaken', toSend: 'challenge.to_post', toSendNew: 'challenge.to_post_new' },
-  comment: { atOnce: 'comment.too_many_at_once', overtaken: 'challenge.comment_overtaken', toSend: 'challenge.to_comment', toSendNew: 'challenge.to_comment_new' },
-} as const satisfies Record<Sent, Record<string, MessageKey>>;
-
-/** A minute, in milliseconds: what the limits on posts and on comments count over, and how long a run of challenged comments lasts. */
-const MINUTE = 60_000;
 
 /** When a user's posts in the last minute were: epoch ms separated by spaces, oldest first. Kept a minute. */
 export const recentPostsKey = (userId: string) => `posts:${userId}`;
