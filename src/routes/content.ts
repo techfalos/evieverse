@@ -1,16 +1,17 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
+import { setForDeletion } from '../deletion.js';
 import type { AppDeps } from '../deps.js';
 import { forbidden, notFound } from '../http/errors.js';
-import { mediaUrl } from '../storage/summaryStore.js';
-import { touchTags } from '../tags.js';
+import { mediaUrl, previewOf } from '../posts.js';
 
 const Params = z.object({ contentId: z.string().uuid() });
 const RawQuery = z.object({ version: z.coerce.number().int().positive().optional() });
 const DeleteBody = z.object({ userId: z.string().optional(), apiKey: z.string().optional() });
 
-export function contentRoutes(app: FastifyInstance, { db, config, content, appender, now = Date.now }: AppDeps) {
+export function contentRoutes(app: FastifyInstance, deps: AppDeps) {
+  const { db, config, content } = deps;
   /** Content set for deletion is already gone as far as readers are concerned. */
   async function load(contentId: string) {
     const row = await db
@@ -25,7 +26,7 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, appen
     return row;
   }
 
-  /** retrieve_content: publisher credit first, then the preview and hashtags. */
+  /** retrieve_content: publisher credit first, then the preview, the whole text or caption, and hashtags. */
   app.get('/content/:contentId', async (req) => {
     const { contentId } = Params.parse(req.params);
     const row = await load(contentId);
@@ -35,7 +36,8 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, appen
       contentId: row.id,
       version: row.version,
       ...(row.origin_server !== null && { origin: { server: row.origin_server, contentId: row.origin_content_id, version: row.origin_version } }),
-      preview: meta?.preview ?? null,
+      preview: meta ? previewOf(meta, config.publicBaseUrl) : null,
+      ...(meta?.text !== undefined && { text: meta.text }),
       tags: meta?.tags ?? [],
       likes: row.like_count,
       mimeType: row.mime_type,
@@ -68,31 +70,14 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, appen
     return reply.send(await content.stream(contentId, row.version));
   });
 
-  /**
-   * Sets the caller's content for deletion. /content stops serving it and tombstones hide it from
-   * feeds at once, but nothing is removed yet: the compactor removes it from every day index, then
-   * deletes its row, bytes and summaries in the same run. Repeating the request appends the tombstones again.
-   */
+  /** Sets content for deletion (see setForDeletion): the caller's own, or any content for an admin. */
   app.delete('/content/:contentId', async (req, reply) => {
     const { contentId } = Params.parse(req.params);
     const user = await authenticate(db, req, DeleteBody.parse(req.body ?? {}));
-    const row = await db.selectFrom('content').select(['user_id', 'delete_requested_at']).where('id', '=', contentId).executeTakeFirst();
+    const row = await db.selectFrom('content').select(['id', 'user_id', 'delete_requested_at']).where('id', '=', contentId).executeTakeFirst();
     if (!row) throw notFound('content not found');
-    if (row.user_id !== user.id) throw forbidden('only the original publisher can delete this content');
-
-    if (row.delete_requested_at === null) {
-      await db.updateTable('content').set({ delete_requested_at: now() }).where('id', '=', contentId).where('delete_requested_at', 'is', null).execute();
-    }
-    // Once the deletion is set no version can commit, so these versions are final; no row means the compactor already finished.
-    const marked = await db.selectFrom('content').select(['version', 'created_at', 'delete_requested_at']).where('id', '=', contentId).executeTakeFirst();
-    if (marked) {
-      const metas = await Promise.all(Array.from({ length: marked.version }, (_, i) => content.getMeta(contentId, i + 1)));
-      const tags = [...new Set(metas.flatMap((m) => m?.tags ?? []))];
-      await touchTags(db, config.db.dialect, tags, now());
-      const failed = await appender.tombstone(tags, { tombstone: true, contentId, below: null, createdAt: marked.created_at });
-      if (failed.length) req.log.warn({ contentId, tags: failed }, 'tombstone append failed; feeds show the content until the compactor deletes it');
-    }
-    const requestedAt = marked?.delete_requested_at ?? row.delete_requested_at ?? now();
+    if (row.user_id !== user.id && !user.admin) throw forbidden('only the original publisher or an admin can delete this content');
+    const requestedAt = await setForDeletion(deps, row, req.log);
     return reply.status(202).send({ contentId, status: 'pending_deletion', requestedAt: new Date(requestedAt).toISOString() });
   });
 }

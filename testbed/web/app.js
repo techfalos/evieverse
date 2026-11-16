@@ -352,24 +352,20 @@ async function loadFeed({ more = false } = {}) {
 }
 
 function renderStats() {
-  const records = state.pages.reduce((n, p) => n + countRecords(p.data), 0);
-  const tokens = state.pages.reduce((n, p) => n + p.data.estimatedTokens, 0);
+  const records = state.pages.reduce((n, p) => n + p.data.count, 0);
   const last = state.pages.at(-1);
   $('#stats').replaceChildren(
     h('span', {}, `${records} records`),
-    h('span', {}, `~${tokens.toLocaleString()} tokens`),
     h('span', {}, `${state.pages.length} page${state.pages.length > 1 ? 's' : ''}`),
     h('span', {}, `truncated: ${last.data.truncated ? 'yes' : 'no'}`),
     h('span', {}, `last page ${Math.round(last.ms)} ms, ${(last.bytes / 1024).toFixed(0)} KB`),
   );
 }
 
-const countRecords = (data) => data.days.reduce((n, d) => n + Object.values(d.tags).reduce((m, l) => m + l.length, 0), 0);
-
 function renderPage(data, tags, page) {
   const frag = document.createDocumentFragment();
   if (page > 1) frag.append(h('div', { class: 'page-break' }, `page ${page}`));
-  if (!countRecords(data)) {
+  if (!data.count) {
     const which = { true: ' created with AI', false: ' not created with AI' }[state.ai[state.tab]] ?? '';
     frag.append(h('p', { class: 'empty' }, `No posts${which} for these hashtags in this window.`));
   }
@@ -391,7 +387,7 @@ function renderPage(data, tags, page) {
           {},
           h('strong', {}, `Slice ${i + 1}${day.extended ? ' (extended)' : ''}`),
           h('span', {}, `${when(day.from)} → ${when(day.to)}`),
-          h('span', {}, `${day.usedTokens.toLocaleString()} / ${day.allocatedTokens.toLocaleString()} tokens`),
+          h('span', {}, `${day.count} / ${day.allocated} posts`),
           h('span', { class: 'chips' }, tags.map((t, j) => (lists[j].length ? h('span', { class: 'chip' }, `#${t} ${lists[j].length}`) : null))),
         ),
         picks.map(({ rec, via }) => card(rec, via)),
@@ -403,11 +399,19 @@ function renderPage(data, tags, page) {
 
 function preview(rec) {
   const p = rec.preview;
-  if (p.kind === 'text') return h('p', { class: 'preview' }, p.text);
-  if (rec.mimeType.startsWith('image/')) return h('a', { href: p.url, target: '_blank' }, h('img', { class: 'media', src: p.url, loading: 'lazy', alt: '' }));
-  if (rec.mimeType.startsWith('video/')) return h('video', { class: 'media', src: p.url, controls: true, preload: 'none' });
-  if (rec.mimeType.startsWith('audio/')) return h('audio', { src: p.url, controls: true, preload: 'none' });
-  return h('a', { href: p.url, target: '_blank' }, `Open ${rec.mimeType} file`);
+  const caption = p.text ? h('p', { class: 'preview' }, p.text) : null;
+  switch (p.kind) {
+    case 'text':
+      return caption;
+    case 'image':
+      return [h('a', { href: p.url, target: '_blank' }, h('img', { class: 'media', src: p.url, loading: 'lazy', alt: p.text ?? '' })), caption];
+    case 'video':
+      return [h('video', { class: 'media', src: p.url, controls: true, preload: 'none' }), caption];
+    case 'audio':
+      return [h('audio', { class: 'media', src: p.url, controls: true, preload: 'none' }), caption];
+    default:
+      return h('a', { class: 'link-post', href: p.url, target: '_blank', rel: 'noopener noreferrer' }, h('strong', {}, hostOf(p.url)), h('span', { class: 'muted' }, p.url));
+  }
 }
 
 function card(rec, via) {
@@ -486,31 +490,37 @@ async function remove(rec) {
 }
 
 async function edit(rec) {
+  const p = rec.preview;
   $('#content-id').value = rec.contentId;
   $('#post-tags').value = rec.tags.join(', ');
   $('#ai-generated').checked = rec.aiGenerated;
-  const textual = rec.preview.kind === 'text';
-  setKind(textual ? 'text' : 'file');
-  if (textual) {
+  setKind(p.kind);
+  if (p.kind === 'link') $('#url').value = p.url;
+  else {
+    // The preview holds only the first words; the content has the whole text or caption.
     try {
-      const res = await fetch(`${API}/content/${rec.contentId}/raw`);
-      $('#content').value = await res.text();
-      const type = [...$('#content-type').options].find((o) => o.value === rec.mimeType);
-      if (type) $('#content-type').value = rec.mimeType;
+      const { data } = await api('GET', `/content/${rec.contentId}`, undefined, { auth: false });
+      $('#content').value = data.text ?? p.text ?? '';
     } catch {
-      $('#content').value = rec.preview.text;
+      $('#content').value = p.text ?? '';
     }
-  } else {
-    toast(`Choose a new ${rec.mimeType} file: a new version must keep the content type.`);
   }
+  if (isMedia(p.kind)) toast(`Choose the ${rec.mimeType} file again: a new version sends its file, and must keep its content type.`);
   $('#post-panel').scrollIntoView({ behavior: 'smooth' });
 }
 
 const kind = () => document.querySelector('input[name="kind"]:checked').value;
+const isMedia = (k) => k === 'image' || k === 'video' || k === 'audio';
 function setKind(k) {
   document.querySelector(`input[name="kind"][value="${k}"]`).checked = true;
-  $('#text-fields').hidden = k !== 'text';
-  $('#file-fields').hidden = k !== 'file';
+  $('#text-fields').hidden = k === 'link';
+  $('#file-fields').hidden = !isMedia(k);
+  $('#url-fields').hidden = k !== 'link';
+  $('#file').accept = isMedia(k) ? `${k}/*` : '';
+  $('#content').placeholder = k === 'text' ? '' : 'Caption (optional)';
+  // The sample text is a text post's; a caption starts empty.
+  if (k !== 'text' && isSample($('#content').value)) $('#content').value = '';
+  if (k === 'text' && !$('#content').value.trim()) fillSample();
 }
 
 const SAMPLE_MARK = 'Testbed post from';
@@ -523,7 +533,7 @@ function fillSample() {
   $('#content').value =
     `${SAMPLE_MARK} ${a?.username ?? 'someone'} at ${new Date().toLocaleTimeString()}.\n\n` +
     'Its hashtags are below, so it shows up in those feeds straight away. ' +
-    'Edit the text, change the hashtags, or switch to a file upload to try images, PDFs or video.';
+    'Edit the text, change the hashtags, or switch to an image, video, audio or link post.';
   if (!$('#post-tags').value.trim() || $('#post-tags').value === sampleTags) $('#post-tags').value = tags;
   sampleTags = tags;
 }
@@ -534,15 +544,20 @@ async function post(e) {
   const contentId = $('#content-id').value.trim() || undefined;
   const tags = $('#post-tags').value.trim() || undefined;
   const aiGenerated = $('#ai-generated').checked;
+  const type = kind();
   const text = $('#content').value;
-  const contentType = $('#content-type').value;
+  const url = $('#url').value.trim();
   const file = $('#file').files[0];
-  if (kind() === 'text' && !text.trim()) return toast('Write something first.');
-  if (kind() === 'file' && !file) return toast('Choose a file first.');
+  if (type === 'text' && !text.trim()) return toast('Write something first.');
+  if (type === 'link' && !url) return toast('Paste a link first.');
+  if (isMedia(type) && !file) return toast(`Choose ${type === 'audio' ? 'an audio' : `a ${type}`} file first.`);
   /** The request body, with a challenge's solution when the server asked for one. */
   const body = (solution) => {
-    if (kind() === 'text') return { content: text, contentType, tags, contentId, aiGenerated, ...solution };
+    if (type === 'text') return { type, text, tags, contentId, aiGenerated, ...solution };
+    if (type === 'link') return { type, url, tags, contentId, aiGenerated, ...solution };
     const form = new FormData();
+    form.append('type', type);
+    if (text.trim()) form.append('text', text);
     if (tags) form.append('tags', tags);
     if (contentId) form.append('contentId', contentId);
     form.append('aiGenerated', String(aiGenerated));
@@ -558,7 +573,7 @@ async function post(e) {
     const { data, ms } = await withChallenges((solution) => api('POST', '/store', body(solution)));
     out.className = 'result';
     out.textContent = `${Math.round(ms)} ms\n${JSON.stringify(data, null, 2)}`;
-    if (data.unchanged) toast('Unchanged: same bytes as the current version (and the same hashtags, where the server uses yours).');
+    if (data.unchanged) toast('Unchanged: the same post as the current version (and the same hashtags, where the server uses yours).');
     else {
       state.highlight = { contentId: data.contentId, tags: data.tags };
       $('#content-id').value = '';

@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import { ServerUrl } from './federation.js';
 import { parseTagList } from './tags.js';
 
 export const TAGGING_MODES = ['server', 'user'] as const;
@@ -30,6 +29,20 @@ const ConfigSchema = z.object({
 
   /** Absolute base URL used for media links in feed records, e.g. https://api.example.com. Empty = relative links. */
   publicBaseUrl: z.string().default(''),
+
+  /**
+   * Origins whose pages may call the API from a browser, e.g. https://app.example.com, or * for any
+   * (separated by commas or spaces in the environment). Empty: none, so only pages on the API's own origin can.
+   */
+  corsOrigins: z
+    .union([z.string(), z.array(z.string())])
+    .default([])
+    .transform((v, ctx) => {
+      const parsed = parseOriginList(v);
+      if ('origins' in parsed) return parsed.origins;
+      ctx.addIssue({ code: 'custom', message: parsed.error });
+      return z.NEVER;
+    }),
 
   /** The RAM tier: feed index, tail lists, summaries of the last few days, publisher credits. */
   redis: z.object({
@@ -76,14 +89,18 @@ const ConfigSchema = z.object({
     }),
 
   feed: z.object({
-    maxTokens: int(100000),
-    charsPerToken: z.coerce.number().positive().default(4),
-    /** Token quota of a tag's index for today; each older UTC day gets half the previous day's... */
-    tagDayMaxTokens: int(100000),
-    /** ...but never less than this, so a day's most-liked content stays for the whole retention period. */
-    tagDayMinTokens: int(10000),
+    /** Posts per feed page when the request doesn't pass `limit`. */
+    pageSize: int(50),
+    /** The largest `limit` a feed request may pass. */
+    maxPageSize: int(100),
+    /** Posts a tag's index keeps for today; each older UTC day keeps half the previous day's... */
+    tagDayMaxPosts: int(400),
+    /** ...but never fewer than this, so a day's most-liked content stays for the whole retention period. */
+    tagDayMinPosts: int(40),
     /** UTC days a tag's index keeps, and summaries are stored (capped at maxLookbackDays). */
     tagRetentionDays: int(90),
+    /** Posts a publisher's own index, which following feeds read, keeps per UTC day: the newest, whatever their likes. */
+    authorDayMaxPosts: int(1000),
     maxLookbackDays: z.coerce.number().int().min(7).default(90),
     /** In the newest day slice, one in this many picks per tag is new low-like content (0 disables). */
     freshEvery: z.coerce.number().int().min(0).default(4),
@@ -91,8 +108,10 @@ const ConfigSchema = z.object({
     freshMaxLikes: z.coerce.number().int().min(0).default(0),
     /** Fresh picks are sampled per feed session from this many newest eligible records per tag. */
     freshPool: int(200),
-    /** Words of text content copied into each record's preview. */
+    /** Words of a text post or caption copied into each record's preview... */
     previewWords: int(100),
+    /** ...and at most this many characters of them, which bounds text written without spaces. */
+    previewChars: int(1000),
     /** New records go to one Redis list per tag per window; closed windows are merged by the compactor. */
     tailWindowSeconds: int(300),
     /** Superseded day indexes, manifests and merged tails are kept this long, which is also the cursor lifetime. */
@@ -101,12 +120,17 @@ const ConfigSchema = z.object({
     headCacheMs: z.coerce.number().int().min(0).default(1000),
     /** Tags whose manifest and day indexes (immutable; ~30 bytes per post) each node keeps in memory. */
     indexCacheSize: int(500),
+    /** The same for publishers' own indexes, which following feeds read: one per user followed. */
+    authorIndexCacheSize: int(5000),
     /** Summaries of posts younger than this are also kept in Redis; older ones are read from the summary store. */
     summaryHotDays: int(8),
     /** Brotli quality (0-11) of stored summaries. */
     summaryBrotliQuality: z.coerce.number().int().min(0).max(11).default(11),
     /** Compressed summaries read from the summary store that each node keeps in memory (they never change). */
     summaryCacheSize: z.coerce.number().int().min(0).default(20_000),
+  }).refine((f) => f.pageSize <= f.maxPageSize, {
+    path: ['pageSize'],
+    message: 'FEED_PAGE_SIZE can be at most FEED_MAX_PAGE_SIZE',
   }),
 
   compact: z.object({
@@ -127,8 +151,6 @@ const ConfigSchema = z.object({
   federation: z.object({
     /** /store waits this long for each server it federates content to. */
     timeoutMs: int(10_000),
-    /** Base URLs /store may federate content to (comma-separated in the environment); empty allows any. */
-    allowedServers: z.preprocess(parseList, z.array(ServerUrl)).default([]),
   }),
 
   /** Challenges people solve to register, and to post again soon after posting. They're kept in Redis. */
@@ -154,6 +176,8 @@ const ConfigSchema = z.object({
    * challenge, however many challenges they'd solve (0: no limit).
    */
   postRateLimitPerMinute: z.coerce.number().int().min(0).default(3),
+  /** The most users one user can follow. A following feed reads the index of every one of them. */
+  maxFollowing: int(1000),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -191,6 +215,7 @@ const ENV_MAP: Record<string, string> = {
   DATABASE_URL: 'db.url',
   DB_POOL_SIZE: 'db.poolSize',
   PUBLIC_BASE_URL: 'publicBaseUrl',
+  CORS_ORIGINS: 'corsOrigins',
   REDIS_URL: 'redis.url',
   REDIS_KEY_PREFIX: 'redis.keyPrefix',
   CONTENT_SCHEME: 'storage.content.scheme',
@@ -202,13 +227,15 @@ const ENV_MAP: Record<string, string> = {
   MAX_UPLOAD_BYTES: 'storage.maxUploadBytes',
   TAGGING_MODE: 'tagging.mode',
   TAGGING_SERVER_TAGS: 'tagging.serverTags',
-  FEED_MAX_TOKENS: 'feed.maxTokens',
-  CHARS_PER_TOKEN: 'feed.charsPerToken',
-  FEED_TAG_DAY_MAX_TOKENS: 'feed.tagDayMaxTokens',
-  FEED_TAG_DAY_MIN_TOKENS: 'feed.tagDayMinTokens',
+  FEED_PAGE_SIZE: 'feed.pageSize',
+  FEED_MAX_PAGE_SIZE: 'feed.maxPageSize',
+  FEED_TAG_DAY_MAX_POSTS: 'feed.tagDayMaxPosts',
+  FEED_TAG_DAY_MIN_POSTS: 'feed.tagDayMinPosts',
   FEED_TAG_RETENTION_DAYS: 'feed.tagRetentionDays',
+  FEED_AUTHOR_DAY_MAX_POSTS: 'feed.authorDayMaxPosts',
   FEED_MAX_LOOKBACK_DAYS: 'feed.maxLookbackDays',
   FEED_PREVIEW_WORDS: 'feed.previewWords',
+  FEED_PREVIEW_CHARS: 'feed.previewChars',
   FEED_FRESH_EVERY: 'feed.freshEvery',
   FEED_FRESH_MAX_LIKES: 'feed.freshMaxLikes',
   FEED_FRESH_POOL: 'feed.freshPool',
@@ -216,6 +243,7 @@ const ENV_MAP: Record<string, string> = {
   FEED_GEN_RETENTION_MINUTES: 'feed.genRetentionMinutes',
   FEED_HEAD_CACHE_MS: 'feed.headCacheMs',
   FEED_INDEX_CACHE_SIZE: 'feed.indexCacheSize',
+  FEED_AUTHOR_CACHE_SIZE: 'feed.authorIndexCacheSize',
   SUMMARY_HOT_DAYS: 'feed.summaryHotDays',
   SUMMARY_BROTLI_QUALITY: 'feed.summaryBrotliQuality',
   SUMMARY_CACHE_SIZE: 'feed.summaryCacheSize',
@@ -225,7 +253,6 @@ const ENV_MAP: Record<string, string> = {
   COMPACT_CONCURRENCY: 'compact.concurrency',
   COMPACT_LEASE_SECONDS: 'compact.leaseSeconds',
   FEDERATION_TIMEOUT_MS: 'federation.timeoutMs',
-  FEDERATION_ALLOWED_SERVERS: 'federation.allowedServers',
   CHALLENGE_REGISTER: 'challenge.register',
   CHALLENGE_POST_WINDOW_SECONDS: 'challenge.postWindowSeconds',
   CHALLENGE_TTL_SECONDS: 'challenge.ttlSeconds',
@@ -233,6 +260,7 @@ const ENV_MAP: Record<string, string> = {
   CHALLENGE_MIN_SOLVE_MS: 'challenge.minSolveMs',
   REGISTER_RATE_LIMIT_PER_HOUR: 'registerRateLimitPerHour',
   POST_RATE_LIMIT_PER_MINUTE: 'postRateLimitPerMinute',
+  MAX_FOLLOWING: 'maxFollowing',
 };
 
 const EMPTY_SECTIONS: Json = {
@@ -250,8 +278,24 @@ function parseJson(v: unknown) {
   return typeof v === 'string' ? JSON.parse(v) : v;
 }
 
-function parseList(v: unknown) {
-  return typeof v === 'string' ? v.split(',').map((s) => s.trim()).filter(Boolean) : v;
+/** "https://a.example/, *" -> ["*"]; "https://a.example/ http://localhost:5173" -> the two origins. */
+function parseOriginList(input: string | string[]): { origins: string[] } | { error: string } {
+  const words = (typeof input === 'string' ? input.split(/[\s,]+/) : input).map((w) => w.trim()).filter(Boolean);
+  if (words.includes('*')) return { origins: ['*'] };
+  const origins = new Set<string>();
+  for (const word of words) {
+    let url: URL;
+    try {
+      url = new URL(word);
+    } catch {
+      return { error: `"${word}" is not an origin such as https://app.example.com` };
+    }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+      return { error: `"${word}" is not an origin such as https://app.example.com: only a scheme, host and port` };
+    }
+    origins.add(url.origin);
+  }
+  return { origins: [...origins] };
 }
 
 /**

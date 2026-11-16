@@ -1,0 +1,12 @@
+node_modules/
+dist/
+data/
+*.sqlite
+*.sqlite-journal
+.env
+coverage/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example

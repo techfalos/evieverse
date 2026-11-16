@@ -69,19 +69,23 @@ export function registerRoutes(app: FastifyInstance, deps: AppDeps) {
     },
   );
 
+  /** A public profile, with the user's roles: whether they're an admin, and the hashtags they moderate. */
   app.get('/users/:userId', async (req) => {
     const { userId } = Params.parse(req.params);
     const user = await db
       .selectFrom('users')
-      .select(['id', 'username', 'publisher_url', 'created_at'])
+      .select(['id', 'username', 'publisher_url', 'created_at', 'admin'])
       .where('id', '=', userId)
       .executeTakeFirst();
     if (!user) throw notFound('user not found');
+    const moderates = await db.selectFrom('tag_moderators').select('tag').where('user_id', '=', userId).execute();
     return {
       userId: user.id,
       username: user.username,
       publisherUrl: user.publisher_url,
       createdAt: new Date(user.created_at).toISOString(),
+      admin: user.admin === 1,
+      moderates: moderates.map((r) => r.tag).sort(),
     };
   });
 

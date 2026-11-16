@@ -9,6 +9,7 @@ export interface AuthUser {
   id: string;
   username: string;
   publisherUrl: string | null;
+  admin: boolean;
 }
 
 function hashKey(apiKey: string): string {
@@ -44,7 +45,7 @@ async function verify(db: Db, apiKey: string, user: { userId: string } | { usern
   const rows = await db
     .selectFrom('api_keys')
     .innerJoin('users', 'users.id', 'api_keys.user_id')
-    .select(['api_keys.key_hash', 'users.id', 'users.username', 'users.publisher_url'])
+    .select(['api_keys.key_hash', 'users.id', 'users.username', 'users.publisher_url', 'users.admin'])
     .where((eb) =>
       'userId' in user
         ? eb('api_keys.user_id', '=', user.userId)
@@ -56,7 +57,7 @@ async function verify(db: Db, apiKey: string, user: { userId: string } | { usern
   const expected = Buffer.from(hashKey(apiKey), 'hex');
   const row = rows.find((r) => timingSafeEqual(Buffer.from(r.key_hash, 'hex'), expected));
   if (!row) throw unauthorized();
-  return { id: row.id, username: row.username, publisherUrl: row.publisher_url };
+  return { id: row.id, username: row.username, publisherUrl: row.publisher_url, admin: row.admin === 1 };
 }
 
 /**

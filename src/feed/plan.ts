@@ -17,8 +17,8 @@ export interface PlanOptions {
   hours: number;
   /** End of the window (inclusive, UTC epoch ms); later pages of a cursor reuse the first page's anchor. */
   anchor: number;
-  maxTokens: number;
-  charsPerToken: number;
+  /** Most records in the page. */
+  limit: number;
   maxLookbackDays: number;
   /** Per slice index, how far into each requested tag's ordered list earlier pages consumed. */
   positions?: Record<number, number[]>;
@@ -55,7 +55,6 @@ export interface PlannedSlice {
 export interface FeedPlan {
   window: { from: number; to: number };
   slices: PlannedSlice[];
-  estimatedTokens: number;
   truncated: boolean;
   positions: Record<number, number[]>;
   /** Per tag, how far into the newest slice's fresh pool the feed has consumed (empty when disabled). */
@@ -123,11 +122,11 @@ function balance(list: Candidate[]): Candidate[] {
 }
 
 /**
- * Plans a token-budgeted feed over the records of the requested tags (index entries only; bodies
+ * Plans a feed page of at most `limit` records of the requested tags (index entries only; bodies
  * are fetched afterwards). Items of one content in several tags are returned once.
  *
  * Time is cut into 24h slices counted back from the anchor. Slice i of the requested window is
- * allotted maxTokens / 2^(i+1) (50%, 25%, 12.5%, ...), with the oldest window slice taking the
+ * allotted limit / 2^(i+1) records (50%, 25%, 12.5%, ...), with the oldest window slice taking the
  * remainder. Within a slice, tags take turns (equal share per tag); each tag's records are ordered
  * by UTC day, then likes. Unused allowance carries to the next older slice; anything left after the
  * window extends further back (up to maxLookbackDays); anything still left flows back to the newest
@@ -151,7 +150,6 @@ export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
   const lookbackStart = Math.min(windowStart, anchor - opts.maxLookbackDays * DAY);
   const windowSlices = Math.ceil(opts.hours / 24);
   const T = perTag.length;
-  const cost = (c: Candidate) => Math.ceil((c.length + 1) / opts.charsPerToken);
 
   const sliceBounds = (index: number) => {
     if (index < windowSlices) {
@@ -242,7 +240,7 @@ export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
   const fill = (slice: Slice, allowance: number): number => {
     let used = 0;
     slice.allocated += allowance;
-    for (;;) {
+    while (used < allowance) {
       let t = -1;
       for (let step = 0; step < T; step++) {
         const candidate = (slice.rr + step) % T;
@@ -254,18 +252,11 @@ export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
       if (t < 0) break;
       const from = source(slice, t);
       const c = next(slice, from.lists, from.pos, t)!;
-      const n = cost(c);
-      if (n > opts.maxTokens) {
-        // Can never fit in any response; skip so pagination always makes progress.
-        slice.seen.add(c.contentId);
-        continue;
-      }
-      if (used + n > allowance) break;
       slice.seen.add(c.contentId);
       from.pos[t]!++;
       slice.picks[t]!.push(c);
       if (slice.fresh) slice.fresh.picked[t]!++;
-      used += n;
+      used++;
       slice.rr = (t + 1) % T;
     }
     slice.used += used;
@@ -276,9 +267,10 @@ export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
   let carry = 0;
   let allocatedSoFar = 0;
   for (let i = 0; i < windowSlices; i++) {
-    const share = i === windowSlices - 1 ? opts.maxTokens - allocatedSoFar : Math.floor(opts.maxTokens / 2 ** (i + 1));
-    allocatedSoFar += share;
-    const allowance = share + carry;
+    // Rounded on the running total, so the oldest slice doesn't collect every slice's rounding.
+    const through = i === windowSlices - 1 ? opts.limit : Math.round(opts.limit * (1 - 2 ** -(i + 1)));
+    const allowance = through - allocatedSoFar + carry;
+    allocatedSoFar = through;
     const slice = slices.get(i);
     carry = slice ? allowance - fill(slice, allowance) : allowance;
   }
@@ -306,7 +298,6 @@ export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
     slices: ordered
       .filter((s) => s.picks.some((p) => p.length > 0))
       .map(({ index, from, to, extended, allocated, used, picks }) => ({ index, from, to, extended, allocated, used, picks })),
-    estimatedTokens: ordered.reduce((n, s) => n + s.used, 0),
     truncated: ordered.some(hasMore),
     positions,
     freshPositions: newest?.fresh ? [...newest.fresh.pos] : [],

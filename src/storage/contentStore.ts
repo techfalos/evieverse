@@ -15,14 +15,24 @@ export interface ContentMeta {
   sha256: string;
   /** Absent from meta files written before the AI flag existed, which counts as false. */
   aiGenerated?: boolean;
+  /** As written; read it with previewOf, which reads previews written before post types too. */
   preview: Preview;
+  /** The whole text of a text post, or an image's, video's or audio's caption. Absent on federated content, which only has its preview. */
+  text?: string;
   tags: string[];
   createdAt: string;
   /** Federated content only; it has no bytes here. */
   origin?: Origin;
 }
 
-export type Preview = { kind: 'text'; text: string } | { kind: 'media'; url: string };
+/**
+ * A post as feeds show it; its kind is the post's type (src/posts.ts). Text is cut to the first
+ * FEED_PREVIEW_WORDS words; an image's, video's or audio's URL links to its bytes.
+ */
+export type Preview =
+  | { kind: 'text'; text: string }
+  | { kind: 'image' | 'video' | 'audio'; url: string; text?: string }
+  | { kind: 'link'; url: string };
 
 /** Where federated content lives: the base URL of the server it was stored on, and its id and version there. */
 export interface Origin {
@@ -68,6 +78,17 @@ export class ContentStore {
 
   async stream(contentId: string, version: number): Promise<Readable> {
     return (await this.op.reader(contentKey(contentId, version))).createReadStream();
+  }
+
+  /** Copies a version's bytes to another version, within the backend where it can (S3's limit is 5 GB), else through this process. */
+  async copy(contentId: string, from: number, to: number, mimeType: string): Promise<void> {
+    if (this.op.capability().copy) {
+      try {
+        return await this.op.copy(contentKey(contentId, from), contentKey(contentId, to));
+      } catch {}
+    }
+    const writer = await this.op.writer(contentKey(contentId, to), { contentType: mimeType });
+    await pipeline(await this.stream(contentId, from), writer.createWriteStream());
   }
 
   async remove(contentId: string, version: number): Promise<void> {

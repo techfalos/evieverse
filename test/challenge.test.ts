@@ -71,8 +71,8 @@ for (const target of TARGETS) {
     });
 
     const register = (payload: Record<string, unknown>) => ctx.app.inject({ method: 'POST', url: '/register', payload });
-    const storeText = (user: User, content: string, extra: Record<string, unknown> = {}) =>
-      ctx.app.inject({ method: 'POST', url: '/store', payload: { ...user, content, tags: hashtags(content), ...extra } });
+    const storeText = (user: User, text: string, extra: Record<string, unknown> = {}) =>
+      ctx.app.inject({ method: 'POST', url: '/store', payload: { ...user, type: 'text', text, tags: hashtags(text), ...extra } });
     const newChallenge = (scope: string) => ctx.app.inject({ method: 'POST', url: '/register', payload: { username: scope } }).then((r) => r.json().challenge as Challenge);
     const gone = async (c: Challenge) => (await ctx.hot.get(challengeKey(c.id))) === null;
 

@@ -14,7 +14,13 @@ export function tagRoutes(app: FastifyInstance, { db }: AppDeps) {
   /** Lists hashtags, most recently active first. ?prefix=mum matches "mumbai", "mumbaifloods", ... */
   app.get('/tags', async (req) => {
     const q = Query.parse(req.query);
-    let query = db.selectFrom('tags').select(['name', 'last_appended_at']).orderBy('last_appended_at', 'desc').limit(q.limit);
+    let query = db
+      .selectFrom('tags')
+      .select(['name', 'last_appended_at'])
+      // Publishers' own indexes ("@<userId>") are compacted like hashtags, but aren't hashtags.
+      .where('name', 'not like', '@%')
+      .orderBy('last_appended_at', 'desc')
+      .limit(q.limit);
     const prefix = q.prefix?.replace(/^#/, '').toLowerCase();
     if (prefix) query = query.where('name', 'like', `${prefix}%`);
     const rows = await query.execute();

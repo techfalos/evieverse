@@ -1,7 +1,7 @@
 {
   "name": "theuniverse",
   "version": "0.1.0",
-  "description": "Open source social media server: store any content, hashtags, likes, and token-budgeted feeds planned from a per-hashtag index in Redis.",
+  "description": "Open source social media server: image, video, audio, text and link posts, hashtags, likes, and feeds planned from a per-hashtag index in Redis.",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -14,11 +14,13 @@
     "start": "node dist/server.js",
     "compact": "node dist/compact/main.js",
     "migrate": "node dist/db/migrate.js",
+    "admin": "node dist/moderation/admin.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@fastify/cors": "^11.4.1",
     "@fastify/multipart": "^10.1.8",
     "@fastify/rate-limit": "^11.2.2",
     "better-sqlite3": "^12.11.1",
@@ -29,7 +31,6 @@
     "opendal": "^0.49.13",
     "pg": "^8.23.1",
     "pino": "^10.4.0",
-    "unpdf": "^2.1.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {

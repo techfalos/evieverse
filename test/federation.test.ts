@@ -8,7 +8,15 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR
 const ORIGIN = 'https://a.example/api';
 
 type User = { userId: string; apiKey: string };
-type Item = { contentId: string; version: number; origin?: { server: string; contentId: string; version: number }; tags: string[]; likes: number; createdAt: string };
+type Item = {
+  contentId: string;
+  version: number;
+  origin?: { server: string; contentId: string; version: number };
+  preview: { kind: string; text?: string; url?: string };
+  tags: string[];
+  likes: number;
+  createdAt: string;
+};
 type Feed = { days: { tags: Record<string, Item[]> }[] };
 
 for (const target of TARGETS) {
@@ -31,8 +39,8 @@ for (const target of TARGETS) {
       a.clock.now += ms;
       b.clock.now = a.clock.now;
     };
-    const store = (user: User, content: string, extra: Record<string, unknown> = {}) =>
-      a.app.inject({ method: 'POST', url: '/store', payload: { ...user, content, tags: hashtags(content), ...extra } });
+    const store = (user: User, text: string, extra: Record<string, unknown> = {}) =>
+      a.app.inject({ method: 'POST', url: '/store', payload: { ...user, type: 'text', text, tags: hashtags(text), ...extra } });
     const items = async (ctx: TestContext, tag: string) => {
       const res = await ctx.app.inject({ method: 'GET', url: `/feed?tags=${tag}` });
       expect(res.statusCode, res.body).toBe(200);
@@ -115,7 +123,7 @@ for (const target of TARGETS) {
       const stale = await send(1);
       expect(stale.statusCode).toBe(409);
       expect(stale.json().error).toBe('version 2 of this content is already federated');
-      const local = await b.app.inject({ method: 'POST', url: '/store', payload: { ...bAlice, contentId: copy, content: 'edited here #sports', tags: ['sports'] } });
+      const local = await b.app.inject({ method: 'POST', url: '/store', payload: { ...bAlice, contentId: copy, type: 'text', text: 'edited here #sports', tags: ['sports'] } });
       expect(local.statusCode).toBe(409);
       expect(local.json().error).toBe('federated content is updated on its origin server, which federates the new version');
 
@@ -132,19 +140,47 @@ for (const target of TARGETS) {
       expect((await items(a, 'sports')).map((i) => i.contentId)).toEqual([v1.contentId]);
     });
 
-    it('links media previews to the bytes on the origin, from a multipart upload', async () => {
+    it('links images to the bytes on the origin, with their caption, from a multipart upload', async () => {
       const alice = await a.register('alice');
       const bAlice = await b.register('alice');
       const servers = JSON.stringify([{ serverAddress: bUrl, serverUser: bAlice.userId, serverKey: bAlice.apiKey }]);
-      const mp = multipart({ ...alice, federated_servers: servers, tags: 'image' }, { name: 'pixel.png', type: 'image/png', data: PNG });
+      const mp = multipart({ ...alice, type: 'image', text: 'One pixel', federated_servers: servers, tags: 'image' }, { name: 'pixel.png', type: 'image/png', data: PNG });
       const res = await a.app.inject({ method: 'POST', url: '/store', payload: mp.payload, headers: mp.headers });
       expect(res.statusCode, res.body).toBe(201);
       const { contentId, preview, federated: results } = res.json();
-      expect(preview).toEqual({ kind: 'media', url: `${ORIGIN}/content/${contentId}/raw?version=1` });
+      expect(preview).toEqual({ kind: 'image', url: `${ORIGIN}/content/${contentId}/raw?version=1`, text: 'One pixel' });
       expect(results).toMatchObject([{ ok: true, status: 201 }]);
       const [item] = await items(b, 'image');
       expect(item).toMatchObject({ contentId: results[0].contentId, mimeType: 'image/png', preview });
       expect(bytesOnB(results[0].contentId, 1)).toBe(false);
+    });
+
+    it('federates links, and reads records from servers older than post types', async () => {
+      const alice = await a.register('alice');
+      const bAlice = await b.register('alice');
+      const servers = [{ serverAddress: bUrl, serverUser: 'alice', serverKey: bAlice.apiKey }];
+      const res = await a.app.inject({ method: 'POST', url: '/store', payload: { ...alice, type: 'link', url: 'https://news.example/a', tags: ['news'], federated_servers: servers } });
+      expect(res.json().federated).toMatchObject([{ ok: true, status: 201 }]);
+      expect(await items(b, 'news')).toMatchObject([{ mimeType: 'text/uri-list', preview: { kind: 'link', url: 'https://news.example/a' } }]);
+
+      const entry = (contentId: string, mimeType: string, preview: object) => ({
+        contentId,
+        version: 1,
+        mimeType,
+        preview,
+        tags: ['old'],
+        createdAt: new Date(b.clock.now).toISOString(),
+      });
+      const send = (e: object) => federated({ username: 'alice', apiKey: bAlice.apiKey, origin: ORIGIN, entry: e });
+      const bytes = (id: string) => `${ORIGIN}/content/${id}/raw?version=1`;
+      const sent = {
+        '00000000-0000-4000-8000-000000000001': ['image/png', { kind: 'media', url: 'https://elsewhere.example/x' }, { kind: 'image' }],
+        '00000000-0000-4000-8000-000000000002': ['application/pdf', { kind: 'media' }, { kind: 'link' }],
+        '00000000-0000-4000-8000-000000000003': ['text/html', { kind: 'text', text: 'A page' }, { kind: 'link' }],
+      } as const;
+      for (const [id, [mimeType, preview]] of Object.entries(sent)) expect((await send(entry(id, mimeType, preview))).statusCode).toBe(201);
+      const got = Object.fromEntries((await items(b, 'old')).map((i) => [i.origin!.contentId, i.preview]));
+      expect(got).toEqual(Object.fromEntries(Object.entries(sent).map(([id, [, , read]]) => [id, { ...read, url: bytes(id) }])));
     });
 
     it('reports each server that refuses the record or cannot be reached, and stores the content anyway', async () => {
@@ -169,7 +205,7 @@ for (const target of TARGETS) {
       expect(await items(b, 'news')).toHaveLength(1);
     });
 
-    it('refuses to federate without an absolute PUBLIC_BASE_URL, to servers not allowed, or with a malformed list, storing nothing', async () => {
+    it('refuses to federate without an absolute PUBLIC_BASE_URL, or with a malformed list, storing nothing', async () => {
       const alice = await a.register('alice');
       const bAlice = await b.register('alice');
       const servers = [{ serverAddress: bUrl, serverUser: 'alice', serverKey: bAlice.apiKey }];
@@ -182,15 +218,12 @@ for (const target of TARGETS) {
       a.config.publicBaseUrl = '';
       expect(await refused(servers)).toBe("federation needs PUBLIC_BASE_URL set to this server's absolute URL, which other servers link back to");
       a.config.publicBaseUrl = ORIGIN;
-      a.config.federation.allowedServers = ['https://b.example'];
-      expect(await refused(servers)).toBe(`this server doesn't federate to ${bUrl}`);
       for (const bad of ['{not json', [{ serverAddress: 'ftp://b.example', serverUser: 'alice', serverKey: 'k' }], [], { serverAddress: bUrl }]) {
         expect(await refused(bad)).toBe('Invalid request');
       }
       expect(await a.db.selectFrom('content').select('id').execute()).toEqual([]);
       expect(await items(b, 'news')).toEqual([]);
 
-      a.config.federation.allowedServers = [bUrl];
       expect((await store(alice, 'hello #news', { federated_servers: servers })).json().federated).toMatchObject([{ ok: true }]);
     });
 
@@ -251,6 +284,9 @@ for (const target of TARGETS) {
       expect((await send({ entry: { ...entry, tags: ['!!!'] } })).json().error).toBe('the entry has no usable hashtags');
       expect((await send({ origin: 'javascript:alert(1)' })).statusCode).toBe(400);
       expect((await send({ entry: { ...entry, contentId: 'c-1' } })).statusCode).toBe(400);
+      for (const preview of [{ kind: 'link', url: 'javascript:alert(1)' }, { kind: 'image', text: 'x'.repeat(10_001) }, { kind: 'file' }]) {
+        expect((await send({ entry: { ...entry, preview } })).statusCode).toBe(400);
+      }
       expect((await send({ apiKey: 'nope' })).statusCode).toBe(401);
       expect((await federated({ username: 'bob', apiKey: noUrl.apiKey, origin: ORIGIN, entry })).statusCode).toBe(400);
 

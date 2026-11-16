@@ -69,21 +69,20 @@
         <form id="post-form">
           <div class="seg">
             <label><input type="radio" name="kind" value="text" checked> Text</label>
-            <label><input type="radio" name="kind" value="file"> File upload</label>
-          </div>
-          <div id="text-fields">
-            <textarea id="content" rows="8" spellcheck="false"></textarea>
-            <label>Content type
-              <select id="content-type">
-                <option>text/plain</option>
-                <option>text/html</option>
-                <option>text/markdown</option>
-                <option>application/json</option>
-              </select>
-            </label>
+            <label><input type="radio" name="kind" value="image"> Image</label>
+            <label><input type="radio" name="kind" value="video"> Video</label>
+            <label><input type="radio" name="kind" value="audio"> Audio</label>
+            <label><input type="radio" name="kind" value="link"> Link</label>
           </div>
           <div id="file-fields" hidden>
             <input type="file" id="file">
+          </div>
+          <div id="url-fields" hidden>
+            <input type="url" id="url" placeholder="https://…" spellcheck="false">
+            <p class="hint">A PDF, a web page or any other file is posted as a link to it.</p>
+          </div>
+          <div id="text-fields">
+            <textarea id="content" rows="8" spellcheck="false"></textarea>
           </div>
           <label>Hashtags <span class="muted">(required unless <code>TAGGING_MODE</code> is <code>server</code>)</span>
             <input id="post-tags" placeholder="news, ai" autocomplete="off" spellcheck="false">

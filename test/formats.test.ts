@@ -53,23 +53,45 @@ describe('summary text', () => {
     expect(decodeSummary(ID, withAi, '')).toEqual(summary());
   });
 
-  it('stores no text for a media preview and builds its URL when read', () => {
-    const s = summary({ mimeType: 'image/png', preview: { kind: 'media', url: 'https://old.example/ignored' } });
+  it("stores an image's, video's or audio's caption but not its URL, which is built when read", () => {
+    const s = summary({ mimeType: 'image/png', preview: { kind: 'image', url: 'https://old.example/ignored', text: 'Sunset over the bay' } });
     const text = encodeSummary(s);
     expect(text).not.toContain('ignored');
-    expect(decodeSummary(ID, text, 'https://api.example.com').preview).toEqual({
-      kind: 'media',
-      url: `https://api.example.com/content/${ID}/raw?version=3`,
-    });
+    const url = `https://api.example.com/content/${ID}/raw?version=3`;
+    expect(decodeSummary(ID, text, 'https://api.example.com').preview).toEqual({ kind: 'image', url, text: 'Sunset over the bay' });
+    for (const [mimeType, kind] of [['video/mp4', 'video'], ['audio/mpeg', 'audio']] as const) {
+      const media = summary({ mimeType, preview: { kind, url: 'https://old.example/ignored' } });
+      expect(decodeSummary(ID, encodeSummary(media), 'https://api.example.com').preview).toEqual({ kind, url });
+    }
   });
 
-  it('round-trips the origin of federated content, whose media links point at the origin server', () => {
+  it("round-trips a link's URL", () => {
+    const s = summary({ mimeType: 'text/uri-list', preview: { kind: 'link', url: 'https://news.example/a?b=c#d' } });
+    expect(decodeSummary(ID, encodeSummary(s), 'https://api.example.com')).toEqual(s);
+  });
+
+  it('reads summaries written before post types: files of a post type as that type, plain text as text, any other file as a link to its bytes', () => {
+    const before = (mimeType: string, kind: string, text = '') =>
+      `3 ${NOW - 1234} ${NOW} 0\n7c9e6679-7425-40de-944b-e07fc1f90ae7\n${mimeType}\nnews\n${kind}\n\n\n\u001e\n${text}`;
+    const url = `https://api.example.com/content/${ID}/raw?version=3`;
+    const read = (mimeType: string, kind: string, text?: string) => decodeSummary(ID, before(mimeType, kind, text), 'https://api.example.com').preview;
+    expect(read('image/png', 'media')).toEqual({ kind: 'image', url });
+    expect(read('video/mp4', 'media')).toEqual({ kind: 'video', url });
+    expect(read('audio/mpeg', 'media')).toEqual({ kind: 'audio', url });
+    expect(read('text/plain', 'text', 'hello')).toEqual({ kind: 'text', text: 'hello' });
+    expect(read('text/markdown', 'text', '# hello')).toEqual({ kind: 'text', text: '# hello' });
+    expect(read('application/pdf', 'text', 'Annual report')).toEqual({ kind: 'link', url });
+    expect(read('text/html', 'text', 'A page')).toEqual({ kind: 'link', url });
+    expect(read('application/zip', 'media')).toEqual({ kind: 'link', url });
+  });
+
+  it('round-trips the origin of federated content, whose files link to the origin server', () => {
     const origin = { server: 'https://a.example/api', contentId: '5c06badf-f69d-4900-8cab-256a1b626b10', version: 7 };
     const s = summary({ origin });
     expect(decodeSummary(ID, encodeSummary(s), '')).toEqual(s);
-    const media = summary({ mimeType: 'image/png', preview: { kind: 'media', url: 'https://old.example/ignored' }, origin });
+    const media = summary({ mimeType: 'image/png', preview: { kind: 'image', url: 'https://old.example/ignored' }, origin });
     expect(decodeSummary(ID, encodeSummary(media), 'https://b.example').preview).toEqual({
-      kind: 'media',
+      kind: 'image',
       url: `https://a.example/api/content/${origin.contentId}/raw?version=7`,
     });
   });

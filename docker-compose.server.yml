@@ -1,0 +1,66 @@
+# Just the API server, for building a frontend against: the app built from this repo, on Postgres and
+# Valkey, with no seed data and no testbed page. Content and summaries are on a local volume, so
+# /content/:id/raw streams bytes from the server itself rather than redirecting to an object store.
+#
+#   docker compose -f docker-compose.server.yml up -d --build
+#   curl http://localhost:3000/health
+#
+# To start over: docker compose -f docker-compose.server.yml down -v
+name: theuniverse-server
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: theuniverse
+      POSTGRES_PASSWORD: theuniverse
+      POSTGRES_DB: theuniverse
+    ports: ['${SERVER_POSTGRES_PORT:-25432}:5432']
+    volumes: [postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U theuniverse']
+      interval: 2s
+      retries: 30
+
+  # volatile-lru only evicts keys with a TTL (hot summaries, superseded index keys), never the live index.
+  redis:
+    image: valkey/valkey:8
+    command: ['valkey-server', '--maxmemory', '512mb', '--maxmemory-policy', 'volatile-lru', '--save', '60', '1']
+    ports: ['${SERVER_REDIS_PORT:-26379}:6379']
+    volumes: [redis:/data]
+    healthcheck:
+      test: ['CMD', 'valkey-cli', 'ping']
+      interval: 2s
+      retries: 30
+
+  app:
+    build: .
+    image: theuniverse-server-app
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports: ['${SERVER_PORT:-3000}:3000']
+    environment:
+      DB_DIALECT: postgres
+      DATABASE_URL: postgres://theuniverse:theuniverse@postgres:5432/theuniverse
+      REDIS_URL: redis://redis:6379
+      CONTENT_SCHEME: fs
+      CONTENT_OPTIONS: '{"root":"/app/data/content"}'
+      PUBLIC_BASE_URL: http://localhost:${SERVER_PORT:-3000}
+      # Set to the frontend's origins, e.g. http://localhost:5173, to allow only those.
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # Docker Desktop gives every request from the host the same source IP, so the per-IP limit on
+      # /register is effectively global.
+      REGISTER_RATE_LIMIT_PER_HOUR: '1000'
+      TAGGING_MODE: ${TAGGING_MODE:-user}
+      TAGGING_SERVER_TAGS: ${TAGGING_SERVER_TAGS:-}
+    volumes: [content:/app/data]
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 3s
+      retries: 30
+
+volumes:
+  postgres:
+  redis:
+  content:

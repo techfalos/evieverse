@@ -10,12 +10,20 @@ import type { Origin, Preview, Publisher, Summary } from '../storage/index.js';
  *   tail:<tag>:<windowStart>  list: new-post entries and tombstones, pushed by any node
  *   tails:<tag>               sorted set of the tag's tail windows
  *
- * Index entries hold only what the planner needs (id, version, likes, creation time, size, and the
- * AI-generated flag feeds filter on); the record bodies are summaries shared by every tag
- * (SummaryStore) plus publisher credits (PublisherStore). Each day index holds the best posts of that
+ * Index entries hold what the planner needs (id, version, likes, creation time, and the AI-generated
+ * flag feeds filter on) and the rendered record's size; the record bodies are summaries shared by every
+ * tag (SummaryStore) plus publisher credits (PublisherStore). Each day index holds the best posts of that
  * UTC day (by likes, then creation time) up to a quota that shrinks with age, so popular content
  * stays for the whole retention period.
+ *
+ * Each publisher's own posts have an index of the same layout, named authorIndex(userId), which
+ * following feeds read. Its day indexes hold the day's newest posts instead, up to a fixed quota.
  */
+
+/** A publisher's own index, named so no hashtag (letters, digits and _) can be the same. */
+export const authorIndex = (userId: string) => `@${userId}`;
+/** The publisher whose own index this is; null for a hashtag. */
+export const indexAuthor = (name: string) => (name.startsWith('@') ? name.slice(1) : null);
 
 /** A feed record, in exactly the shape the feed returns. */
 export interface FeedRecord {
@@ -49,7 +57,7 @@ export const toFeedRecord = (s: Summary, likes: number, publisher: Publisher): F
   updatedAt: iso(s.updatedAt),
 });
 
-/** Bytes of the record as the feed returns it; the planner budgets tokens from this. */
+/** Bytes of the record as the feed returns it. */
 export const recordSize = (s: Summary, publisher: Publisher, likes = 0) => Buffer.byteLength(JSON.stringify(toFeedRecord(s, likes, publisher)));
 
 /** One post in a day index or a tail. */
@@ -167,7 +175,7 @@ export interface DayRef {
   /** UTC day number (ms / DAY). */
   day: number;
   gen: string;
-  /** The token quota the index was trimmed to; when the day's quota shrinks with age, it's re-trimmed. */
+  /** The most posts the index was trimmed to; when the day's quota shrinks with age, it's re-trimmed. */
   quota: number;
   count: number;
 }
@@ -200,7 +208,7 @@ export const newGenId = (day: number, createdAt: number) => `${pad(day, 5)}-${pa
 export const DAY = 24 * 60 * 60 * 1000;
 export const utcDay = (ms: number) => Math.floor(ms / DAY);
 
-/** Token quota of a UTC day at `ageDays` old: halves each day from `max`, never below `min`. */
+/** Post quota of a UTC day at `ageDays` old: halves each day from `max`, never below `min`. */
 export const dayQuota = (ageDays: number, max: number, min: number) => Math.max(min, Math.floor(max / 2 ** Math.max(0, ageDays)));
 
 /** Order of day indexes and of each feed slice: UTC day desc, likes desc, newest, id. */
@@ -212,6 +220,17 @@ export function compareRecords(
     utcDay(b.createdAt) - utcDay(a.createdAt) ||
     b.likes - a.likes ||
     b.createdAt - a.createdAt ||
+    (a.contentId < b.contentId ? -1 : a.contentId > b.contentId ? 1 : 0)
+  );
+}
+
+/**
+ * Order of a publisher's day indexes and of the following feed: newest first, then id. In the whole
+ * seconds day indexes keep, so an entry keeps its place when the compactor moves it out of a tail.
+ */
+export function compareRecent(a: { createdAt: number; contentId: string }, b: { createdAt: number; contentId: string }): number {
+  return (
+    Math.floor(b.createdAt / 1000) - Math.floor(a.createdAt / 1000) ||
     (a.contentId < b.contentId ? -1 : a.contentId > b.contentId ? 1 : 0)
   );
 }

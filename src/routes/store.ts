@@ -9,9 +9,9 @@ import type { AppDeps } from '../deps.js';
 import { checkFederation, federate, FederatedServers, serverBase, type FederatedServer } from '../federation.js';
 import { badRequest, conflict, forbidden, HttpError, notFound } from '../http/errors.js';
 import { resolveMimeType } from '../http/mime.js';
-import { documentText, isDocument } from '../media.js';
+import { postRules, type RemovedTag } from '../moderation/policy.js';
+import { LINK_MIME, LinkUrl, MAX_TEXT_CHARS, mediaType, mediaUrl, POST_TYPES, previewOf, TEXT_MIME, type MediaType } from '../posts.js';
 import { spoolToTemp, type ContentMeta, type Preview, type Publisher, type SpooledFile, type Summary } from '../storage/index.js';
-import { mediaUrl } from '../storage/summaryStore.js';
 import { parseTagList, sameTags } from '../tags.js';
 import { MAX_VERSION, toFeedRecord } from '../tagfeed/layout.js';
 import { firstWords, versionWriter } from '../versions.js';
@@ -20,13 +20,19 @@ const Fields = z.object({
   userId: z.string().optional(),
   apiKey: z.string().optional(),
   contentId: z.string().uuid().optional(),
+  /** What the post is: an image, video or audio file, with an optional caption in `text`; text; or a link. */
+  type: z.enum(POST_TYPES),
+  /** A text post's text, or an image's, video's or audio's caption. */
+  text: z.string().max(MAX_TEXT_CHARS).optional(),
+  /** A link post's URL. */
+  url: LinkUrl.optional(),
   /** The publisher's hashtags: a list, or one string of them separated by commas or spaces. Used only where TAGGING_MODE lets publishers choose. */
   tags: z.union([z.array(z.string().max(100)).max(50), z.string().max(5000)]).optional(),
   /** The publisher's declaration that the content was created with AI. Omitted: false, or on an update the current version's. */
   aiGenerated: z.union([z.boolean(), z.stringbool()]).optional(),
   contentType: z.string().max(255).optional(),
   filename: z.string().max(512).optional(),
-  /** Inline content for JSON requests (or a plain multipart text field). */
+  /** An image's, video's or audio's file, inline for JSON requests (or a plain multipart text field). */
   content: z.string().optional(),
   contentEncoding: z.enum(['utf8', 'base64']).default('utf8'),
   /** Servers to send the version's feed record to once it's stored: { serverAddress, serverUser, serverKey }, or a list. */
@@ -40,6 +46,16 @@ interface Upload {
   filename: string | null;
   mimeType: string;
 }
+
+/** A post, its bytes spooled to a temp file: an image's, video's or audio's file, a text post's text, or a link's URL. */
+type Post = { file: SpooledFile; filename: string | null; mimeType: string } & (
+  | { type: MediaType; text?: string }
+  | { type: 'text'; text: string }
+  | { type: 'link'; url: string }
+);
+
+/** A text post's text or a caption; a link has none. */
+const textOf = (post: Post) => (post.type === 'link' ? undefined : post.text);
 
 export function storeRoutes(app: FastifyInstance, deps: AppDeps) {
   const { db, config, content, now = Date.now } = deps;
@@ -70,15 +86,39 @@ export function storeRoutes(app: FastifyInstance, deps: AppDeps) {
     return { fields, upload };
   }
 
-  async function inlineUpload(fields: Fields): Promise<Upload | undefined> {
-    if (fields.content === undefined) return undefined;
-    const bytes = Buffer.from(fields.content, fields.contentEncoding === 'base64' ? 'base64' : 'utf8');
-    if (bytes.length === 0) throw badRequest('content is empty');
-    return {
-      file: await spoolToTemp(Readable.from([bytes]), tmp, maxBytes),
-      filename: fields.filename ?? null,
-      mimeType: fields.contentType ?? (fields.contentEncoding === 'base64' ? 'application/octet-stream' : 'text/plain'),
-    };
+  const spool = (bytes: Buffer) => spoolToTemp(Readable.from([bytes]), tmp, maxBytes);
+
+  /**
+   * The post the request describes. An image, video or audio post needs a file of that type, from the
+   * upload or inline in `content`. A text post's text and a link's URL are stored as its bytes.
+   */
+  async function readPost(fields: Fields, upload: Upload | undefined): Promise<Post> {
+    const { type } = fields;
+    const text = fields.text?.trim() || undefined;
+    if (type !== 'link' && fields.url !== undefined) throw badRequest('url is only for link posts');
+    if (type === 'text' || type === 'link') {
+      if (upload || fields.content !== undefined) throw badRequest(`a ${type} post has no file`);
+      if (type === 'text') {
+        if (!text) throw badRequest('text is required');
+        return { type, text, file: await spool(Buffer.from(text)), filename: null, mimeType: TEXT_MIME };
+      }
+      if (fields.text !== undefined) throw badRequest('a link post is just its url');
+      if (fields.url === undefined) throw badRequest('url is required');
+      return { type, url: fields.url, file: await spool(Buffer.from(fields.url)), filename: null, mimeType: LINK_MIME };
+    }
+
+    if (!upload && fields.content === undefined) throw badRequest(`content is required: the ${type} file`);
+    const filename = upload?.filename ?? fields.filename ?? null;
+    const sent = upload?.mimeType ?? (fields.contentEncoding === 'base64' ? 'application/octet-stream' : 'text/plain');
+    const mimeType = resolveMimeType(fields.contentType ?? sent, filename);
+    if (mediaType(mimeType) !== type) throw badRequest(`${type} posts take ${type}/* files, got ${mimeType}; post other files as a link`);
+    let file = upload?.file;
+    if (!file) {
+      const bytes = Buffer.from(fields.content!, fields.contentEncoding === 'base64' ? 'base64' : 'utf8');
+      if (bytes.length === 0) throw badRequest('content is empty');
+      file = await spool(bytes);
+    }
+    return { type, ...(text ? { text } : {}), file, filename, mimeType };
   }
 
   /**
@@ -94,8 +134,9 @@ export function storeRoutes(app: FastifyInstance, deps: AppDeps) {
   }
 
   /**
-   * Creates or updates content. A post soon after the user's previous one is answered with challenges
-   * first, more of them the longer the run, before anything is stored. An update then reserves its own
+   * Creates or updates content. Moderation first refuses the post or drops some of its hashtags (see
+   * postRules). A post soon after the user's previous one is then answered with challenges, more of
+   * them the longer the run, before anything is stored. An update then reserves its own
    * version number, and the version is written as versionWriter describes. With federated_servers, the
    * version's feed record is then sent to each of them. An unchanged upload sends the current version's,
    * so storing content again federates it to more servers, or retries.
@@ -103,6 +144,7 @@ export function storeRoutes(app: FastifyInstance, deps: AppDeps) {
   app.post('/store', { bodyLimit: 32 * 1024 * 1024 }, async (req, reply) => {
     let raw: Record<string, unknown>;
     let upload: Upload | undefined;
+    let post: Post | undefined;
     if (req.isMultipart()) {
       ({ fields: raw, upload } = await readMultipart(req));
     } else {
@@ -112,13 +154,13 @@ export function storeRoutes(app: FastifyInstance, deps: AppDeps) {
     try {
       const fields = Fields.parse(raw);
       if (upload && fields.content !== undefined) throw badRequest('Send content either as a file or as a field, not both');
-      upload ??= await inlineUpload(fields);
-      if (!upload) throw badRequest('content is required');
+      post = await readPost(fields, upload);
+      const { file, filename, mimeType } = post;
 
       const user = await authenticate(db, req, fields);
       if (!user.publisherUrl) throw badRequest(`set your publisherUrl first (PATCH /users/${user.id})`);
       const servers = fields.federated_servers;
-      if (servers) checkFederation(config, servers);
+      if (servers) checkFederation(config);
       const own = publisherTags(fields);
       const tags = config.tagging.mode === 'server' ? config.tagging.serverTags : own;
 
@@ -132,25 +174,35 @@ export function storeRoutes(app: FastifyInstance, deps: AppDeps) {
       if (existing && Math.max(existing.version, existing.reserved_version) >= MAX_VERSION) {
         throw conflict(`content can have at most ${MAX_VERSION} versions`);
       }
-
-      const filename = upload.filename ?? fields.filename ?? null;
-      const mimeType = resolveMimeType(fields.contentType ?? upload.mimeType, filename);
       if (existing && mimeType !== existing.mime_type) {
         throw badRequest(`a new version must have the same content type as the original (${existing.mime_type}), got ${mimeType}`);
       }
+
       const aiGenerated = fields.aiGenerated ?? (existing?.ai_generated === 1);
       const publisher: Publisher = { userId: user.id, username: user.username, publisherUrl: user.publisherUrl };
-      if (existing && existing.sha256 === upload.file.sha256 && aiGenerated === (existing.ai_generated === 1)) {
-        // The publisher's hashtags make a new version only if they aren't the current version's.
-        const current = servers || own.length ? await currentSummary(existing) : undefined;
-        if (!current || !own.length || sameTags(own, current.tags)) {
-          const federated = current && servers && (await federateTo(servers, current, publisher));
-          return reply.send({ contentId: existing.id, version: existing.version, unchanged: true, ...(federated && { federated }) });
+      const unchanged = async (row: ContentRow, current: Summary | undefined, removedTags: RemovedTag[] = []) => {
+        const federated = current && servers && (await federateTo(servers, current, publisher));
+        return reply.send({ contentId: row.id, version: row.version, unchanged: true, ...(removedTags.length > 0 && { removedTags }), ...(federated && { federated }) });
+      };
+      let current: Summary | undefined;
+      if (existing && existing.sha256 === file.sha256 && aiGenerated === (existing.ai_generated === 1)) {
+        const meta = await currentMeta(existing);
+        // A caption is part of the post, like its bytes: a new one alone makes a new version.
+        if ((meta.text ?? '') === (textOf(post) ?? '')) {
+          current = summaryOf(existing, meta);
+          // The publisher's hashtags make a new version only if they aren't the current version's.
+          if (!own.length || sameTags(own, current.tags)) return unchanged(existing, current);
         }
       }
 
+      // Before any challenge, so nobody solves one for a post that isn't published.
+      const rules = await postRules(db, { userId: user.id, tags, contentId: existing?.id });
+      for (const text of [post.type === 'link' ? post.url : post.text, filename]) if (text) rules.scanner?.scan(text);
+      const moderated = rules.apply();
+      if (existing && current && sameTags(moderated.tags, current.tags)) return unchanged(existing, current, moderated.removedTags);
+
       const release = await challenges.admitPost(user.id, fields);
-      const s = await store(publisher, upload, filename, mimeType, aiGenerated, existing, tags).catch(async (err) => {
+      const s = await store(publisher, post, aiGenerated, existing, moderated.tags).catch(async (err) => {
         await release();
         throw err;
       });
@@ -159,33 +211,38 @@ export function storeRoutes(app: FastifyInstance, deps: AppDeps) {
         contentId: s.contentId,
         version: s.version,
         tags: s.tags,
+        ...(moderated.removedTags.length > 0 && { removedTags: moderated.removedTags }),
         preview: s.preview,
         aiGenerated: s.aiGenerated,
         ...(federated && { federated }),
       });
     } finally {
       await upload?.file.cleanup();
+      await post?.file.cleanup();
     }
   });
 
   async function store(
     publisher: Publisher,
-    upload: Upload,
-    filename: string | null,
-    mimeType: string,
+    post: Post,
     aiGenerated: boolean,
     existing: { id: string; version: number; created_at: number } | undefined,
     tags: string[],
   ): Promise<Summary> {
     const contentId = existing?.id ?? randomUUID();
-    const text = isDocument(mimeType) ? await previewText(upload, mimeType) : undefined;
     const version = existing ? await versions.reserveVersion(contentId, existing.version) : 1;
 
     const ts = now();
     const createdAt = existing?.created_at ?? ts;
-    const preview: Preview = text?.trim()
-      ? { kind: 'text', text: firstWords(text, config.feed.previewWords) }
-      : { kind: 'media', url: mediaUrl(config.publicBaseUrl, contentId, version) };
+    const { file, filename, mimeType } = post;
+    const cut = (text: string) => firstWords(text, config.feed.previewWords, config.feed.previewChars);
+    const preview: Preview =
+      post.type === 'text'
+        ? { kind: 'text', text: cut(post.text) }
+        : post.type === 'link'
+          ? { kind: 'link', url: post.url }
+          : { kind: post.type, url: mediaUrl(config.publicBaseUrl, contentId, version), ...(post.text ? { text: cut(post.text) } : {}) };
+    const text = textOf(post);
 
     const summary: Summary = { contentId, version, createdAt, updatedAt: ts, userId: publisher.userId, mimeType, aiGenerated, tags, preview };
     const meta: ContentMeta = {
@@ -193,10 +250,11 @@ export function storeRoutes(app: FastifyInstance, deps: AppDeps) {
       version,
       mimeType,
       filename,
-      size: upload.file.size,
-      sha256: upload.file.sha256,
+      size: file.size,
+      sha256: file.sha256,
       aiGenerated,
       preview,
+      ...(text !== undefined && { text }),
       tags,
       createdAt: new Date(ts).toISOString(),
     };
@@ -205,38 +263,30 @@ export function storeRoutes(app: FastifyInstance, deps: AppDeps) {
       existing,
       summary,
       meta,
-      columns: { filename, size: upload.file.size, sha256: upload.file.sha256 },
-      putBytes: () => content.putFile(contentId, version, upload.file.path, mimeType),
+      columns: { filename, size: file.size, sha256: file.sha256 },
+      putBytes: () => content.putFile(contentId, version, file.path, mimeType),
     });
     return summary;
   }
 
-  /** The text a document's preview is cut from. One that can't be read gets a media preview. */
-  async function previewText(upload: Upload, mimeType: string): Promise<string | undefined> {
-    try {
-      return await documentText(upload.file.path, mimeType, upload.file.size);
-    } catch (err) {
-      app.log.warn({ err }, 'could not extract the text for a preview');
-      return undefined;
-    }
+  async function currentMeta(row: ContentRow): Promise<ContentMeta> {
+    const meta = await content.getMeta(row.id, row.version);
+    if (!meta) throw new HttpError(500, `the meta file of version ${row.version} is missing`);
+    return meta;
   }
 
   /** The current version's summary, rebuilt from the database and its meta file, which outlives the summary store's retention. */
-  async function currentSummary(row: ContentRow): Promise<Summary> {
-    const meta = await content.getMeta(row.id, row.version);
-    if (!meta) throw new HttpError(500, `the meta file of version ${row.version} is missing`);
-    return {
-      contentId: row.id,
-      version: row.version,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      userId: row.user_id,
-      mimeType: row.mime_type,
-      aiGenerated: row.ai_generated === 1,
-      tags: meta.tags,
-      preview: meta.preview.kind === 'media' ? { kind: 'media', url: mediaUrl(config.publicBaseUrl, row.id, row.version) } : meta.preview,
-    };
-  }
+  const summaryOf = (row: ContentRow, meta: ContentMeta): Summary => ({
+    contentId: row.id,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    userId: row.user_id,
+    mimeType: row.mime_type,
+    aiGenerated: row.ai_generated === 1,
+    tags: meta.tags,
+    preview: previewOf(meta, config.publicBaseUrl),
+  });
 
   /** Likes stay on each server, so the record goes out with none. */
   const federateTo = (servers: FederatedServer[], summary: Summary, publisher: Publisher) =>

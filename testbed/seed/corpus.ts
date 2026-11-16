@@ -414,8 +414,7 @@ export const topicOf = (beat: string) => BEATS[beat]!.topic;
 
 export interface Article {
   title: string;
-  /** The first sentence: the title plus a detail. It opens the first paragraph. */
-  lead: string;
+  /** The first opens with the title plus a detail. */
   paragraphs: string[];
 }
 
@@ -432,19 +431,10 @@ export function article(r: Rng, beat: string, tags: string[]): Article {
   const extra = sample(r, ANY_TOPIC, between(r, 1, 2));
   const paragraphs = [`${lead} ${lines[0]} ${lines[1]}`, lines.slice(2, 4).join(' '), [...lines.slice(4), ...extra].join(' ')];
   if (r() < 0.5) paragraphs.push(tags.map((t) => `#${t}`).join(' '));
-  return { title, lead, paragraphs };
+  return { title, paragraphs };
 }
 
 export const articleText = (a: Article) => a.paragraphs.join('\n\n');
-
-/** The title as a heading, so the first paragraph drops the lead sentence that repeats it. */
-export function articleHtml(a: Article): string {
-  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const paragraphs = [a.paragraphs[0]!.slice(a.lead.length).trim(), ...a.paragraphs.slice(1)];
-  return `<!doctype html><html><head><title>${esc(a.title)}</title></head><body><article><h1>${esc(a.title)}</h1>${paragraphs
-    .map((p) => `<p>${esc(p)}</p>`)
-    .join('')}</article></body></html>`;
-}
 
 export function updateNote(r: Rng): string {
   return pick(r, [

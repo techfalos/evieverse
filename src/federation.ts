@@ -59,17 +59,11 @@ export type FederationResult =
   | { serverAddress: string; ok: true; status: number; contentId: string; version: number }
   | { serverAddress: string; ok: false; status?: number; error: string; challenge?: Challenge };
 
-/**
- * Other servers link back to federated content, so this server's base URL must be absolute; and
- * operators can limit which servers it sends to (the addresses come from users).
- */
-export function checkFederation(config: Config, servers: FederatedServer[]) {
+/** Other servers link back to federated content, so this server's base URL must be absolute. */
+export function checkFederation(config: Config) {
   if (!/^https?:\/\//.test(config.publicBaseUrl)) {
     throw badRequest("federation needs PUBLIC_BASE_URL set to this server's absolute URL, which other servers link back to");
   }
-  const allowed = config.federation.allowedServers;
-  const refused = allowed.length ? servers.filter((s) => !allowed.includes(s.serverAddress)) : [];
-  if (refused.length) throw badRequest(`this server doesn't federate to ${refused.map((s) => s.serverAddress).join(', ')}`);
 }
 
 /**

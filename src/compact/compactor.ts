@@ -1,7 +1,19 @@
 import type { Config } from '../config.js';
 import type { Db } from '../db/index.js';
-import { PublisherStore, type ContentStore, type HotStore, type Summary, type SummaryRef, type SummaryStore } from '../storage/index.js';
+import { syncFollowing } from '../follows.js';
+import { previewOf } from '../posts.js';
 import {
+  FollowStore,
+  PublisherStore,
+  type ContentStore,
+  type HotStore,
+  type Summary,
+  type SummaryRef,
+  type SummaryStore,
+} from '../storage/index.js';
+import {
+  authorIndex,
+  compareRecent,
   compareRecords,
   COMPACTOR_STATE_KEY,
   DAY,
@@ -10,6 +22,7 @@ import {
   decodeTail,
   EMPTY_HEAD,
   headKey,
+  indexAuthor,
   isTombstone,
   manifestKey,
   newGenId,
@@ -73,7 +86,8 @@ const newWork = (): TagWork => ({ days: new Set(), readmit: new Map(), all: fals
  * (re-admitting liked content that was trimmed earlier), versions replaced by newer ones, and content
  * set for deletion; days whose quota shrank are re-trimmed. It then writes a new manifest and swaps
  * the head, erases replaced versions (bytes and summaries), deletes content set for deletion that no
- * day index holds any more, and deletes summaries past retention.
+ * day index holds any more, and deletes summaries past retention. Each publisher's own index is
+ * compacted the same way, alongside the hashtags of their content, but keeps each day's newest posts.
  * Readers are never blocked: they keep reading the keys they started with, which only expire after
  * `genRetentionMinutes`. Runs never overlap, even across processes: each holds a lease in the
  * database (see CompactorLease), since a run that published its heads after a newer run would bring
@@ -82,10 +96,12 @@ const newWork = (): TagWork => ({ days: new Set(), readmit: new Map(), all: fals
 export class Compactor {
   private readonly now: () => number;
   private readonly publishers: PublisherStore;
+  private readonly follows: FollowStore;
 
   constructor(private readonly deps: CompactorDeps) {
     this.now = deps.now ?? Date.now;
     this.publishers = new PublisherStore(deps.hot, { cacheMs: 0 }, this.now);
+    this.follows = new FollowStore(deps.hot);
   }
 
   private get cfg() {
@@ -151,6 +167,7 @@ export class Compactor {
     if (opts.rebuild) await this.markEverything(workFor, runStart, lease);
     await this.markNewLikes(workFor, state.through, runStart);
     await this.syncChangedPublishers(state.through, runStart, lease);
+    await this.syncChangedFollowing(state.through, runStart, lease);
     const superseded = await this.markSuperseded(workFor);
     const pending = await this.markPendingAppends(workFor, runStart);
     const deletions = await this.markDeletions(workFor, cutoff);
@@ -216,11 +233,14 @@ export class Compactor {
     return { tags, deleted };
   }
 
-  /** `--rebuild`: every content within retention is re-admitted under its tags, and every publisher credit rewritten. */
+  /**
+   * `--rebuild`: every content within retention is re-admitted under its tags and its publisher's own
+   * index, and every publisher credit and every user's follows rewritten.
+   */
   private async markEverything(workFor: (tag: string) => TagWork, runStart: number, lease: CompactorLease) {
     const rows = await this.deps.db
       .selectFrom('content')
-      .select(['id', 'version', 'created_at'])
+      .select(['id', 'user_id', 'version', 'created_at'])
       .where('delete_requested_at', 'is', null)
       .where('created_at', '>', runStart - this.retentionDays * DAY)
       .execute();
@@ -228,6 +248,7 @@ export class Compactor {
     const users = await this.deps.db.selectFrom('users').select(['id', 'username', 'publisher_url']).execute();
     await lease.check();
     await mapLimit(users, 16, (u) => this.publishers.put({ userId: u.id, username: u.username, publisherUrl: u.publisher_url }));
+    await this.syncFollowing(users.map((u) => u.id), lease);
   }
 
   /** (tag, day) of content liked in [since, until); the liked content is re-admitted if it was trimmed. */
@@ -235,7 +256,7 @@ export class Compactor {
     const rows = await this.deps.db
       .selectFrom('likes')
       .innerJoin('content', 'content.id', 'likes.content_id')
-      .select(['content.id', 'content.version', 'content.created_at'])
+      .select(['content.id', 'content.user_id', 'content.version', 'content.created_at'])
       .distinct()
       .where('likes.created_at', '>=', since)
       .where('likes.created_at', '<', until)
@@ -261,6 +282,27 @@ export class Compactor {
   }
 
   /**
+   * Rewrites the follows in Redis of users who followed or unfollowed someone in [since, until). The
+   * request already wrote them; this repairs a write that failed, or two that raced.
+   */
+  private async syncChangedFollowing(since: number, until: number, lease: CompactorLease) {
+    const users = await this.deps.db
+      .selectFrom('users')
+      .select('id')
+      .where('following_changed_at', '>=', since)
+      .where('following_changed_at', '<', until)
+      .execute();
+    await this.syncFollowing(users.map((u) => u.id), lease);
+  }
+
+  private async syncFollowing(userIds: string[], lease: CompactorLease) {
+    for (let i = 0; i < userIds.length; i += BATCH) {
+      await lease.check();
+      await syncFollowing(this.deps.db, this.follows, userIds.slice(i, i + BATCH));
+    }
+  }
+
+  /**
    * Versions replaced by a newer one, each marked under its own hashtags so its entries are dropped
    * (a tag the newer version still carries gets the current entry instead). That needs only the
    * current version's meta, so an entry of the old version merged from a tail later is dropped too.
@@ -270,7 +312,7 @@ export class Compactor {
     const rows = await this.deps.db
       .selectFrom('superseded_versions')
       .innerJoin('content', 'content.id', 'superseded_versions.content_id')
-      .select(['content.id', 'superseded_versions.version', 'content.created_at'])
+      .select(['content.id', 'content.user_id', 'superseded_versions.version', 'content.created_at'])
       .execute();
     const tagsOf = await this.markContent(workFor, rows);
     return rows.map((r) => ({ id: r.id, version: r.version, createdAt: r.created_at, tags: tagsOf.get(r) ?? [] }));
@@ -286,7 +328,7 @@ export class Compactor {
     const rows = await this.deps.db
       .selectFrom('pending_appends')
       .innerJoin('content', 'content.id', 'pending_appends.content_id')
-      .select(['content.id', 'content.version', 'content.created_at', 'pending_appends.version as pending'])
+      .select(['content.id', 'content.user_id', 'content.version', 'content.created_at', 'pending_appends.version as pending'])
       .where('pending_appends.created_at', '<', until - this.cfg.compact.graceSeconds * 1000)
       .execute();
     const live = rows.filter((r) => r.pending === r.version && r.created_at > until - this.retentionDays * DAY);
@@ -304,7 +346,7 @@ export class Compactor {
   private async markDeletions(workFor: (tag: string) => TagWork, cutoff: number) {
     const rows = await this.deps.db
       .selectFrom('content')
-      .select(['id', 'version', 'reserved_version', 'created_at'])
+      .select(['id', 'user_id', 'version', 'reserved_version', 'created_at'])
       .where('delete_requested_at', 'is not', null)
       .where('updated_at', '<', cutoff - this.cfg.compact.graceSeconds * 1000)
       .execute();
@@ -319,9 +361,10 @@ export class Compactor {
 
   /**
    * Marks the content's UTC day under each of its hashtags, read from the version's metadata file (and
-   * every older version's still stored, if asked); returns every hashtag marked for each row.
+   * every older version's still stored, if asked), and under its publisher's own index; returns every
+   * index marked for each row.
    */
-  private async markContent<R extends { id: string; version: number; created_at: number }>(
+  private async markContent<R extends { id: string; user_id: string; version: number; created_at: number }>(
     workFor: (tag: string) => TagWork,
     rows: R[],
     opts: { readmit?: boolean; allVersions?: boolean } = {},
@@ -329,21 +372,24 @@ export class Compactor {
     const tagsOf = new Map<R, string[]>();
     await mapLimit(rows, 16, async (r) => {
       const day = utcDay(r.created_at);
-      const versions = opts.allVersions ? Array.from({ length: r.version }, (_, i) => r.version - i) : [r.version];
       const marked = new Set<string>();
+      const mark = (tag: string, readmit: boolean) => {
+        marked.add(tag);
+        const w = workFor(tag);
+        w.days.add(day);
+        if (readmit) {
+          let ids = w.readmit.get(day);
+          if (!ids) w.readmit.set(day, (ids = new Set()));
+          ids.add(r.id);
+        }
+      };
+      const versions = opts.allVersions ? Array.from({ length: r.version }, (_, i) => r.version - i) : [r.version];
       for (const version of versions) {
         const meta = await this.deps.content.getMeta(r.id, version);
-        for (const tag of meta?.tags ?? []) {
-          marked.add(tag);
-          const w = workFor(tag);
-          w.days.add(day);
-          if (opts.readmit && version === r.version) {
-            let ids = w.readmit.get(day);
-            if (!ids) w.readmit.set(day, (ids = new Set()));
-            ids.add(r.id);
-          }
-        }
+        for (const tag of meta?.tags ?? []) mark(tag, !!opts.readmit && version === r.version);
       }
+      // Every version is the same publisher's, whatever its meta file holds.
+      mark(authorIndex(r.user_id), !!opts.readmit);
       tagsOf.set(r, [...marked]);
     });
     return tagsOf;
@@ -370,7 +416,9 @@ export class Compactor {
 
     const today = utcDay(runStart);
     const minDay = today - this.retentionDays + 1;
-    const quotaOf = (day: number) => dayQuota(today - day, this.cfg.feed.tagDayMaxTokens, this.cfg.feed.tagDayMinTokens);
+    const author = indexAuthor(tag) !== null;
+    const quotaOf = (day: number) =>
+      author ? this.cfg.feed.authorDayMaxPosts : dayQuota(today - day, this.cfg.feed.tagDayMaxPosts, this.cfg.feed.tagDayMinPosts);
 
     // Entries not yet in a day index, by UTC day, in push order so later entries (newer versions) win.
     const incoming = new Map<number, IndexEntry[]>();
@@ -455,7 +503,7 @@ export class Compactor {
     const { entries, stale } = await this.refresh([...latest.values()], opts.runStart);
     const missing = [...(readmit ?? [])].filter((id) => !latest.has(id));
     entries.push(...(await this.readmitted(tag, [...stale, ...missing], ctx)));
-    const kept = this.trim(entries, opts.quota);
+    const kept = this.trim(entries, opts.quota, indexAuthor(tag) !== null);
     if (!kept.length) return null;
     const gen = newGenId(day, opts.runStart);
     await this.deps.hot.set(dayKey(tag, gen), packDay(kept));
@@ -466,10 +514,12 @@ export class Compactor {
    * Current-version entries rebuilt from the database and each content's metadata file, for content the
    * day doesn't hold as the database does: liked content an earlier compaction trimmed, versions whose
    * tail append never happened, and entries of another version. Content set for deletion, or whose
-   * current version no longer carries the tag, gets none. Their summaries are restored if a tier lacks
-   * them. They then compete for the day's quota like any entry.
+   * current version no longer carries the tag (or, in a publisher's own index, isn't theirs), gets
+   * none. Their summaries are restored if a tier lacks them. They then compete for the day's quota
+   * like any entry.
    */
   private async readmitted(tag: string, ids: string[], ctx: RunContext): Promise<IndexEntry[]> {
+    const author = indexAuthor(tag);
     const out: IndexEntry[] = [];
     for (let i = 0; i < ids.length; i += BATCH) {
       const rows = await this.deps.db
@@ -491,7 +541,7 @@ export class Compactor {
         .execute();
       await mapLimit(rows, 16, async (row) => {
         const meta = await this.deps.content.getMeta(row.id, row.version);
-        if (!meta || !meta.tags.includes(tag)) return;
+        if (!meta || (author !== null ? row.user_id !== author : !meta.tags.includes(tag))) return;
         const summary: Summary = {
           contentId: row.id,
           version: row.version,
@@ -501,7 +551,7 @@ export class Compactor {
           mimeType: meta.mimeType,
           aiGenerated: row.ai_generated === 1,
           tags: meta.tags,
-          preview: meta.preview,
+          preview: previewOf(meta, this.cfg.publicBaseUrl),
           ...(meta.origin && { origin: meta.origin }),
         };
         const key = `${row.id}:${row.version}`;
@@ -553,22 +603,15 @@ export class Compactor {
   }
 
   /**
-   * Sorts one day's entries by likes, then recency, and keeps the best within the day's token quota.
-   * Creation times are cut to the whole seconds an index stores first, so the index order is the order
-   * readers see.
+   * Sorts one day's entries by likes, then recency (a publisher's own index: by recency alone), and
+   * keeps the first `quota` of them. Creation times are cut to the whole seconds an index stores
+   * first, so the index order is the order readers see.
    */
-  private trim(entries: IndexEntry[], quota: number): IndexEntry[] {
-    const sorted = entries.map((e) => ({ ...e, createdAt: Math.floor(e.createdAt / 1000) * 1000 })).sort(compareRecords);
-    const cpt = this.cfg.feed.charsPerToken;
-    let tokens = 0;
-    const kept: IndexEntry[] = [];
-    for (const e of sorted) {
-      const n = Math.ceil((e.size + 1) / cpt);
-      if (tokens + n > quota) break;
-      tokens += n;
-      kept.push(e);
-    }
-    return kept;
+  private trim(entries: IndexEntry[], quota: number, newestFirst: boolean): IndexEntry[] {
+    return entries
+      .map((e) => ({ ...e, createdAt: Math.floor(e.createdAt / 1000) * 1000 }))
+      .sort(newestFirst ? compareRecent : compareRecords)
+      .slice(0, quota);
   }
 
   /** Forgets merged tail windows whose lists have expired. */

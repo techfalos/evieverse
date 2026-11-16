@@ -33,6 +33,11 @@ export const TARGETS: TestTarget[] = [
 ];
 
 export const TABLES = [
+  'removed_tags',
+  'blocked_words',
+  'tag_mutes',
+  'tag_moderators',
+  'follows',
   'likes',
   'pending_appends',
   'superseded_versions',
@@ -81,6 +86,8 @@ export async function createTestContext(
     tagging?: Partial<Config['tagging']>;
     registerRateLimitPerHour?: number;
     postRateLimitPerMinute?: number;
+    maxFollowing?: number;
+    corsOrigins?: string | string[];
   } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'theuniverse-test-'));
@@ -96,11 +103,13 @@ export async function createTestContext(
         summaries: { scheme: 'fs', options: { root: join(dir, 'summaries') } },
         tmpPath: join(dir, 'tmp'),
       },
-      feed: { maxTokens: 100000, headCacheMs: 0, ...opts.feed },
+      feed: { headCacheMs: 0, ...opts.feed },
       challenge: { register: false, postWindowSeconds: 0, powBits: 8, ...opts.challenge },
       ...(opts.tagging && { tagging: opts.tagging }),
       ...(opts.registerRateLimitPerHour && { registerRateLimitPerHour: opts.registerRateLimitPerHour }),
       postRateLimitPerMinute: opts.postRateLimitPerMinute ?? 0,
+      ...(opts.maxFollowing && { maxFollowing: opts.maxFollowing }),
+      ...(opts.corsOrigins && { corsOrigins: opts.corsOrigins }),
     },
     {},
   );

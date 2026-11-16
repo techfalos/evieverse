@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { Db } from '../src/db/index.js';
 import { DAY, HOUR } from '../src/feed/plan.js';
+import { authorIndex } from '../src/tagfeed/layout.js';
 import { createTestContext, hashtags, multipart, tailLines, TARGETS, type TestContext } from './helpers.js';
 
 // 1x1 transparent PNG
@@ -20,8 +21,8 @@ type Item = {
 type Feed = {
   truncated: boolean;
   nextCursor: string | null;
-  estimatedTokens: number;
-  days: { extended: boolean; tags: Record<string, Item[]> }[];
+  count: number;
+  days: { extended: boolean; count: number; tags: Record<string, Item[]> }[];
 };
 
 for (const target of TARGETS) {
@@ -35,8 +36,13 @@ for (const target of TARGETS) {
       await ctx.close();
     });
 
-    const storeText = (user: User, content: string, extra: Record<string, unknown> = {}) =>
-      ctx.app.inject({ method: 'POST', url: '/store', payload: { ...user, content, tags: hashtags(content), ...extra } });
+    const storeText = (user: User, text: string, extra: Record<string, unknown> = {}) =>
+      ctx.app.inject({ method: 'POST', url: '/store', payload: { ...user, type: 'text', text, tags: hashtags(text), ...extra } });
+    const storePost = (user: User, payload: Record<string, unknown>) => ctx.app.inject({ method: 'POST', url: '/store', payload: { ...user, ...payload } });
+    const upload = (fields: Record<string, string>, file: { name: string; type: string; data: Buffer }) => {
+      const mp = multipart(fields, file);
+      return ctx.app.inject({ method: 'POST', url: '/store', payload: mp.payload, headers: mp.headers });
+    };
     const getContent = async (contentId: string) => (await ctx.app.inject({ method: 'GET', url: `/content/${contentId}` })).json();
     const feed = async (query: string): Promise<Feed> => {
       const res = await ctx.app.inject({ method: 'GET', url: `/feed?${query}` });
@@ -53,7 +59,14 @@ for (const target of TARGETS) {
       expect(dup.statusCode).toBe(409);
       expect(dup.json().error).toBe('username is already taken');
       const profile = await ctx.app.inject({ method: 'GET', url: `/users/${a.json().userId}` });
-      expect(profile.json()).toEqual({ userId: a.json().userId, username: 'alice', publisherUrl: 'https://a.example', createdAt: expect.any(String) });
+      expect(profile.json()).toEqual({
+        userId: a.json().userId,
+        username: 'alice',
+        publisherUrl: 'https://a.example',
+        createdAt: expect.any(String),
+        admin: false,
+        moderates: [],
+      });
 
       const bob = await ctx.register('bob');
       const rename = (username: string) => ctx.app.inject({ method: 'PATCH', url: `/users/${bob.userId}`, payload: { ...bob, username } });
@@ -122,7 +135,7 @@ for (const target of TARGETS) {
       expect(tagList.tags.map((t: { tag: string }) => t.tag)).toEqual(['mumbai']);
     });
 
-    it('previews text as its first 100 words and media as a link', async () => {
+    it('previews text as its first 100 words, at most 1,000 characters of them, and an image as a link to it', async () => {
       await ctx.close();
       ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com' });
       const alice = await ctx.register('alice');
@@ -130,15 +143,126 @@ for (const target of TARGETS) {
       const text = (await storeText(alice, `${words} #long`)).json();
       expect(text.preview.text.split(' ')).toHaveLength(101);
       expect(text.preview.text).toMatch(/^w0 w1 .* w99 …$/);
+      expect((await getContent(text.contentId)).text).toBe(`${words} #long`);
+      // Text without spaces reads as one word.
+      expect((await storeText(alice, `${'字'.repeat(5000)} #long`)).json().preview.text).toBe(`${'字'.repeat(1000)} …`);
+      expect((await storeText(alice, `a${'😀'.repeat(600)} #long`)).json().preview.text).toBe(`a${'😀'.repeat(499)} …`);
 
-      const mp = multipart({ ...alice, tags: 'pixel' }, { name: 'pixel.png', type: 'image/png', data: PNG });
-      const img = await ctx.app.inject({ method: 'POST', url: '/store', payload: mp.payload, headers: mp.headers });
+      const img = await upload({ ...alice, type: 'image', tags: 'pixel' }, { name: 'pixel.png', type: 'image/png', data: PNG });
       expect(img.statusCode).toBe(201);
       const { contentId } = img.json();
-      expect(img.json().preview).toEqual({ kind: 'media', url: `https://api.example.com/content/${contentId}/raw?version=1` });
+      expect(img.json().preview).toEqual({ kind: 'image', url: `https://api.example.com/content/${contentId}/raw?version=1` });
       const raw = await ctx.app.inject({ method: 'GET', url: `/content/${contentId}/raw?version=1` });
       expect(Buffer.from(raw.rawPayload).equals(PNG)).toBe(true);
       expect(raw.headers['content-type']).toBe('image/png');
+    });
+
+    it('stores images, videos and audio with an optional caption, text, and links', async () => {
+      await ctx.close();
+      ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com' });
+      const alice = await ctx.register('alice');
+      const raw = (id: string) => `https://api.example.com/content/${id}/raw?version=1`;
+
+      const caption = `Sunset over the bay. ${Array.from({ length: 120 }, (_, i) => `c${i}`).join(' ')}`;
+      const img = await upload({ ...alice, type: 'image', text: `  ${caption}\n`, tags: 'pics' }, { name: 'sunset.png', type: 'image/png', data: PNG });
+      expect(img.statusCode, img.body).toBe(201);
+      const image = img.json().contentId;
+      expect(img.json().preview).toEqual({ kind: 'image', url: raw(image), text: expect.stringMatching(/^Sunset over the bay\. c0 .* c95 …$/) });
+      expect(await getContent(image)).toMatchObject({ mimeType: 'image/png', preview: img.json().preview, text: caption });
+
+      // Inline in JSON, and typed by the file's extension.
+      const vid = await storePost(alice, { type: 'video', content: PNG.toString('base64'), contentEncoding: 'base64', contentType: 'video/mp4', tags: ['clips'] });
+      expect(vid.statusCode, vid.body).toBe(201);
+      expect(vid.json().preview).toEqual({ kind: 'video', url: raw(vid.json().contentId) });
+      expect(await getContent(vid.json().contentId)).not.toHaveProperty('text');
+      const aud = await upload({ ...alice, type: 'audio', text: 'Live at the Roundhouse', tags: 'music' }, { name: 'set.mp3', type: 'application/octet-stream', data: PNG });
+      expect(aud.statusCode, aud.body).toBe(201);
+      expect(aud.json().preview).toEqual({ kind: 'audio', url: raw(aud.json().contentId), text: 'Live at the Roundhouse' });
+      expect((await getContent(aud.json().contentId)).mimeType).toBe('audio/mpeg');
+
+      const lnk = await storePost(alice, { type: 'link', url: 'https://News.example/story?id=1', tags: ['news'] });
+      expect(lnk.statusCode, lnk.body).toBe(201);
+      const link = lnk.json().contentId;
+      expect(lnk.json().preview).toEqual({ kind: 'link', url: 'https://news.example/story?id=1' });
+      expect(await getContent(link)).toMatchObject({ mimeType: 'text/uri-list', preview: lnk.json().preview });
+      expect((await ctx.app.inject({ method: 'GET', url: `/content/${link}/raw` })).body).toBe('https://news.example/story?id=1');
+
+      const record = async (tag: string) => (await feed(`tags=${tag}`)).days[0]!.tags[tag]![0]!;
+      for (const compacted of [false, true]) {
+        if (compacted) await ctx.compact();
+        expect((await record('pics')).preview).toEqual(img.json().preview);
+        expect((await record('music')).preview).toEqual(aud.json().preview);
+        expect(await record('news')).toMatchObject({ mimeType: 'text/uri-list', preview: lnk.json().preview });
+      }
+    });
+
+    it("refuses a post that isn't what its type says", async () => {
+      const alice = await ctx.register('alice');
+      const refused = async (res: Awaited<ReturnType<typeof storePost>>, error?: string) => {
+        expect(res.statusCode, res.body).toBe(400);
+        if (error) expect(res.json().error).toBe(error);
+      };
+      const tags = ['news'];
+      await refused(await storePost(alice, { text: 'no type', tags }));
+      await refused(await storePost(alice, { type: 'file', text: 'no such type', tags }));
+      await refused(await storePost(alice, { type: 'text', tags }), 'text is required');
+      await refused(await storePost(alice, { type: 'text', text: ' \n ', tags }), 'text is required');
+      await refused(await storePost(alice, { type: 'text', text: 'x'.repeat(40_001), tags }));
+      await refused(await storePost(alice, { type: 'text', text: 'hi', url: 'https://a.example', tags }), 'url is only for link posts');
+      await refused(await storePost(alice, { type: 'text', content: 'hi', tags }), 'a text post has no file');
+      await refused(await storePost(alice, { type: 'link', tags }), 'url is required');
+      await refused(await storePost(alice, { type: 'link', url: 'https://a.example', text: 'about it', tags }), 'a link post is just its url');
+      for (const url of ['ftp://a.example/f', 'javascript:alert(1)', 'not a url', `https://a.example/${'x'.repeat(2048)}`]) {
+        await refused(await storePost(alice, { type: 'link', url, tags }));
+      }
+      await refused(await storePost(alice, { type: 'image', text: 'a caption', tags }), 'content is required: the image file');
+      await refused(await upload({ ...alice, type: 'image', tags: 'news' }, { name: 'report.pdf', type: 'application/pdf', data: PNG }), 'image posts take image/* files, got application/pdf; post other files as a link');
+      await refused(await upload({ ...alice, type: 'video', tags: 'news' }, { name: 'pixel.png', type: 'image/png', data: PNG }), 'video posts take video/* files, got image/png; post other files as a link');
+      await refused(await upload({ ...alice, type: 'link', url: 'https://a.example', tags: 'news' }, { name: 'pixel.png', type: 'image/png', data: PNG }), 'a link post has no file');
+      expect(await ctx.db.selectFrom('content').selectAll().execute()).toEqual([]);
+    });
+
+    it('makes a new version when only the caption changes', async () => {
+      const alice = await ctx.register('alice');
+      const send = (fields: Record<string, string>) => upload({ ...alice, type: 'image', tags: 'pics', ...fields }, { name: 'pixel.png', type: 'image/png', data: PNG });
+      const { contentId } = (await send({ text: 'first caption' })).json();
+      expect((await send({ contentId, text: 'first caption' })).json()).toMatchObject({ version: 1, unchanged: true });
+      ctx.clock.now += 1000;
+      expect((await send({ contentId, text: 'second caption' })).json()).toMatchObject({ version: 2, preview: { kind: 'image', text: 'second caption' } });
+      ctx.clock.now += 1000;
+      const bare = (await send({ contentId })).json();
+      expect(bare).toMatchObject({ version: 3 });
+      expect(bare.preview).not.toHaveProperty('text');
+      expect(await getContent(contentId)).not.toHaveProperty('text');
+      expect((await feed('tags=pics')).days[0]!.tags.pics!.map((i) => [i.version, i.preview.text])).toEqual([[3, undefined]]);
+    });
+
+    it('reads content stored before post types: files as their type, plain text as text, other files as links to their bytes', async () => {
+      const alice = await ctx.register('alice');
+      const img = (await upload({ ...alice, type: 'image', tags: 'pics' }, { name: 'pixel.png', type: 'image/png', data: PNG })).json().contentId;
+      const doc = (await storeText(alice, 'Annual report #news')).json().contentId;
+      const old = (await storeText(alice, 'Plain words #news')).json().contentId;
+      const legacy = async (contentId: string, mimeType: string, preview: object) => {
+        const meta = (await ctx.content.getMeta(contentId, 1))!;
+        await ctx.content.putMeta({ ...meta, mimeType, preview: preview as never, text: undefined });
+        await ctx.db.updateTable('content').set({ mime_type: mimeType }).where('id', '=', contentId).execute();
+        await ctx.summaries.remove([{ contentId, version: 1, createdAt: ctx.clock.now }]);
+      };
+      await legacy(img, 'image/png', { kind: 'media', url: '/elsewhere' });
+      await legacy(doc, 'application/pdf', { kind: 'text', text: 'Annual report' });
+      await legacy(old, 'text/plain', { kind: 'text', text: 'Plain words' });
+
+      const expected = {
+        [img]: { kind: 'image', url: `/content/${img}/raw?version=1` },
+        [doc]: { kind: 'link', url: `/content/${doc}/raw?version=1` },
+        [old]: { kind: 'text', text: 'Plain words' },
+      };
+      for (const [id, preview] of Object.entries(expected)) expect((await getContent(id)).preview).toEqual(preview);
+      // Their summaries rebuilt from the meta files.
+      await ctx.hot.clear();
+      await ctx.compactor.runOnce({ rebuild: true });
+      const records = (await feed('tags=news,pics')).days.flatMap((d) => Object.values(d.tags).flat());
+      expect(Object.fromEntries(records.map((r) => [r.contentId, r.preview]))).toEqual(expected);
     });
 
     it("gives every post the server's hashtags in server mode, whatever the publisher sends", async () => {
@@ -152,9 +276,8 @@ for (const target of TARGETS) {
       expect(await tailLines(ctx.hot, 'sports')).toEqual([]);
       expect(ids((await feed('tags=austin')).days[0], 'austin')).toEqual([res.json().contentId]);
 
-      const mp = multipart({ ...alice }, { name: 'pixel.png', type: 'image/png', data: PNG });
-      const img = await ctx.app.inject({ method: 'POST', url: '/store', payload: mp.payload, headers: mp.headers });
-      expect(img.json()).toMatchObject({ tags: ['local', 'austin'], preview: { kind: 'media' } });
+      const img = await upload({ ...alice, type: 'image' }, { name: 'pixel.png', type: 'image/png', data: PNG });
+      expect(img.json()).toMatchObject({ tags: ['local', 'austin'], preview: { kind: 'image' } });
     });
 
     it("normalises the publisher's hashtags, from a list or one form field, and refuses ones it can't use", async () => {
@@ -165,8 +288,7 @@ for (const target of TARGETS) {
       expect(await tailLines(ctx.hot, 'news')).toEqual([]);
 
       // A form field holds them in one string.
-      const mp = multipart({ ...alice, tags: 'art, #Pixel' }, { name: 'pixel.png', type: 'image/png', data: PNG });
-      const img = await ctx.app.inject({ method: 'POST', url: '/store', payload: mp.payload, headers: mp.headers });
+      const img = await upload({ ...alice, type: 'image', tags: 'art, #Pixel' }, { name: 'pixel.png', type: 'image/png', data: PNG });
       expect(img.json().tags).toEqual(['art', 'pixel']);
 
       const unusable = await storeText(alice, 'Tokyo #news', { tags: ['news', '日本'] });
@@ -187,8 +309,7 @@ for (const target of TARGETS) {
         expect(res.json().error).toBe('tags is required: on this server, publishers choose the hashtags of their posts');
       };
       for (const tags of [undefined, [], '', ' , ']) refused(await storeText(alice, 'Flooding in Mumbai #news', { tags }));
-      const mp = multipart({ ...alice }, { name: 'pixel.png', type: 'image/png', data: PNG });
-      refused(await ctx.app.inject({ method: 'POST', url: '/store', payload: mp.payload, headers: mp.headers }));
+      refused(await upload({ ...alice, type: 'image' }, { name: 'pixel.png', type: 'image/png', data: PNG }));
       expect(await ctx.db.selectFrom('content').selectAll().execute()).toEqual([]);
 
       const v1 = await storeText(alice, 'Flooding in Mumbai', { tags: 'news mumbai' });
@@ -239,14 +360,17 @@ for (const target of TARGETS) {
       expect(await ctx.db.selectFrom('superseded_versions').selectAll().execute()).toEqual([]);
     });
 
-    it('requires new versions to keep the original content type', async () => {
+    it('requires new versions to keep the original type and content type', async () => {
       const alice = await ctx.register('alice');
       const { contentId } = (await storeText(alice, 'words #news')).json();
-      const mp = multipart({ ...alice, contentId, tags: 'news' }, { name: 'pixel.png', type: 'image/png', data: PNG });
-      const res = await ctx.app.inject({ method: 'POST', url: '/store', payload: mp.payload, headers: mp.headers });
+      const res = await upload({ ...alice, type: 'image', contentId, tags: 'news' }, { name: 'pixel.png', type: 'image/png', data: PNG });
       expect(res.statusCode).toBe(400);
       expect(res.json().error).toBe('a new version must have the same content type as the original (text/plain), got image/png');
-      expect((await storeText(alice, 'html now #news', { contentId, contentType: 'text/html' })).statusCode).toBe(400);
+      const link = await storePost(alice, { type: 'link', contentId, url: 'https://news.example/a', tags: ['news'] });
+      expect(link.json().error).toBe('a new version must have the same content type as the original (text/plain), got text/uri-list');
+      const img = (await upload({ ...alice, type: 'image', tags: 'pics' }, { name: 'pixel.png', type: 'image/png', data: PNG })).json().contentId;
+      const jpeg = await upload({ ...alice, type: 'image', contentId: img, tags: 'pics' }, { name: 'pixel.jpg', type: 'image/jpeg', data: PNG });
+      expect(jpeg.json().error).toBe('a new version must have the same content type as the original (image/png), got image/jpeg');
       expect((await getContent(contentId)).version).toBe(1);
       expect((await storeText(alice, 'more words #news', { contentId })).json()).toMatchObject({ version: 2 });
     });
@@ -271,7 +395,7 @@ for (const target of TARGETS) {
       for (const item of news) expect(item.publisher).toEqual(publisher);
       expect((await feed('tags=mumbai')).days[0]!.tags.mumbai![0]!.publisher).toEqual(publisher);
       ctx.clock.now += 1000;
-      expect((await ctx.compact()).tags).toEqual(['news']);
+      expect((await ctx.compact()).tags).toEqual([authorIndex(alice.userId), 'news']);
       expect((await feed('tags=mumbai')).days[0]!.tags.mumbai![0]!.publisher).toEqual(publisher);
     });
 
@@ -303,7 +427,7 @@ for (const target of TARGETS) {
       expect((await like(carol, second)).json()).toMatchObject({ likes: 2 });
       expect((await like(alice, second)).json()).toMatchObject({ likes: 3 });
       ctx.clock.now += 1000;
-      expect((await ctx.compact()).tags).toEqual(['news']);
+      expect((await ctx.compact()).tags).toEqual([authorIndex(alice.userId), 'news']);
       day = (await feed('tags=news')).days[0]!;
       expect(day.tags.news!.map((i) => [i.contentId, i.likes])).toEqual([[second, 3], [first, 2]]);
     });
@@ -390,7 +514,17 @@ for (const target of TARGETS) {
       expect(ids(dayBefore, 'news')).toEqual([yesterday]);
       expect(extended!.extended).toBe(true);
       expect(ids(extended, 'sports')).toEqual([threeWeeks]);
-      expect(result.estimatedTokens).toBeGreaterThan(0);
+      expect(result.count).toBe(5);
+      expect(result.days.map((d) => d.count)).toEqual([3, 1, 1]);
+
+      // Half of a two-post page goes to the newest day.
+      const limited = await feed('tags=news,sports&hours=48&limit=2');
+      expect(limited.days.flatMap((d) => ids(d, 'news'))).toEqual([popular, yesterday]);
+      expect(limited.count).toBe(2);
+      expect(limited.nextCursor).toBeTruthy();
+      for (const limit of [0, 101]) {
+        expect((await ctx.app.inject({ method: 'GET', url: `/feed?tags=news&limit=${limit}` })).statusCode).toBe(400);
+      }
 
       expect((await ctx.app.inject({ method: 'GET', url: '/feed?tags=news&hours=500' })).statusCode).toBe(400);
       expect((await ctx.app.inject({ method: 'GET', url: '/feed?tags=news/india' })).statusCode).toBe(400);
@@ -418,7 +552,7 @@ for (const target of TARGETS) {
       const full = await feed('tags=news&mode=balanced');
       expect(order(full)).toEqual([p0, p2, p4, p1, p3, p5]);
 
-      ctx.config.feed.maxTokens = Math.floor((full.estimatedTokens / 6) * 2.5);
+      ctx.config.feed.pageSize = 2;
       const paged: string[] = [];
       let cursor: string | null = null;
       for (let page = 0; page < 10; page++) {
@@ -442,8 +576,7 @@ for (const target of TARGETS) {
       ctx.clock.now += 1000;
       const ai = (await storeText(alice, 'written with a model #news #tech', { aiGenerated: true })).json();
       expect(ai).toMatchObject({ version: 1, aiGenerated: true });
-      const mp = multipart({ ...alice, aiGenerated: 'true', tags: 'pixel' }, { name: 'pixel.png', type: 'image/png', data: PNG });
-      const img = await ctx.app.inject({ method: 'POST', url: '/store', payload: mp.payload, headers: mp.headers });
+      const img = await upload({ ...alice, type: 'image', aiGenerated: 'true', tags: 'pixel' }, { name: 'pixel.png', type: 'image/png', data: PNG });
       expect(img.json()).toMatchObject({ aiGenerated: true });
       expect((await storeText(alice, 'unsure #news', { aiGenerated: 'maybe' })).statusCode).toBe(400);
       expect((await ctx.app.inject({ method: 'GET', url: '/feed?tags=news&aiGenerated=maybe' })).statusCode).toBe(400);
@@ -487,7 +620,7 @@ for (const target of TARGETS) {
       expect(await newsIds('&aiGenerated=false')).toEqual([]);
 
       // Cursor pages keep the filter they started with.
-      ctx.config.feed.maxTokens = Math.ceil((await feed('tags=news&aiGenerated=true')).estimatedTokens * 0.6);
+      ctx.config.feed.pageSize = 1;
       const first = await feed('tags=news&aiGenerated=true');
       expect(ids(first.days[0], 'news')).toEqual([ai.contentId]);
       for (const other of ['', '&aiGenerated=false']) {
@@ -496,8 +629,11 @@ for (const target of TARGETS) {
       expect(ids((await feed(`tags=news&aiGenerated=true&cursor=${first.nextCursor}`)).days[0], 'news')).toEqual([human.contentId]);
     });
 
-    it('serves the feed without touching the database', async () => {
+    it('serves feeds, by hashtag and of whom a user follows, without touching the database', async () => {
       const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const follow = await ctx.app.inject({ method: 'PUT', url: `/users/${bob.userId}/following/${alice.userId}`, payload: bob });
+      expect(follow.statusCode, follow.body).toBe(201);
       const a = (await storeText(alice, 'compacted #news')).json().contentId;
       await ctx.compact();
       ctx.clock.now += 1000;
@@ -516,8 +652,10 @@ for (const target of TARGETS) {
           hot: ctx.hot,
           summaries: ctx.summaries,
           publishers: ctx.publishers,
+          follows: ctx.follows,
           appender: ctx.appender,
           feedReader: ctx.feedReader,
+          authorReader: ctx.authorReader,
           now: () => ctx.clock.now,
         },
         { logger: false },
@@ -526,6 +664,9 @@ for (const target of TARGETS) {
         const res = await app.inject({ method: 'GET', url: '/feed?tags=news' });
         expect(res.statusCode, res.body).toBe(200);
         expect(ids(res.json().days[0], 'news')).toEqual([b, a]);
+        const following = await app.inject({ method: 'GET', url: `/feed/following?userId=${bob.userId}` });
+        expect(following.statusCode, following.body).toBe(200);
+        expect(following.json().records.map((r: Item) => r.contentId)).toEqual([b, a]);
       } finally {
         await app.close();
       }

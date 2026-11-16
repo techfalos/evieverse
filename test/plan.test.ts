@@ -15,7 +15,6 @@ function item(tags: string[], ageMs: number, likes = 0, aiGenerated = false): It
     version: 1,
     createdAt: NOW - ageMs,
     likes,
-    length: 399,
     aiGenerated,
     tags,
   };
@@ -27,8 +26,7 @@ const byTag = (items: Item[], tags: string[]) => tags.map((t) => items.filter((i
 const opts = (o: Partial<PlanOptions> = {}): PlanOptions => ({
   hours: 24,
   anchor: NOW,
-  maxTokens: 10_000,
-  charsPerToken: 4,
+  limit: 100,
   maxLookbackDays: 90,
   ...o,
 });
@@ -37,28 +35,28 @@ const plan = (items: Item[], tags: string[], o: Partial<PlanOptions> = {}) => pl
 const ids = (p: FeedPlan) => p.slices.flatMap((s) => s.picks.flatMap((l) => l.map((c) => c.contentId)));
 
 describe('planFeed', () => {
-  it('halves the budget per day: 50% newest, 25% next, oldest window day takes the remainder', () => {
+  it('halves the page per day: 50% newest, 25% next, oldest window day takes the remainder', () => {
     const items = [0, 1, 2].flatMap((day) => Array.from({ length: 200 }, (_, i) => item(['news'], day * DAY + (i + 1) * 60_000)));
     const p = plan(items, ['news'], { hours: 72 });
-    const used = p.slices.map((s) => s.used);
-    expect(used[0]).toBeGreaterThan(4800);
-    expect(used[0]).toBeLessThanOrEqual(5300);
-    expect(used[1]).toBeGreaterThan(2300);
-    expect(used[2]).toBeGreaterThan(2300);
-    for (const s of p.slices) expect(s.used).toBeLessThanOrEqual(s.allocated);
-    expect(p.estimatedTokens).toBeLessThanOrEqual(10_000);
+    expect(p.slices.map((s) => s.used)).toEqual([50, 25, 25]);
+    for (const s of p.slices) expect(s.picks[0]).toHaveLength(s.used);
+    expect(ids(p)).toHaveLength(100);
     expect(p.truncated).toBe(true);
   });
 
-  it('carries unused budget from an empty day to the next older day', () => {
-    const items = [1, 2].flatMap((day) => Array.from({ length: 200 }, (_, i) => item(['news'], day * DAY + (i + 1) * 60_000)));
-    const p = plan(items, ['news'], { hours: 72 });
-    expect(p.slices).toHaveLength(2);
-    expect(p.slices[0]!.used).toBeGreaterThan(7200);
-    expect(p.slices[1]!.used).toBeLessThan(2900);
+  it('rounds day shares to whole posts on the running total, so newer days get the rounding', () => {
+    const items = [0, 1, 2, 3, 4, 5, 6].flatMap((day) => Array.from({ length: 60 }, (_, i) => item(['news'], day * DAY + (i + 1) * 60_000)));
+    expect(plan(items, ['news'], { hours: 168, limit: 50 }).slices.map((s) => s.used)).toEqual([25, 13, 6, 3, 1, 1, 1]);
+    expect(ids(plan(items, ['news'], { hours: 72, limit: 1 }))).toEqual([items[0]!.contentId]);
   });
 
-  it('extends past the window (and past 168h) when the window does not fill the budget', () => {
+  it('carries unused allowance from an empty day to the next older day', () => {
+    const items = [1, 2].flatMap((day) => Array.from({ length: 200 }, (_, i) => item(['news'], day * DAY + (i + 1) * 60_000)));
+    const p = plan(items, ['news'], { hours: 72 });
+    expect(p.slices.map((s) => s.used)).toEqual([75, 25]);
+  });
+
+  it('extends past the window (and past 168h) when the window does not fill the page', () => {
     const old = item(['news'], 21 * DAY);
     const p = plan([old], ['news']);
     expect(ids(p)).toEqual([old.contentId]);
@@ -70,7 +68,7 @@ describe('planFeed', () => {
     expect(ids(plan([item(['news'], 100 * DAY)], ['news']))).toEqual([]);
   });
 
-  it('gives leftover budget back to newer days when older days have nothing', () => {
+  it('gives leftover allowance back to newer days when older days have nothing', () => {
     const items = Array.from({ length: 50 }, (_, i) => item(['news'], (i + 1) * 60_000));
     const p = plan(items, ['news'], { hours: 72 });
     expect(ids(p)).toHaveLength(50);
@@ -82,7 +80,7 @@ describe('planFeed', () => {
       ...Array.from({ length: 100 }, (_, i) => item(['news'], (i + 1) * 60_000)),
       ...Array.from({ length: 100 }, (_, i) => item(['sports'], (i + 1) * 60_000)),
     ];
-    const [news, sports] = plan(items, ['news', 'sports'], { maxTokens: 5000 }).slices[0]!.picks;
+    const [news, sports] = plan(items, ['news', 'sports'], { limit: 50 }).slices[0]!.picks;
     expect(Math.abs(news!.length - sports!.length)).toBeLessThanOrEqual(1);
   });
 
@@ -91,7 +89,7 @@ describe('planFeed', () => {
       ...Array.from({ length: 100 }, (_, i) => item(['news'], (i + 1) * 60_000)),
       ...Array.from({ length: 2 }, (_, i) => item(['sports'], (i + 1) * 60_000)),
     ];
-    const [news, sports] = plan(items, ['news', 'sports'], { maxTokens: 5000 }).slices[0]!.picks;
+    const [news, sports] = plan(items, ['news', 'sports'], { limit: 50 }).slices[0]!.picks;
     expect(sports).toHaveLength(2);
     expect(news!.length).toBeGreaterThan(2);
   });
@@ -116,7 +114,7 @@ describe('planFeed', () => {
     const items = [0, 1, 3].flatMap((day) => Array.from({ length: 20 }, (_, i) => item(['news'], day * DAY + (i + 1) * 60_000, (i * 7) % 5)));
     const sorted = [...items].sort((a, b) => b.createdAt - a.createdAt);
     const fileOrder = [...items].sort((a, b) => Math.floor(b.createdAt / DAY) - Math.floor(a.createdAt / DAY) || b.likes - a.likes || b.createdAt - a.createdAt);
-    const o = { hours: 96, maxTokens: 3000 };
+    const o = { hours: 96, limit: 30 };
     expect(ids(planFeed([fileOrder], opts(o)))).toEqual(ids(planFeed([sorted], opts(o))));
     expect(ids(planFeed([fileOrder], opts(o)))).toEqual(ids(planFeed([[...items].reverse()], opts(o))));
   });
@@ -129,7 +127,7 @@ describe('planFeed', () => {
     const seen: string[] = [];
     let positions: Record<number, number[]> | undefined;
     for (let page = 0; page < 50; page++) {
-      const p = plan(items, tags, { mode, hours: 72, maxTokens: 3000, positions });
+      const p = plan(items, tags, { mode, hours: 72, limit: 30, positions });
       seen.push(...ids(p));
       if (!p.truncated) break;
       positions = p.positions;
@@ -145,7 +143,7 @@ describe('planFeed', () => {
     const picked: Candidate[] = [];
     let positions: Record<number, number[]> | undefined;
     for (let page = 0; page < 20; page++) {
-      const p = plan(items, ['news', 'sports'], { mode, maxTokens: 500, positions });
+      const p = plan(items, ['news', 'sports'], { mode, limit: 5, positions });
       picked.push(...p.slices.flatMap((s) => s.picks.flat()));
       if (!p.truncated) break;
       positions = p.positions;
@@ -166,8 +164,8 @@ describe('planFeed fresh injection', () => {
 
   it('injects new 0-like content into the newest slice of a busy tag', () => {
     const items = busy();
-    expect(zeroLikes(plan(items, ['news'], { maxTokens: 2000 }))).toEqual([]);
-    const p = plan(items, ['news'], { maxTokens: 2000, fresh: fresh(1) });
+    expect(zeroLikes(plan(items, ['news'], { limit: 20 }))).toEqual([]);
+    const p = plan(items, ['news'], { limit: 20, fresh: fresh(1) });
     const picks = p.slices[0]!.picks[0]!;
     expect(picks).toHaveLength(20);
     // The 2nd pick, then every 4th: 2, 6, 10, 14, 18.
@@ -179,9 +177,9 @@ describe('planFeed fresh injection', () => {
 
   it('samples fresh content per session seed, reproducibly', () => {
     const items = busy();
-    const a = zeroLikes(plan(items, ['news'], { maxTokens: 2000, fresh: fresh(1) }));
-    expect(zeroLikes(plan(items, ['news'], { maxTokens: 2000, fresh: fresh(1) }))).toEqual(a);
-    expect(zeroLikes(plan(items, ['news'], { maxTokens: 2000, fresh: fresh(2) }))).not.toEqual(a);
+    const a = zeroLikes(plan(items, ['news'], { limit: 20, fresh: fresh(1) }));
+    expect(zeroLikes(plan(items, ['news'], { limit: 20, fresh: fresh(1) }))).toEqual(a);
+    expect(zeroLikes(plan(items, ['news'], { limit: 20, fresh: fresh(2) }))).not.toEqual(a);
   });
 
   it('keeps plain recency order when nothing liked outranks the new content', () => {
@@ -191,7 +189,7 @@ describe('planFeed fresh injection', () => {
 
   it('leaves older slices ordered strictly by likes', () => {
     const items = [...busy(), ...Array.from({ length: 30 }, (_, i) => item(['news'], DAY + HOUR + i * 60_000, i % 3 === 0 ? 0 : i))];
-    const older = plan(items, ['news'], { hours: 48, maxTokens: 4000, fresh: fresh(1) }).slices[1]!.picks[0]!.map((c) => c.likes);
+    const older = plan(items, ['news'], { hours: 48, limit: 40, fresh: fresh(1) }).slices[1]!.picks[0]!.map((c) => c.likes);
     expect(older).toEqual([...older].sort((a, b) => b - a));
   });
 
@@ -204,7 +202,7 @@ describe('planFeed fresh injection', () => {
     let positions: Record<number, number[]> | undefined;
     let freshPositions: number[] | undefined;
     for (let page = 0; page < 50; page++) {
-      const p = plan(items, tags, { hours: 72, maxTokens: 1500, positions, fresh: fresh(7, freshPositions) });
+      const p = plan(items, tags, { hours: 72, limit: 15, positions, fresh: fresh(7, freshPositions) });
       seen.push(...ids(p));
       if (!p.truncated) break;
       positions = p.positions;
@@ -224,9 +222,9 @@ describe('planFeed balanced mode', () => {
     expect(likes(plan(items, ['news'], { mode: 'balanced' }))).toEqual([9, 6, 3, 8, 5, 2, 7, 4, 1]);
   });
 
-  it('gives each third an equal share when the budget fits only part of the day', () => {
+  it('gives each third an equal share when the page fits only part of the day', () => {
     const items = Array.from({ length: 90 }, (_, i) => item(['news'], (i + 1) * 60_000, i + 1));
-    const picked = likes(plan(items, ['news'], { mode: 'balanced', maxTokens: 3000 }));
+    const picked = likes(plan(items, ['news'], { mode: 'balanced', limit: 30 }));
     expect(picked).toHaveLength(30);
     expect([picked.filter((l) => l > 60).length, picked.filter((l) => l > 30 && l <= 60).length, picked.filter((l) => l <= 30).length]).toEqual([10, 10, 10]);
   });
@@ -246,7 +244,7 @@ describe('planFeed balanced mode', () => {
       ...Array.from({ length: 10 }, (_, i) => item(['news'], (i + 1) * 60_000)),
     ];
     const fresh = { every: 4, maxLikes: 0, pool: 200, seed: 1 };
-    const run = (o: Partial<PlanOptions>) => ids(plan(items, ['news'], { maxTokens: 1200, ...o }));
+    const run = (o: Partial<PlanOptions>) => ids(plan(items, ['news'], { limit: 12, ...o }));
     expect(run({ fresh })).not.toEqual(run({}));
     expect(run({ mode: 'balanced', fresh })).toEqual(run({ mode: 'balanced' }));
   });
@@ -277,7 +275,7 @@ describe('planFeed AI filter', () => {
       let freshPositions: number[] | undefined;
       for (let page = 0; page < 50; page++) {
         const fresh = { every: 4, maxLikes: 0, pool: 200, seed: 3, positions: freshPositions };
-        const p = plan(all, tags, { mode, hours: 72, maxTokens: 1500, aiGenerated, positions, fresh });
+        const p = plan(all, tags, { mode, hours: 72, limit: 15, aiGenerated, positions, fresh });
         seen.push(...ids(p));
         if (!p.truncated) break;
         positions = p.positions;

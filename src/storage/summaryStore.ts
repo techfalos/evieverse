@@ -1,6 +1,7 @@
 import { promisify } from 'node:util';
 import { brotliCompress, brotliDecompressSync, constants } from 'node:zlib';
 import type { Operator } from 'opendal';
+import { bytesUrl, readPreview } from '../posts.js';
 import { Lru, mapLimit } from '../util.js';
 import type { Origin, Preview } from './contentStore.js';
 import type { HotStore } from './hotStore.js';
@@ -40,17 +41,18 @@ export const summaryDay = (createdAt: number) => Math.floor(createdAt / DAY);
 const dayPrefix = (day: number) => `summaries/${String(day).padStart(5, '0')}/`;
 export const summaryObjectKey = (r: SummaryRef) => `${dayPrefix(summaryDay(r.createdAt))}${r.contentId}/${r.version}.br`;
 
-export const mediaUrl = (publicBaseUrl: string, contentId: string, version: number) =>
-  `${publicBaseUrl}/content/${contentId}/raw?version=${version}`;
-
 const clean = (s: string) => s.replaceAll(SEPARATOR, '');
+
+/** What a summary holds after its header: a text post's text or a caption, or a link's URL. */
+const body = (p: Preview) => (p.kind === 'link' ? p.url : (p.text ?? ''));
 
 /**
  * Plain text rather than JSON, which compresses better: a header line of numbers (version,
  * timestamps, and 1 if AI-generated, else 0), the publisher's id, MIME type, hashtags, preview kind
  * and origin ("<server> <contentId> <version>" for federated content, else empty), then an empty
- * line, a line holding only U+001E, and the preview text (with U+001E removed). A media preview
- * stores no text; its URL is built when read, on the origin server for federated content.
+ * line, a line holding only U+001E, and the preview's text (with U+001E removed): a text post's or a
+ * caption, or a link's URL. An image's, video's or audio's URL isn't stored; it's built when read, on
+ * the origin server for federated content. Summaries written before post types read as readPreview says.
  * Summaries written before the AI flag existed have three numbers, and read as not AI-generated.
  * Releases with an AI wrote its summary in place of the empty line, and need a line there to read
  * a summary; reading skips it.
@@ -59,8 +61,7 @@ export function encodeSummary(s: Summary): string {
   const numbers = `${s.version} ${s.createdAt} ${s.updatedAt} ${s.aiGenerated ? 1 : 0}`;
   const origin = s.origin ? `${s.origin.server} ${s.origin.contentId} ${s.origin.version}` : '';
   const header = [numbers, s.userId, s.mimeType, s.tags.join(' '), s.preview.kind, origin];
-  const preview = s.preview.kind === 'text' ? clean(s.preview.text) : '';
-  return `${header.join('\n')}\n\n${SEPARATOR}\n${preview}`;
+  return `${header.join('\n')}\n\n${SEPARATOR}\n${clean(body(s.preview))}`;
 }
 
 export function decodeSummary(contentId: string, text: string, publicBaseUrl: string): Summary {
@@ -75,22 +76,22 @@ export function decodeSummary(contentId: string, text: string, publicBaseUrl: st
   const sep = text.indexOf(`\n${SEPARATOR}\n`, pos);
   if (sep < 0) throw new Error(`summary of ${contentId} has no separator`);
   const [version, createdAt, updatedAt, ai] = lines[0]!.split(' ').map(Number);
-  const kind = lines[4];
+  const kind = lines[4]!;
+  const mimeType = lines[2]!;
   const [server, originId, originVersion] = lines[5]!.split(' ');
   const origin = server && originId && originVersion ? { server, contentId: originId, version: Number(originVersion) } : undefined;
+  const rest = text.slice(sep + 3);
+  const bytes = bytesUrl(publicBaseUrl, { contentId, version: version!, origin });
   return {
     contentId,
     version: version!,
     createdAt: createdAt!,
     updatedAt: updatedAt!,
     userId: lines[1]!,
-    mimeType: lines[2]!,
+    mimeType,
     aiGenerated: ai === 1,
     tags: lines[3] ? lines[3].split(' ') : [],
-    preview:
-      kind === 'text'
-        ? { kind, text: text.slice(sep + 3) }
-        : { kind: 'media', url: origin ? mediaUrl(origin.server, origin.contentId, origin.version) : mediaUrl(publicBaseUrl, contentId, version!) },
+    preview: readPreview(kind === 'link' ? { kind, url: rest } : { kind, text: rest }, mimeType, bytes),
     ...(origin && { origin }),
   };
 }

@@ -5,6 +5,7 @@ import { brotliDecompressSync } from 'node:zlib';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { summaryKey, summaryObjectKey, type SummaryRef } from '../src/storage/summaryStore.js';
 import {
+  authorIndex,
   DAY,
   DAY_ENTRY_BYTES,
   dayKey,
@@ -38,8 +39,8 @@ for (const target of TARGETS) {
       await ctx.close();
     });
 
-    const store = async (user: User, content: string) => {
-      const res = await ctx.app.inject({ method: 'POST', url: '/store', payload: { ...user, content, tags: hashtags(content) } });
+    const store = async (user: User, text: string) => {
+      const res = await ctx.app.inject({ method: 'POST', url: '/store', payload: { ...user, type: 'text', text, tags: hashtags(text) } });
       expect(res.statusCode, res.body).toBe(201);
       return res.json().contentId as string;
     };
@@ -63,13 +64,8 @@ for (const target of TARGETS) {
       const res = await ctx.app.inject({ method: 'POST', url: '/like', payload: { ...user, contentId } });
       expect(res.statusCode, res.body).toBe(201);
     };
-    /** Tokens of one stored record, measured from a feed of just that record. */
-    const recordTokens = async (user: User) => {
-      await store(user, 'measure #measure');
-      return (await getFeed('tags=measure')).json().estimatedTokens as number;
-    };
-    const update = (user: User, contentId: string, content: string) =>
-      ctx.app.inject({ method: 'POST', url: '/store', payload: { ...user, contentId, content, tags: hashtags(content) } });
+    const update = (user: User, contentId: string, text: string) =>
+      ctx.app.inject({ method: 'POST', url: '/store', payload: { ...user, contentId, type: 'text', text, tags: hashtags(text) } });
     const contentRow = (contentId: string) => ctx.db.selectFrom('content').select('id').where('id', '=', contentId).executeTakeFirst();
     const items = async (tag: string) => ((await getFeed(`tags=${tag}`)).json() as Feed).days.flatMap((d) => d.tags[tag] ?? []);
     const versions = async (tag: string) => (await items(tag)).map((i) => [i.contentId, i.version]);
@@ -204,11 +200,9 @@ for (const target of TARGETS) {
     });
 
     it('keeps a popular post for weeks while a flood of new posts arrives, trimming its day by likes', async () => {
-      ctx = await createTestContext(target);
+      ctx = await createTestContext(target, { feed: { tagDayMaxPosts: 20, tagDayMinPosts: 3 } });
       const alice = await ctx.register('alice');
       const bob = await ctx.register('bob');
-      const per = await recordTokens(alice);
-      Object.assign(ctx.config.feed, { tagDayMaxTokens: Math.floor(per * 20.5), tagDayMinTokens: Math.floor(per * 3.5) });
 
       ctx.clock.now -= 20 * DAY;
       const popular = await store(alice, 'popular #news');
@@ -239,11 +233,9 @@ for (const target of TARGETS) {
     });
 
     it('rewrites only the day index of liked content and re-admits liked content that was trimmed', async () => {
-      ctx = await createTestContext(target);
+      ctx = await createTestContext(target, { feed: { tagDayMaxPosts: 3, tagDayMinPosts: 3 } });
       const alice = await ctx.register('alice');
       const bob = await ctx.register('bob');
-      const per = await recordTokens(alice);
-      Object.assign(ctx.config.feed, { tagDayMaxTokens: Math.floor(per * 3.5), tagDayMinTokens: Math.floor(per * 3.5) });
 
       ctx.clock.now -= 2 * DAY;
       const older: string[] = [];
@@ -381,7 +373,7 @@ for (const target of TARGETS) {
       expect(await contentRow(id)).toBeDefined();
 
       slow.release();
-      expect(await runA).toMatchObject({ tags: ['news'], deleted: [] });
+      expect(await runA).toMatchObject({ tags: [authorIndex(alice.userId), 'news'], deleted: [] });
       expect((await items('news')).map((i) => [i.contentId, i.likes])).toEqual([[id, 1]]);
       expect((await ctx.compact()).deleted).toEqual([id]);
       expect((await readManifest('news')).days).toEqual([]);
@@ -417,7 +409,7 @@ for (const target of TARGETS) {
     });
 
     it('hides deleted content from later pages of a feed session without skipping or repeating other records', async () => {
-      ctx = await createTestContext(target, { feed: { maxTokens: 700 } });
+      ctx = await createTestContext(target, { feed: { pageSize: 5 } });
       const alice = await ctx.register('alice');
       const ids: string[] = [];
       for (let i = 0; i < 12; i++) {
@@ -528,7 +520,7 @@ for (const target of TARGETS) {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       failNextCommit(true);
-      const res = await ctx.app.inject({ method: 'POST', url: '/store', payload: { ...alice, content: 'kept #news', tags: ['news'] } });
+      const res = await ctx.app.inject({ method: 'POST', url: '/store', payload: { ...alice, type: 'text', text: 'kept #news', tags: ['news'] } });
       expect(res.statusCode, res.body).toBe(201);
       const { contentId } = res.json();
       expect((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}/raw` })).body).toBe('kept #news');
@@ -594,7 +586,7 @@ for (const target of TARGETS) {
       const alice = await ctx.register('alice');
       const set = ctx.hot.set.bind(ctx.hot);
       vi.spyOn(ctx.hot, 'set').mockImplementation((key, ...rest) => (key.startsWith('sum:') ? Promise.reject(new Error('redis unavailable')) : set(key, ...rest)));
-      const res = await ctx.app.inject({ method: 'POST', url: '/store', payload: { ...alice, content: 'lost #news', tags: ['news'] } });
+      const res = await ctx.app.inject({ method: 'POST', url: '/store', payload: { ...alice, type: 'text', text: 'lost #news', tags: ['news'] } });
       expect(res.statusCode, res.body).toBe(500);
       expect(await ctx.db.selectFrom('content').selectAll().execute()).toEqual([]);
       expect(await tailLines(ctx.hot, 'news')).toEqual([]);
@@ -723,14 +715,14 @@ for (const target of TARGETS) {
       expect(allIds((await getFeed('tags=news')).json())).toEqual([]);
 
       ctx.clock.now += 1000;
-      expect((await ctx.compactor.runOnce({ rebuild: true })).tags).toEqual(['news', 'sports']);
+      expect((await ctx.compactor.runOnce({ rebuild: true })).tags).toEqual([authorIndex(alice.userId), authorIndex(bob.userId), 'news', 'sports'].sort());
       expect(await records('news')).toEqual(news);
       expect(await records('sports')).toEqual(sports);
       expect(await storedSummaries(old, ctx.clock.now - 10 * DAY)).toEqual(['1.br']);
     });
 
-    it('trims each day index to the best records within its token quota', async () => {
-      ctx = await createTestContext(target, { feed: { tagDayMaxTokens: 400, tagDayMinTokens: 100 } });
+    it('trims each day index to its quota of best records', async () => {
+      ctx = await createTestContext(target, { feed: { tagDayMaxPosts: 4, tagDayMinPosts: 1 } });
       const alice = await ctx.register('alice');
       const ids: string[] = [];
       for (let i = 0; i < 10; i++) {
@@ -738,14 +730,11 @@ for (const target of TARGETS) {
         ctx.clock.now += 1000;
       }
       await ctx.compact();
-      const kept = allIds((await getFeed('tags=news')).json());
-      expect(kept.length).toBeGreaterThan(0);
-      expect(kept.length).toBeLessThan(10);
-      expect(kept).toEqual([...ids].reverse().slice(0, kept.length));
+      expect(allIds((await getFeed('tags=news')).json())).toEqual([...ids].reverse().slice(0, 4));
     });
 
     it('pages multi-tag feeds with a cursor pinned to the indexes of the first page, across a compaction', async () => {
-      ctx = await createTestContext(target, { feed: { maxTokens: 700 } });
+      ctx = await createTestContext(target, { feed: { pageSize: 8 } });
       const alice = await ctx.register('alice');
       const ids: string[] = [];
       const tagSets = ['#news #sports', '#news', '#sports #tech', '#tech'];
@@ -768,7 +757,6 @@ for (const target of TARGETS) {
         seen.push(...allIds(f));
         if (page === 1) {
           // Records stored and compacted mid-pagination don't disturb the pinned pages.
-          ctx.clock.now += 1000;
           await store(alice, 'late arrival #news');
           await ctx.compact();
         }
@@ -777,6 +765,41 @@ for (const target of TARGETS) {
       }
       expect(new Set(seen).size).toBe(seen.length);
       expect(seen.sort()).toEqual([...ids].sort());
+    });
+
+    it('leaves out of a feed session a post stamped before its first page but pushed after it', async () => {
+      ctx = await createTestContext(target, { feed: { pageSize: 3 } });
+      const alice = await ctx.register('alice');
+      const ids: string[] = [];
+      for (let i = 0; i < 10; i++) {
+        ids.push(await store(alice, `post ${i} #news`));
+        ctx.clock.now += 1000;
+      }
+      // The post is stamped before its bytes are uploaded, and the first page is read during the upload.
+      const late = pauseStore('putFile', 'late #news');
+      const stored = store(alice, 'late #news');
+      await late.paused;
+      ctx.clock.now += 1000;
+      const first = (await getFeed('tags=news')).json() as Feed;
+      expect(first.nextCursor).toBeTruthy();
+      late.release();
+      await stored;
+
+      const seen = allIds(first);
+      let cursor = first.nextCursor;
+      for (let page = 0; cursor && page < 40; page++) {
+        const res = await getFeed(`tags=news&cursor=${cursor}`);
+        expect(res.statusCode, res.body).toBe(200);
+        const f = res.json() as Feed;
+        seen.push(...allIds(f));
+        cursor = f.nextCursor;
+      }
+      expect(new Set(seen).size).toBe(seen.length);
+      expect(seen.sort()).toEqual([...ids].sort());
+
+      // A tail the first page read that Redis has since lost ends the session, rather than skipping its posts.
+      await ctx.hot.del((await ctx.hot.scores(tailIndexKey('news'), 0, Infinity)).map((w) => tailKey('news', w)));
+      expect((await getFeed(`tags=news&cursor=${first.nextCursor}`)).statusCode).toBe(410);
     });
 
     it('injects new unliked content between liked content read from a day index', async () => {
@@ -796,9 +819,9 @@ for (const target of TARGETS) {
       }
       await ctx.compact();
 
-      const full = (await getFeed('tags=news')).json() as Feed & { estimatedTokens: number };
+      const full = (await getFeed('tags=news')).json() as Feed;
       expect(allIds(full).sort()).toEqual([...liked, ...fresh].sort());
-      ctx.config.feed.maxTokens = Math.floor((full.estimatedTokens / 10) * 4.5);
+      ctx.config.feed.pageSize = 4;
 
       // The page is assembled out of index order (liked, fresh, liked, ...) and must still be valid JSON.
       const res = await getFeed('tags=news');
@@ -814,7 +837,7 @@ for (const target of TARGETS) {
     });
 
     it('rejects cursors older than the retention period', async () => {
-      ctx = await createTestContext(target, { feed: { maxTokens: 200, genRetentionMinutes: 5 } });
+      ctx = await createTestContext(target, { feed: { pageSize: 2, genRetentionMinutes: 5 } });
       const alice = await ctx.register('alice');
       for (let i = 0; i < 5; i++) await store(alice, `post ${i} #news`);
       const first = (await getFeed('tags=news')).json() as Feed;

@@ -9,12 +9,13 @@ import type { AppDeps } from '../deps.js';
 import { ServerUrl } from '../federation.js';
 import { badRequest, conflict } from '../http/errors.js';
 import type { ContentMeta, Origin, Preview, Summary } from '../storage/index.js';
-import { mediaUrl } from '../storage/summaryStore.js';
+import { postRules } from '../moderation/policy.js';
+import { LinkUrl, mediaUrl, readPreview } from '../posts.js';
 import { normalizeTags } from '../tags.js';
 import { MAX_VERSION } from '../tagfeed/layout.js';
 import { changedConcurrently, firstWords, versionWriter } from '../versions.js';
 
-const MAX_PREVIEW_CHARS = 10_000;
+const PreviewText = z.string().max(10_000);
 
 /** A feed record as the origin server renders it. Its publisher and likes are the origin's, and aren't used. */
 const Entry = z.object({
@@ -22,9 +23,12 @@ const Entry = z.object({
   version: z.number().int().min(1).max(MAX_VERSION),
   mimeType: z.string().min(1).max(255),
   aiGenerated: z.boolean().default(false),
+  // An image's, video's or audio's URL is built from the origin instead.
   preview: z.discriminatedUnion('kind', [
-    z.object({ kind: z.literal('text'), text: z.string().max(MAX_PREVIEW_CHARS) }),
-    // Its URL is built from the origin instead.
+    z.object({ kind: z.literal('text'), text: PreviewText }),
+    z.object({ kind: z.enum(['image', 'video', 'audio']), text: PreviewText.optional() }),
+    z.object({ kind: z.literal('link'), url: LinkUrl }),
+    // From servers older than post types: a file, read as readPreview says.
     z.object({ kind: z.literal('media') }),
   ]),
   tags: z.array(z.string().max(100)).min(1).max(50),
@@ -55,6 +59,7 @@ export function federatedRoutes(app: FastifyInstance, deps: AppDeps) {
    * same version again changes nothing, and an older one is refused. It's a post like /store, so one soon
    * after the user's previous post is answered with challenges, which the origin passes back to its client.
    * Its hashtags are the record's, except in server tagging mode, where they're this server's.
+   * Moderation is this server's own, as for /store, and checks the record's preview text or link.
    */
   app.post('/federated', async (req, reply) => {
     const body = Body.parse(req.body ?? {});
@@ -81,17 +86,32 @@ export function federatedRoutes(app: FastifyInstance, deps: AppDeps) {
       if (Math.max(existing.version, existing.reserved_version) >= MAX_VERSION) throw conflict(`content can have at most ${MAX_VERSION} versions`);
     }
 
+    const preview = previewOfEntry(body.origin, entry);
+    // The content is on the origin, so its preview is all the text there is to check.
+    const rules = await postRules(db, { userId: user.id, tags, contentId: existing?.id });
+    const words = preview.kind === 'link' ? preview.url : preview.text;
+    if (words) rules.scanner?.scan(words);
+    const { tags: kept, removedTags } = rules.apply();
+
     const release = await challenges.admitPost(user.id, body);
     try {
-      return reply.status(existing ? 200 : 201).send(await writeCopy(user, body, tags, existing));
+      const copy = await writeCopy(user, body, preview, kept, existing);
+      return reply.status(existing ? 200 : 201).send({ ...copy, ...(removedTags.length > 0 && { removedTags }) });
     } catch (err) {
       await release();
       throw err;
     }
   });
 
+  /** The record's preview as stored here: its text cut to this server's preview length, and a file's URL at the origin. */
+  function previewOfEntry(server: string, entry: Body['entry']): Preview {
+    const preview = readPreview(entry.preview, entry.mimeType, mediaUrl(server, entry.contentId, entry.version));
+    if (preview.kind === 'link' || preview.text === undefined) return preview;
+    return { ...preview, text: firstWords(preview.text, config.feed.previewWords, config.feed.previewChars) };
+  }
+
   /** Writes the record as a version of the user's copy: a new one, or the next version of `existing`. */
-  async function writeCopy(user: AuthUser, body: Body, tags: string[], existing: ContentRow | undefined) {
+  async function writeCopy(user: AuthUser, body: Body, preview: Preview, tags: string[], existing: ContentRow | undefined) {
     const { entry } = body;
     const contentId = existing?.id ?? randomUUID();
     const version = existing ? await versions.reserveVersion(contentId, existing.version) : 1;
@@ -99,10 +119,6 @@ export function federatedRoutes(app: FastifyInstance, deps: AppDeps) {
     // A clock ahead of this one can't date the content in the future.
     const createdAt = existing?.created_at ?? Math.min(Date.parse(entry.createdAt), ts);
     const origin: Origin = { server: body.origin, contentId: entry.contentId, version: entry.version };
-    const preview: Preview =
-      entry.preview.kind === 'text'
-        ? { kind: 'text', text: firstWords(entry.preview.text, config.feed.previewWords) }
-        : { kind: 'media', url: mediaUrl(origin.server, origin.contentId, origin.version) };
     const { mimeType, aiGenerated } = entry;
 
     const summary: Summary = { contentId, version, createdAt, updatedAt: ts, userId: user.id, mimeType, aiGenerated, tags, preview, origin };

@@ -5,13 +5,22 @@ import type { AppDeps } from './deps.js';
 import { conflict } from './http/errors.js';
 import type { ContentMeta, Publisher, Summary } from './storage/index.js';
 import { touchTags } from './tags.js';
-import { recordSize, type TailRecord } from './tagfeed/layout.js';
+import { authorIndex, recordSize, type TailRecord } from './tagfeed/layout.js';
 
 export const changedConcurrently = () => conflict('content was updated or set for deletion concurrently; retry');
 
-export function firstWords(text: string, n: number): string {
+/** The first `maxWords` words of `text`, cut to `maxChars` characters, which bounds text written without spaces. */
+export function firstWords(text: string, maxWords: number, maxChars: number): string {
   const words = text.trim().split(/\s+/).filter(Boolean);
-  return words.slice(0, n).join(' ') + (words.length > n ? ' …' : '');
+  let out = words.slice(0, maxWords).join(' ');
+  let cut = words.length > maxWords;
+  if (out.length > maxChars) {
+    // Not between the halves of a surrogate pair.
+    const code = out.charCodeAt(maxChars - 1);
+    out = out.slice(0, code >= 0xd800 && code <= 0xdbff ? maxChars - 1 : maxChars).trimEnd();
+    cut = true;
+  }
+  return cut ? `${out} …` : out;
 }
 
 /** Content row columns a version sets beyond what its summary holds, on insert and on update alike. */
@@ -60,15 +69,17 @@ export function versionWriter({ db, config, content, summaries, publishers, appe
 
   /**
    * Writes a version: its bytes (if any), meta file and summary, then the database commits it, and
-   * only then is one entry pushed onto the tail of every hashtag, so a tail never holds a version the
-   * database rejected. The commit also records a pending_appends row, cleared once every append
-   * succeeds; the compactor adds the entry itself for rows left behind. An update replaces the previous
-   * version: tombstones hide it from feeds at once, and the compactor erases it.
+   * only then is one entry pushed onto the tail of every hashtag and of the publisher's own index, so a
+   * tail never holds a version the database rejected. The commit also records a pending_appends row,
+   * cleared once every append succeeds; the compactor adds the entry itself for rows left behind. An
+   * update replaces the previous version: tombstones hide it from feeds at once, and the compactor erases it.
    */
   async function write({ publisher, existing, summary, meta, columns, putBytes }: NewVersion): Promise<void> {
-    const { contentId, version, createdAt, updatedAt: ts, tags, aiGenerated } = summary;
+    const { contentId, version, createdAt, updatedAt: ts, aiGenerated } = summary;
     const entry: TailRecord = { contentId, version, createdAt, updatedAt: ts, likes: 0, size: recordSize(summary, publisher), aiGenerated };
     const row = { ...columns, mime_type: summary.mimeType, ai_generated: aiGenerated ? 1 : 0 };
+    const own = authorIndex(publisher.userId);
+    const tags = [...summary.tags, own];
 
     const previous = existing ? await content.getMeta(contentId, existing.version) : null;
     await putBytes?.();
@@ -116,7 +127,7 @@ export function versionWriter({ db, config, content, summaries, publishers, appe
     await appendRecord(entry, tags);
     if (previous) {
       // After the new entry, so a tag both versions carry never shows neither.
-      const failed = await appender.tombstone(previous.tags, { tombstone: true, contentId, below: version, createdAt });
+      const failed = await appender.tombstone([...previous.tags, own], { tombstone: true, contentId, below: version, createdAt });
       if (failed.length) log.warn({ contentId, version, tags: failed }, 'tombstone append failed; the compactor will remove the old version');
     }
   }

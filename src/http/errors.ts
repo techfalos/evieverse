@@ -20,6 +20,8 @@ export const unauthorized = (msg = 'Invalid userId or apiKey') => new HttpError(
 export const forbidden = (msg: string) => new HttpError(403, msg);
 export const notFound = (msg: string) => new HttpError(404, msg);
 export const conflict = (msg: string) => new HttpError(409, msg);
+/** A valid request whose content moderation refuses. */
+export const unprocessable = (msg: string, extra?: Record<string, unknown>) => new HttpError(422, msg, undefined, extra);
 /** Nothing was done: the request has to be sent again with the challenge's solution. */
 export const challengeRequired = (msg: string, challenge: unknown) => new HttpError(428, msg, undefined, { challenge });
 export const tooManyRequests = (msg: string, retryAfterSeconds: number) =>

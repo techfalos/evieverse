@@ -13,7 +13,6 @@ import { createStores } from '../../src/deps.js';
 import { mapLimit } from '../../src/util.js';
 import {
   article,
-  articleHtml,
   articleText,
   between,
   gauss,
@@ -93,8 +92,9 @@ async function call<T>(time: number, opts: InjectOptions): Promise<T> {
 
 // Everything random is drawn up front, so the data is the same on every run.
 const r = rng(20261109);
-// A stream of its own, so the AI flags leave every other draw as it was.
+// Streams of their own, so the AI flags and captions leave every other draw as it was.
 const rAi = rng(20261110);
+const rCaption = rng(20261111);
 const start = Date.now();
 const registeredAt = start - (DAYS + 1) * DAY;
 
@@ -135,19 +135,25 @@ function publisher(): number {
   return Math.max(0, PUBLISHERS.findIndex((p) => (x -= p.pull) < 0));
 }
 
+/** What /store is sent for a post, but its hashtags and AI flag. */
+type PostBody =
+  | { type: 'image'; content: string; contentEncoding: 'base64'; contentType: 'image/png'; filename: string; text?: string }
+  | { type: 'text'; text: string }
+  | { type: 'link'; url: string };
+
 interface PostPlan {
   n: number;
   author: number;
   time: number;
-  filename: string;
-  contentType: string;
-  body: string | Buffer;
+  body: PostBody;
   tags: string[];
   aiGenerated: boolean;
   likers: { user: number; time: number }[];
   stored?: Promise<string>;
   contentId?: string;
 }
+
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
 const posts: PostPlan[] = [];
 for (let n = 1; n <= POSTS; n++) {
@@ -159,23 +165,18 @@ for (let n = 1; n <= POSTS; n++) {
   const time = postedAt();
   const id = String(n).padStart(4, '0');
 
-  let plan: Omit<PostPlan, 'likers' | 'aiGenerated'>;
+  let body: PostBody;
   if (r() < (spec.images ?? 0.04)) {
     if (!tags.includes('photography') && r() < 0.5) tags.push('photography');
-    plan = { n, author, time, tags, filename: `seed-${id}.png`, contentType: 'image/png', body: picture(r, topicOf(beat)) };
+    const png = picture(r, topicOf(beat));
+    const caption = rCaption() < 0.6 ? article(rCaption, beat, tags).title : undefined;
+    body = { type: 'image', content: png.toString('base64'), contentEncoding: 'base64', contentType: 'image/png', filename: `seed-${id}.png`, ...(caption && { text: caption }) };
   } else {
     const a = article(r, beat, tags);
-    const html = r() < 0.08;
-    plan = {
-      n,
-      author,
-      time,
-      tags,
-      filename: `seed-${id}.${html ? 'html' : 'txt'}`,
-      contentType: html ? 'text/html' : 'text/plain',
-      body: html ? articleHtml(a) : articleText(a),
-    };
+    // Some publishers' posts link to the article on their own site.
+    body = r() < 0.08 ? { type: 'link', url: `https://${spec.host}.example.com/${beat}/${slug(a.title)}-${id}` } : { type: 'text', text: articleText(a) };
   }
+  const plan = { n, author, time, tags, body };
 
   // Heavy-tailed likes; four in ten posts get none, and posts under 12 hours old have had less time.
   const age = start - time;
@@ -193,15 +194,14 @@ posts.sort((a, b) => a.time - b.time);
 // A few text posts older than a day get a second version some hours later.
 const updates = shuffle(
   r,
-  posts.filter((p) => typeof p.body === 'string' && p.time < start - DAY),
+  posts.filter((p) => p.body.type === 'text' && p.time < start - DAY),
 )
   .slice(0, UPDATES)
   .map((p) => {
     const tags = p.tags.length > 2 && r() < 0.3 ? p.tags.slice(0, 2) : p.tags;
-    const filename = p.filename.replace(/\.(\w+)$/, '-v2.$1');
-    const note = updateNote(r);
-    const body = p.contentType === 'text/html' ? (p.body as string).replace('<article>', `<article><p>${note}</p>`) : `${note}\n\n${p.body}`;
-    return { post: p, filename, body, tags, time: Math.min(p.time + between(r, 1, 20) * HOUR, start - 10 * 60_000) };
+    const { text } = p.body as Extract<PostBody, { type: 'text' }>;
+    const body: PostBody = { type: 'text', text: `${updateNote(r)}\n\n${text}` };
+    return { post: p, body, tags, time: Math.min(p.time + between(r, 1, 20) * HOUR, start - 10 * 60_000) };
   });
 
 log(`registering ${userPlans.length} users`);
@@ -234,26 +234,13 @@ await mapLimit(writes, 8, async ({ post: p, update: u }) => {
     // mapLimit starts items in order, so the post's own store has already begun.
     const contentId = await p.stored!;
     // No aiGenerated: an edit that doesn't say keeps the post's.
-    await call(u.time, {
-      method: 'POST',
-      url: '/store',
-      payload: { ...creds(p.author), contentId, content: u.body, contentType: p.contentType, filename: u.filename, tags: u.tags },
-    });
+    await call(u.time, { method: 'POST', url: '/store', payload: { ...creds(p.author), contentId, ...u.body, tags: u.tags } });
     return;
   }
-  const binary = typeof p.body !== 'string';
   p.stored = call<{ contentId: string }>(p.time, {
     method: 'POST',
     url: '/store',
-    payload: {
-      ...creds(p.author),
-      content: binary ? (p.body as Buffer).toString('base64') : p.body,
-      contentEncoding: binary ? 'base64' : 'utf8',
-      contentType: p.contentType,
-      filename: p.filename,
-      tags: p.tags,
-      aiGenerated: p.aiGenerated,
-    },
+    payload: { ...creds(p.author), ...p.body, tags: p.tags, aiGenerated: p.aiGenerated },
   }).then((res) => res.contentId);
   p.contentId = await p.stored;
   if (++stored % 250 === 0) log(`stored ${stored}/${posts.length}`);
@@ -282,9 +269,8 @@ log(`indexed ${tags.length} hashtags`);
 
 for (const url of ['/feed?tags=news&hours=24', '/feed?tags=ai,space,football&hours=72&mode=balanced', '/feed?tags=news&hours=24&aiGenerated=true']) {
   const res = await app.inject({ method: 'GET', url });
-  const feed = res.json() as { estimatedTokens: number; truncated: boolean; days: { tags: Record<string, unknown[]> }[] };
-  const records = feed.days.reduce((s, d) => s + Object.values(d.tags).reduce((t, list) => t + list.length, 0), 0);
-  log(`${url}: ${res.statusCode}, ${records} records, ~${feed.estimatedTokens} tokens, truncated=${feed.truncated}`);
+  const feed = res.json() as { count: number; truncated: boolean };
+  log(`${url}: ${res.statusCode}, ${feed.count} records, truncated=${feed.truncated}`);
 }
 
 await mkdir(OUT, { recursive: true });
