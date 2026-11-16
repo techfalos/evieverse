@@ -8,7 +8,7 @@ import { forbidden, notFound, tooManyRequests } from '../http/errors.js';
 import { Credentials } from '../http/schemas.js';
 import { notify } from '../inbox.js';
 import { msg } from '../language.js';
-import { moderateComment, moderatesServer } from '../moderation/policy.js';
+import { moderateComment, moderatesServer, refuseBanned } from '../moderation/policy.js';
 import type { Comment } from '../storage/index.js';
 
 const Params = z.object({ contentId: z.string().uuid() });
@@ -100,6 +100,8 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
    * waits in the moderation queue, which nobody but its author and the queue's moderators reads
    * until it is accepted. 422 for one the server doesn't trust enough to keep.
    *
+   * A banned user is refused (403).
+   *
    * A user sends at most `comments.perMinute` a minute, counted in Redis as messages are, and only
    * the comments that got through the gate count.
    */
@@ -107,6 +109,7 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
     const { contentId } = Params.parse(req.params);
     const body = CommentBody.parse(req.body ?? {});
     const user = await authenticate(db, req, body);
+    refuseBanned(user);
     // Published content only: what is set for deletion, or waits in the moderation queue, isn't there to comment on.
     await loadPublished(db, contentId);
     if (!takesComments(await requireMeta(content, contentId))) throw notFound(msg('comment.off'));

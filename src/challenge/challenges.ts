@@ -61,10 +61,10 @@ export function leadingZeroBits(hash: Buffer): number {
 }
 
 /**
- * How many challenges a post needs after `streak` posts in a row with challenges: 1, 1, 2, 4, 8, …, so
- * from the second on, each costs as many as the whole run before it.
+ * How many challenges a post needs after `streak` posts in a row with challenges: 1, 1, then 2 for as
+ * long as the run goes on. Nobody is asked to solve more than two one after another.
  */
-const postSteps = (streak: number) => (streak < 2 ? 1 : 2 ** (streak - 1));
+const postSteps = (streak: number) => (streak < 2 ? 1 : 2);
 
 const normalizeAnswer = (s: string) => s.toUpperCase().replace(/[\s-]/g, '');
 
@@ -80,7 +80,8 @@ const postsInMinute = (stored: string | null, at: number) =>
 /**
  * A user's run of posts: when they last posted or were challenged to (a post within the window after
  * it must solve challenges), and how many posts in a row they made with challenges, which sets how
- * many the next one needs. A user with none stored hasn't posted within the window.
+ * many the next one needs, and is the place in the run a post's challenges are solved for. A user with
+ * none stored hasn't posted within the window.
  */
 interface PostRun {
   last: number;

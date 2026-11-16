@@ -94,7 +94,7 @@
           <div id="text-fields">
             <textarea id="content" rows="8" spellcheck="false"></textarea>
           </div>
-          <label>Hashtags <span class="muted">(required unless <code>TAGGING_MODE</code> is <code>server</code>)</span>
+          <label>Hashtags <span class="muted">(required)</span>
             <input id="post-tags" placeholder="news, ai" autocomplete="off" spellcheck="false">
           </label>
           <label class="check"><input type="checkbox" id="ai-generated"> Created with AI
@@ -108,8 +108,8 @@
             <button type="button" id="sample" class="link">sample text</button>
           </div>
           <p class="hint">
-            With <code>TAGGING_MODE=server</code>, every post gets <code>TAGGING_SERVER_TAGS</code> instead.
-            New posts show in feeds at once; likes after the next compactor run (a few seconds).
+            <span id="tagging-hint">With <code>TAGGING_MODE=server</code>, a post takes only hashtags from <code>TAGGING_SERVER_TAGS</code>.</span>
+            New posts, likes and deletions show in feeds after the next compactor run (a few seconds).
           </p>
         </form>
         <pre id="post-result" class="result" hidden></pre>

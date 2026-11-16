@@ -9,9 +9,9 @@ const HOURS = [1, 2, 4, 8, 12, 24, 48, 72, 168, 336, 504, 720, 1440, 2160];
 
 const ALGORITHMS = {
   popular:
-    "algorithm=popular puts each day's most liked posts first, giving each day and each hashtag a share of the page. " +
-    "In the newest slice, each tag's 2nd pick and every 4th after it is a fresh post with no likes yet.",
-  chronological: 'algorithm=chronological puts the newest posts first, whatever their likes or their hashtag.',
+    "algorithm=popular puts the window's most liked posts first, giving each hashtag a share of the page. " +
+    "Each tag's 2nd pick and every 4th after it is a fresh post with no likes yet.",
+  chronological: "algorithm=chronological puts the window's newest posts first, whatever their likes or their hashtag.",
 };
 
 const TABS = {
@@ -42,6 +42,8 @@ const state = {
   /** The aiGenerated filter per tab: '' (all), 'true' or 'false'. */
   ai: { user: '', latest: '' },
   recentTags: [],
+  /** The hashtags a post can have (GET /tagging): the server's in server tagging mode, null where any will do. */
+  allowedTags: null,
   pages: [],
   cursor: null,
   query: null,
@@ -386,36 +388,33 @@ function renderPage(data, asked, page, algorithm) {
   const related = new Set(data.related ?? []);
   const tags = [...asked, ...related];
   const label = (t) => `#${t}${related.has(t) ? ' (related)' : ''}`;
-  data.days.forEach((day, i) => {
-    const lists = tags.map((t) => day.tags[t] ?? []);
-    const n = lists.reduce((s, l) => s + l.length, 0);
-    if (!n) return;
-    let picks = [];
-    if (algorithm === 'chronological') {
-      // Each tag's list is newest first; merged by creation time, they are the feed's order.
-      picks = lists.flatMap((l, j) => l.map((rec) => ({ rec, via: tags[j] }))).sort((a, b) => Date.parse(b.rec.createdAt) - Date.parse(a.rec.createdAt));
-    } else {
-      // The planner gives tags equal turns within a slice; interleaving shows that order.
-      for (let k = 0; k < Math.max(...lists.map((l) => l.length)); k++) {
-        lists.forEach((l, j) => l[k] && picks.push({ rec: l[k], via: tags[j] }));
-      }
+  const lists = tags.map((t) => data.tags[t] ?? []);
+  let picks = [];
+  if (algorithm === 'chronological') {
+    // Each tag's list is newest first; merged by creation time, they are the feed's order.
+    picks = lists.flatMap((l, j) => l.map((rec) => ({ rec, via: tags[j] }))).sort((a, b) => Date.parse(b.rec.createdAt) - Date.parse(a.rec.createdAt));
+  } else {
+    // Each tag's list is its most liked first, and the planner gives tags equal turns; interleaving shows that order.
+    for (let k = 0; k < Math.max(...lists.map((l) => l.length)); k++) {
+      lists.forEach((l, j) => l[k] && picks.push({ rec: l[k], via: tags[j] }));
     }
+  }
+  if (picks.length) {
     frag.append(
       h(
         'section',
-        { class: `slice${day.extended ? ' extended' : ''}` },
+        { class: 'page' },
         h(
           'header',
           {},
-          h('strong', {}, `Slice ${i + 1}${day.extended ? ' (extended)' : ''}`),
-          h('span', {}, `${when(day.from)} → ${when(day.to)}`),
-          h('span', {}, `${day.count} / ${day.allocated} posts`),
+          h('strong', {}, `${data.count} post${data.count === 1 ? '' : 's'}`),
+          h('span', {}, `window ${when(data.window.from)} → ${when(data.window.to)}`),
           h('span', { class: 'chips' }, tags.map((t, j) => (lists[j].length ? h('span', { class: 'chip' }, `${label(t)} ${lists[j].length}`) : null))),
         ),
         picks.map(({ rec, via }) => card(rec, label(via))),
       ),
     );
-  });
+  }
   $('#feed').append(frag);
 }
 
@@ -468,16 +467,34 @@ function card(rec, via) {
   );
 }
 
+/**
+ * Feeds have a new post, and lose a deleted one, after the compactor's next run (COMPACT_INTERVAL_SECONDS,
+ * 5 unless the testbed was started with another). So the feed is read again every RETRY_MS until the post
+ * just stored is on it, up to HIGHLIGHT_TRIES times.
+ */
+const RETRY_MS = 2000;
+const HIGHLIGHT_TRIES = 8;
+let reloadTimer;
+/** Reads the feed again in a moment, unless the reader has paged on or changed feeds by then. */
+function reloadSoon(ms = RETRY_MS) {
+  const query = state.query;
+  clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(() => state.query === query && state.pages.length <= 1 && loadFeed(), ms);
+}
+
 function revealHighlight() {
-  if (!state.highlight) return;
-  const el = document.querySelector(`.card[data-id="${state.highlight.contentId}"]`);
+  const wanted = state.highlight;
+  if (!wanted) return;
+  const el = document.querySelector(`.card[data-id="${wanted.contentId}"]`);
   if (el) {
     el.classList.add('flash');
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     state.highlight = null;
+  } else if (wanted.tries < HIGHLIGHT_TRIES && state.pages.length <= 1) {
+    wanted.tries++;
+    reloadSoon();
   } else if (!state.cursor) {
-    const tags = state.highlight.tags;
-    toast(`Your post isn't on this feed. Its hashtags: ${tags.map((t) => `#${t}`).join(' ')}`, 6000);
+    toast(`Your post isn't on this feed. Its hashtags: ${wanted.tags.map((t) => `#${t}`).join(' ')}`, 6000);
     state.highlight = null;
   }
 }
@@ -503,8 +520,9 @@ async function remove(rec) {
   if (!confirm(`Delete this post (${rec.contentId})?`)) return;
   try {
     const { data } = await api('DELETE', `/content/${rec.contentId}`);
-    toast(`${data.status}: hidden from feeds now, removed by the next compactor run.`);
-    loadFeed();
+    toast(`${data.status}: it can't be read any more, and the next compactor run takes it out of feeds.`);
+    document.querySelectorAll(`.card[data-id="${rec.contentId}"]`).forEach((el) => el.classList.add('gone'));
+    reloadSoon(3 * RETRY_MS);
   } catch (err) {
     toast(`Delete failed: ${err.message}`);
   }
@@ -547,13 +565,17 @@ function setKind(k) {
 const SAMPLE_MARK = 'Testbed post from';
 const isSample = (s) => !s.trim() || s.startsWith(SAMPLE_MARK);
 let sampleTags = '';
-/** A sample post, tagged with the actor's interests unless other hashtags were typed in. */
+/** A sample post, tagged with the actor's interests (of the hashtags the server allows) unless other hashtags were typed in. */
 function fillSample() {
   const a = state.actor;
-  const tags = (a?.interests?.length ? a.interests : defaultTags('latest')).slice(0, 2).join(', ');
+  const wanted = a?.interests?.length ? a.interests : defaultTags('latest');
+  const allowed = state.allowedTags;
+  // Where the server lists the hashtags a post can have, the ones wanted that are on it, or else its first.
+  const usable = allowed ? wanted.filter((t) => allowed.includes(t)) : wanted;
+  const tags = (usable.length ? usable : (allowed ?? [])).slice(0, 2).join(', ');
   $('#content').value =
     `${SAMPLE_MARK} ${a?.username ?? 'someone'} at ${new Date().toLocaleTimeString()}.\n\n` +
-    'Its hashtags are below, so it shows up in those feeds straight away. ' +
+    'Its hashtags are below, so it shows up in those feeds after the next compactor run, a few seconds from now. ' +
     'Edit the text, change the hashtags, or switch to an image, video, audio or link post.';
   if (!$('#post-tags').value.trim() || $('#post-tags').value === sampleTags) $('#post-tags').value = tags;
   sampleTags = tags;
@@ -594,9 +616,15 @@ async function post(e) {
     const { data, ms } = await withChallenges((solution) => api('POST', '/store', body(solution)));
     out.className = 'result';
     out.textContent = `${Math.round(ms)} ms\n${JSON.stringify(data, null, 2)}`;
-    if (data.unchanged) toast('Unchanged: the same post as the one stored (and the same hashtags, where the server uses yours).');
-    else {
-      state.highlight = { contentId: data.contentId, tags: data.tags };
+    if (data.unchanged) toast('Unchanged: the same post as the one stored, with the same hashtags.');
+    else if (data.status === 'pending_review') {
+      toast('Stored, and held in the moderation queue: it is in no feed until it is accepted.', 6000);
+      $('#content-id').value = '';
+      loadFeed();
+    } else {
+      // An update shows where the post already is at once; a new post, or a new hashtag, after the next compactor run.
+      if (!contentId) toast('Stored. Feeds have it after the next compactor run, a few seconds from now.');
+      state.highlight = { contentId: data.contentId, tags: data.tags, tries: 0 };
       $('#content-id').value = '';
       if (isSample($('#content').value)) fillSample();
       loadFeed();
@@ -667,6 +695,15 @@ async function init() {
     const { data } = await api('GET', '/tags?limit=200', undefined, { auth: false });
     state.recentTags = data.tags.map((t) => t.tag);
     $('#tag-list').replaceChildren(...state.recentTags.map((t) => h('option', { value: t })));
+  } catch {}
+  // Which hashtags a post can have: any, or in server tagging mode only the ones the server lists.
+  try {
+    const { data } = await api('GET', '/tagging', undefined, { auth: false });
+    state.allowedTags = data.allowedTags;
+    $('#tagging-hint').textContent = data.allowedTags
+      ? `This server takes only its own hashtags (TAGGING_MODE=server), up to ${data.maxTags} a post: ${data.allowedTags.map((t) => `#${t}`).join(' ')}.`
+      : `Any hashtags will do (TAGGING_MODE=user), up to ${data.maxTags} a post.`;
+    if (data.allowedTags) $('#post-tags').placeholder = data.allowedTags.slice(0, 2).join(', ');
   } catch {}
 
   renderActorSelect();

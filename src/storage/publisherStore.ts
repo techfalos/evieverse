@@ -26,6 +26,12 @@ export class PublisherStore {
     this.cache.delete(p.userId);
   }
 
+  /** Forgets a user's credit, as a deleted account's is: what is left of their name is a comment's empty username. */
+  async remove(userId: string): Promise<void> {
+    await this.hot.del([publisherKey(userId)]);
+    this.cache.delete(userId);
+  }
+
   /** Credits by user id. A user Redis has no credit for (e.g. lost data before a rebuild) gets an empty username. */
   async getMany(userIds: string[]): Promise<Map<string, Publisher>> {
     const t = this.now();

@@ -23,6 +23,11 @@ output "content_bucket" {
   value = aws_s3_bucket.content.id
 }
 
+output "audit_bucket" {
+  description = "Where every request that added, updated or deleted something is written, and moved to cold storage from."
+  value       = aws_s3_bucket.audit.id
+}
+
 output "redis_endpoint" {
   value = aws_elasticache_replication_group.redis.primary_endpoint_address
 }

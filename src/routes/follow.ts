@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
 import { isUniqueViolation, lockUser } from '../db/index.js';
 import type { AppDeps } from '../deps.js';
-import { syncFollowing } from '../follows.js';
+import { requireShownFollows, syncFollowing } from '../follows.js';
 import { badRequest, conflict, forbidden, HttpError, notFound } from '../http/errors.js';
 import { listPage, listQuery } from '../http/listCursor.js';
 import { Credentials } from '../http/schemas.js';
@@ -47,7 +47,7 @@ export function followRoutes(app: FastifyInstance, { db, config, follows, now = 
     const { userId, followeeId } = PairParams.parse(req.params);
     await caller(req, userId);
     if (followeeId === userId) throw badRequest(msg('follow.yourself'));
-    const followee = await db.selectFrom('users').select('id').where('id', '=', followeeId).executeTakeFirst();
+    const followee = await db.selectFrom('users').select('id').where('id', '=', followeeId).where('deleted_at', 'is', null).executeTakeFirst();
     if (!followee) throw notFound(msg('user.not_found'));
 
     let followedAt = (await findFollow(userId, followeeId))?.created_at;
@@ -86,13 +86,18 @@ export function followRoutes(app: FastifyInstance, { db, config, follows, now = 
     return { userId, followeeId, wasFollowing: Number(removed.numDeletedRows) === 1 };
   });
 
-  /** Follows are public, like posts: anyone can list whom a user follows, and who follows them. */
+  /**
+   * Whom a user follows, and who follows them. Each list is hidden unless its user shows it, which
+   * they choose for each on its own (see requireShownFollows).
+   *
+   * A list goes by its own user's setting alone: one who shows who follows them shows those users,
+   * whether or not they in turn show whom they follow.
+   */
   for (const list of ['following', 'followers'] as const) {
     app.get(`/users/:userId/${list}`, async (req) => {
       const { userId } = Params.parse(req.params);
       const page = listQuery(req.query);
-      const user = await db.selectFrom('users').select('id').where('id', '=', userId).executeTakeFirst();
-      if (!user) throw notFound(msg('user.not_found'));
+      await requireShownFollows(db, req, userId, list);
 
       const { own, other } = SIDES[list];
       const query = db

@@ -3,7 +3,7 @@ import type { RouteDeps, StoreDeps } from '../deps.js';
 import { cliRoutes } from '../routes/cli.js';
 import { commentReadRoutes, commentWriteRoutes } from '../routes/comments.js';
 import { contentRoutes, deletionRoutes } from '../routes/content.js';
-import { feedRoutes } from '../routes/feed.js';
+import { feedRoutes, followingFeedRoutes } from '../routes/feed.js';
 import { followRoutes } from '../routes/follow.js';
 import { inboxRoutes } from '../routes/inbox.js';
 import { languageRoutes } from '../routes/languages.js';
@@ -32,20 +32,21 @@ interface WithoutDatabase {
  * them all. A deployment's gateway has to send each path to its group's function, so the routing
  * tables under deploy/terraform change with this one.
  *
- *   feed     GET /feed, /feed/following                       Redis and the summary store only
+ *   feed     GET /feed                                        Redis and the summary store only
  *   content  GET /content/:id, /content/:id/raw,              one database read each, and the content store
  *            /content/:id/comments, /content/:id/comments/:id (and Redis, for comments)
  *   store    POST /uploads, /store                            writes posts
- *   api      everything else: register and users, languages, likes, follows, inboxes, messages
- *            and blocks, tags, moderation, reports, DELETE /content/:id, writing and deleting
+ *   api      everything else: register and users, languages, likes, follows and the following feed
+ *            (GET /feed/following, which asks the database who may read it), inboxes, messages and
+ *            blocks, tagging and tags, moderation, reports, DELETE /content/:id, writing and deleting
  *            comments, and the CLI's download (/cli)
  */
 export const GROUPS = {
   feed: {
     database: false,
-    // Only what feeds read is passed on: they never touch the database.
-    register: (app, { config, feedReader, authorReader, summaries, publishers, follows, relatedTags, now }) =>
-      feedRoutes(app, { config, feedReader, authorReader, summaries, publishers, follows, relatedTags, now }),
+    // Only what hashtag feeds read is passed on: they never touch the database.
+    register: (app, { config, feedReader, summaries, publishers, relatedTags, now }) =>
+      feedRoutes(app, { config, feedReader, summaries, publishers, relatedTags, now }),
   },
   content: {
     database: true,
@@ -68,6 +69,7 @@ export const GROUPS = {
       languageRoutes(app);
       likeRoutes(app, deps);
       followRoutes(app, deps);
+      followingFeedRoutes(app, deps);
       inboxRoutes(app, deps);
       deletionRoutes(app, deps);
       commentWriteRoutes(app, deps);

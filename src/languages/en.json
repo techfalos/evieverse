@@ -19,9 +19,11 @@
     "user.api_key_note": "Store this apiKey now; it cannot be retrieved again.",
     "user.not_found": "user not found",
     "user.update_own_only": "you can only update your own profile",
-    "user.nothing_to_update": "nothing to update: provide username, language or messages",
+    "user.nothing_to_update": "nothing to update: provide username, language, messages, showFollowing or showFollowers",
     "user.key_own_only": "you can only replace your own API key",
     "user.api_key_replaced_note": "Store this apiKey now; it cannot be retrieved again. The key it replaces no longer works.",
+    "user.delete_own_only": "you can only delete your own account, unless you're an admin",
+    "user.banned": "your account is banned: you can't post, comment or send messages",
 
     "content.not_found": "content not found",
     "content.meta_missing": "the meta file of the content is missing",
@@ -46,6 +48,8 @@
     "post.url_only_for_links": "url is only for link posts",
     "post.link_is_its_url": "a link post is just its url",
     "post.tags_required": "tags is required: on this server, publishers choose the hashtags of their posts",
+    "post.tags_required_allowed": "tags is required: choose from this server's hashtags, which GET /tagging lists",
+    "post.tag_not_allowed": "#{tag} is not one of this server's hashtags, which GET /tagging lists",
     "post.rate": {
       "one": "you can post at most once a minute",
       "other": "you can post at most {count} times a minute"
@@ -90,6 +94,8 @@
     "follow.yourself": "you can't follow yourself",
     "follow.limit": "you can follow at most {max} users",
     "follow.unfollowed_feed_not_updated": "you no longer follow them, but your following feed couldn't be updated; send the request again",
+    "follow.following_hidden": "this user doesn't show whom they follow",
+    "follow.followers_hidden": "this user doesn't show who follows them",
 
     "inbox.own_only": "you can only read and change your own inbox",
 
@@ -115,6 +121,8 @@
     "notice.comment_accepted": "Your comment was accepted from the moderation queue, and is published.",
     "notice.comment_rejected": "Your comment was rejected from the moderation queue, and deleted.",
     "notice.comment_deleted": "Your comment was deleted.",
+    "notice.user_banned": "A moderator banned your account: you can't post, comment or send messages. You can still read, and your inbox still works.",
+    "notice.user_unbanned": "Your account is no longer banned.",
 
     "comment.not_found": "comment not found",
     "comment.off": "this post doesn't take comments",
@@ -145,6 +153,8 @@
     "moderation.server_moderator_only": "only an admin or a server moderator can do this",
     "moderation.tag_moderator_only": "only an admin or a moderator of #{tag} can do this",
     "moderation.only_admin": "this is the only admin: make another user an admin first",
+    "moderation.ban_yourself": "you can't ban yourself",
+    "moderation.ban_staff": "admins and server moderators can't be banned: end their role first",
     "moderation.admins_changed": "the admins changed concurrently; retry",
     "moderation.word_unblockable": "\"{word}\" can't be blocked: block words or phrases of letters and digits, of at most {maxWords} words and {maxChars} characters",
     "moderation.list_full": "a list can hold at most {max} words and phrases",

@@ -83,6 +83,7 @@ for (const target of TARGETS) {
       expect(open.comments).toBe(true);
       const { contentId } = open;
       expect(await flagOf(contentId)).toBe(true);
+      await ctx.compactor.runOnce();
       expect(await inFeed()).toEqual({ [closed.contentId]: false, [contentId]: true });
       // It is in the meta file, and nowhere in the database.
       expect((await ctx.content.getMeta(contentId))?.comments).toBe(true);

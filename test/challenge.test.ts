@@ -265,7 +265,7 @@ for (const target of TARGETS) {
       return { res, steps };
     };
 
-    it('asks posts in a row for 1, 1, 2, 4, 8 challenges, one after another, until a minute goes by without a post or challenge', async () => {
+    it('asks posts in a row for 1, 1, then never more than 2 challenges, one after another, until a minute goes by without a post or challenge', async () => {
       const alice = await ctx.register('alice');
       const steps = async (text: string) => {
         const { res, steps } = await storeSolving(alice, text);
@@ -280,35 +280,35 @@ for (const target of TARGETS) {
       // Each right answer gets the next challenge; a wrong one, a new challenge at the same step.
       const first = await storeText(alice, 'five #news');
       expect(first.json()).toMatchObject({
-        error: 'you posted or were challenged less than 60 seconds ago; solve 4 challenges to post',
-        challenge: { step: 1, steps: 4 },
+        error: 'you posted or were challenged less than 60 seconds ago; solve 2 challenges to post',
+        challenge: { step: 1, steps: 2 },
       });
       const next = await storeText(alice, 'five #news', await ctx.solve(first.json().challenge));
-      expect(next.json()).toMatchObject({ error: 'solved 1 of 4; solve the next challenge', challenge: { step: 2, steps: 4 } });
+      expect(next.json()).toMatchObject({ error: 'solved 1 of 2; solve the next challenge', challenge: { step: 2, steps: 2 } });
       const solution = await ctx.solve(next.json().challenge);
       const wrongAnswer = solution.challengeAnswer.replace(/^./, (ch) => (ch === 'A' ? 'C' : 'A'));
       const wrong = await storeText(alice, 'five #news', { ...solution, challengeAnswer: wrongAnswer });
-      expect(wrong.json()).toMatchObject({ error: 'the characters are wrong; solve the new challenge', challenge: { step: 2, steps: 4 } });
-      let res = wrong;
-      for (const step of [3, 4]) {
-        res = await storeText(alice, 'five #news', await ctx.solve(res.json().challenge));
-        expect(res.json().challenge).toMatchObject({ step, steps: 4 });
-      }
-      expect((await storeText(alice, 'five #news', await ctx.solve(res.json().challenge))).statusCode).toBe(201);
+      expect(wrong.json()).toMatchObject({ error: 'the characters are wrong; solve the new challenge', challenge: { step: 2, steps: 2 } });
+      expect((await storeText(alice, 'five #news', await ctx.solve(wrong.json().challenge))).statusCode).toBe(201);
 
-      // Eight challenges take this person well over a minute, but each one starts the minute again.
-      expect(await steps('six #news')).toHaveLength(8);
-      expect(written).toEqual(['one #news', 'two #news', 'three #news', 'four #news', 'five #news', 'six #news']);
+      // Two is the most, however long the run goes on, and each challenge starts the minute again.
+      for (const text of ['six #news', 'seven #news', 'eight #news', 'nine #news']) expect(await steps(text)).toEqual(['1/2', '2/2']);
+      expect(written).toHaveLength(9);
 
       // A minute without either, and the run starts over.
       ctx.clock.now += 60_000;
-      expect(await steps('seven #news')).toEqual([]);
-      expect(await steps('eight #news')).toEqual(['1/1']);
+      expect(await steps('ten #news')).toEqual([]);
+      expect(await steps('eleven #news')).toEqual(['1/1']);
     });
 
     it('lets one of runs solved in parallel through, and gives a failed post its place in the run back', async () => {
       const alice = await ctx.register('alice');
-      for (const text of ['one #news', 'two #news', 'three #news']) expect((await storeSolving(alice, text)).res.statusCode).toBe(201);
+      for (const text of ['one #news', 'two #news']) expect((await storeSolving(alice, text)).res.statusCode).toBe(201);
+
+      // A post that fails after its challenge gives its place back: the next needs one again, and only the one after it two.
+      const failed = await storeSolving(alice, 'fail #news');
+      expect([failed.res.statusCode, failed.steps]).toEqual([500, ['1/1']]);
+      expect((await storeSolving(alice, 'three #news')).steps).toEqual(['1/1']);
 
       // Two posts at once each get their own run of two challenges, but only one can use its run.
       const runs = await Promise.all(['four #news', 'five #news'].map((text) => storeText(alice, text)));
@@ -321,13 +321,10 @@ for (const target of TARGETS) {
       );
       expect((await storeText(alice, 'four #news', lasts[0]!)).statusCode).toBe(201);
       const late = await storeText(alice, 'five #news', lasts[1]!);
-      expect(late.json()).toMatchObject({ error: 'another post went through meanwhile; solve 4 new challenges to post', challenge: { step: 1, steps: 4 } });
-
-      // A post that fails after its challenges gives its place back: the next needs four again, then eight.
-      const failed = await storeSolving(alice, 'fail #news');
-      expect([failed.res.statusCode, failed.steps.length]).toEqual([500, 4]);
-      expect((await storeSolving(alice, 'five #news')).steps).toHaveLength(4);
-      expect((await storeSolving(alice, 'six #news')).steps).toHaveLength(8);
+      // The one that lost solves a new run, which is no longer than the one it lost.
+      expect(late.json()).toMatchObject({ error: 'another post went through meanwhile; solve 2 new challenges to post', challenge: { step: 1, steps: 2 } });
+      const five = await storeSolving(alice, 'five #news');
+      expect([five.res.statusCode, five.steps]).toEqual([201, ['1/2', '2/2']]);
     });
 
     it('refuses a post past three in a minute outright, before any challenge, until the oldest is a minute old', async () => {

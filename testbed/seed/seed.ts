@@ -29,7 +29,7 @@ import {
 
 /**
  * Seeds the testbed through the app's own routes (register, store, like), so every write takes the real
- * path: object store, summaries, database and tail appends. Each request runs on its own clock, set back
+ * path: object store, summaries, database and the feed queue. Each request runs on its own clock, set back
  * in time, which spreads the posts over the last SEED_DAYS days while requests run concurrently. Summaries
  * use the real clock, so only posts younger than SUMMARY_HOT_DAYS are also kept in Redis. A final
  * `--rebuild` compaction on the real clock builds the day indexes, as after Redis lost its data.

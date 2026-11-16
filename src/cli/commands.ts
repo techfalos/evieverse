@@ -1,4 +1,4 @@
-import { apiClient, BUILD, CliError, serverUrl, VERSION, type Api } from './client.js';
+import { ApiError, apiClient, BUILD, CliError, serverUrl, VERSION, type Api } from './client.js';
 import { DEFAULT_PROFILE, listProfiles, readProfile, removeProfile, writeProfile, type Profile } from './profiles.js';
 import { installRelease, latestRelease } from './update.js';
 
@@ -73,6 +73,11 @@ export interface WhoAmI {
   moderates: string[];
   /** Whether they take part in messages between users. */
   messages: boolean;
+  /** Whether anyone can list whom they follow, and who follows them. */
+  showFollowing: boolean;
+  showFollowers: boolean;
+  /** Whether a moderator banned them: they can't post, comment or send messages. */
+  banned?: boolean;
 }
 
 interface Request {
@@ -93,11 +98,11 @@ function table(rows: string[][]): string {
   return rows.map((row) => row.map((cell, i) => (i === row.length - 1 ? cell : cell.padEnd(widths[i]!))).join('  ')).join('\n');
 }
 
-/** An admin can do all the others can, so only that is said of one. */
+/** An admin can do all the others can, so only that is said of one. A ban is said after the roles. */
 function roles(me: WhoAmI): string {
-  if (me.admin) return 'an admin';
   const held = [me.moderator && 'a server moderator', me.moderates.length > 0 && `moderator of ${hashtags(me.moderates)}`].filter(Boolean);
-  return held.length ? held.join(', and ') : 'no moderation role';
+  const role = me.admin ? 'an admin' : held.length ? held.join(', and ') : 'no moderation role';
+  return me.banned ? `${role}; banned, so you can't post, comment or send messages` : role;
 }
 
 /** A post as the feed and the moderation queue give it, as far as the CLI shows it. */
@@ -165,6 +170,21 @@ function pageQuery({ values }: Args, query = new URLSearchParams()): string {
   return query.size ? `?${query}` : '';
 }
 const more = (nextCursor: string | null) => (nextCursor ? `\nThere are more: --cursor ${nextCursor}` : '');
+
+/** What deleting an account answers: gone, or on its way out while the compactor deletes its posts. */
+interface AccountDeleted {
+  userId: string;
+  status: 'deleted' | 'pending_deletion';
+  requestedAt?: string;
+}
+
+/** Deleting an account can't be undone, so the commands that do it go ahead only when told to. */
+function confirmed({ values }: Args, what: string): void {
+  if (values.yes !== true) throw new CliError(`${what} can't be undone: run the command again with --yes to go ahead`, 2);
+}
+
+const deletedText = (d: AccountDeleted) =>
+  d.status === 'deleted' ? `Deleted account ${d.userId}.` : `Deleted account ${d.userId}: its posts are being removed, and the account goes with the last of them.`;
 
 const reportCount = (reports: number) => `${reports} ${reports === 1 ? 'report' : 'reports'}`;
 
@@ -346,6 +366,25 @@ export const COMMANDS: Command[] = [
       };
     },
   },
+  {
+    name: 'account delete',
+    options: { yes: { type: 'boolean' } },
+    flags: '--yes',
+    role: 'anyone',
+    summary:
+      'Deletes your account, for good: your key stops working, your posts are deleted, and the profile is removed from this machine. Your comments stay, without your name. Needs --yes.',
+    async run(ctx, args) {
+      confirmed(args, 'deleting your account');
+      const { name, profile } = await ctx.profile();
+      const deleted = await (await ctx.api()).request<AccountDeleted>('DELETE', path`/users/${profile.userId}`);
+      // Its key is dead now: the profile is of no use to anyone.
+      await removeProfile(ctx.io.home, name).catch(() => undefined);
+      return {
+        data: { profile: name, ...deleted },
+        text: `${deletedText(deleted)}\nRemoved profile "${name}" from this machine.`,
+      };
+    },
+  },
   endpoint<{ contentId: string; requestedAt: string }>({
     name: 'content delete',
     positionals: ['contentId'],
@@ -517,17 +556,21 @@ export const COMMANDS: Command[] = [
     request: ({ positionals: [tag, userId] }) => ({ method: 'DELETE', path: path`/tags/${tag!}/muted/${userId!}` }),
     text: (d) => (d.wasMuted ? `${d.userId} is no longer muted on #${d.tag}.` : `${d.userId} wasn't muted on #${d.tag}.`),
   }),
-  endpoint<{ nextCursor: string | null; days: { tags: Record<string, PostRecord[]> }[] }>({
+  endpoint<{ nextCursor: string | null; tags: Record<string, PostRecord[]> }>({
     name: 'tag queue',
     positionals: ['tag'],
     options: PAGE_OPTIONS,
     flags: PAGE_FLAGS,
     role: 'moderator',
     summary: "Lists a hashtag's moderation queue: the posts under it that no moderator has approved, or removed it from, yet.",
-    // The queue is the hashtag's feed, without the posts a moderator approved.
-    request: (args) => ({ method: 'GET', path: `/feed${pageQuery(args, new URLSearchParams({ tags: args.positionals[0]!, moderated: 'false' }))}` }),
+    // The queue is the hashtag's feed, without the posts a moderator approved. A feed is of its window alone,
+    // so the queue asks for the widest one (90 days): everything under the hashtag, not the last day's posts.
+    request: (args) => ({
+      method: 'GET',
+      path: `/feed${pageQuery(args, new URLSearchParams({ tags: args.positionals[0]!, moderated: 'false', hours: '2160' }))}`,
+    }),
     text: (d, { positionals: [tag] }) => {
-      const posts = d.days.flatMap((day) => Object.values(day.tags).flat());
+      const posts = Object.values(d.tags).flat();
       return (posts.length ? table(posts.map((p) => [p.contentId, p.publisher.username, p.createdAt, snippet(p)])) : `Nothing under #${tag!.replace(/^#/, '')} waits for a moderator.`) + more(d.nextCursor);
     },
   }),
@@ -557,12 +600,46 @@ export const COMMANDS: Command[] = [
         : `Removed #${d.tag} from ${d.contentId}: it's now under ${hashtags(d.tags)}.`) + (d.muted ? `\nIts publisher is muted on #${d.tag}.` : ''),
   }),
 
+  {
+    name: 'register',
+    positionals: ['username'],
+    options: { language: { type: 'string' } },
+    flags: '[--language <code>]',
+    role: 'admin',
+    summary:
+      'Registers a user, and prints their userId and their API key, which is shown this once. With --language, the language the server answers them in, instead of yours.',
+    async run(ctx, { positionals: [username], values }) {
+      const body = { username, ...(typeof values.language === 'string' && { language: values.language }) };
+      const user = await (await ctx.api()).request<{ userId: string; username: string; apiKey: string }>('POST', '/register', body).catch((err: unknown) => {
+        // The server asks anyone but an admin to solve a challenge first, whose image takes a client to show.
+        if (err instanceof ApiError && err.status === 428) {
+          throw new CliError('only an admin registers a user with the CLI: the server asks anyone else to solve a challenge, which takes a client that shows its image');
+        }
+        throw err;
+      });
+      return { data: user, text: `Registered ${user.username} (${user.userId}).\nTheir API key, shown this once: ${user.apiKey}` };
+    },
+  },
   endpoint<{ admins: { userId: string; username: string }[] }>({
     name: 'admins list',
     role: 'admin',
     summary: "Lists the server's admins.",
     request: () => ({ method: 'GET', path: '/admins' }),
     text: (d) => table(d.admins.map((a) => [a.userId, a.username])),
+  }),
+  endpoint<AccountDeleted>({
+    name: 'users delete',
+    positionals: ['userId'],
+    options: { yes: { type: 'boolean' } },
+    flags: '--yes',
+    role: 'admin',
+    summary:
+      "Deletes any user's account, for good: their key stops working and their posts are deleted. Their comments stay, without their name. Not the only admin's account. Needs --yes.",
+    request: (args) => {
+      confirmed(args, 'deleting an account');
+      return { method: 'DELETE', path: path`/users/${args.positionals[0]!}` };
+    },
+    text: (d) => deletedText(d),
   }),
   endpoint<{ userId: string; username: string; alreadyAdmin: boolean }>({
     name: 'admins grant',
@@ -618,6 +695,41 @@ export const COMMANDS: Command[] = [
     summary: "Ends a user's moderation of a hashtag.",
     request: ({ positionals: [tag, userId] }) => ({ method: 'DELETE', path: path`/tags/${tag!}/moderators/${userId!}` }),
     text: (d) => (d.wasModerator ? `${d.userId} no longer moderates #${d.tag}.` : `${d.userId} didn't moderate #${d.tag}.`),
+  }),
+  endpoint<{ banned: { userId: string; username: string; bannedAt: string; reason: string | null; bannedBy: { userId: string; username: string } | null }[]; nextCursor: string | null }>({
+    name: 'bans list',
+    options: PAGE_OPTIONS,
+    flags: PAGE_FLAGS,
+    role: 'serverModerator',
+    summary: 'Lists the banned users, most recently banned first: who banned each, when, and why.',
+    request: (args) => ({ method: 'GET', path: `/banned${pageQuery(args)}` }),
+    text: (d) =>
+      (d.banned.length
+        ? table(d.banned.map((b) => [b.userId, b.username, `since ${b.bannedAt}`, `by ${b.bannedBy?.username ?? '(an account that is gone)'}`, (b.reason ?? '(no reason given)').replace(/\s+/g, ' ')]))
+        : 'Nobody is banned.') + more(d.nextCursor),
+  }),
+  endpoint<{ userId: string; username: string; alreadyBanned: boolean }>({
+    name: 'bans add',
+    positionals: ['userId'],
+    options: { reason: { type: 'string' } },
+    flags: '[--reason <text>]',
+    role: 'serverModerator',
+    summary:
+      "Bans a user: they can't post, comment or send messages, and can still read. They are told. Not an admin or a server moderator. With --reason, what moderators can read of why.",
+    request: ({ positionals: [userId], values }) => ({
+      method: 'PUT',
+      path: path`/banned/${userId!}`,
+      ...(typeof values.reason === 'string' && { body: { reason: values.reason } }),
+    }),
+    text: (d) => (d.alreadyBanned ? `${d.username} (${d.userId}) was already banned.` : `${d.username} (${d.userId}) is banned: they can't post, comment or send messages.`),
+  }),
+  endpoint<{ userId: string; wasBanned: boolean }>({
+    name: 'bans remove',
+    positionals: ['userId'],
+    role: 'serverModerator',
+    summary: 'Ends a ban. The user is told.',
+    request: ({ positionals: [userId] }) => ({ method: 'DELETE', path: path`/banned/${userId!}` }),
+    text: (d) => (d.wasBanned ? `${d.userId} is no longer banned.` : `${d.userId} wasn't banned.`),
   }),
   endpoint<{ queue: (QueueItem & { trustScore: number; queuedAt: string })[]; nextCursor: string | null }>({
     name: 'queue list',

@@ -23,8 +23,9 @@ export function normalizeTag(input: string): string | null {
 /**
  * Hashtags a person chose: a list, or one string of them separated by commas or spaces ("news, #Mumbai").
  * It refuses what it can't use instead of dropping it, so nobody's tag silently goes missing.
+ * `max` is how many there can be: a post's, unless the list is of something else.
  */
-export function parseTagList(input: string | string[]): { tags: string[] } | { error: Message } {
+export function parseTagList(input: string | string[], max = MAX_TAGS): { tags: string[] } | { error: Message } {
   const words = typeof input === 'string' ? input.split(/[\s,]+/) : input;
   const tags = new Set<string>();
   for (const word of words) {
@@ -33,19 +34,22 @@ export function parseTagList(input: string | string[]): { tags: string[] } | { e
     if (!tag) return { error: msg('tags.unusable', { word }) };
     tags.add(tag);
   }
-  if (tags.size > MAX_TAGS) return { error: msg('tags.too_many', { max: MAX_TAGS, got: tags.size }) };
+  if (tags.size > max) return { error: msg('tags.too_many', { max, got: tags.size }) };
   return { tags: [...tags] };
 }
 
-/** The hashtags a post gets: the server's own in server tagging mode, else the ones chosen for it. */
-export const postTags = (tagging: { mode: 'server' | 'user'; serverTags: string[] }, chosen: string[]) =>
-  tagging.mode === 'server' ? tagging.serverTags : chosen;
+/**
+ * The hashtags a post can have: the server's own in server tagging mode, and any (null) in user mode.
+ * Either way a post's hashtags are the ones its publisher chose for it.
+ */
+export const allowedTags = (tagging: { mode: 'server' | 'user'; serverTags: string[] }): string[] | null =>
+  tagging.mode === 'server' ? tagging.serverTags : null;
 
 export function sameTags(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((t) => b.includes(t));
 }
 
-/** Records that these tags just received a tail append, so the compactor will merge them. */
+/** Records that a post was just published or updated under these tags, which /tags lists hashtags by, and gives a new tag its row. */
 export async function touchTags(db: Db, dialect: DbDialect, tags: string[], now: number): Promise<void> {
   // Sorted, so concurrent transactions lock shared tag rows in the same order and can't deadlock.
   for (const name of [...tags].sort()) {

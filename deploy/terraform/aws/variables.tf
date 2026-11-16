@@ -51,7 +51,7 @@ variable "db_instance_class" {
 }
 
 variable "redis_node_type" {
-  description = "ElastiCache node type. Size it for the feed index (~30 bytes per indexed post) plus 8 days of compressed summaries; see deploy/README.md."
+  description = "ElastiCache node type. Size it for the feed index (~30 bytes per indexed post) plus 8 days of compressed summaries; see docs/DEPLOY.md."
   type        = string
   default     = "cache.t4g.small"
 }
@@ -60,6 +60,16 @@ variable "redis_replicas" {
   description = "Read replicas of the ElastiCache primary; at least 1 gives automatic failover across AZs."
   type        = number
   default     = 1
+}
+
+variable "audit_archive_after_days" {
+  description = "Days after a record of the audit log (every request that added, updated or deleted something) is written that it moves to S3 Glacier Deep Archive, the cold storage it stays in. Restoring one takes hours."
+  type        = number
+  default     = 30
+  validation {
+    condition     = var.audit_archive_after_days >= 0
+    error_message = "A number of days, 0 or more."
+  }
 }
 
 variable "environment" {

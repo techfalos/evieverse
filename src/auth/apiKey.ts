@@ -16,6 +16,12 @@ export interface AuthUser {
   language: string;
   /** Whether the user takes part in messages between users: on, until they turn it off. */
   messages: boolean;
+  /** Whether anyone can list whom the user follows: off, until they turn it on. */
+  showFollowing: boolean;
+  /** Whether anyone can list who follows the user: off, until they turn it on. */
+  showFollowers: boolean;
+  /** Whether a server moderator or an admin banned the user: they are refused posts, comments, messages and upload links (see refuseBanned). */
+  banned: boolean;
 }
 
 /**
@@ -76,10 +82,22 @@ async function verifyApiKey(db: Db, userId: string, apiKey: string, languages: L
   const row = await db
     .selectFrom('api_keys')
     .innerJoin('users', 'users.id', 'api_keys.user_id')
-    .select(['users.id', 'users.username', 'users.admin', 'users.moderator', 'users.language', 'users.messages'])
+    .select([
+      'users.id',
+      'users.username',
+      'users.admin',
+      'users.moderator',
+      'users.language',
+      'users.messages',
+      'users.show_following',
+      'users.show_followers',
+      'users.banned_at',
+    ])
     .where('api_keys.user_id', '=', userId)
     .where('api_keys.key_hash', '=', hashKey(apiKey))
     .where('api_keys.revoked_at', 'is', null)
+    // Deleting an account revokes its keys too; this holds for a request that was under way when it did.
+    .where('users.deleted_at', 'is', null)
     .executeTakeFirst();
   if (!row) throw unauthorized();
   return {
@@ -89,6 +107,9 @@ async function verifyApiKey(db: Db, userId: string, apiKey: string, languages: L
     moderator: row.moderator === 1,
     language: languageOf(languages, row.language),
     messages: row.messages === 1,
+    showFollowing: row.show_following === 1,
+    showFollowers: row.show_followers === 1,
+    banned: row.banned_at !== null,
   };
 }
 
@@ -125,6 +146,7 @@ export async function authenticate(
   if (!userId || !apiKey) throw unauthorized(msg('auth.required'));
   const user = await verifyApiKey(db, userId, apiKey, req.server.languages);
   req.language = user.language;
+  if (req.audit) req.audit.userId = user.id;
   return user;
 }
 

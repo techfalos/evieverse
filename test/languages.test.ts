@@ -277,7 +277,7 @@ for (const target of TARGETS) {
       const before = await stored(ana.userId);
 
       const changed = await patch(ana, ana.userId, { language: 'EN' });
-      expect([changed.statusCode, changed.json()]).toEqual([200, { userId: ana.userId, username: 'ana', language: 'en', messages: true }]);
+      expect([changed.statusCode, changed.json()]).toEqual([200, { userId: ana.userId, username: 'ana', language: 'en', messages: true, showFollowing: false, showFollowers: false }]);
       // The language is no part of her credit, so nothing tells the compactor to write that again.
       expect(await stored(ana.userId)).toEqual({ language: 'en', updated_at: before.updated_at });
       expect(await whoami(ana)).toMatchObject({ language: 'en' });
@@ -292,8 +292,8 @@ for (const target of TARGETS) {
       expect(await whoami(ana)).toMatchObject({ username: 'ana', language: 'en' });
 
       // Both at once, and each alone leaves the other as it is.
-      expect((await patch(ana, ana.userId, { username: 'anna', language: 'es' })).json()).toEqual({ userId: ana.userId, username: 'anna', language: 'es', messages: true });
-      expect((await patch(ana, ana.userId, { username: 'ana' })).json()).toEqual({ userId: ana.userId, username: 'ana', language: 'es', messages: true });
+      expect((await patch(ana, ana.userId, { username: 'anna', language: 'es' })).json()).toEqual({ userId: ana.userId, username: 'anna', language: 'es', messages: true, showFollowing: false, showFollowers: false });
+      expect((await patch(ana, ana.userId, { username: 'ana' })).json()).toEqual({ userId: ana.userId, username: 'ana', language: 'es', messages: true, showFollowing: false, showFollowers: false });
       expect(await whoami(ana)).toMatchObject({ username: 'ana', language: 'es' });
 
       // Nobody else can, and the refusal is in the language of whoever tried.

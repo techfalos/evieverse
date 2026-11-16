@@ -1,8 +1,8 @@
 import { Redis } from 'ioredis';
 
 /**
- * The RAM tier: the feed index (heads, manifests, day indexes), tail lists, hot summaries and
- * publisher credits. Keys are relative; each store adds its own prefix. Any Redis-protocol server
+ * The RAM tier: the feed index (heads, manifests, day indexes), hot summaries and publisher
+ * credits. Keys are relative; each store adds its own prefix. Any Redis-protocol server
  * works (Redis, Valkey, ElastiCache, Memorystore, Azure); without one, MemoryHotStore keeps
  * everything in this process, which only suits a single node.
  */
@@ -11,6 +11,8 @@ export interface HotStore {
   mget(keys: string[]): Promise<(Buffer | null)[]>;
   /** Without `ttlMs` the key never expires (and is never evicted under a volatile-* policy). */
   set(key: string, value: Buffer | string, ttlMs?: number): Promise<void>;
+  /** Sets several keys in one round trip, each as `set` does. Not atomic: if it fails, some may be set. */
+  setMany(entries: HotEntry[]): Promise<void>;
   /** Sets a key that isn't there, to expire in `ttlMs`; one that is there is left as it is. */
   setIfAbsent(key: string, value: Buffer, ttlMs: number): Promise<void>;
   /** Gets and deletes a key in one step, so of concurrent callers only one gets its value. */
@@ -33,16 +35,6 @@ export interface HotStore {
    */
   swap(key: string, expected: string | null, next: string | null, ttlMs?: number): Promise<boolean>;
   /**
-   * Adds `index.score` to a sorted set, then appends `value` to a list. Not atomic: a failure can
-   * leave a listed window without its list, which reads as empty, never a list nobody can find.
-   */
-  push(list: string, value: string, index: { key: string; score: number }): Promise<void>;
-  /** Every element of each list; a missing list is empty. */
-  lists(keys: string[]): Promise<Buffer[][]>;
-  /** Members (numbers, each its own score) of a sorted set in [min, max), ascending. */
-  scores(key: string, min: number, max: number): Promise<number[]>;
-  zrem(key: string, members: number[]): Promise<void>;
-  /**
    * Adds members to a set that is kept in the order of its members, which must be ASCII (byte order
    * is then the order of the strings). A set that is new, or somehow has no expiry, expires `ttlMs`
    * from now; one that has an expiry keeps it, so the set lasts `ttlMs` from when it was begun.
@@ -61,6 +53,13 @@ export interface HotStore {
   /** Deletes every key under this store's prefix. */
   clear(): Promise<void>;
   close(): Promise<void>;
+}
+
+/** A key to set (see setMany). */
+export interface HotEntry {
+  key: string;
+  value: Buffer | string;
+  ttlMs?: number;
 }
 
 /** The bounds of a range of an ordered set (see lexRange): neither is part of the range. */
@@ -151,6 +150,16 @@ export class RedisHotStore implements HotStore {
     else await this.redis.set(this.k(key), value, 'PX', ttl(ttlMs));
   }
 
+  async setMany(entries: HotEntry[]) {
+    if (!entries.length) return;
+    const p = this.redis.pipeline();
+    for (const { key, value, ttlMs } of entries) {
+      if (ttlMs === undefined) p.set(this.k(key), value);
+      else p.set(this.k(key), value, 'PX', ttl(ttlMs));
+    }
+    check(await p.exec());
+  }
+
   async setIfAbsent(key: string, value: Buffer, ttlMs: number) {
     await this.redis.set(this.k(key), value, 'PX', ttl(ttlMs), 'NX');
   }
@@ -198,28 +207,6 @@ export class RedisHotStore implements HotStore {
     return (await this.redis.eval(SWAP, 1, this.k(key), ...args)) === 1;
   }
 
-  async push(list: string, value: string, index: { key: string; score: number }) {
-    // Separate commands rather than MULTI, so the two keys may live on different shards behind a proxy.
-    await this.redis.zadd(this.k(index.key), index.score, String(index.score));
-    await this.redis.rpush(this.k(list), value);
-  }
-
-  async lists(keys: string[]) {
-    if (!keys.length) return [];
-    const p = this.redis.pipeline();
-    for (const key of keys) p.lrangeBuffer(this.k(key), 0, -1);
-    return check(await p.exec()) as Buffer[][];
-  }
-
-  async scores(key: string, min: number, max: number) {
-    const members = await this.redis.zrangebyscore(this.k(key), String(min), Number.isFinite(max) ? `(${max}` : '+inf');
-    return members.map(Number);
-  }
-
-  async zrem(key: string, members: number[]) {
-    if (members.length) await this.redis.zrem(this.k(key), ...members.map(String));
-  }
-
   async lexAdd(key: string, members: string[], ttlMs: number) {
     // One key, so the script runs wherever the key lives, as for incr.
     for (let i = 0; i < members.length; i += LEX_BATCH) {
@@ -255,12 +242,12 @@ export class RedisHotStore implements HotStore {
   }
 }
 
-/** An ordered set's members. A class of its own, which tells it from the set of a tag's tail windows. */
+/** An ordered set's members. */
 class LexSet {
   readonly members = new Set<string>();
 }
 
-type Value = Buffer | Buffer[] | Set<number> | LexSet;
+type Value = Buffer | LexSet;
 const isLexSet = (v: Value): v is LexSet => v instanceof LexSet;
 
 /** In-process stand-in for Redis (development, tests, single-node setups). Expiry follows the injected clock. */
@@ -292,8 +279,16 @@ export class MemoryHotStore implements HotStore {
     return keys.map((key) => this.value(key, Buffer.isBuffer) ?? null);
   }
 
-  async set(key: string, value: Buffer | string, ttlMs?: number) {
+  private put(key: string, value: Buffer | string, ttlMs?: number) {
     this.map.set(key, { v: Buffer.from(value), exp: ttlMs === undefined ? null : this.now() + ttl(ttlMs) });
+  }
+
+  async set(key: string, value: Buffer | string, ttlMs?: number) {
+    this.put(key, value, ttlMs);
+  }
+
+  async setMany(entries: HotEntry[]) {
+    for (const { key, value, ttlMs } of entries) this.put(key, value, ttlMs);
   }
 
   async setIfAbsent(key: string, value: Buffer, ttlMs: number) {
@@ -342,30 +337,6 @@ export class MemoryHotStore implements HotStore {
     if (next === null) this.map.delete(key);
     else await this.set(key, next, ttlMs);
     return true;
-  }
-
-  async push(list: string, value: string, index: { key: string; score: number }) {
-    const items = this.value(list, Array.isArray) ?? [];
-    const set = this.value(index.key, (v): v is Set<number> => v instanceof Set) ?? new Set<number>();
-    items.push(Buffer.from(value));
-    set.add(index.score);
-    if (!this.map.has(list)) this.map.set(list, { v: items, exp: null });
-    if (!this.map.has(index.key)) this.map.set(index.key, { v: set, exp: null });
-  }
-
-  async lists(keys: string[]) {
-    return keys.map((key) => [...(this.value(key, Array.isArray) ?? [])]);
-  }
-
-  async scores(key: string, min: number, max: number) {
-    const set = this.value(key, (v): v is Set<number> => v instanceof Set);
-    return [...(set ?? [])].filter((s) => s >= min && s < max).sort((a, b) => a - b);
-  }
-
-  async zrem(key: string, members: number[]) {
-    const set = this.value(key, (v): v is Set<number> => v instanceof Set);
-    for (const m of members) set?.delete(m);
-    if (set && !set.size) this.map.delete(key);
   }
 
   async lexAdd(key: string, members: string[], ttlMs: number) {

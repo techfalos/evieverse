@@ -18,7 +18,8 @@ x-app-env: &app-env
   COMPACT_INTERVAL_SECONDS: ${COMPACT_INTERVAL_SECONDS:-5}
   # Every request reaches the app from nginx, so the per-IP limit on /register is effectively global.
   REGISTER_RATE_LIMIT_PER_HOUR: '1000'
-  # user or server; server needs TAGGING_SERVER_TAGS too. The seed always sends its planned hashtags.
+  # user or server; server needs TAGGING_SERVER_TAGS too: the only hashtags posts from the page can then have.
+  # The seed posts its planned hashtags either way.
   TAGGING_MODE: ${TAGGING_MODE:-user}
   TAGGING_SERVER_TAGS: ${TAGGING_SERVER_TAGS:-}
 

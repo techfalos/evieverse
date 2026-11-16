@@ -150,10 +150,32 @@ export class SummaryStore {
 
   /** Writes whichever tier is missing the summary. */
   async ensure(s: Summary): Promise<void> {
-    const hot = this.hotTtl(s.createdAt) > 0;
-    const [inCold, [inHot]] = await Promise.all([this.op.exists(summaryObjectKey(s)), hot ? this.hot.exists([summaryKey(s)]) : [true]]);
-    if (!inCold) return this.put(s);
-    if (!inHot) await this.hot.set(summaryKey(s), await this.compress(s), this.hotTtl(s.createdAt));
+    const [err] = await this.ensureMany([s]);
+    if (err) throw err;
+  }
+
+  /**
+   * Writes whichever tier is missing each of the summaries: Redis is asked about them all in one
+   * round trip, and the object store about several at a time. Returns, in order, what went wrong
+   * with each, and null where nothing did, so one that fails doesn't keep the others from being
+   * looked at.
+   */
+  async ensureMany(list: Summary[]): Promise<(Error | null)[]> {
+    const hot = list.map((s) => this.hotTtl(s.createdAt) > 0);
+    const found = await this.hot.exists(list.filter((_, i) => hot[i]).map(summaryKey));
+    let next = 0;
+    const inHot = hot.map((due) => (due ? found[next++]! : true));
+    const errors: (Error | null)[] = list.map(() => null);
+    await mapLimit([...list.keys()], COLD_READS, async (i) => {
+      const s = list[i]!;
+      try {
+        if (!(await this.op.exists(summaryObjectKey(s)))) await this.put(s);
+        else if (!inHot[i]) await this.hot.set(summaryKey(s), await this.compress(s), this.hotTtl(s.createdAt));
+      } catch (err) {
+        errors[i] = err instanceof Error ? err : new Error(String(err));
+      }
+    });
+    return errors;
   }
 
   /** The summaries, in order; null where neither tier has one (e.g. erased since it was planned). */
@@ -191,7 +213,17 @@ export class SummaryStore {
     });
   }
 
-  /** Erases the summaries from both tiers. */
+  /**
+   * Erases one summary from both tiers, and fails if it can't: for content that must leave feeds
+   * now, which leave out a record with no summary. One that isn't there is no error.
+   */
+  async erase(r: SummaryRef): Promise<void> {
+    this.cache.delete(summaryObjectKey(r));
+    await this.op.delete(summaryObjectKey(r));
+    await this.hot.del([summaryKey(r)]);
+  }
+
+  /** Erases the summaries from both tiers, as far as it can: one it couldn't is left behind. */
   async remove(refs: SummaryRef[]): Promise<void> {
     if (!refs.length) return;
     for (const r of refs) this.cache.delete(summaryObjectKey(r));

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { closeAccount } from '../accounts.js';
 import { authenticate, authenticateIfNamed, issueApiKey, reissueApiKey } from '../auth/apiKey.js';
 import { ChallengeFields } from '../challenge/challenges.js';
 import { isUniqueViolation } from '../db/index.js';
@@ -29,6 +30,9 @@ const UpdateBody = Credentials.extend({
   language: LanguageCode.optional(),
   /** Whether the user takes part in messages between users (see routes/inbox.ts). */
   messages: Flag.optional(),
+  /** Whether anyone can list whom the user follows, and who follows them (see routes/follow.ts). */
+  showFollowing: Flag.optional(),
+  showFollowers: Flag.optional(),
 });
 
 const Params = z.object({ userId: z.string().uuid() });
@@ -38,7 +42,8 @@ function usernameTaken(err: unknown): never {
   throw err;
 }
 
-export function registerRoutes(app: FastifyInstance, { db, config, publishers, challenges, now = Date.now }: RouteDeps) {
+export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
+  const { db, config, publishers, challenges, now = Date.now } = deps;
   const { languages } = app;
 
   /** Feeds read credits from Redis; the compactor re-syncs changed users if this write fails. */
@@ -104,7 +109,8 @@ export function registerRoutes(app: FastifyInstance, { db, config, publishers, c
   /**
    * A public profile, with the user's roles: whether they're an admin or a server moderator, and the
    * hashtags they moderate. Not whether they take messages from other users: with it, someone
-   * refused could tell a block from the setting (see routes/inbox.ts).
+   * refused could tell a block from the setting (see routes/inbox.ts). Nor whether they show whom
+   * they follow or who follows them, which asking for either list answers (see routes/follow.ts).
    */
   app.get('/users/:userId', async (req) => {
     const { userId } = Params.parse(req.params);
@@ -112,6 +118,7 @@ export function registerRoutes(app: FastifyInstance, { db, config, publishers, c
       .selectFrom('users')
       .select(['id', 'username', 'created_at', 'admin', 'moderator'])
       .where('id', '=', userId)
+      .where('deleted_at', 'is', null)
       .executeTakeFirst();
     if (!user) throw notFound(msg('user.not_found'));
     return {
@@ -125,8 +132,9 @@ export function registerRoutes(app: FastifyInstance, { db, config, publishers, c
   });
 
   /**
-   * Whose key the caller's is, with their roles, the language they are answered in and whether they
-   * take part in messages between users: what a client checks a key with, and learns what it may do.
+   * Whose key the caller's is, with their roles, the language they are answered in, whether they
+   * take part in messages between users, whether they show whom they follow and who follows
+   * them, and whether they are banned: what a client checks a key with, and learns what it may do.
    */
   app.get('/whoami', async (req) => {
     const user = await authenticate(db, req, Credentials.parse(req.body ?? {}));
@@ -138,35 +146,44 @@ export function registerRoutes(app: FastifyInstance, { db, config, publishers, c
       moderator: user.moderator,
       moderates: await moderatedBy(user.id),
       messages: user.messages,
+      showFollowing: user.showFollowing,
+      showFollowers: user.showFollowers,
+      banned: user.banned,
     };
   });
 
   /**
    * Updates the caller's own profile: their username, their language, whether they take part in
-   * messages between users, or any of them at once. Feeds show the new name at once: they read it
-   * from Redis. The new language is the one the server answers the user in from this response on.
-   * Neither it nor `messages` is part of their credit, so they leave `updated_at` as it is.
+   * messages between users, whether they show whom they follow, whether they show who follows
+   * them, or any of them at once. Feeds show the new name at once: they read it from Redis. The
+   * new language is the one the server answers the user in from this response on. Only the name
+   * is part of their credit, so nothing else changes `updated_at`.
    */
   app.patch('/users/:userId', async (req) => {
     const { userId } = Params.parse(req.params);
     const body = UpdateBody.parse(req.body ?? {});
     const user = await authenticate(db, req, body);
     if (user.id !== userId) throw forbidden(msg('user.update_own_only'));
-    if (body.username === undefined && body.language === undefined && body.messages === undefined) throw badRequest(msg('user.nothing_to_update'));
+    const given = [body.username, body.language, body.messages, body.showFollowing, body.showFollowers];
+    if (given.every((value) => value === undefined)) throw badRequest(msg('user.nothing_to_update'));
     const username = body.username ?? user.username;
     const language = body.language === undefined ? user.language : chosen(body.language);
     const messages = body.messages ?? user.messages;
+    const showFollowing = body.showFollowing ?? user.showFollowing;
+    const showFollowers = body.showFollowers ?? user.showFollowers;
     const renamed = username !== user.username;
     // One statement, so a request that changes several things changes them all or, its username taken, none.
     const changes = {
       ...(renamed && { username, updated_at: now() }),
       ...(body.language !== undefined && { language }),
       ...(body.messages !== undefined && { messages: messages ? 1 : 0 }),
+      ...(body.showFollowing !== undefined && { show_following: showFollowing ? 1 : 0 }),
+      ...(body.showFollowers !== undefined && { show_followers: showFollowers ? 1 : 0 }),
     };
     if (Object.keys(changes).length > 0) await db.updateTable('users').set(changes).where('id', '=', userId).execute().catch(usernameTaken);
     if (renamed) await putPublisher({ userId, username });
     req.language = language;
-    return { userId, username, language, messages };
+    return { userId, username, language, messages, showFollowing, showFollowers };
   });
 
   /**
@@ -181,5 +198,23 @@ export function registerRoutes(app: FastifyInstance, { db, config, publishers, c
     if (user.id !== userId) throw forbidden(msg('user.key_own_only'));
     const apiKey = await reissueApiKey(db, config.db.dialect, req, body, now());
     return reply.status(201).send({ userId, apiKey, note: say(req, msg('user.api_key_replaced_note')) });
+  });
+
+  /**
+   * Deletes an account (see src/accounts.ts): the caller's own, or any for an admin. The account is
+   * gone at once, as far as anyone can tell: its keys stop working, and its posts are 404 and leave
+   * the feeds. It is `200` and `status: "deleted"` when nothing of it is left, and `202` with
+   * `status: "pending_deletion"` while the compactor deletes its posts, after which it deletes
+   * the account. Repeating it, as an admin, for an account that is on its way out gives the same answer.
+   * The only admin's account isn't deleted (409): make another user an admin first.
+   */
+  app.delete('/users/:userId', async (req, reply) => {
+    const { userId } = Params.parse(req.params);
+    const user = await authenticate(db, req, Credentials.parse(req.body ?? {}));
+    if (user.id !== userId && !user.admin) throw forbidden(msg('user.delete_own_only'));
+    const { deletedAt, removed } = await closeAccount(deps, userId, user, req.log);
+    req.log.info({ userId, by: user.id, removed }, 'deleted an account');
+    if (removed) return reply.status(200).send({ userId, status: 'deleted' });
+    return reply.status(202).send({ userId, status: 'pending_deletion', requestedAt: iso(deletedAt) });
   });
 }

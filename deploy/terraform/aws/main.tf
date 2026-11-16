@@ -14,12 +14,11 @@ locals {
   secret_keys = concat(["DATABASE_URL", "REDIS_URL"], nonsensitive(keys(var.secrets)))
 
   # Which function serves which requests. This follows the route groups in src/functions/groups.ts:
-  # change the two together. Anything not listed goes to the api function.
+  # change the two together. Anything not listed goes to the api function, /feed/following among it:
+  # only /feed itself is the feed function's.
   routes = {
     "GET /feed"              = "feed"
     "HEAD /feed"             = "feed"
-    "GET /feed/{proxy+}"     = "feed"
-    "HEAD /feed/{proxy+}"    = "feed"
     "GET /content/{proxy+}"  = "content"
     "HEAD /content/{proxy+}" = "content"
     "POST /uploads"          = "store"
@@ -261,9 +260,57 @@ resource "aws_s3_bucket_lifecycle_configuration" "content" {
   }
 }
 
+# ---------------------------------------------------------------- audit log
+
+# Every request that adds, updates or deletes something is written here, whole and gzipped, one
+# object each, as the response is sent (src/audit.ts); reads are not. The objects move to S3 Glacier
+# Deep Archive after `audit_archive_after_days`, which is the cold storage they end in. The functions
+# can put objects here and do nothing else with it: not read, overwrite or delete one. The
+# application's own log group (30 days) keeps a line for each, naming its object.
+resource "aws_s3_bucket" "audit" {
+  bucket_prefix = "${var.name}-audit-"
+  force_destroy = var.force_destroy
+}
+
+resource "aws_s3_bucket_public_access_block" "audit" {
+  bucket                  = aws_s3_bucket.audit.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "audit" {
+  bucket = aws_s3_bucket.audit.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "audit" {
+  bucket = aws_s3_bucket.audit.id
+  # Most records are well under 128 KB, which S3 doesn't transition by default. This setting lets it
+  # transition them to the Glacier classes (the default is the same for every class).
+  transition_default_minimum_object_size = "varies_by_storage_class"
+  rule {
+    id     = "archive"
+    status = "Enabled"
+    filter {}
+    transition {
+      days          = var.audit_archive_after_days
+      storage_class = "DEEP_ARCHIVE"
+    }
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
+    }
+  }
+}
+
 # ---------------------------------------------------------------- redis
 
-# The feed index, tails, hot summaries and publisher credits. Cluster mode stays off: the app uses
+# The feed index, hot summaries and publisher credits. Cluster mode stays off: the app uses
 # multi-key commands across tags. volatile-lru only ever evicts keys with a TTL (hot summaries and
 # superseded index keys), so a full cache degrades to object-store reads instead of losing the index.
 resource "aws_elasticache_subnet_group" "main" {
@@ -446,7 +493,10 @@ locals {
   # `var.secrets` are environment variables there: encrypted at rest, but readable by anyone allowed
   # lambda:GetFunctionConfiguration on these functions.
   function_env = merge(local.env, {
-    REDIS_URL = local.redis_url
+    # Only the functions answer requests, so only they write the audit log.
+    AUDIT_SCHEME  = "s3"
+    AUDIT_OPTIONS = jsonencode({ bucket = aws_s3_bucket.audit.id, region = var.region })
+    REDIS_URL     = local.redis_url
     # The address CloudFront saw is the last one in X-Forwarded-For once the gateway's own is dropped.
     TRUST_PROXY          = "1"
     FUNCTION_EDGE_SECRET = random_password.edge.result
@@ -508,6 +558,15 @@ resource "aws_iam_role_policy_attachment" "function_vpc" {
 resource "aws_iam_role_policy" "function" {
   role   = aws_iam_role.function.id
   policy = data.aws_iam_policy_document.content.json
+}
+
+# The audit log is write-only to the functions: they can add records and nothing else.
+resource "aws_iam_role_policy" "function_audit" {
+  role = aws_iam_role.function.id
+  policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = [{ Effect = "Allow", Action = ["s3:PutObject"], Resource = "${aws_s3_bucket.audit.arn}/*" }]
+  })
 }
 
 resource "aws_iam_role" "execution" {
@@ -686,6 +745,7 @@ resource "aws_lambda_function" "fn" {
     aws_cloudwatch_log_group.function,
     aws_iam_role_policy_attachment.function_vpc,
     aws_iam_role_policy.function,
+    aws_iam_role_policy.function_audit,
   ]
 }
 
@@ -776,7 +836,7 @@ resource "aws_ecs_service" "compactor" {
 }
 
 # `--rebuild` rebuilds the whole feed index from the database and the bucket, after Redis lost data.
-# It is a task of its own, started by hand (see deploy/README.md): no service runs it. It can run
+# It is a task of its own, started by hand (see docs/DEPLOY.md): no service runs it. It can run
 # beside the compactor: the lease makes each wait for the other's pass.
 resource "aws_ecs_task_definition" "rebuild" {
   family                   = "${var.name}-rebuild"

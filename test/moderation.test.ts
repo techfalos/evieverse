@@ -1,9 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setAdmin } from '../src/moderation/policy.js';
 import { normalizeWord, WordScanner } from '../src/moderation/words.js';
 import { touchTags } from '../src/tags.js';
-import { as, createTestContext, multipart, PNG, requests, tailLines, TARGETS, type TestContext, type User } from './helpers.js';
+import { as, createTestContext, multipart, PNG, queued, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 const NO_USER = '00000000-0000-4000-8000-000000000000';
 const REFUSED = "the post contains a word or phrase this server doesn't allow, so it wasn't published";
@@ -160,7 +161,7 @@ for (const target of TARGETS) {
 
       expect(await ctx.db.selectFrom('content').select('id').execute()).toEqual([{ id: contentId }]);
       expect(ok(await req(null, 'GET', `/content/${contentId}`), 200)).toMatchObject({ text: 'An honest post about spammers #news' });
-      expect(await tailLines(ctx.hot, 'news')).toHaveLength(1);
+      expect(await queued(ctx)).toEqual([`${contentId} @${alice.userId}`, `${contentId} news`]);
       // None of them was a post, so the run's challenge is still the first.
       const next = await store(alice, 'A second post #news');
       expect(next.statusCode).toBe(428);
@@ -186,6 +187,7 @@ for (const target of TARGETS) {
 
       const both = await post(alice, 'A rumour about the match #news #sports');
       expect(both).toMatchObject({ tags: ['sports'], removedTags: [{ tag: 'news', reason: 'blocked_word' }] });
+      await ctx.compactor.runOnce();
       expect(await feedOf('news')).toEqual([]);
       expect((await feedOf('sports')).map((i) => [i.contentId, i.tags])).toEqual([[both.contentId, ['sports']]]);
       expect(await post(alice, `${'word '.repeat(7_000)}unconfirmed, reports #news #sports`)).toMatchObject({ tags: ['sports'] });
@@ -221,7 +223,7 @@ for (const target of TARGETS) {
       expect(await post(alice, 'Another rumour #news')).toMatchObject({ tags: ['news'] });
     });
 
-    it('removes a hashtag from a post, which leaves its feeds at once and loses the hashtag for good once the compactor has run', async () => {
+    it('removes a hashtag from a post, which leaves its feeds and loses the hashtag for good once the compactor has run', async () => {
       ctx = await createTestContext(target);
       const root = await admin();
       const mod = await ctx.register('mod');
@@ -239,10 +241,10 @@ for (const target of TARGETS) {
       expect((await remove(root, 'weather')).json().error).toBe("the content isn't tagged #weather");
       expect((await req(root, 'DELETE', `/content/${NO_USER}/tags/news`)).statusCode).toBe(404);
 
-      // The removal is recorded, and hides the post from the hashtag's feeds at once. The post itself is as it was.
+      // The removal is recorded. Until the compactor's next run the post is as it was, in the hashtag's feeds too.
       expect(ok(await remove(mod, 'news'), 200)).toEqual({ contentId, tag: 'news', tags: ['mumbai'], muted: false });
       expect(await decisions()).toEqual([{ content_id: contentId, tag: 'news', decision: 'removed', moderator_id: mod.userId, applied_at: null }]);
-      expect(await feedOf('news')).toEqual([]);
+      expect((await feedOf('news')).map((i) => i.contentId)).toEqual([contentId]);
       expect((await feedOf('mumbai')).map((i) => [i.contentId, i.tags, i.updatedAt])).toEqual([[contentId, ['news', 'mumbai'], posted]]);
       expect(ok(await req(null, 'GET', `/content/${contentId}`), 200)).toMatchObject({ tags: ['news', 'mumbai'], updatedAt: posted });
       // It no longer has the hashtag to remove.
@@ -256,7 +258,7 @@ for (const target of TARGETS) {
       expect((await feedOf('mumbai')).map((i) => [i.contentId, i.tags, i.updatedAt])).toEqual([[contentId, ['mumbai'], now()]]);
       expect(ok(await req(null, 'GET', `/content/${contentId}`), 200)).toMatchObject({ tags: ['mumbai'], updatedAt: now() });
       expect((await req(null, 'GET', `/content/${contentId}/raw`)).body).toBe('Flooding in Mumbai #news #mumbai');
-      expect(await ctx.db.selectFrom('pending_appends').selectAll().execute()).toEqual([]);
+      expect(await queued(ctx)).toEqual([]);
       // Nothing is left for the next run to do.
       ctx.clock.now += 1000;
       expect((await ctx.compactor.runOnce()).tags).toEqual([]);
@@ -298,11 +300,11 @@ for (const target of TARGETS) {
       expect(await tagsOf(contentId)).toEqual(['mumbai']);
       expect(await applied()).toBe(ctx.clock.now);
 
-      // An update that passed moderation before the removal, and wrote the post and its entry after the compactor ran.
+      // An update that passed moderation before the removal, and wrote the post and queued it after the compactor ran.
       await ctx.content.putMeta({ ...before, updatedAt: ctx.clock.now });
       await touchTags(ctx.db, ctx.config.db.dialect, ['news'], ctx.clock.now);
-      await ctx.appender.append('news', { contentId, createdAt: before.updatedAt, updatedAt: ctx.clock.now, likes: 0, aiGenerated: false, moderated: false });
-      // The run that merges the entry leaves it out of the index, and has the next one take the hashtag off again.
+      await ctx.db.insertInto('feed_queue').values({ content_id: contentId, tag: 'news', token: randomUUID(), committed: 1, created_at: ctx.clock.now }).execute();
+      // The run that takes the row leaves the post out of the index, and has the next one take the hashtag off again.
       await ctx.compact();
       expect(await feedOf('news')).toEqual([]);
       expect(await applied()).toBeNull();
@@ -319,10 +321,10 @@ for (const target of TARGETS) {
         .insertInto('tag_moderation')
         .values({ content_id: both.contentId, tag: 'mumbai', decision: 'removed', moderator_id: root.userId, decided_at: ctx.clock.now, applied_at: null })
         .execute();
-      await ctx.compact();
+      // The run that takes the last of them off sets the post for deletion, and deletes it.
+      expect((await ctx.compact()).deleted).toEqual([both.contentId]);
       expect((await req(null, 'GET', `/content/${both.contentId}`)).statusCode).toBe(404);
       expect(await feedOf('mumbai')).toHaveLength(1);
-      expect((await ctx.compact()).deleted).toEqual([both.contentId]);
     });
 
     it("leaves a file's bytes as they are, and takes a post down when its last hashtag is removed", async () => {
@@ -348,9 +350,9 @@ for (const target of TARGETS) {
 
       const last = await req(root, 'DELETE', `/content/${contentId}/tags/pics`);
       expect(ok(last, 202)).toEqual({ contentId, tag: 'pics', tags: [], status: 'pending_deletion', requestedAt: now(), muted: false });
-      expect(await feedOf('pics')).toEqual([]);
       expect((await req(null, 'GET', `/content/${contentId}`)).statusCode).toBe(404);
       expect((await ctx.compact()).deleted).toEqual([contentId]);
+      expect(await feedOf('pics')).toEqual([]);
       expect(await ctx.content.getMeta(contentId)).toBeNull();
     });
   });

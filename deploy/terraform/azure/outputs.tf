@@ -23,6 +23,11 @@ output "storage_account" {
   value = azurerm_storage_account.main.name
 }
 
+output "audit_container" {
+  description = "The blob container, in the storage account, that every request that added, updated or deleted something is written to, and moved to cold storage from."
+  value       = azurerm_storage_container.audit.name
+}
+
 output "redis_hostname" {
   value = azurerm_managed_redis.main.hostname
 }

@@ -30,7 +30,9 @@ export interface EnsuredAdmin {
 export function ensureAdmin(db: Db, admin: BootstrapAdmin, now = Date.now()): Promise<EnsuredAdmin> {
   const { userId, keyHash } = admin;
   return db.transaction().execute(async (trx) => {
-    const user = await trx.selectFrom('users').select(['username', 'admin']).where('id', '=', userId).executeTakeFirst();
+    const user = await trx.selectFrom('users').select(['username', 'admin', 'deleted_at']).where('id', '=', userId).executeTakeFirst();
+    // Deleted, and not yet gone (the compactor deletes its posts first): it can't be put back in place, and it can't be made anew under the same id.
+    if (user?.deleted_at != null) throw new Error(`the admin account ${userId} was deleted and is not gone yet: run the migration step again once the compactor has deleted its posts`);
     if (!user) {
       const holder = await trx.selectFrom('users').select('id').where('username', '=', admin.username).executeTakeFirst();
       if (holder) throw new Error(`the admin account can't be created: the username "${admin.username}" belongs to user ${holder.id}; choose another`);

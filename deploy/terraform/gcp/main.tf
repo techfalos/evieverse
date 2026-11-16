@@ -26,11 +26,11 @@ locals {
   service_url = { for group in keys(local.groups) : group => "https://${var.name}-${group}-${data.google_project.this.number}.${var.region}.run.app" }
 
   # Which service serves which requests. This follows src/functions/groups.ts: change the two
-  # together. `{rest=**}` matches any number of path segments; the most specific path wins.
+  # together. `{rest=**}` matches any number of path segments; the most specific path wins. Only
+  # /feed itself is the feed group's: /feed/following is the api group's, with the rest.
   methods = ["get", "head", "post", "put", "patch", "delete", "options"]
   routes = {
     "/feed"              = { get = "feed", head = "feed", options = "feed" }
-    "/feed/{rest=**}"    = { get = "feed", head = "feed", options = "feed" }
     "/content/{rest=**}" = merge({ for method in local.methods : method => "api" }, { get = "content", head = "content" })
     "/uploads"           = { post = "store", options = "store" }
     "/store"             = { post = "store", options = "store" }
@@ -72,6 +72,9 @@ locals {
   function_env = merge({
     DB_POOL_SIZE = tostring(var.db_pool_size)
     TRUST_PROXY  = tostring(var.trust_proxy)
+    # Only the services answer requests, so only they write the audit log.
+    AUDIT_SCHEME  = "gcs"
+    AUDIT_OPTIONS = jsonencode({ bucket = google_storage_bucket.audit.name })
   }, local.env)
 
   builtin_secrets = {
@@ -143,7 +146,7 @@ resource "google_compute_subnetwork" "main" {
   ip_cidr_range = "10.30.0.0/24"
 }
 
-# The feed index, tails, hot summaries and publisher credits, reached over Cloud Run's direct VPC
+# The feed index, hot summaries and publisher credits, reached over Cloud Run's direct VPC
 # egress. volatile-lru only ever evicts keys with a TTL (hot summaries and superseded index keys),
 # so a full cache degrades to object-store reads instead of losing the index. Traffic stays inside
 # the VPC and needs the AUTH string; Memorystore's TLS uses a private CA the app doesn't load.
@@ -190,6 +193,37 @@ resource "google_storage_bucket" "content" {
       type = "Delete"
     }
   }
+}
+
+# ---------------------------------------------------------------- audit log
+
+# Every request that adds, updates or deletes something is written here, whole and gzipped, one
+# object each, as the response is sent (src/audit.ts); reads are not. The objects move to the
+# Archive storage class after `audit_archive_after_days`, which is the cold storage they end in. The
+# services can create objects here and do nothing else with it: not read, overwrite or delete one.
+# Cloud Logging, which keeps what the services print, has a line for each, naming its object.
+resource "google_storage_bucket" "audit" {
+  name                        = "${var.project_id}-${var.name}-audit"
+  location                    = var.region
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  force_destroy               = !var.deletion_protection
+
+  lifecycle_rule {
+    condition {
+      age = var.audit_archive_after_days
+    }
+    action {
+      type          = "SetStorageClass"
+      storage_class = "ARCHIVE"
+    }
+  }
+}
+
+resource "google_storage_bucket_iam_member" "audit" {
+  bucket = google_storage_bucket.audit.name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:${google_service_account.app.email}"
 }
 
 # Links to the bucket are signed with a private key, and Cloud Run's own credentials have none.
@@ -342,6 +376,7 @@ locals {
     google_project_iam_member.sql,
     google_storage_bucket_iam_member.content,
     google_storage_bucket_iam_member.storage,
+    google_storage_bucket_iam_member.audit,
     google_secret_manager_secret_iam_member.app,
     google_secret_manager_secret_version.db_url,
     google_secret_manager_secret_version.redis_url,
@@ -706,7 +741,7 @@ resource "google_cloud_run_v2_worker_pool" "compactor" {
 }
 
 # `--rebuild` rebuilds the whole feed index from the database and the bucket, after Redis lost data.
-# It is a job, started by hand (see deploy/README.md): nothing schedules it. It can run beside the
+# It is a job, started by hand (see docs/DEPLOY.md): nothing schedules it. It can run beside the
 # compactor: the lease makes each wait for the other's pass.
 resource "google_cloud_run_v2_job" "rebuild" {
   name                = "${var.name}-rebuild"

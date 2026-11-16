@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryHotStore, SummaryStore, type Summary } from '../src/storage/index.js';
 import { decodeSummary, encodeSummary, summaryKey } from '../src/storage/summaryStore.js';
-import { DAY_ENTRY_BYTES, decodeTail, encodeTail, packDay, unpackDay, type IndexEntry } from '../src/tagfeed/layout.js';
+import { DAY_ENTRY_BYTES, packDay, unpackDay, type IndexEntry } from '../src/tagfeed/layout.js';
 import { DAY } from '../src/time.js';
 
 const NOW = Date.UTC(2026, 10, 6, 12);
@@ -100,35 +100,8 @@ describe('day index entries', () => {
   });
 });
 
-describe('tail lines', () => {
-  it('round-trips records, tombstones and approvals, and ignores lines it cannot read', () => {
-    const record = { contentId: ID, createdAt: NOW - 5, updatedAt: NOW, likes: 0, aiGenerated: false, moderated: false };
-    expect(encodeTail(record)).toBe(`r ${ID} ${NOW - 5} ${NOW} 0`);
-    expect(decodeTail(encodeTail(record))).toEqual(record);
-    const ai = { ...record, aiGenerated: true };
-    expect(encodeTail(ai)).toBe(`r ${ID} ${NOW - 5} ${NOW} 1`);
-    expect(decodeTail(encodeTail(ai))).toEqual(ai);
-    const moderated = { ...ai, moderated: true };
-    expect(encodeTail(moderated)).toBe(`r ${ID} ${NOW - 5} ${NOW} 3`);
-    expect(decodeTail(encodeTail(moderated))).toEqual(moderated);
-    const approval = { approval: true as const, contentId: ID, createdAt: NOW - 5 };
-    expect(encodeTail(approval)).toBe(`a ${ID} ${NOW - 5}`);
-    expect(decodeTail(encodeTail(approval))).toEqual(approval);
-    expect(decodeTail(`a ${ID}`)).toBeNull();
-    // A record with no flags isn't one this server wrote.
-    expect(decodeTail(`r ${ID} ${NOW - 5} ${NOW}`)).toBeNull();
-    for (const before of [NOW, null]) {
-      const t = { tombstone: true as const, contentId: ID, before, createdAt: NOW - 5 };
-      expect(encodeTail(t)).toBe(`t ${ID} ${before ?? '*'} ${NOW - 5}`);
-      expect(decodeTail(encodeTail(t))).toEqual(t);
-    }
-    expect(decodeTail('{"contentId":"x"}')).toBeNull();
-    expect(decodeTail('r x 1')).toBeNull();
-  });
-});
-
 describe('MemoryHotStore', () => {
-  it('expires keys by the injected clock and keeps tail windows in a sorted set', async () => {
+  it('expires keys by the injected clock', async () => {
     let now = NOW;
     const hot = new MemoryHotStore(() => now);
     await hot.set('a', 'x', 1000);
@@ -137,16 +110,14 @@ describe('MemoryHotStore', () => {
     now += 1000;
     expect(await hot.exists(['a', 'b'])).toEqual([false, true]);
 
-    for (const w of [300, 0, 600]) await hot.push(`tail:${w}`, `line ${w}`, { key: 'tails', score: w });
-    await hot.push('tail:0', 'second', { key: 'tails', score: 0 });
-    expect(await hot.scores('tails', 0, 600)).toEqual([0, 300]);
-    expect(await hot.scores('tails', 300, Infinity)).toEqual([300, 600]);
-    expect((await hot.lists(['tail:0', 'missing'])).map((l) => l.map(String))).toEqual([['line 0', 'second'], []]);
-    await hot.expire(['tail:0'], 10);
+    await hot.expire(['b'], 10);
     now += 10;
-    expect(await hot.lists(['tail:0'])).toEqual([[]]);
-    await hot.zrem('tails', [0, 300, 600]);
-    expect(await hot.scores('tails', 0, Infinity)).toEqual([]);
+    expect(await hot.mget(['a', 'b'])).toEqual([null, null]);
+
+    await hot.setMany([{ key: 'c', value: 'x', ttlMs: 1000 }, { key: 'd', value: Buffer.from('y') }]);
+    expect(await hot.mget(['c', 'd'])).toEqual([Buffer.from('x'), Buffer.from('y')]);
+    now += 1000;
+    expect(await hot.exists(['c', 'd'])).toEqual([false, true]);
   });
 
   it('keeps a set in the order of its members, read a range at a time from either end, which lasts from when it was begun', async () => {

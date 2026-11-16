@@ -7,6 +7,7 @@ import { HttpError, tooManyRequests } from '../http/errors.js';
 import { resolveMimeType } from '../http/mime.js';
 import { Credentials } from '../http/schemas.js';
 import { msg } from '../language.js';
+import { refuseBanned } from '../moderation/policy.js';
 import { mediaType } from '../posts.js';
 import { UploadTooLargeError } from '../storage/index.js';
 import { iso } from '../time.js';
@@ -34,6 +35,8 @@ export function uploadRoutes(app: FastifyInstance, { db, config, content, hot, n
   app.post('/uploads', async (req, reply) => {
     const body = Body.parse(req.body ?? {});
     const user = await authenticate(db, req, body);
+    // A link is for posting the file, which a banned user can't.
+    refuseBanned(user);
     const mimeType = resolveMimeType(body.contentType, body.filename);
     if (mediaType(mimeType) !== body.type) throw wrongFileType(body.type, mimeType);
     const { maxUploadBytes, uploadLinksPerMinute } = config.storage;

@@ -12,7 +12,7 @@ interface FeedBodies {
 }
 
 /** Every record a tag feed's plan picked. */
-export const planned = (plan: FeedPlan) => plan.slices.flatMap((s) => s.picks.flat());
+export const planned = (plan: FeedPlan) => plan.picks.flat();
 
 /**
  * The summary of every picked record (one MGET for posts younger than the hot window, parallel
@@ -29,47 +29,51 @@ export async function loadBodies(picked: Candidate[], summaries: SummaryStore, p
 }
 
 /**
- * Streams the feed JSON in plan order. A record whose summary is gone (erased after the plan was
- * made) is left out, and not counted. `tags` are the hashtags the plan was made over, and `related`
- * those of them the feed added to the ones it was asked for; undefined if it wasn't asked to add any.
+ * The summary a record picked under `tag` is shown with, or none, which leaves the record out:
+ *
+ * - its summary is gone: the content was deleted since the index was built, or an update of it
+ *   waits in the moderation queue, which erases the summary (see contentWriter);
+ * - its summary doesn't carry `tag` any more: an update dropped the hashtag, or a moderator
+ *   removed it.
+ *
+ * The index is as the compactor's last run left it, and a feed session reads the one its first page
+ * did for as long as its cursor lasts. The summary is what the content is now, so this is what
+ * keeps content out of a feed it has left before the index says so.
+ */
+function shown(bodies: FeedBodies, c: Candidate, tag: string): Summary | undefined {
+  const s = bodies.summaries.get(refKey(c));
+  return s?.tags.includes(tag) ? s : undefined;
+}
+
+/**
+ * Streams the feed JSON: each hashtag's records, in plan order. A record with no summary to show
+ * it with (see `shown`) is left out, and not counted. `tags` are the hashtags the plan was made
+ * over, and `related` those of them the feed added to the ones it was asked for; undefined if it
+ * wasn't asked to add any.
  */
 export function* renderFeed(plan: FeedPlan, tags: string[], bodies: FeedBodies, nextCursor: string | null, related?: string[]): Generator<Buffer> {
-  const counts = plan.slices.map((s) => s.picks.reduce((n, list) => n + list.filter((c) => bodies.summaries.has(refKey(c))).length, 0));
+  const records = tags.map((tag, t) =>
+    plan.picks[t]!.flatMap((c) => {
+      const s = shown(bodies, c, tag);
+      return s ? [JSON.stringify(toFeedRecord(s, c.likes, bodies.publishers.get(s.userId)!, c.moderated))] : [];
+    }),
+  );
   const head = {
     window: { from: iso(plan.window.from), to: iso(plan.window.to) },
-    count: counts.reduce((a, b) => a + b, 0),
+    count: records.reduce((n, list) => n + list.length, 0),
     truncated: plan.truncated,
     nextCursor,
     ...(related && { related }),
   };
-  yield Buffer.from(`${JSON.stringify(head).slice(0, -1)},"days":[`);
+  yield Buffer.from(`${JSON.stringify(head).slice(0, -1)},"tags":{`);
 
-  let firstDay = true;
-  for (const [i, slice] of plan.slices.entries()) {
-    const meta = {
-      from: iso(slice.from),
-      to: iso(slice.to),
-      extended: slice.extended,
-      allocated: slice.allocated,
-      count: counts[i],
-    };
-    yield Buffer.from(`${firstDay ? '' : ','}${JSON.stringify(meta).slice(0, -1)},"tags":{`);
-    firstDay = false;
-
-    let firstTag = true;
-    for (let t = 0; t < tags.length; t++) {
-      const records: string[] = [];
-      for (const c of slice.picks[t]!) {
-        const s = bodies.summaries.get(refKey(c));
-        if (s) records.push(JSON.stringify(toFeedRecord(s, c.likes, bodies.publishers.get(s.userId)!, c.moderated)));
-      }
-      if (!records.length) continue;
-      yield Buffer.from(`${firstTag ? '' : ','}${JSON.stringify(tags[t])}:[${records.join(',')}]`);
-      firstTag = false;
-    }
-    yield Buffer.from('}}');
+  let firstTag = true;
+  for (let t = 0; t < tags.length; t++) {
+    if (!records[t]!.length) continue;
+    yield Buffer.from(`${firstTag ? '' : ','}${JSON.stringify(tags[t])}:[${records[t]!.join(',')}]`);
+    firstTag = false;
   }
-  yield Buffer.from(']}');
+  yield Buffer.from('}}');
 }
 
 /** The records of a following feed's picks, in order; one whose summary is gone is left out. */

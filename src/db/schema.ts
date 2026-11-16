@@ -24,6 +24,28 @@ export interface UsersTable {
   language: string | null;
   /** 1 for a user who takes part in messages between users, else 0: theirs to turn off (PATCH /users/:userId). Notices reach them either way. */
   messages: Generated<number>;
+  /**
+   * 1 for a user who lets anyone list whom they follow, and read their following feed, which names them, else 0:
+   * off until they turn it on (PATCH /users/:userId). They can always read both themselves.
+   */
+  show_following: Generated<number>;
+  /** The same for the list of who follows them. */
+  show_followers: Generated<number>;
+  /**
+   * When a server moderator or an admin banned the user (PUT /banned/:userId), or null. A banned user is refused
+   * whatever writes a post, a comment or a message. Never set on an admin or a server moderator.
+   */
+  banned_at: number | null;
+  /** Who banned them; null while they aren't banned, and once that user is gone. */
+  banned_by: string | null;
+  /** What the moderator said was the reason, if anything. Only moderators read it. */
+  ban_reason: string | null;
+  /**
+   * When the account was deleted (DELETE /users/:userId), or null. The row stays until the compactor has deleted
+   * the content of the user's that is set for deletion (see purgeAccounts): until then the account is gone as far as
+   * anyone is concerned, and its username is still taken.
+   */
+  deleted_at: number | null;
 }
 
 export interface ApiKeysTable {
@@ -50,9 +72,8 @@ export interface TagsTable {
   /** A single hashtag word, e.g. "mumbai", or "@<userId>": a publisher's own index. */
   name: string;
   created_at: number;
+  /** When a post was last published or updated under the tag, which /tags lists hashtags by. */
   last_appended_at: number;
-  /** Tail windows starting before this time have been merged into the tag's day indexes. */
-  compacted_at: Generated<number>;
 }
 
 /**
@@ -74,19 +95,30 @@ export interface LikesTable {
   created_at: number;
 }
 
-/** One row per user following another. Follows are public, like posts. */
+/** One row per user following another. Each side lists its follows to others only if its user says so (users.show_following, users.show_followers). */
 export interface FollowsTable {
   follower_id: string;
   followee_id: string;
   created_at: number;
 }
 
-/** A tag whose tail may not hold a committed write's line for the content; the compactor rebuilds the entry of stale ones. */
-export interface PendingAppendsTable {
+/**
+ * The queue the feed index is written from: content whose entry in a tag's index the compactor
+ * rebuilds, from the database and the meta file, on its next run. One row per content and tag, so
+ * writes of the same content between two runs queue once.
+ */
+export interface FeedQueueTable {
   content_id: string;
-  /** A hashtag the write gave the content or dropped from it, or its publisher's own index. */
+  /** A hashtag the write gave the content, kept on it or dropped from it, or its publisher's own index. */
   tag: string;
-  /** When the write that left the row was made; a later write to the same tag re-stamps it. */
+  /** Names the write that stamped the row last. A run deletes only the rows that still hold the token it read. */
+  token: string;
+  /**
+   * 1 once the write committed. 0 on the rows an update queues before it writes anything: a run
+   * leaves those until they are COMPACT_GRACE_SECONDS old, when the update is taken to have stopped.
+   */
+  committed: number;
+  /** When the row was stamped. */
   created_at: number;
 }
 
@@ -225,7 +257,7 @@ export interface Database {
   tag_pairs: TagPairsTable;
   likes: LikesTable;
   follows: FollowsTable;
-  pending_appends: PendingAppendsTable;
+  feed_queue: FeedQueueTable;
   compactor_lease: CompactorLeaseTable;
   tag_moderators: TagModeratorsTable;
   tag_mutes: TagMutesTable;

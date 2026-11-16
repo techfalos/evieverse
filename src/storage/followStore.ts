@@ -3,8 +3,8 @@ import type { HotStore } from './hotStore.js';
 const followingKey = (userId: string) => `fol:${userId}`;
 
 /**
- * Whom each user follows, in Redis, so following feeds never touch the database: one key per user who
- * follows anyone, with no expiry. Written on every follow and unfollow; the compactor re-syncs users
+ * Whom each user follows, in Redis, so following feeds never read the `follows` table (all they ask
+ * the database is who may read them): one key per user who follows anyone, with no expiry. Written on every follow and unfollow; the compactor re-syncs users
  * who followed someone since its last run, and --rebuild every user.
  */
 export class FollowStore {

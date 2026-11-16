@@ -1,7 +1,7 @@
 import type { AuthUser } from '../auth/apiKey.js';
 import type { Config } from '../config.js';
 import type { Db } from '../db/index.js';
-import { unprocessable } from '../http/errors.js';
+import { forbidden, unprocessable } from '../http/errors.js';
 import { msg } from '../language.js';
 import { routeOf, trustOf, type TrustPlugin, type TrustRoute } from './trust.js';
 import { WordScanner } from './words.js';
@@ -27,9 +27,18 @@ export async function moderates(db: Db, user: AuthUser, tag: string): Promise<bo
  */
 export const moderatesServer = (user: AuthUser): boolean => user.admin || user.moderator;
 
+/**
+ * Refuses (403) a user who was banned: what writes a post, a comment or a message, or a link to
+ * upload a post's file with, is not for them. Reading, their inbox, their own posts' deletion and
+ * their own account (its settings, its key, its deletion) are.
+ */
+export function refuseBanned(user: AuthUser): void {
+  if (user.banned) throw forbidden(msg('user.banned'));
+}
+
 /** Makes a user an admin, or not; null if there's no such user. A userId wins over a username that happens to look like one. */
 export async function setAdmin(db: Db, user: string, admin: boolean): Promise<{ userId: string; username: string } | null> {
-  const select = db.selectFrom('users').select(['id', 'username']);
+  const select = db.selectFrom('users').select(['id', 'username']).where('deleted_at', 'is', null);
   const row = (await select.where('id', '=', user).executeTakeFirst()) ?? (await select.where('username', '=', user).executeTakeFirst());
   if (!row) return null;
   await db.updateTable('users').set({ admin: admin ? 1 : 0 }).where('id', '=', row.id).execute();

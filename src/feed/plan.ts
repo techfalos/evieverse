@@ -1,10 +1,10 @@
 import { compareRecent, compareRecords } from '../tagfeed/layout.js';
 import type { Candidate } from '../tagfeed/reader.js';
-import { DAY, HOUR } from '../time.js';
+import { HOUR } from '../time.js';
 
 /**
- * popular: each tag's records by likes, most first (with fresh slots in the newest slice).
- * chronological: the newest records first, whatever their tag or their likes.
+ * popular: the window's most liked records first, the tags taking turns (with fresh slots).
+ * chronological: the window's newest records first, whatever their tag or their likes.
  */
 export const FEED_ALGORITHMS = ['popular', 'chronological'] as const;
 export type FeedAlgorithm = (typeof FEED_ALGORITHMS)[number];
@@ -15,15 +15,15 @@ export const FEED_HOURS: readonly number[] = [1, 2, 4, 8, 12, 24, 48, 72, 168, 3
 export interface PlanOptions {
   /** Defaults to popular. */
   algorithm?: FeedAlgorithm;
+  /** The window: only records created in the `hours` up to the anchor are in the feed. */
   hours: number;
   /** End of the window (inclusive, UTC epoch ms); later pages of a cursor reuse the first page's anchor. */
   anchor: number;
   /** Most records in the page. */
   limit: number;
-  maxLookbackDays: number;
-  /** Per slice index, how far into each requested tag's ordered list earlier pages consumed. */
-  positions?: Record<number, number[]>;
-  /** Fresh-content injection for the newest slice; omitted, `every: 0` or the chronological algorithm disables it. */
+  /** How far into each requested tag's ordered list earlier pages consumed. */
+  positions?: number[];
+  /** Fresh-content injection; omitted, `every: 0` or the chronological algorithm disables it. */
   fresh?: FreshOptions;
   /** Only records created with AI (true) or without (false); omitted, both. */
   aiGenerated?: boolean;
@@ -44,38 +44,17 @@ export interface FreshOptions {
   positions?: number[];
 }
 
-export interface PlannedSlice {
-  index: number;
-  from: number;
-  to: number;
-  extended: boolean;
-  allocated: number;
-  used: number;
-  /** Picked records per requested tag, in output order. */
-  picks: Candidate[][];
-}
-
 export interface FeedPlan {
   window: { from: number; to: number };
-  slices: PlannedSlice[];
+  /** Picked records per requested tag, in output order. */
+  picks: Candidate[][];
+  /** Whether the window holds records no page has returned yet. */
   truncated: boolean;
-  positions: Record<number, number[]>;
-  /** Per tag, how far into the newest slice's fresh pool the feed has consumed (empty when disabled). */
+  /** How far into each requested tag's ordered list the feed has consumed. */
+  positions: number[];
+  /** Per tag, how far into its fresh pool the feed has consumed (empty when disabled). */
   freshPositions: number[];
 }
-
-interface Slice extends PlannedSlice {
-  lists: Candidate[][];
-  pos: number[];
-  rr: number;
-  seen: Set<string>;
-  /** Only on the newest slice when fresh injection is enabled. */
-  fresh: { lists: Candidate[][]; pos: number[]; picked: number[] } | null;
-}
-
-type Order = (a: Candidate, b: Candidate) => number;
-
-const isOrdered = (list: Candidate[], order: Order) => list.every((c, i) => i === 0 || order(list[i - 1]!, c) <= 0);
 
 /** Small deterministic PRNG (mulberry32), so the same seed reproduces the same shuffle on every page. */
 function rng(seed: number): () => number {
@@ -107,196 +86,122 @@ function freshPool(list: Candidate[], fresh: FreshOptions, t: number): Candidate
  * Plans a feed page of at most `limit` records of the requested tags (index entries only; bodies
  * are fetched afterwards). Items of one content in several tags are returned once.
  *
- * Time is cut into 24h slices counted back from the anchor. Slice i of the requested window is
- * allotted limit / 2^(i+1) records (50%, 25%, 12.5%, ...), with the oldest window slice taking the
- * remainder. Within a slice, tags take turns (equal share per tag); each tag's records are ordered
- * by UTC day, then likes. Unused allowance carries to the next older slice; anything left after the
- * window extends further back (up to maxLookbackDays); anything still left flows back to the newest
- * slices that had records they couldn't fit.
+ * The feed is of the window and nothing else: the records created in the `hours` up to the anchor,
+ * as one span of time. A record's place depends on its likes or on when it was created, never on
+ * which day that was, and a page the window can't fill is left short rather than filled with older
+ * records.
  *
- * Fresh injection: in the newest slice, every `fresh.every`th pick per tag comes from a seeded
- * shuffle of the newest low-like records, so new content is seen (and can earn likes) even on
- * busy tags. Older slices are ordered strictly by likes.
+ * The popular algorithm returns the window's most liked records first. Each tag's records are
+ * ordered by likes (most first), then recency, and the tags take turns picking one record each, so
+ * every tag gets an equal share of the page; a tag that runs out lets the others continue.
  *
- * The chronological algorithm returns the newest records first instead. Each tag's records are
- * ordered by creation time alone, a slice's picks go to whichever tag's next record is the newest
- * rather than to each tag in turn, and a slice is given the whole page before any older one gets a
- * record: so a page is the newest `limit` records of the tags together, and the next page carries on
- * from there. It has no fresh slots, which exist to lift new records out of a likes order. The order
- * depends only on the records, so cursor positions stay valid.
+ * Fresh injection (popular only): every `fresh.every`th pick per tag comes from a seeded shuffle of
+ * the window's newest low-like records, so new content is seen (and can earn likes) even on busy
+ * tags.
  *
- * With `aiGenerated` or `moderated` set, every other record is left out before any of this, so the
- * positions index the filtered lists and later pages must use the same filters.
+ * The chronological algorithm works the same way, in order of time instead: each tag's records are
+ * ordered by creation time alone, and a pick goes to whichever tag's next record is the newest
+ * rather than to each tag in turn. So a page is the newest `limit` records of the tags together,
+ * and the next page carries on from there. It has no fresh slots, which exist to lift new records
+ * out of a likes order.
+ *
+ * Either order depends only on the records, so cursor positions stay valid. With `aiGenerated` or
+ * `moderated` set, every other record is left out before any of this, so the positions index the
+ * filtered lists and later pages must use the same filters.
  */
 export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
   const { anchor } = opts;
   const chronological = opts.algorithm === 'chronological';
-  const order: Order = chronological ? compareRecent : compareRecords;
+  const order = chronological ? compareRecent : compareRecords;
   const windowStart = anchor - opts.hours * HOUR;
-  const lookbackStart = Math.min(windowStart, anchor - opts.maxLookbackDays * DAY);
-  const windowSlices = Math.ceil(opts.hours / 24);
   const T = perTag.length;
 
-  const sliceBounds = (index: number) => {
-    if (index < windowSlices) {
-      return { from: Math.max(anchor - (index + 1) * DAY, windowStart), to: anchor - index * DAY, extended: false };
-    }
-    const k = index - windowSlices;
-    return { from: Math.max(windowStart - (k + 1) * DAY, lookbackStart), to: windowStart - k * DAY, extended: true };
-  };
-  const sliceIndexOf = (ts: number) =>
-    ts > windowStart ? Math.floor((anchor - ts) / DAY) : windowSlices + Math.floor((windowStart - ts) / DAY);
+  // Each tag's records of the window, in the algorithm's order. A tag's index is in likes order only
+  // within each of the days it is stored by, so the window's records are sorted as one list.
+  const lists = perTag.map((candidates) =>
+    candidates
+      .filter(
+        (c) =>
+          c.createdAt > windowStart &&
+          c.createdAt <= anchor &&
+          (opts.aiGenerated === undefined || c.aiGenerated === opts.aiGenerated) &&
+          (opts.moderated === undefined || c.moderated === opts.moderated),
+      )
+      .sort(order),
+  );
 
-  const slices = new Map<number, Slice>();
-  perTag.forEach((candidates, t) => {
-    for (const c of candidates) {
-      if (c.createdAt > anchor || c.createdAt <= lookbackStart) continue;
-      if (opts.aiGenerated !== undefined && c.aiGenerated !== opts.aiGenerated) continue;
-      if (opts.moderated !== undefined && c.moderated !== opts.moderated) continue;
-      const index = sliceIndexOf(c.createdAt);
-      let slice = slices.get(index);
-      if (!slice) {
-        slice = {
-          index,
-          ...sliceBounds(index),
-          allocated: 0,
-          used: 0,
-          picks: Array.from({ length: T }, () => []),
-          lists: Array.from({ length: T }, () => []),
-          pos: Array(T).fill(0),
-          rr: 0,
-          seen: new Set(),
-          fresh: null,
-        };
-        slices.set(index, slice);
-      }
-      slice.lists[t]!.push(c);
-    }
-  });
-
-  for (const slice of slices.values()) {
-    // Day indexes are already in likes order, so popular slices without tail entries usually skip the sort.
-    for (const list of slice.lists) if (!isOrdered(list, order)) list.sort(order);
-    const saved = opts.positions?.[slice.index];
-    if (saved) {
-      slice.lists.forEach((list, t) => {
-        slice.pos[t] = Math.min(saved[t] ?? 0, list.length);
-        for (const c of list.slice(0, slice.pos[t])) if (!c.hidden) slice.seen.add(c.contentId);
-      });
-    }
-  }
+  /** Content earlier pages returned, and this one has picked: it isn't returned again under another tag, or from another list. */
+  const seen = new Set<string>();
+  const consumed = (from: Candidate[][], saved: number[] | undefined) =>
+    from.map((list, t) => {
+      const upTo = Math.min(saved?.[t] ?? 0, list.length);
+      for (const c of list.slice(0, upTo)) seen.add(c.contentId);
+      return upTo;
+    });
+  const pos = consumed(lists, opts.positions);
 
   const fresh = !chronological && opts.fresh && opts.fresh.every > 0 ? opts.fresh : null;
-  const newest = slices.get(0);
-  if (fresh && newest) {
-    const lists = newest.lists.map((list, t) => freshPool(list, fresh, t));
-    const pos = lists.map((list, t) => Math.min(fresh.positions?.[t] ?? 0, list.length));
-    lists.forEach((list, t) => {
-      for (const c of list.slice(0, pos[t])) if (!c.hidden) newest.seen.add(c.contentId);
-    });
-    newest.fresh = { lists, pos, picked: Array(T).fill(0) };
-  }
+  const pools = fresh ? lists.map((list, t) => freshPool(list, fresh, t)) : [];
+  const freshPos = consumed(pools, fresh?.positions);
+  /** This page's picks per tag so far, which decide where its fresh slots are. */
+  const picked: number[] = Array(T).fill(0);
 
-  /**
-   * Advances past records already shown (dedupe across tags and lists) or hidden by a tombstone;
-   * returns the next record. Hidden records stay in the lists, so positions from a cursor written
-   * before a tombstone arrived still point at the same records.
-   */
-  const next = (slice: Slice, lists: Candidate[][], pos: number[], t: number): Candidate | undefined => {
-    const list = lists[t]!;
-    while (pos[t]! < list.length && (list[pos[t]!]!.hidden || slice.seen.has(list[pos[t]!]!.contentId))) pos[t]!++;
-    return list[pos[t]!];
+  /** Advances past records already shown (dedupe across tags and lists); returns the next record. */
+  const next = (from: Candidate[][], at: number[], t: number): Candidate | undefined => {
+    const list = from[t]!;
+    while (at[t]! < list.length && seen.has(list[at[t]!]!.contentId)) at[t]!++;
+    return list[at[t]!];
   };
-  /** The ranked list holds every record of the slice, so it alone tells whether tag t has more. */
-  const peek = (slice: Slice, t: number) => next(slice, slice.lists, slice.pos, t);
+  /** The ordered list holds every record of the tag, so it alone tells whether tag t has more. */
+  const peek = (t: number) => next(lists, pos, t);
 
   /**
    * Where tag t's next pick comes from: its fresh pool on the 2nd and every `every`th pick after,
-   * unless the ranked list has already reached low-like records (then nothing is being buried).
+   * unless the ordered list has already reached low-like records (then nothing is being buried).
    */
-  const source = (slice: Slice, t: number): { lists: Candidate[][]; pos: number[] } => {
-    const f = slice.fresh;
-    if (!f || !fresh || f.picked[t]! % fresh.every !== 1 % fresh.every) return slice;
-    if (peek(slice, t)!.likes <= fresh.maxLikes || !next(slice, f.lists, f.pos, t)) return slice;
-    return f;
+  const source = (t: number): { from: Candidate[][]; at: number[] } => {
+    const ordered = { from: lists, at: pos };
+    if (!fresh || picked[t]! % fresh.every !== 1 % fresh.every) return ordered;
+    if (peek(t)!.likes <= fresh.maxLikes || !next(pools, freshPos, t)) return ordered;
+    return { from: pools, at: freshPos };
   };
-  const hasMore = (slice: Slice) => slice.lists.some((_, t) => peek(slice, t) !== undefined);
 
   /**
-   * The tag the slice's next pick comes from, or -1 once it has none left: the next tag in turn that
-   * has a record or, in chronological order, the tag whose next record is the newest (of tags whose
-   * next records were created in the same second, the one with the lower content id, as in each list).
+   * The tag the next pick comes from, or -1 once none has a record left: the next tag in turn that
+   * has one or, in chronological order, the tag whose next record is the newest (of tags whose next
+   * records were created in the same second, the one with the lower content id, as in each list).
    */
-  const turn = (slice: Slice): number => {
+  let rr = 0;
+  const turn = (): number => {
     let t = -1;
     for (let step = 0; step < T; step++) {
-      const candidate = chronological ? step : (slice.rr + step) % T;
-      const c = peek(slice, candidate);
+      const candidate = chronological ? step : (rr + step) % T;
+      const c = peek(candidate);
       if (!c) continue;
       if (!chronological) return candidate;
-      if (t < 0 || compareRecent(c, peek(slice, t)!) < 0) t = candidate;
+      if (t < 0 || compareRecent(c, peek(t)!) < 0) t = candidate;
     }
     return t;
   };
 
-  /** Picks records, a tag at a time (see turn), until the allowance is used or the slice is exhausted. */
-  const fill = (slice: Slice, allowance: number): number => {
-    let used = 0;
-    slice.allocated += allowance;
-    while (used < allowance) {
-      const t = turn(slice);
-      if (t < 0) break;
-      const from = source(slice, t);
-      const c = next(slice, from.lists, from.pos, t)!;
-      slice.seen.add(c.contentId);
-      from.pos[t]!++;
-      slice.picks[t]!.push(c);
-      if (slice.fresh) slice.fresh.picked[t]!++;
-      used++;
-      slice.rr = (t + 1) % T;
-    }
-    slice.used += used;
-    return used;
-  };
-
-  // Pass 1: the requested window, newest slice first, halving allocations with carry-over.
-  let carry = 0;
-  let allocatedSoFar = 0;
-  for (let i = 0; i < windowSlices; i++) {
-    // Rounded on the running total, so the oldest slice doesn't collect every slice's rounding. Chronological
-    // order has no shares: the newest slice is allotted the whole page, and each older one what is left of it.
-    const through = chronological || i === windowSlices - 1 ? opts.limit : Math.round(opts.limit * (1 - 2 ** -(i + 1)));
-    const allowance = through - allocatedSoFar + carry;
-    allocatedSoFar = through;
-    const slice = slices.get(i);
-    carry = slice ? allowance - fill(slice, allowance) : allowance;
+  const picks: Candidate[][] = Array.from({ length: T }, () => []);
+  for (let used = 0; used < opts.limit; used++) {
+    const t = turn();
+    if (t < 0) break;
+    const { from, at } = source(t);
+    const c = next(from, at, t)!;
+    seen.add(c.contentId);
+    at[t]!++;
+    picks[t]!.push(c);
+    picked[t]!++;
+    rr = (t + 1) % T;
   }
-  let remaining = carry;
-
-  const ordered = [...slices.values()].sort((a, b) => a.index - b.index);
-
-  // Extension: reach back past the window while budget remains.
-  for (const s of ordered) {
-    if (remaining <= 0) break;
-    if (s.extended) remaining -= fill(s, remaining);
-  }
-
-  // Pass 2: leftover budget flows back to the newest slices that still have records.
-  for (const s of ordered) {
-    if (remaining <= 0) break;
-    if (hasMore(s)) remaining -= fill(s, remaining);
-  }
-
-  const positions: Record<number, number[]> = {};
-  for (const s of ordered) if (s.pos.some((p) => p > 0)) positions[s.index] = [...s.pos];
 
   return {
     window: { from: windowStart, to: anchor },
-    slices: ordered
-      .filter((s) => s.picks.some((p) => p.length > 0))
-      .map(({ index, from, to, extended, allocated, used, picks }) => ({ index, from, to, extended, allocated, used, picks })),
-    truncated: ordered.some(hasMore),
-    positions,
-    freshPositions: newest?.fresh ? [...newest.fresh.pos] : [],
+    picks,
+    truncated: lists.some((_, t) => peek(t) !== undefined),
+    positions: [...pos],
+    freshPositions: [...freshPos],
   };
 }

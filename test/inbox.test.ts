@@ -249,7 +249,7 @@ for (const target of TARGETS) {
       expect(await whoami(bob)).toMatchObject({ messages: true });
       ok(await send(alice, bob, 'before'), 201);
 
-      expect(ok(await setMessages(bob, false))).toEqual({ userId: bob.userId, username: 'bob', language: 'en', messages: false });
+      expect(ok(await setMessages(bob, false))).toEqual({ userId: bob.userId, username: 'bob', language: 'en', messages: false, showFollowing: false, showFollowers: false });
       expect(await whoami(bob)).toMatchObject({ messages: false });
       expect(await whoami(alice)).toMatchObject({ messages: true });
       // It is theirs alone to change, and nobody else's to see.

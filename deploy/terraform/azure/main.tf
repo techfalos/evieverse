@@ -35,10 +35,11 @@ locals {
   secret_names = nonsensitive(toset(keys(local.secret_env)))
 
   # The route groups of src/functions/groups.ts, and the paths Front Door sends to each: change the
-  # two together. The most specific pattern wins, so anything not listed goes to the api group.
+  # two together. The most specific pattern wins, so anything not listed goes to the api group,
+  # /feed/following among it: only /feed itself is the feed group's.
   # /content/* is the content group's for reading only: see the ContentWrites rule.
   groups = {
-    feed    = { patterns = ["/feed", "/feed/*"], max_replicas = var.feed_max_replicas }
+    feed    = { patterns = ["/feed"], max_replicas = var.feed_max_replicas }
     content = { patterns = ["/content/*"], max_replicas = var.max_replicas }
     store   = { patterns = ["/uploads", "/store"], max_replicas = var.max_replicas }
     api     = { patterns = ["/*"], max_replicas = var.max_replicas }
@@ -48,10 +49,15 @@ locals {
     # Every replica keeps up to this many database connections. See `max_replicas`.
     DB_POOL_SIZE = tostring(var.db_pool_size)
     TRUST_PROXY  = tostring(var.trust_proxy)
+    # Only the apps answer requests, so only they write the audit log.
+    AUDIT_SCHEME = "azblob"
   }, local.env)
   # Front Door sends this to the apps, whose own addresses are public; they refuse requests without it.
-  function_secret_env   = merge(local.secret_env, { FUNCTION_EDGE_SECRET = random_password.edge.result })
-  function_secret_names = setunion(local.secret_names, ["FUNCTION_EDGE_SECRET"])
+  function_secret_env = merge(local.secret_env, {
+    FUNCTION_EDGE_SECRET = random_password.edge.result
+    AUDIT_OPTIONS        = jsonencode(merge(local.blob_options, { container = azurerm_storage_container.audit.name }))
+  })
+  function_secret_names = setunion(local.secret_names, ["FUNCTION_EDGE_SECRET", "AUDIT_OPTIONS"])
 }
 
 resource "random_password" "edge" {
@@ -136,11 +142,34 @@ resource "azurerm_storage_management_policy" "uploads" {
       }
     }
   }
+  # The audit log moves to the Archive tier, its cold storage, once it is `audit_archive_after_days` old.
+  rule {
+    name    = "archive-audit-log"
+    enabled = true
+    filters {
+      prefix_match = ["${azurerm_storage_container.audit.name}/"]
+      blob_types   = ["blockBlob"]
+    }
+    actions {
+      base_blob {
+        tier_to_archive_after_days_since_creation_greater_than = var.audit_archive_after_days
+      }
+    }
+  }
+}
+
+# Every request that adds, updates or deletes something is written here, whole and gzipped, one
+# blob each, as the response is sent (src/audit.ts); reads are not. The apps keep what they print in
+# the Log Analytics workspace below, which has a line for each, naming its blob.
+resource "azurerm_storage_container" "audit" {
+  name                  = "audit"
+  storage_account_id    = azurerm_storage_account.main.id
+  container_access_type = "private"
 }
 
 # ---------------------------------------------------------------- redis
 
-# The feed index, tails, hot summaries and publisher credits. The Enterprise clustering policy puts
+# The feed index, hot summaries and publisher credits. The Enterprise clustering policy puts
 # one endpoint in front of the shards, so the app connects as to a single Redis. volatile-lru only
 # ever evicts keys with a TTL (hot summaries and superseded index keys), so a full cache degrades to
 # object-store reads instead of losing the index.
@@ -507,7 +536,7 @@ resource "azurerm_container_app" "compactor" {
 }
 
 # `--rebuild` rebuilds the whole feed index from the database and blob storage, after Redis lost
-# data. It is a job, started by hand (see deploy/README.md). It can run beside the compactor: the
+# data. It is a job, started by hand (see docs/DEPLOY.md). It can run beside the compactor: the
 # lease makes each wait for the other's pass.
 resource "azurerm_container_app_job" "rebuild" {
   name                         = "${var.name}-rebuild"

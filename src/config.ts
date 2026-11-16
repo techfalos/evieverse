@@ -64,7 +64,7 @@ const ConfigSchema = z.object({
     .default('')
     .transform(parseTrustProxy),
 
-  /** The RAM tier: feed index, tail lists, summaries of the last few days, publisher credits. */
+  /** The RAM tier: feed index, summaries of the last few days, publisher credits. */
   redis: z.object({
     /** redis:// or rediss:// URL of any Redis-protocol server. Unset: an in-process store, for a single node only. */
     url: z.string().optional(),
@@ -90,17 +90,32 @@ const ConfigSchema = z.object({
     uploadLinksPerMinute: z.coerce.number().int().min(0).default(10),
   }),
 
-  /** Who chooses the hashtags of a post. */
+  /**
+   * The audit log: every request that adds, updates or deletes something (a POST, PUT, PATCH or DELETE
+   * that succeeded), whole, gzipped, one object each, and no read. A deployment's store is the
+   * bucket that its lifecycle rules move to cold storage. Unset: nothing is written.
+   */
+  audit: z.object({
+    /** Any Apache OpenDAL scheme (fs, s3, gcs, azblob ...). */
+    scheme: z.string().min(1).optional(),
+    options: z.preprocess(parseJson, z.record(z.string(), z.coerce.string())).optional(),
+  }),
+
+  /** Which hashtags a post can have. Its publisher chooses them, and every post must have some. */
   tagging: z
     .object({
-      /** server: every post gets serverTags, whatever its publisher sends. user: the publisher's, which every post must have. */
+      /** user: any hashtags. server: only those of serverTags; a post with any other is refused. */
       mode: z.enum(['server', 'user']).default('user'),
-      /** The hashtags of every post in server mode (separated by commas or spaces in the environment). */
+      /**
+       * The hashtags posts can have in server mode, as many as the server wants (separated by commas
+       * or spaces in the environment). GET /tagging lists them, for clients to offer.
+       */
       serverTags: z
         .union([z.string(), z.array(z.string())])
         .default([])
         .transform((v, ctx) => {
-          const parsed = parseTagList(v);
+          // Any number of them: the limit on a post's hashtags is on what a publisher picks from these.
+          const parsed = parseTagList(v, Infinity);
           if ('tags' in parsed) return parsed.tags;
           // Said to the operator as the server starts, so in English, whatever language requests are answered in.
           ctx.addIssue({ code: 'custom', message: loadLanguages().render(REFERENCE_LANGUAGE, parsed.error) });
@@ -125,12 +140,13 @@ const ConfigSchema = z.object({
     tagRetentionDays: int(90),
     /** Posts a publisher's own index, which following feeds read, keeps per UTC day: the newest, whatever their likes. */
     authorDayMaxPosts: int(1000),
+    /** How far back a following feed reaches, and the longest a tag's index is kept. A hashtag feed is of the window it asks for. */
     maxLookbackDays: z.coerce.number().int().min(7).default(90),
-    /** In the newest day slice, one in this many picks per tag is new low-like content (0 disables). */
+    /** In a popular feed, one in this many picks per tag is new low-like content (0 disables). */
     freshEvery: z.coerce.number().int().min(0).default(4),
     /** Records with at most this many likes count as fresh. */
     freshMaxLikes: z.coerce.number().int().min(0).default(0),
-    /** Fresh picks are sampled per feed session from this many newest eligible records per tag. */
+    /** Fresh picks are sampled per feed session from this many newest eligible records per tag in the feed's window. */
     freshPool: int(200),
     /** A feed asked to add related hashtags (addRelated) adds at most this many for each hashtag it was asked for (0: none). */
     relatedTags: z.coerce.number().int().min(0).default(3),
@@ -142,11 +158,12 @@ const ConfigSchema = z.object({
     previewWords: int(100),
     /** ...and at most this many characters of them, which bounds text written without spaces. */
     previewChars: int(1000),
-    /** New records go to one Redis list per tag per window; closed windows are merged by the compactor. */
-    tailWindowSeconds: int(300),
-    /** Superseded day indexes, manifests and merged tails are kept this long, which is also the cursor lifetime. */
+    /** Superseded day indexes and manifests are kept this long, which is also the cursor lifetime. */
     genRetentionMinutes: int(60),
-    /** How long a tag's head, tail-window list and related hashtags, and publisher credits, are cached by each node. */
+    /**
+     * How long a tag's head and related hashtags, and publisher credits, are cached by each node. A
+     * node shows what the compactor published up to this long after it did.
+     */
     headCacheMs: z.coerce.number().int().min(0).default(1000),
     /** Tags whose manifest and day indexes (immutable; 25 bytes per post) each node keeps in memory. */
     indexCacheSize: int(500),
@@ -172,10 +189,17 @@ const ConfigSchema = z.object({
      * The compactor is one process that runs for as long as it is up: a run starts this long after the
      * previous one started, or as soon as that one ends if it took longer. So runs never overlap, and
      * there is never more than one in this many seconds.
+     *
+     * It is also how long a write waits to reach feeds, at most: every run takes all of the feed queue.
      */
     intervalSeconds: int(5),
-    /** Tail windows are merged only once they closed at least this long ago (covers clock skew between nodes). */
+    /**
+     * What a run leaves for a later one until it is this old: the hashtag counts related hashtags are
+     * worked out from (covers clock skew between nodes), and the rows an update queued before it
+     * wrote anything and hasn't committed (after this long, the update is taken to have stopped half way).
+     */
     graceSeconds: z.coerce.number().int().min(0).default(30),
+    /** Batches of indexes compacted at a time. A batch is a couple of hundred tags, read and written together. */
     concurrency: int(4),
     /**
      * Lifetime of the database lease that keeps the runs of two compactor processes from overlapping
@@ -192,7 +216,7 @@ const ConfigSchema = z.object({
     register: bool(true),
     /**
      * A user's post (/store) less than this long after their previous post or challenge must
-     * solve challenges, more of them the longer the run (0: never).
+     * solve a challenge, or two from the third such post in a row (0: never).
      */
     postWindowSeconds: z.coerce.number().int().min(0).default(60),
     /** How long a challenge can be solved for. */
@@ -300,6 +324,8 @@ const ENV_MAP: Record<string, string> = {
   STORAGE_TMP_PATH: 'storage.tmpPath',
   MAX_UPLOAD_BYTES: 'storage.maxUploadBytes',
   UPLOAD_LINKS_PER_MINUTE: 'storage.uploadLinksPerMinute',
+  AUDIT_SCHEME: 'audit.scheme',
+  AUDIT_OPTIONS: 'audit.options',
   TAGGING_MODE: 'tagging.mode',
   TAGGING_SERVER_TAGS: 'tagging.serverTags',
   FEED_PAGE_SIZE: 'feed.pageSize',
@@ -317,7 +343,6 @@ const ENV_MAP: Record<string, string> = {
   FEED_RELATED_TAGS: 'feed.relatedTags',
   FEED_RELATED_MIN_POSTS: 'feed.relatedMinPosts',
   FEED_RELATED_MIN_PERCENT: 'feed.relatedMinPercent',
-  FEED_TAIL_WINDOW_SECONDS: 'feed.tailWindowSeconds',
   FEED_GEN_RETENTION_MINUTES: 'feed.genRetentionMinutes',
   FEED_HEAD_CACHE_MS: 'feed.headCacheMs',
   FEED_INDEX_CACHE_SIZE: 'feed.indexCacheSize',
@@ -352,6 +377,7 @@ const EMPTY_SECTIONS: Json = {
   db: {},
   redis: {},
   storage: { content: {}, summaries: {} },
+  audit: {},
   tagging: {},
   feed: {},
   compact: {},

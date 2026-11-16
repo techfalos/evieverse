@@ -25,11 +25,11 @@ describe('SQL migrations', () => {
         'comment_reports',
         'compactor_lease',
         'content',
+        'feed_queue',
         'follows',
         'inbox',
         'likes',
         'moderation_queue',
-        'pending_appends',
         'reports',
         'tag_moderation',
         'tag_moderators',
@@ -41,13 +41,28 @@ describe('SQL migrations', () => {
       ]);
       const columns = async (table: string) =>
         (await db.introspection.getTables()).find((t) => t.name === table)!.columns.map((c) => c.name).sort();
-      expect(await columns('users')).toEqual(['admin', 'created_at', 'id', 'language', 'messages', 'moderator', 'updated_at', 'username']);
+      expect(await columns('users')).toEqual([
+        'admin',
+        'ban_reason',
+        'banned_at',
+        'banned_by',
+        'created_at',
+        'deleted_at',
+        'id',
+        'language',
+        'messages',
+        'moderator',
+        'show_followers',
+        'show_following',
+        'updated_at',
+        'username',
+      ]);
       expect(await columns('inbox')).toEqual(['body', 'content_id', 'created_at', 'id', 'kind', 'read_at', 'sender_id', 'tag', 'user_id']);
       expect(await columns('user_blocks')).toEqual(['blocked_id', 'created_at', 'user_id']);
       expect(await columns('content')).toEqual(['ai_generated', 'created_at', 'delete_requested_at', 'id', 'like_count', 'user_id']);
       expect(await columns('api_keys')).toEqual(['created_at', 'id', 'key_hash', 'revoked_at', 'user_id']);
-      expect(await columns('pending_appends')).toEqual(['content_id', 'created_at', 'tag']);
-      expect(await columns('tags')).toEqual(['compacted_at', 'created_at', 'last_appended_at', 'name']);
+      expect(await columns('feed_queue')).toEqual(['committed', 'content_id', 'created_at', 'tag', 'token']);
+      expect(await columns('tags')).toEqual(['created_at', 'last_appended_at', 'name']);
       expect(await columns('tag_pairs')).toEqual(['posts', 'tag_a', 'tag_b', 'updated_at']);
       expect(await columns('moderation_queue')).toEqual(['content_id', 'created_at', 'trust_score']);
       expect(await columns('tag_moderation')).toEqual(['applied_at', 'content_id', 'decided_at', 'decision', 'moderator_id', 'tag']);

@@ -10,6 +10,7 @@ import { listPage, listQuery } from '../http/listCursor.js';
 import { Credentials, Flag, ListQuery } from '../http/schemas.js';
 import { isNotice, MAX_MESSAGE_CHARS, MESSAGE, NOTICES } from '../inbox.js';
 import { msg, type Message } from '../language.js';
+import { refuseBanned } from '../moderation/policy.js';
 import { iso } from '../time.js';
 
 const Params = z.object({ userId: z.string().uuid() });
@@ -38,7 +39,8 @@ const UnreadQuery = z.object({ unread: Flag.optional() });
  * Messages between users are a setting of each user's (`users.messages`, PATCH /users/:userId),
  * on unless they turn it off: a user with it off is sent none, and sends none. A user also blocks
  * whom they choose (`user_blocks`), and no message then goes between the two, either way. Neither
- * touches notices, which every user gets.
+ * touches notices, which every user gets. A banned user sends no messages (see refuseBanned), but is
+ * sent them, and reads their inbox.
  */
 export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.now }: AppDeps) {
   /** The caller, who must be the user named in the path: `refusal` is what anyone else is told. */
@@ -78,10 +80,11 @@ export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.
   app.post('/messages', async (req, reply) => {
     const body = SendBody.parse(req.body ?? {});
     const sender = await authenticate(db, req, body);
+    refuseBanned(sender);
     if (body.to === sender.id) throw badRequest(msg('message.yourself'));
     if (!sender.messages) throw forbidden(msg('message.turned_off'));
     const [recipient, blocks] = await Promise.all([
-      db.selectFrom('users').select(['id', 'username', 'messages']).where('id', '=', body.to).executeTakeFirst(),
+      db.selectFrom('users').select(['id', 'username', 'messages']).where('id', '=', body.to).where('deleted_at', 'is', null).executeTakeFirst(),
       // Either way round: each is one lookup by the primary key.
       db
         .selectFrom('user_blocks')
@@ -186,7 +189,7 @@ export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.
     const { userId, blockedId } = BlockParams.parse(req.params);
     await blocker(req, userId);
     if (blockedId === userId) throw badRequest(msg('block.yourself'));
-    const blocked = await db.selectFrom('users').select('id').where('id', '=', blockedId).executeTakeFirst();
+    const blocked = await db.selectFrom('users').select('id').where('id', '=', blockedId).where('deleted_at', 'is', null).executeTakeFirst();
     if (!blocked) throw notFound(msg('user.not_found'));
     const { at, already } = await addOnce(
       now,

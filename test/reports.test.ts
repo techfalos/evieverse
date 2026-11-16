@@ -88,6 +88,7 @@ for (const target of TARGETS) {
       );
 
       // A reported post stays published while it waits.
+      await ctx.compactor.runOnce();
       expect(ids(await feedOf('news')).sort()).toEqual([a, b, c].sort());
       expect(ok(await req(null, 'GET', `/content/${a}`), 200)).not.toHaveProperty('status');
       expect(ok(await like(dave, a))).toMatchObject({ likes: 1 });
@@ -167,12 +168,12 @@ for (const target of TARGETS) {
         ].sort(),
       );
 
-      // Deleted: the post is gone at once, as when its publisher deletes it. Only what is in the queue.
+      // Deleted: the post can't be read from then on, as when its publisher deletes it, and leaves feeds on the
+      // compactor's next run. Only what is in the queue.
       for (const u of [alice, bob]) expect((await decide(u, b, 'delete')).statusCode).toBe(403);
       expect((await decide(mod, c, 'delete')).json().error).toBe(NOT_REPORTED);
       expect((await req(mod, 'DELETE', `/content/${c}`)).statusCode).toBe(403);
       expect(ok(await decide(mod, b, 'delete'), 202)).toEqual({ contentId: b, status: 'pending_deletion', requestedAt: now() });
-      expect(ids(await feedOf('news')).sort()).toEqual([a, c].sort());
       expect((await req(null, 'GET', `/content/${b}`)).statusCode).toBe(404);
       expect(ids((await queue(mod)).queue)).toEqual([a]);
       for (const decision of ['accept', 'delete'] as const) expect((await decide(mod, b, decision)).statusCode).toBe(404);
@@ -183,11 +184,13 @@ for (const target of TARGETS) {
       const deleted: string[] = [];
       for (let i = 0; i < 2; i++) deleted.push(...(await ctx.compact()).deleted);
       expect(deleted).toEqual([b]);
+      expect(ids(await feedOf('news')).sort()).toEqual([a, c].sort());
       expect((await rows()).map((r) => r[0])).toEqual([a, a, a]);
 
       // An admin decides as a server moderator does.
       expect(ok(await decide(root, a, 'delete'), 202)).toMatchObject({ contentId: a, status: 'pending_deletion' });
       expect(await queue(root)).toEqual({ queue: [], nextCursor: null });
+      expect((await ctx.compactor.runOnce()).deleted).toEqual([a]);
       expect(ids(await feedOf('news'))).toEqual([c]);
 
       // No longer a server moderator: the queue is closed to them.

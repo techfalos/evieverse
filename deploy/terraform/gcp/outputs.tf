@@ -23,6 +23,11 @@ output "content_bucket" {
   value = google_storage_bucket.content.name
 }
 
+output "audit_bucket" {
+  description = "Where every request that added, updated or deleted something is written, and moved to cold storage from."
+  value       = google_storage_bucket.audit.name
+}
+
 output "redis_instance" {
   value = google_redis_instance.main.name
 }

@@ -2,6 +2,7 @@ import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyServerOptions } from 'fastify';
+import { createAuditLog, registerAudit, type AuditLog } from './audit.js';
 import { Challenges } from './challenge/challenges.js';
 import type { Db } from './db/index.js';
 import type { RouteDeps, StoreDeps } from './deps.js';
@@ -24,6 +25,8 @@ export interface AppOptions extends FastifyServerOptions {
   trustPlugins?: TrustPlugin[];
   /** The languages the server answers in. By default, the files of src/languages (language.ts). */
   languages?: Languages;
+  /** Where changes are written down, or null for nowhere. By default, the store `config.audit` names, if it names one (audit.ts). */
+  audit?: AuditLog | null;
 }
 
 /**
@@ -32,7 +35,7 @@ export interface AppOptions extends FastifyServerOptions {
  */
 export async function buildApp(
   deps: StoreDeps & { db?: Db },
-  { edgeSecret, cli = loadCliRelease(), trustPlugins, languages, ...opts }: AppOptions = {},
+  { edgeSecret, cli = loadCliRelease(), trustPlugins, languages, audit = createAuditLog(deps.config.audit), ...opts }: AppOptions = {},
   groups: readonly GroupName[] = GROUP_NAMES,
 ) {
   const { trustProxy } = deps.config;
@@ -54,6 +57,8 @@ export async function buildApp(
   }
   registerErrorHandler(app);
   if (edgeSecret) requireEdgeSecret(app, edgeSecret);
+  // In every group, as every group that changes something has to write it down.
+  registerAudit(app, audit, deps.now);
   // In every group, so an out-of-date CLI is told so whichever function its request reaches.
   if (cli) requireCliBuild(app, cli);
   const { corsOrigins } = deps.config;

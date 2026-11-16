@@ -34,19 +34,47 @@
 -- messages: 1 for a user who takes part in messages between users, which is every user until they
 -- turn it off (PATCH /users/:userId): 0 for one who is sent none, and sends none. The server's
 -- notices reach their inbox either way (see inbox).
+--
+-- show_following, show_followers: 1 for a user who lets anyone list whom they follow, or who
+-- follows them (GET /users/:userId/following, /followers). Both are 0 until the user turns them on
+-- (PATCH /users/:userId), each on its own: a list that isn't shown is its user's alone to read.
+-- show_following covers the user's following feed too (GET /feed/following), which names whom
+-- they follow.
+--
+-- banned_at: when a server moderator or an admin banned the user (PUT /banned/:userId); NULL for a
+-- user who isn't banned. A banned user keeps their account and their key, and can read, but is
+-- refused whatever writes a post, a comment or a message: /store, comments, /messages and /uploads.
+-- Nobody who is an admin or a server moderator is banned. banned_by is who banned them (NULL once
+-- that user is gone), and ban_reason what they said, if anything: only moderators read either.
+--
+-- deleted_at: when the account was deleted (DELETE /users/:userId); NULL for one that wasn't. The
+-- row is not deleted with it, since content references it and cascades: the account's keys are
+-- revoked, its relations to other users go, and its content is set for deletion (see content), which
+-- the compactor completes. It then deletes the row, once no content of the user's is left. Until
+-- then the account is gone as far as anyone is concerned (it can't sign in, and no lookup finds it),
+-- but its username stays taken. An account with no content is deleted at once, with no stage in between.
 CREATE TABLE users (
-  id          varchar(36)  NOT NULL,
-  username    varchar(64)  NOT NULL,
-  created_at  bigint       NOT NULL,
-  updated_at  bigint       NOT NULL,
-  admin       smallint     NOT NULL DEFAULT 0,
-  moderator   smallint     NOT NULL DEFAULT 0,
-  language    varchar(35),
-  messages    smallint     NOT NULL DEFAULT 1,
+  id              varchar(36)  NOT NULL,
+  username        varchar(64)  NOT NULL,
+  created_at      bigint       NOT NULL,
+  updated_at      bigint       NOT NULL,
+  admin           smallint     NOT NULL DEFAULT 0,
+  moderator       smallint     NOT NULL DEFAULT 0,
+  language        varchar(35),
+  messages        smallint     NOT NULL DEFAULT 1,
+  show_following  smallint     NOT NULL DEFAULT 0,
+  show_followers  smallint     NOT NULL DEFAULT 0,
+  banned_at       bigint,
+  banned_by       varchar(36),
+  ban_reason      varchar(500),
+  deleted_at      bigint,
   CONSTRAINT users_pk PRIMARY KEY (id),
-  CONSTRAINT users_username_uq UNIQUE (username)
+  CONSTRAINT users_username_uq UNIQUE (username),
+  CONSTRAINT users_banned_by_fk FOREIGN KEY (banned_by) REFERENCES users (id) ON DELETE SET NULL
 );
 CREATE INDEX users_updated_idx ON users (updated_at);
+CREATE INDEX users_banned_idx ON users (banned_at);
+CREATE INDEX users_deleted_idx ON users (deleted_at);
 
 -- API keys are stored as sha256 hashes, and looked up by them.
 CREATE TABLE api_keys (
@@ -87,13 +115,13 @@ CREATE INDEX content_user_idx ON content (user_id);
 CREATE INDEX content_delete_requested_idx ON content (delete_requested_at);
 
 -- Flat hashtags, and each publisher's own index ("@<userId>"). Which content carries a tag is recorded
--- only in the content's meta file and in the tag's index in Redis. last_appended_at / compacted_at
--- let the compactor find tags with unmerged tails.
+-- only in the content's meta file and in the tag's index in Redis. last_appended_at is when a post
+-- was last published or updated under the tag, which /tags lists hashtags by; the rows are also how
+-- a compactor run asked to rebuild every index finds them all.
 CREATE TABLE tags (
   name              varchar(64) NOT NULL,
   created_at        bigint      NOT NULL,
   last_appended_at  bigint      NOT NULL,
-  compacted_at      bigint      NOT NULL DEFAULT 0,
   CONSTRAINT tags_pk PRIMARY KEY (name)
 );
 CREATE INDEX tags_last_appended_idx ON tags (last_appended_at);
@@ -134,7 +162,9 @@ CREATE INDEX likes_created_idx ON likes (created_at);
 -- Who follows whom. Following feeds show the posts of the users someone follows, read from each
 -- publisher's own index in Redis, and the follows themselves are copied to Redis too, so those feeds
 -- never read this table. The compactor rewrites the Redis copy for users who followed someone since
--- its last run, which it finds by created_at.
+-- its last run, which it finds by created_at. The lists of a user's follows, and of who follows
+-- them (by follows_followee_idx), are read from here: each is shown to others only if its user
+-- says so (users.show_following, users.show_followers).
 CREATE TABLE follows (
   follower_id  varchar(36) NOT NULL,
   followee_id  varchar(36) NOT NULL,
@@ -146,20 +176,31 @@ CREATE TABLE follows (
 CREATE INDEX follows_followee_idx ON follows (followee_id, created_at);
 CREATE INDEX follows_created_idx ON follows (created_at);
 
--- A hashtag's tail (or a publisher's own index's) that may not hold a write's line for a piece of
--- content yet: its entry, or for a hashtag an update dropped, the tombstone that hides it there. /store
--- inserts the rows in the transaction that commits the write, appends to the tails only after that,
--- then deletes the rows whose append succeeded. For rows left behind (a failed append, a crashed node)
--- the compactor rebuilds the content's entry in that tag from the database and the meta file, which
--- drops it where the content no longer carries the tag.
-CREATE TABLE pending_appends (
+-- The queue the feed index is written from: a piece of content, and a hashtag's index (or its
+-- publisher's own) that a write changed its place in, by giving it the hashtag, updating it there or
+-- dropping it. It is the only way into the index. /store inserts the rows in the transaction that
+-- commits the write, and each compactor run takes every row there is: it rebuilds the content's
+-- entry in that index from the database and the meta file, which drops it where the content no
+-- longer carries the hashtag, and then deletes the row.
+--
+-- One row per content and hashtag, so writes of the same content between two runs queue once. A
+-- later write stamps the row again with its own token, and a run deletes only the rows that still
+-- hold the token it read: a write that commits while a run is under way is the next run's.
+--
+-- An update also queues its rows before it writes anything, uncommitted (committed = 0), in case it
+-- stops half way with the stores already changed. Its commit stamps them as committed. A run leaves
+-- an uncommitted row alone until it is COMPACT_GRACE_SECONDS old, which is when the update is taken
+-- to have stopped.
+CREATE TABLE feed_queue (
   content_id  varchar(36) NOT NULL,
   tag         varchar(64) NOT NULL,
+  token       varchar(36) NOT NULL,
+  committed   smallint    NOT NULL,
   created_at  bigint      NOT NULL,
-  CONSTRAINT pending_appends_pk PRIMARY KEY (content_id, tag),
-  CONSTRAINT pending_appends_content_fk FOREIGN KEY (content_id) REFERENCES content (id) ON DELETE CASCADE
+  CONSTRAINT feed_queue_pk PRIMARY KEY (content_id, tag),
+  CONSTRAINT feed_queue_content_fk FOREIGN KEY (content_id) REFERENCES content (id) ON DELETE CASCADE
 );
-CREATE INDEX pending_appends_created_idx ON pending_appends (created_at);
+CREATE INDEX feed_queue_token_idx ON feed_queue (token);
 
 -- Moderation is decided when content is written, and what moderators decide afterwards is copied into
 -- the feed index, so feeds never read the next six tables.
@@ -227,8 +268,8 @@ CREATE INDEX moderation_queue_created_idx ON moderation_queue (created_at);
 -- moderator_id: who decided; NULL once that user is gone.
 -- applied_at: NULL until a compactor run has applied the decision: rebuilt the content's entry in
 -- the hashtag's day index and, for 'removed', written the content's meta file and summary again
--- without the hashtag (or set the content for deletion, if it was its last). Until then a line in the
--- hashtag's tail shows the decision to readers.
+-- without the hashtag (or set the content for deletion, if it was its last). Feeds show the decision
+-- from then on.
 CREATE TABLE tag_moderation (
   content_id    varchar(36) NOT NULL,
   tag           varchar(64) NOT NULL,

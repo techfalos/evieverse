@@ -50,7 +50,7 @@ variable "request_timeout" {
 }
 
 variable "trust_proxy" {
-  description = "How many proxies in front of a service add to X-Forwarded-For (the gateway, then Cloud Run's front end). The address counted for per-address limits is read that many entries from the end. Check it after the first apply: see deploy/README.md."
+  description = "How many proxies in front of a service add to X-Forwarded-For (the gateway, then Cloud Run's front end). The address counted for per-address limits is read that many entries from the end. Check it after the first apply: see docs/DEPLOY.md."
   type        = number
   default     = 2
 }
@@ -85,7 +85,7 @@ variable "redis_tier" {
 }
 
 variable "redis_memory_gb" {
-  description = "Memorystore capacity. Size it for the feed index (~30 bytes per indexed post) plus 8 days of compressed summaries; see deploy/README.md."
+  description = "Memorystore capacity. Size it for the feed index (~30 bytes per indexed post) plus 8 days of compressed summaries; see docs/DEPLOY.md."
   type        = number
   default     = 1
 }
@@ -116,9 +116,19 @@ variable "secrets" {
 }
 
 variable "deletion_protection" {
-  description = "Protect the database and content bucket from `terraform destroy`."
+  description = "Protect the database from `terraform destroy`, and keep the content and audit log buckets from being deleted while they hold objects."
   type        = bool
   default     = true
+}
+
+variable "audit_archive_after_days" {
+  description = "Days after a record of the audit log (every request that added, updated or deleted something) is written that it moves to the Archive storage class, the cold storage it stays in."
+  type        = number
+  default     = 30
+  validation {
+    condition     = var.audit_archive_after_days >= 0
+    error_message = "A number of days, 0 or more."
+  }
 }
 
 variable "admin_username" {

@@ -13,7 +13,7 @@ services:
       interval: 2s
       retries: 30
 
-  # The feed index, tails, hot summaries and publisher credits (stands in for ElastiCache, Memorystore or
+  # The feed index, hot summaries and publisher credits (stands in for ElastiCache, Memorystore or
   # Azure Managed Redis). volatile-lru only evicts keys with a TTL (hot summaries, superseded index keys),
   # never a live head or day index.
   redis:

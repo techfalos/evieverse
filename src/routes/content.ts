@@ -98,7 +98,7 @@ export function deletionRoutes(app: FastifyInstance, deps: AppDeps) {
     const row = await db.selectFrom('content').select(['id', 'user_id', 'delete_requested_at']).where('id', '=', contentId).executeTakeFirst();
     if (!row) throw contentNotFound();
     if (row.user_id !== user.id && !user.admin) throw forbidden(msg('content.delete_own_only'));
-    const requestedAt = await setForDeletion(deps, row, req.log);
+    const requestedAt = await setForDeletion(deps, row);
     if (row.delete_requested_at === null) await notify(deps, { userId: row.user_id, kind: 'post_deleted', contentId, by: user.id }, req.log);
     return reply.status(202).send({ contentId, status: 'pending_deletion', requestedAt: iso(requestedAt) });
   });

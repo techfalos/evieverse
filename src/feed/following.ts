@@ -22,18 +22,17 @@ export interface FollowingPlan {
 
 /**
  * A page of a following feed: the newest records of the followed publishers' own indexes, after
- * `after`. Their tails are already read; their day indexes are loaded newest day first, and only as
- * far back as the page needs. Each day's entry count says how many days could fill it, so those are
- * loaded at once: one round trip, unless filters or tombstones leave too few records.
+ * `after`. Their day indexes are loaded newest day first, and only as far back as the page needs.
+ * Each day's entry count says how many days could fill it, so those are loaded at once: one round
+ * trip, unless the filters leave too few records.
  */
 export async function planFollowing(reader: TagFeedReader, indexes: OpenTag[], opts: FollowingOptions): Promise<FollowingPlan> {
   const { after, limit } = opts;
   const keep = (c: Candidate) =>
-    !c.hidden &&
     c.createdAt > opts.oldest &&
     (opts.aiGenerated === undefined || c.aiGenerated === opts.aiGenerated) &&
     (!after || compareRecent(after, c) < 0);
-  const found = indexes.flatMap((ix) => ix.tails.filter(keep));
+  const found: Candidate[] = [];
 
   // Days the cursor has passed, or older than the lookback, hold nothing for this page.
   const newestDay = after ? utcDay(after.createdAt) : Infinity;
@@ -50,7 +49,7 @@ export async function planFollowing(reader: TagFeedReader, indexes: OpenTag[], o
   const days = [...byDay.keys()].sort((a, b) => b - a);
 
   for (let i = 0; i < days.length; ) {
-    // Tails are read whole and newer days are loaded, so every record newer than this day is found.
+    // Newer days are loaded, so every record newer than this day is found.
     const settled = found.filter((c) => utcDay(c.createdAt) > days[i]!).length;
     if (settled > limit) break;
     let wanted = limit + 1 - settled;

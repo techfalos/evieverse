@@ -105,10 +105,9 @@ describe('functions', () => {
     expect(stored.status).toBe(201);
     const { contentId } = stored.json();
 
-    // In a tail first, then in a day index once the compactor has run.
-    const inFeed = async () => (await d.call('feed', 'GET', '/feed?tags=news')).json().days.flatMap((day: { tags: Record<string, { contentId: string }[]> }) => day.tags.news!.map((r) => r.contentId));
-    expect(await inFeed()).toEqual([contentId]);
-    d.clock.now += (d.config.feed.tailWindowSeconds + d.config.compact.graceSeconds) * 1000;
+    // In the feed once the compactor has run: stored by one function, queued in the database, indexed by another.
+    const inFeed = async () => ((await d.call('feed', 'GET', '/feed?tags=news')).json().tags.news ?? []).map((r: { contentId: string }) => r.contentId);
+    expect(await inFeed()).toEqual([]);
     expect(await d.compact()).toEqual({ tags: [`@${alice.userId}`, 'news'], deleted: [], skipped: false });
     expect(await inFeed()).toEqual([contentId]);
 
@@ -120,12 +119,15 @@ describe('functions', () => {
     // Each function has its own routes and nobody else's.
     const routes: [GroupName, string, string][] = [
       ['feed', 'GET', '/feed?tags=news'],
+      // The following feed isn't the feed function's: it asks the database who may read it.
+      ['api', 'GET', `/feed/following?userId=${alice.userId}`],
       ['content', 'GET', `/content/${contentId}`],
       ['store', 'POST', '/store'],
       ['store', 'POST', '/uploads'],
       ['api', 'POST', '/register'],
       ['api', 'DELETE', `/content/${contentId}`],
       ['api', 'GET', `/users/${alice.userId}`],
+      ['api', 'GET', '/tagging'],
     ];
     for (const [owner, method, url] of routes) {
       for (const group of GROUP_NAMES) {

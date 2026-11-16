@@ -52,7 +52,7 @@ for (const target of TARGETS) {
           Number(r.posts),
         ]),
       );
-    const tagsOf = (f: Feed, tag: string) => f.days.flatMap((d) => d.tags[tag] ?? []).map((i) => i.contentId);
+    const tagsOf = (f: Feed, tag: string) => (f.tags[tag] ?? []).map((i) => i.contentId);
 
     it('counts the posts of each hashtag, and of each pair of hashtags on one post, as they are stored', async () => {
       const [both] = await posts('a dog #dogs #pets', 1);
@@ -118,7 +118,8 @@ for (const target of TARGETS) {
       const [pet] = await posts('#pets', 1);
       const [fish] = await posts('#fish', 1);
       await ctx.compact();
-      const [tailed] = await posts('in a tail #pets', 1);
+      const [latest] = await posts('the latest #pets', 1);
+      await ctx.compactor.runOnce();
 
       const plain = await feed('tags=dogs');
       expect(plain).not.toHaveProperty('related');
@@ -129,17 +130,17 @@ for (const target of TARGETS) {
       // #pets is on 3 of the 4 posts of #dogs. A post under both hashtags is returned once.
       const related = await feed('tags=dogs&addRelated=true');
       expect(related.related).toEqual(['pets']);
-      expect(Object.keys(related.days[0]!.tags)).toEqual(['dogs', 'pets']);
+      expect(Object.keys(related.tags)).toEqual(['dogs', 'pets']);
       const all = [...tagsOf(related, 'dogs'), ...tagsOf(related, 'pets')];
-      expect([...all].sort()).toEqual([...both, dog, pet, tailed].sort());
-      expect(tagsOf(related, 'pets')).toEqual(expect.arrayContaining([pet, tailed]));
+      expect([...all].sort()).toEqual([...both, dog, pet, latest].sort());
+      expect(tagsOf(related, 'pets')).toEqual(expect.arrayContaining([pet, latest]));
       expect(related.count).toBe(6);
       expect(all).not.toContain(fish);
 
       // In whichever order the feed is asked for, and with its other filters.
       const newest = await feed('tags=dogs&addRelated=1&algorithm=chronological&limit=2');
       expect(newest.related).toEqual(['pets']);
-      expect(tagsOf(newest, 'pets')).toEqual([tailed, pet]);
+      expect(tagsOf(newest, 'pets')).toEqual([latest, pet]);
       expect((await feed('tags=dogs&addRelated=true&aiGenerated=true')).count).toBe(0);
 
       // A hashtag asked for is not added again, and one with none related adds none.

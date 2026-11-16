@@ -1,6 +1,7 @@
 import { createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import type { FastifyRequest } from 'fastify';
+import { auditMultipart } from './audit.js';
 import { badRequest } from './http/errors.js';
 import { IMAGE_HEAD_BYTES, ImageError, imageType, stripImage, type ImageType } from './image.js';
 import { resolveMimeType } from './http/mime.js';
@@ -142,6 +143,7 @@ export const textOf = (post: Post) => (post.type === 'link' ? undefined : post.t
 export async function readMultipart(req: FastifyRequest, { tmpPath, maxUploadBytes }: UploadLimits) {
   const fields: Record<string, string> = {};
   let upload: Upload | undefined;
+  let file: { filename: string | null; mimeType: string; size: number } | undefined;
   try {
     for await (const part of req.parts()) {
       if (part.type === 'file') {
@@ -150,6 +152,7 @@ export async function readMultipart(req: FastifyRequest, { tmpPath, maxUploadByt
           throw badRequest(msg('post.one_file_part'));
         }
         upload = { file: spooled(await spoolToTemp(part.file, tmpPath, maxUploadBytes), tmpPath), filename: part.filename || null, mimeType: part.mimetype };
+        file = { filename: upload.filename, mimeType: upload.mimeType, size: upload.file.size };
       } else {
         fields[part.fieldname] = String(part.value);
       }
@@ -158,6 +161,7 @@ export async function readMultipart(req: FastifyRequest, { tmpPath, maxUploadByt
     await upload?.file.release();
     throw err;
   }
+  auditMultipart(req, fields, file);
   return { fields, upload };
 }
 

@@ -192,7 +192,7 @@ export function reportRoutes(app: FastifyInstance, deps: AppDeps) {
     const moderator = await asServerModerator(req);
     const row = await loadContent(db, contentId);
     if (!(await waiting(contentId).select('user_id').limit(1).executeTakeFirst())) throw notReported();
-    const requestedAt = await setForDeletion(deps, row, req.log);
+    const requestedAt = await setForDeletion(deps, row);
     req.log.info({ contentId, moderator: moderator.id }, 'deleted from the report queue');
     return reply.status(202).send({ contentId, status: 'pending_deletion', requestedAt: iso(requestedAt) });
   });

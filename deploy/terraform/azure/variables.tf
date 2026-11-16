@@ -50,7 +50,7 @@ variable "request_timeout" {
 }
 
 variable "trust_proxy" {
-  description = "How many proxies in front of an app add to X-Forwarded-For (Front Door, then the Container Apps ingress). The address counted for per-address limits is read that many entries from the end. Check it after the first apply: see deploy/README.md."
+  description = "How many proxies in front of an app add to X-Forwarded-For (Front Door, then the Container Apps ingress). The address counted for per-address limits is read that many entries from the end. Check it after the first apply: see docs/DEPLOY.md."
   type        = number
   default     = 2
 }
@@ -79,7 +79,7 @@ variable "db_sku" {
 }
 
 variable "redis_sku" {
-  description = "Azure Managed Redis SKU. Size it for the feed index (~30 bytes per indexed post) plus 8 days of compressed summaries; see deploy/README.md."
+  description = "Azure Managed Redis SKU. Size it for the feed index (~30 bytes per indexed post) plus 8 days of compressed summaries; see docs/DEPLOY.md."
   type        = string
   default     = "Balanced_B1"
 }
@@ -88,6 +88,16 @@ variable "redis_high_availability" {
   description = "Keep a replica with automatic failover."
   type        = bool
   default     = true
+}
+
+variable "audit_archive_after_days" {
+  description = "Days after a record of the audit log (every request that added, updated or deleted something) is written that it moves to the Archive tier, the cold storage it stays in. Reading one means rehydrating it first, which takes hours."
+  type        = number
+  default     = 30
+  validation {
+    condition     = var.audit_archive_after_days >= 0
+    error_message = "A number of days, 0 or more."
+  }
 }
 
 variable "environment" {

@@ -9,10 +9,10 @@ import type { RouteDeps } from '../deps.js';
 import { badRequest, forbidden } from '../http/errors.js';
 import { Credentials, Flag } from '../http/schemas.js';
 import { msg } from '../language.js';
-import { moderatePost, type RemovedTag } from '../moderation/policy.js';
+import { moderatePost, refuseBanned, type RemovedTag } from '../moderation/policy.js';
 import { LinkUrl, MAX_TEXT_CHARS, mediaUrl, POST_TYPES, previewCutter } from '../posts.js';
 import type { ContentMeta, Preview, Publisher, Summary } from '../storage/index.js';
-import { parseTagList, postTags, sameTags } from '../tags.js';
+import { allowedTags, parseTagList, sameTags } from '../tags.js';
 import { readMultipart, readPost, readUploaded, textOf, type Post, type Upload } from '../upload.js';
 import { assertUpdatable } from '../write.js';
 
@@ -24,7 +24,7 @@ const Fields = Credentials.extend({
   text: z.string().max(MAX_TEXT_CHARS).optional(),
   /** A link post's URL. */
   url: LinkUrl.optional(),
-  /** The publisher's hashtags: a list, or one string of them separated by commas or spaces. Used only where TAGGING_MODE lets publishers choose. */
+  /** The publisher's hashtags: a list, or one string of them separated by commas or spaces. Where TAGGING_MODE is server, each must be one of the server's. */
   tags: z.union([z.array(z.string().max(100)).max(50), z.string().max(5000)]).optional(),
   /** The publisher's declaration that the content was created with AI. Omitted: false, or on an update what it was. */
   aiGenerated: Flag.optional(),
@@ -60,15 +60,21 @@ function sameBody(post: Post, meta: ContentMeta): boolean {
 export function storeRoutes(app: FastifyInstance, { db, config, content, challenges, writer, trustPlugins, now = Date.now }: RouteDeps) {
   const cut = previewCutter(config.feed);
 
+  // In server tagging mode, the only hashtags a post can have.
+  const serverTags = allowedTags(config.tagging);
+  const allowed = serverTags && new Set(serverTags);
+
   /**
-   * The publisher's hashtags in user tagging mode, where every post must have them; none in server mode.
+   * The publisher's hashtags, which every post must have. In server tagging mode each must be one of
+   * the server's: one that isn't is refused, not dropped, so nobody's hashtag silently goes missing.
    * Checked before any challenge, so nobody solves one for a post that can't go through.
    */
   function publisherTags(fields: Fields): string[] {
-    if (config.tagging.mode !== 'user') return [];
     const parsed = fields.tags === undefined ? { tags: [] } : parseTagList(fields.tags);
     if ('error' in parsed) throw badRequest(parsed.error);
-    if (!parsed.tags.length) throw badRequest(msg('post.tags_required'));
+    if (!parsed.tags.length) throw badRequest(msg(allowed ? 'post.tags_required_allowed' : 'post.tags_required'));
+    const refused = allowed ? parsed.tags.find((tag) => !allowed.has(tag)) : undefined;
+    if (refused !== undefined) throw badRequest(msg('post.tag_not_allowed', { tag: refused }));
     return parsed.tags;
   }
 
@@ -76,7 +82,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
    * Creates or updates content. Moderation first gives the post a trust score, which says where it
    * goes: refused (422), held in the moderation queue for an admin, or published. It also drops
    * some of its hashtags (see moderatePost). A post soon after the user's previous one is then
-   * answered with challenges, more of them the longer the run, before anything is stored. The post is
+   * answered with a challenge, or two once the run is a few posts long, before anything is stored. The post is
    * then written as contentWriter describes: an update writes over the content, which has one
    * version, and the last write wins. An update that would change nothing writes nothing, which only
    * a text or a link post can show: a file is stored again whenever it is sent.
@@ -85,6 +91,9 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
    * turns it on, and kept by an update that doesn't say. It is in the meta file and the summary, and
    * nowhere in the database. An update that turns it off closes the post's comments and hides them,
    * and deletes none: turning it on again shows them.
+   *
+   * A banned user is refused (403), before anything else of the post is looked at: whatever it is,
+   * a new post or an update, it is theirs no more to write.
    *
    * A post held in the queue is answered 202 with `status: "pending_review"`: it is stored, and its
    * publisher can read and update it, but it is in no feed until an admin accepts it.
@@ -115,12 +124,12 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
       if (!uploadId) post = await readPost(fields, upload, config.storage);
 
       const user = await authenticate(db, req, fields);
+      refuseBanned(user);
       if (uploadId) upload = await readUploaded(content, user.id, uploadId, config.storage);
       post ??= await readPost(fields, upload, config.storage);
       const { filename, mimeType } = post;
       const publisher: Publisher = { userId: user.id, username: user.username };
-      const own = publisherTags(fields);
-      const tags = postTags(config.tagging, own);
+      const tags = publisherTags(fields);
 
       const row = fields.contentId
         ? await db.selectFrom('content').selectAll().where('id', '=', fields.contentId).executeTakeFirst()
@@ -152,7 +161,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
         flags.comments === takesComments(existing.meta) &&
         sameBody(post, existing.meta);
       // The publisher's hashtags make it an update only if they aren't the content's.
-      if (existing && same && (!own.length || sameTags(own, existing.meta.tags))) return unchanged(existing);
+      if (existing && same && sameTags(tags, existing.meta.tags)) return unchanged(existing);
 
       // Before any challenge, so nobody solves one for a post that isn't stored.
       const texts = [post.type === 'link' ? post.url : post.text, filename];

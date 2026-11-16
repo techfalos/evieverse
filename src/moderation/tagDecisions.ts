@@ -1,11 +1,9 @@
-import type { FastifyBaseLogger } from 'fastify';
 import { loadPublished, requireMeta } from '../content.js';
 import { isUniqueViolation, updateOnConflict } from '../db/index.js';
 import { setForDeletion } from '../deletion.js';
 import type { AppDeps } from '../deps.js';
 import { notFound } from '../http/errors.js';
 import { msg } from '../language.js';
-import { touchTags } from '../tags.js';
 import { iso } from '../time.js';
 
 /**
@@ -14,12 +12,12 @@ import { iso } from '../time.js';
  * with `moderated=false`. A moderator takes it out of the queue by approving it or by removing the
  * hashtag from it.
  *
- * A decision is recorded in `tag_moderation` and shown to readers at once by a line in the hashtag's
- * tail. The compactor applies it for good (see Compactor): it flags the content's entry in the
- * hashtag's day index, or takes the hashtag off the content.
+ * A decision is recorded in `tag_moderation`, and that is all a request does: the compactor's next
+ * run finds the row and applies it (see Compactor), which is when feeds show it. It flags the
+ * content's entry in the hashtag's day index, or takes the hashtag off the content.
  */
 
-type Deps = Pick<AppDeps, 'db' | 'config' | 'content' | 'appender' | 'now'>;
+type Deps = Pick<AppDeps, 'db' | 'config' | 'content' | 'now'>;
 
 const notTagged = (tag: string) => notFound(msg('content.not_tagged', { tag }));
 
@@ -40,13 +38,14 @@ async function tagged({ db, content }: Deps, contentId: string, tag: string) {
 }
 
 /**
- * Approves content under `tag`: it is flagged as moderated in the hashtag's feeds, and so leaves the
- * hashtag's moderation queue. The approval is of the content as it is: an update makes it
- * unmoderated again. 404 if the content doesn't carry the hashtag.
+ * Approves content under `tag`: once the compactor has applied it, the content is flagged as
+ * moderated in the hashtag's feeds, and so leaves the hashtag's moderation queue. The approval is
+ * of the content as it is: an update makes it unmoderated again. 404 if the content doesn't carry
+ * the hashtag.
  */
-export async function approveTag(deps: Deps, contentId: string, tag: string, moderatorId: string, log: FastifyBaseLogger): Promise<{ alreadyApproved: boolean }> {
-  const { db, config, appender, now = Date.now } = deps;
-  const { row, approved } = await tagged(deps, contentId, tag);
+export async function approveTag(deps: Deps, contentId: string, tag: string, moderatorId: string): Promise<{ alreadyApproved: boolean }> {
+  const { db, now = Date.now } = deps;
+  const { approved } = await tagged(deps, contentId, tag);
   if (approved) return { alreadyApproved: true };
 
   const decidedAt = now();
@@ -62,13 +61,6 @@ export async function approveTag(deps: Deps, contentId: string, tag: string, mod
     if (other?.decision === 'removed') throw notTagged(tag);
     return { alreadyApproved: true };
   }
-  // The line only shows the approval until the compactor has applied it, which it does from the row.
-  try {
-    await touchTags(db, config.db.dialect, [tag], decidedAt);
-    await appender.append(tag, { approval: true, contentId, createdAt: row.created_at });
-  } catch (err) {
-    log.warn({ err, contentId, tag }, 'approval append failed; feeds show the content as unmoderated until the compactor applies the approval');
-  }
   return { alreadyApproved: false };
 }
 
@@ -83,17 +75,17 @@ export interface Removal {
 }
 
 /**
- * Removes `tag` from content. The removal is recorded, over an approval if there was one, and a
- * tombstone hides the content from the hashtag's feeds at once. The compactor then takes the
- * hashtag off the content: it writes the meta file and summary again without it (the bytes stay as
- * they are) and drops the content from the hashtag's day index. Content left with no hashtag is set
- * for deletion here and now instead, since a post needs one. 404 if the content doesn't carry the
+ * Removes `tag` from content. The removal is recorded, over an approval if there was one. The
+ * compactor's next run then takes the hashtag off the content: it writes the meta file and summary
+ * again without it (the bytes stay as they are) and drops the content from the hashtag's day index,
+ * which is when the hashtag's feeds stop returning it. Content left with no hashtag is set for
+ * deletion here and now instead, since a post needs one. 404 if the content doesn't carry the
  * hashtag.
  *
  * The removal stays: an update of the content doesn't get the hashtag back (see moderatePost).
  */
-export async function removeTag(deps: Deps, contentId: string, tag: string, moderatorId: string, log: FastifyBaseLogger): Promise<Removal> {
-  const { db, config, appender, now = Date.now } = deps;
+export async function removeTag(deps: Deps, contentId: string, tag: string, moderatorId: string): Promise<Removal> {
+  const { db, config, now = Date.now } = deps;
   const { row, meta, removed } = await tagged(deps, contentId, tag);
 
   const decidedAt = now();
@@ -107,12 +99,8 @@ export async function removeTag(deps: Deps, contentId: string, tag: string, mode
 
   const tags = meta.tags.filter((t) => t !== tag && !removed.has(t));
   if (!tags.length) {
-    const requestedAt = await setForDeletion(deps, row, log);
+    const requestedAt = await setForDeletion(deps, row);
     return { userId: row.user_id, tags, status: 'pending_deletion', requestedAt: iso(requestedAt) };
   }
-  // It hides every entry of the content there, whenever written: no later write gets the hashtag back.
-  await touchTags(db, config.db.dialect, [tag], decidedAt);
-  const failed = await appender.tombstone([tag], { tombstone: true, contentId, before: null, createdAt: row.created_at });
-  if (failed.length) log.warn({ contentId, tag }, 'tombstone append failed; the feed shows the content until the compactor applies the removal');
   return { userId: row.user_id, tags };
 }

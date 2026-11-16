@@ -30,6 +30,8 @@ const EXCERPT_CHARS = 200;
  *   comment_rejected   ...or rejected it there, which deletes it
  *   comment_deleted    someone other than its author deleted the comment: the post's publisher, an
  *                      admin, or a server moderator or an admin from the report queue
+ *   user_banned        a server moderator or an admin banned the user
+ *   user_unbanned      ...or ended the ban
  */
 export const NOTICES = {
   post_accepted: 'notice.post_accepted',
@@ -42,6 +44,8 @@ export const NOTICES = {
   comment_accepted: 'notice.comment_accepted',
   comment_rejected: 'notice.comment_rejected',
   comment_deleted: 'notice.comment_deleted',
+  user_banned: 'notice.user_banned',
+  user_unbanned: 'notice.user_unbanned',
 } as const satisfies Record<string, MessageKey>;
 
 export type NoticeKind = keyof typeof NOTICES;
@@ -52,7 +56,7 @@ export const MESSAGE = 'message';
 export const isNotice = (kind: string): kind is NoticeKind => Object.hasOwn(NOTICES, kind);
 
 export interface Notice {
-  /** Whose inbox it goes to: the publisher of the post, the author of the comment, or the user who was muted. */
+  /** Whose inbox it goes to: the publisher of the post, the author of the comment, or the user who was muted or banned. */
   userId: string;
   kind: NoticeKind;
   /** Who did what the notice reports. The notice doesn't name them; nobody is told of what they did themselves. */

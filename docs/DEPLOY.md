@@ -1,6 +1,6 @@
 # Deploying Evieverse with Terraform
 
-Each directory under `terraform/` is a self-contained root module that builds the image from this repo, provisions everything the server needs, and prints the HTTPS URL when it finishes.
+Each directory under `deploy/terraform/` is a self-contained root module that builds the image from this repo, provisions everything the server needs, and prints the HTTPS URL when it finishes.
 
 The modules run the server as functions: the routes are split into four groups, each group runs on its own and scales with its own traffic (down to nothing, where the cloud allows), and one address in front sends each request to its group. The compactor isn't a function: it's one container that's always running, beside them. Everything runs the same container image.
 
@@ -18,12 +18,12 @@ They are containers on every cloud, not zip packages, because the storage librar
 
 | Group | Requests | Uses |
 |-------|----------|------|
-| `feed` | `GET /feed`, `GET /feed/following` | Redis and the bucket only: no database connection |
+| `feed` | `GET /feed` | Redis and the bucket only: no database connection |
 | `content` | `GET /content/:id`, `GET /content/:id/raw`, and reading a post's comments: `GET /content/:id/comments`, `GET /content/:id/comments/:commentId` | Database, bucket, and Redis for comments |
 | `store` | `POST /uploads`, `POST /store` | Database, Redis, bucket |
-| `api` | Everything else: `/register`, `/users`, `/whoami`, `/languages`, `/like`, `/report`, follows, moderation, `/admins`, `/moderators`, `/tags`, `DELETE /content/:id`, writing and deleting comments (`POST /content/:id/comments`, `DELETE /content/:id/comments/:commentId`), `/cli`, `/health` | Database, Redis, bucket |
+| `api` | Everything else: `/register`, `/users`, `/whoami`, `/languages`, `/like`, `/report`, follows and the following feed (`GET /feed/following`, which asks the database who may read it), moderation, `/admins`, `/moderators`, `/banned`, `DELETE /users/:id` (deleting an account), `/tagging`, `/tags`, `DELETE /content/:id`, writing and deleting comments (`POST /content/:id/comments`, `DELETE /content/:id/comments/:commentId`), `/cli`, `/health` | Database, Redis, bucket |
 
-The groups are defined in [`src/functions/groups.ts`](../src/functions/groups.ts), and each module's routing table (`local.routes`, or `local.groups` on Azure) follows it. A route added to a group other than `api` needs a line there too; anything a table doesn't list goes to `api`. Comments needed no line: every module already sends `GET` under `/content/` to the content group and every other method there to `api`, which is where their reads and writes belong.
+The groups are defined in [`src/functions/groups.ts`](../src/functions/groups.ts), and each module's routing table (`local.routes`, or `local.groups` on Azure) follows it. A route added to a group other than `api` needs a line there too; anything a table doesn't list goes to `api`. Comments needed no line: every module already sends `GET` under `/content/` to the content group and every other method there to `api`, which is where their reads and writes belong. The following feed is the other way round: it sits under `/feed` but belongs to `api`, so each table sends only `/feed` itself to the feed group. A deployment made before that needs the module applied again, which changes the image and the routing together; with the new image behind the old routing, `GET /feed/following` gets `404` from the feed group.
 
 ## Prerequisites
 
@@ -64,17 +64,20 @@ environment = { TAGGING_MODE = "server", TAGGING_SERVER_TAGS = "news" }
 secrets     = { SUMMARY_OPTIONS = "{\"bucket\":\"summaries\",\"access_key_id\":\"...\",\"secret_access_key\":\"...\"}" }
 ```
 
+[CONFIG.md](CONFIG.md) lists every setting, and says what an `apply` does when you change one.
+
 ## The admin account
 
-Every deployment gets an [admin](../API.md#moderation) account, so there's someone to moderate it, appoint moderators and make more admins from the first minute. Each module does the same:
+Every deployment gets an [admin](API.md#moderation) account, so there's someone to moderate it, appoint moderators and make more admins from the first minute. Each module does the same:
 
 1. **Terraform makes the account's id and API key,** in the format the server issues keys in. The key is random, and exists in two places only: the Terraform state, and the profile file below.
 2. **The migration step creates the account.** It's given the key's SHA-256, not the key (`BOOTSTRAP_ADMIN`), and after the migrations it creates the user if it isn't there, makes it an admin, and makes that key its only one. It runs again whenever the image or the account's values change, and changes nothing when they haven't.
-3. **The key is installed on the machine that applies,** once the account exists: Terraform writes `~/.evieverse/profiles/<name>.json` (`name` is the module's variable, `evieverse` by default), readable only by you. That's a profile of the server's [CLI](../CLI.md), so after installing the CLI, it works as the admin with no sign-in:
+3. **The key is installed on the machine that applies,** once the account exists: Terraform writes `~/.evieverse/profiles/<name>.json` (`name` is the module's variable, `evieverse` by default), readable only by you. That's a profile of the server's [CLI](CLI.md), so after installing the CLI, it works as the admin with no sign-in:
 
 ```sh
 curl -fsSL "$(terraform output -raw url)/cli/install.sh" | sh     # Windows: irm <url>/cli/install.ps1 | iex
 evieverse --profile evieverse whoami
+evieverse --profile evieverse register alice                   # an account of your own: prints its userId and API key
 evieverse --profile evieverse admins grant <userId>            # make your own account an admin
 ```
 
@@ -96,8 +99,8 @@ Things to know:
 - **On another machine,** sign in with the outputs: `EVIEVERSE_API_KEY="$(terraform output -raw admin_api_key)" evieverse login "$(terraform output -raw url)" "$(terraform output -raw admin_user_id)"`. A machine that applies an existing deployment gets the profile file written too.
 - **The key is in the Terraform state,** in plain text, like the database password and the other secrets these modules create. Keep the state where only the deployment's operators can read it (an encrypted remote backend, rather than a file in the repo).
 - **To replace the key,** run `terraform apply -replace=random_password.admin_key`. The migration step gives the account the new key and revokes the old one, and the profile file is rewritten.
-- **Don't replace it through the API** ([`POST /users/:userId/key`](../API.md#post-usersuseridkey), or `evieverse key rotate`). The deployment doesn't learn of a key made there: the next apply that runs the migration step revokes it and makes the deployment's key work again, which undoes the replacement if that key had leaked.
-- **The account is a break-glass one.** Make your own account an admin with it, and use that from day to day. It can't be locked out by the API: the server refuses to revoke its only admin, and if this account's role is revoked while others remain, the next apply that runs the migration step restores it.
+- **Don't replace it through the API** ([`POST /users/:userId/key`](API.md#post-usersuseridkey), or `evieverse key rotate`). The deployment doesn't learn of a key made there: the next apply that runs the migration step revokes it and makes the deployment's key work again, which undoes the replacement if that key had leaked.
+- **The account is a break-glass one.** Make your own account an admin with it, and use that from day to day. It can't be locked out by the API: the server refuses to revoke or delete its only admin, and if this account's role is revoked while others remain, the next apply that runs the migration step restores it. An admin can't ban it either. If its account is deleted while others remain, the migration step fails until the compactor has purged the account (which frees its username), and then creates it again.
 - **`terraform destroy`** removes the profile file with the deployment.
 
 ## Upgrading from the container deployment
@@ -120,13 +123,29 @@ A request to a function can't carry a large file. The limits on a file sent in t
 | GCP | 32 MiB | Cloud Run's and API Gateway's limit on a request body |
 | Azure | None set by Container Apps; not tested through Front Door | |
 
-Larger files go straight to the bucket: the client asks [`POST /uploads`](../API.md#post-uploads) for a link, sends the file to it, and posts it with `/store` by its `uploadId`. Every module sets the bucket up for that:
+Larger files go straight to the bucket: the client asks [`POST /uploads`](API.md#post-uploads) for a link, sends the file to it, and posts it with `/store` by its `uploadId`. Every module sets the bucket up for that:
 
 - **CORS:** pages on `upload_origins` (any origin by default) may send files to the bucket from a browser. The link is the permission; this only tells browsers which pages may use one.
 - **Expiry:** an upload nobody posts is deleted after a day (`uploads/` in the bucket).
 - **`MAX_UPLOAD_BYTES`** is the largest file `/store` accepts either way. To post an upload, `/store` copies it within the bucket, inside the request's time limit: 30 seconds on AWS, `request_timeout` on GCP (300) and Azure (240). AWS is set to 256 MiB and GCP to 1 GiB. Those are estimates of what fits, not measurements; time a large upload on your own deployment before raising them through `environment`. Azure keeps the server's default (5 GiB), which is more than fits in its timeout.
 
 On GCP, signing a link needs a private key, and Cloud Run's own credentials don't have one. The module therefore creates a service account that can only read and write the content bucket, and a key for it, which the functions use for the bucket (`direct_uploads`, on by default). The key doesn't expire, and is kept in Secret Manager and in the Terraform state. Organisations that forbid service account keys need `direct_uploads = false`: `/uploads` then answers `501`, and files are limited to 32 MiB.
+
+## Audit log
+
+Every request that adds, updates or deletes something (a `POST`, `PUT`, `PATCH` or `DELETE` that succeeded) is written down whole, and no read is: `GET /feed` and the other reads leave nothing. What a record holds, and how a write that fails is handled, is in [CONFIG.md](CONFIG.md#audit-log).
+
+Each module creates a bucket of its own for it, which moves what it holds to the cloud's cold storage, and gives the functions the right to add to it and nothing else: not to read, overwrite or delete a record.
+
+| Cloud | Where | Cold storage | Written by |
+|-------|-------|--------------|------------|
+| AWS | S3 bucket `<name>-audit-…` | Glacier Deep Archive | Lambda functions (`s3:PutObject` only) |
+| GCP | GCS bucket `<project>-<name>-audit` | Archive storage class | Cloud Run services (`storage.objectCreator` only) |
+| Azure | Container `audit` of the storage account | Archive tier | Container Apps (the account key, as for content) |
+
+Records stay as they were written for `audit_archive_after_days` (30 by default; the same variable on every cloud), then the bucket's lifecycle rule moves them. A record is one small object, so on AWS and Azure the archive tiers' per-object charges and minimum storage durations (180 days) are worth a look at your volume. Reading an archived record takes hours to restore. Nothing deletes records. The bucket is named in the `audit_bucket` output (`audit_container` on Azure).
+
+The audit log is written by the functions that answer requests, in each request, before it is answered: a failed write is logged as an error and doesn't fail the request. The log of the functions themselves (CloudWatch, Cloud Logging, Log Analytics) also gets a line for each record, naming its object, for as long as that log is kept.
 
 ## Client addresses
 
@@ -180,7 +199,7 @@ Measured for this change, with the limits of each measurement:
 
 Every module sets the eviction policy to `volatile-lru`. Only keys with a TTL (hot summaries, comments, challenges and superseded index keys) are ever evicted, so a full Redis costs object-store reads, never the index.
 
-Size it for about 25 bytes per indexed post per hashtag (10,000 busy hashtags take about 1.1 GB) plus about 0.4 KB per post of the last 8 days (about 0.3 GB at 100,000 posts a day). Comments are kept for a day (`COMMENTS_HOT_HOURS`), and a million a day need about 0.5 GB. The defaults have about 1 GB; raise `redis_node_type`, `redis_memory_gb` or `redis_sku` as you grow. [APP.md](../APP.md#12-performance-and-scale) has the details.
+Size it for about 25 bytes per indexed post per hashtag (10,000 busy hashtags take about 1.1 GB) plus about 0.4 KB per post of the last 8 days (about 0.3 GB at 100,000 posts a day). Comments are kept for a day (`COMMENTS_HOT_HOURS`), and a million a day need about 0.5 GB. The defaults have about 1 GB; raise `redis_node_type`, `redis_memory_gb` or `redis_sku` as you grow. [APP.md](APP.md#12-performance-and-scale) has the details.
 
 If Redis loses its data, run the compactor once with `--rebuild`. It rebuilds the feed index, the hot summaries and the publisher credits from the database and the content bucket. Comments need no rebuild: each post's are read from the bucket again the first time they're asked for. A rebuild reads every post, so it's a container task or job of its own rather than a pass of the running compactor. Each module keeps one for it, and prints the command that starts it:
 
@@ -228,7 +247,7 @@ It runs beside the compactor. If the compactor is mid-pass, the rebuild waits fo
 
 ## Setting it up yourself
 
-Without these modules, the server runs on any of each cloud's services below, as long-running API nodes with one compactor (`node dist/server.js`, `node dist/compact/main.js`), or as functions (`node dist/functions/http.js` for containers that scale with traffic, `node dist/functions/lambda.js` on Lambda, with `FUNCTION_GROUP` naming the group). The rules that apply on every cloud, and the ones functions add, are in [APP.md](../APP.md#13-deployment-topology).
+Without these modules, the server runs on any of each cloud's services below, as long-running API nodes with one compactor (`node dist/server.js`, `node dist/compact/main.js`), or as functions (`node dist/functions/http.js` for containers that scale with traffic, `node dist/functions/lambda.js` on Lambda, with `FUNCTION_GROUP` naming the group). The rules that apply on every cloud, and the ones functions add, are in [APP.md](APP.md#13-deployment-topology).
 
 **AWS**
 

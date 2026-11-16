@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import { sql } from 'kysely';
 import { expect } from 'vitest';
 import { buildApp } from '../src/app.js';
+import type { AuditRecord } from '../src/audit.js';
 import { challengeKey, leadingZeroBits, type Challenge } from '../src/challenge/challenges.js';
 import { createCompactor } from '../src/compact/compactor.js';
 import { loadConfig, type Config } from '../src/config.js';
@@ -13,9 +15,6 @@ import { bootstrap } from '../src/deps.js';
 import type { Languages } from '../src/language.js';
 import type { TrustPlugin } from '../src/moderation/trust.js';
 import type { CliRelease } from '../src/routes/cli.js';
-import type { HotStore } from '../src/storage/index.js';
-import { tailIndexKey, type TailLine } from '../src/tagfeed/layout.js';
-import { readTails } from '../src/tagfeed/read.js';
 
 export interface TestTarget {
   name: string;
@@ -49,7 +48,7 @@ export const TABLES = [
   'tag_moderators',
   'follows',
   'likes',
-  'pending_appends',
+  'feed_queue',
   'compactor_lease',
   'tag_pairs',
   'tags',
@@ -76,11 +75,9 @@ export function proofOfWork({ prefix, bits }: Challenge['proofOfWork']): string 
 /** The #hashtags written in a post's text, which tests send as its tags. */
 export const hashtags = (text: string) => [...text.matchAll(/#(\w+)/g)].map((m) => m[1]!);
 
-/** Every line of a tag's tail lists, oldest window first. */
-export async function tailLines(hot: HotStore, tag: string): Promise<TailLine[]> {
-  const windows = await hot.scores(tailIndexKey(tag), 0, Infinity);
-  return (await readTails(hot, tag, windows)).flat().map((line) => line!);
-}
+/** The feed queue: "<contentId> <tag>" of every row, sorted. What the compactor's next run takes, once committed. */
+export const queued = async (ctx: { db: Db }) =>
+  (await ctx.db.selectFrom('feed_queue').select(['content_id', 'tag']).execute()).map((r) => `${r.content_id} ${r.tag}`).sort();
 
 /**
  * Challenges are off unless `challenge` turns them on, with a proof of work quick enough for tests, and
@@ -90,6 +87,8 @@ export async function createTestContext(
   target: TestTarget,
   opts: {
     feed?: Record<string, number>;
+    /** Writes the audit log, to `audit/` in the test's directory (see readAudit). Off unless asked for. */
+    audit?: boolean;
     publicBaseUrl?: string;
     challenge?: Partial<Config['challenge']>;
     tagging?: Partial<Config['tagging']>;
@@ -134,6 +133,7 @@ export async function createTestContext(
         ...(opts.maxUploadBytes && { maxUploadBytes: opts.maxUploadBytes }),
         ...(opts.uploadLinksPerMinute !== undefined && { uploadLinksPerMinute: opts.uploadLinksPerMinute }),
       },
+      ...(opts.audit && { audit: { scheme: 'fs', options: { root: join(dir, 'audit') } } }),
       feed: { headCacheMs: 0, ...opts.feed },
       challenge: { register: false, postWindowSeconds: 0, powBits: 8, ...opts.challenge },
       ...(opts.tagging && { tagging: opts.tagging }),
@@ -161,7 +161,6 @@ export async function createTestContext(
   const app = await buildApp(deps, { logger: false, cli: opts.cli ?? null, trustPlugins: opts.trustPlugins, languages: opts.languages });
 
   const compactor = createCompactor(deps);
-  const windowMs = config.feed.tailWindowSeconds * 1000;
   const graceMs = config.compact.graceSeconds * 1000;
 
   /**
@@ -184,9 +183,14 @@ export async function createTestContext(
     dir,
     ...deps,
     compactor,
-    /** Moves the clock past the current tail window (plus grace) and runs one compaction pass. */
+    /**
+     * Runs one compaction pass, which is what puts writes in feeds, with the clock moved past the
+     * grace period first: the run then takes everything there is to take, the hashtag counts and the
+     * updates that stopped half way too. A committed write needs no such wait: `compactor.runOnce()`
+     * takes it as it is.
+     */
     async compact(extraMs = 0) {
-      clock.now += windowMs + graceMs + extraMs;
+      clock.now += graceMs + 1000 + extraMs;
       return compactor.runOnce();
     },
     solve,
@@ -209,6 +213,16 @@ export async function createTestContext(
 }
 
 export type TestContext = Awaited<ReturnType<typeof createTestContext>>;
+
+/** Every record of the audit log (see `audit` of createTestContext), oldest first, with the file it is in. */
+export async function readAudit(ctx: Pick<TestContext, 'dir'>): Promise<(AuditRecord & { key: string })[]> {
+  const root = join(ctx.dir, 'audit');
+  const keys = (await readdir(root, { recursive: true, withFileTypes: true }).catch(() => []))
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.json.gz'))
+    .map((entry) => join(entry.parentPath, entry.name));
+  const records = await Promise.all(keys.map(async (key) => ({ ...(JSON.parse(gunzipSync(await readFile(key)).toString('utf8')) as AuditRecord), key })));
+  return records.sort((a, b) => a.time.localeCompare(b.time) || a.key.localeCompare(b.key));
+}
 
 /** Builds a multipart/form-data body for app.inject. */
 export function multipart(fields: Record<string, string>, file?: { name: string; type: string; data: Buffer }) {
@@ -257,12 +271,15 @@ export type FeedItem = {
 };
 
 export type Feed = {
+  /** The span of time the feed is of. */
+  window: { from: string; to: string };
   count: number;
   truncated: boolean;
   nextCursor: string | null;
   /** With addRelated: the related hashtags the feed added to the ones asked for. */
   related?: string[];
-  days: { extended: boolean; count: number; tags: Record<string, FeedItem[]> }[];
+  /** Each hashtag's records, in the feed's order; a hashtag with none is left out. */
+  tags: Record<string, FeedItem[]>;
 };
 
 type App = Pick<TestContext, 'app'>;
@@ -295,7 +312,7 @@ export async function feed(ctx: App, query: string): Promise<Feed> {
 }
 
 /** The records of a hashtag's feed. */
-export const feedItems = async (ctx: App, tag: string) => (await feed(ctx, `tags=${tag}`)).days.flatMap((d) => d.tags[tag] ?? []);
+export const feedItems = async (ctx: App, tag: string) => (await feed(ctx, `tags=${tag}`)).tags[tag] ?? [];
 
 /** The requests above on whichever context a test is running with, so its calls needn't pass it. */
 export const requests = (ctx: () => App) => ({

@@ -9,18 +9,14 @@ import {
   DAY_ENTRY_BYTES,
   dayKey,
   headKey,
-  isTombstone,
   manifestKey,
-  tailIndexKey,
-  tailKey,
   unpackDay,
   type DayRef,
   type Head,
   type Manifest,
-  type TailRecord,
 } from '../src/tagfeed/layout.js';
 import { DAY, HOUR, utcDay } from '../src/time.js';
-import { createTestContext, requests, tailLines, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
+import { createTestContext, queued, requests, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
 
 for (const target of TARGETS) {
   describe(`feed index (${target.name})`, () => {
@@ -39,7 +35,7 @@ for (const target of TARGETS) {
     };
     const getFeed = async (query: string) => ctx.app.inject({ method: 'GET', url: `/feed?${query}` });
     const own = (user: User) => authorIndex(user.userId);
-    const allIds = (f: Feed) => f.days.flatMap((d) => Object.values(d.tags).flatMap((l) => l.map((i) => i.contentId)));
+    const allIds = (f: Feed) => Object.values(f.tags).flatMap((l) => l.map((i) => i.contentId));
     const readJson = async <T>(key: string) => JSON.parse((await ctx.hot.get(key))!.toString()) as T;
     const readHead = (tag: string) => readJson<Head>(headKey(tag));
     const readManifest = async (tag: string) => readJson<Manifest>(manifestKey(tag, (await readHead(tag)).manifest!));
@@ -57,9 +53,27 @@ for (const target of TARGETS) {
     const contentRow = (contentId: string) => ctx.db.selectFrom('content').select('id').where('id', '=', contentId).executeTakeFirst();
     /** What a hashtag's feed shows: each post and its text. */
     const shown = async (tag: string) => (await items(tag)).map((i) => [i.contentId, i.preview.text]);
-    const pendingAppends = async () =>
-      (await ctx.db.selectFrom('pending_appends').select(['content_id', 'tag']).execute()).map((r) => `${r.content_id} ${r.tag}`).sort();
-    const tailRecords = async (tag: string) => (await tailLines(ctx.hot, tag)).filter((l): l is TailRecord => !isTombstone(l));
+    /** The feed queue: "<contentId> <tag>" of every row. */
+    const queue = () => queued(ctx);
+    /** The rows a write of `contentId` under these hashtags queues: one each, and one for its publisher's own index. */
+    const rowsOf = (user: User, contentId: string, ...tags: string[]) => [own(user), ...tags].map((tag) => `${contentId} ${tag}`);
+    const del = async (user: User, contentId: string) => {
+      const res = await ctx.app.inject({ method: 'DELETE', url: `/content/${contentId}`, payload: { ...user } });
+      expect(res.statusCode, res.body).toBe(202);
+    };
+    /** Every page of the feed session that `first` began. */
+    const restOf = async (query: string, first: Feed) => {
+      const seen = allIds(first);
+      let cursor = first.nextCursor;
+      for (let page = 0; cursor && page < 40; page++) {
+        const res = await getFeed(`${query}&cursor=${cursor}`);
+        expect(res.statusCode, res.body).toBe(200);
+        const f = res.json() as Feed;
+        seen.push(...allIds(f));
+        cursor = f.nextCursor;
+      }
+      return seen;
+    };
     /** Runs the next transaction's statements, then fails it the way a failed COMMIT would. */
     const failNextCommit = (committed: boolean) => {
       const transaction = ctx.db.transaction.bind(ctx.db);
@@ -110,26 +124,28 @@ for (const target of TARGETS) {
     const storedFiles = async (contentId: string) => (await readdir(join(ctx.dir, 'content', 'content'))).filter((f) => f.startsWith(contentId)).sort();
     const summaryDir = (createdAt: number) => join(ctx.dir, 'summaries', 'summaries', String(utcDay(createdAt)).padStart(5, '0'));
     const storedSummaries = async (contentId: string, createdAt: number) => (await readdir(summaryDir(createdAt))).filter((f) => f.startsWith(contentId)).sort();
-    /** Pauses the first Redis write to a matching key until released, before the write happens. */
+    /** Pauses the compactor's first write of index keys that has a matching key among them until released, before the write happens. */
     const pauseSet = (matches: (key: string) => boolean) => {
       let reached!: () => void;
       let release!: () => void;
       const paused = new Promise<void>((r) => (reached = r));
       const released = new Promise<void>((r) => (release = r));
-      const set = ctx.hot.set.bind(ctx.hot);
+      const setMany = ctx.hot.setMany.bind(ctx.hot);
       let done = false;
-      vi.spyOn(ctx.hot, 'set').mockImplementation(async (...args) => {
-        if (!done && matches(args[0])) {
+      vi.spyOn(ctx.hot, 'setMany').mockImplementation(async (entries) => {
+        if (!done && entries.some((e) => matches(e.key))) {
           done = true;
           reached();
           await released;
         }
-        return set(...args);
+        return setMany(entries);
       });
       return { paused, release };
     };
+    /** The index keys the compactor wrote, of those a spy on `setMany` saw. */
+    const keysSet = (spy: { mock: { calls: [{ key: string }[]][] } }) => spy.mock.calls.flatMap(([entries]) => entries.map((e) => e.key));
 
-    it('compacts tails into a packed, sorted day index named by the manifest, swaps the head, and keeps the feed identical', async () => {
+    it('puts queued posts in feeds on the next run: a packed, sorted day index named by a manifest, and the head swapped to it', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const ids: string[] = [];
@@ -137,11 +153,17 @@ for (const target of TARGETS) {
         ids.push(await store(alice, `item ${i} #news`));
         ctx.clock.now += 1000;
       }
-      const before = (await getFeed('tags=news')).json();
-      expect(allIds(before)).toEqual([...ids].reverse());
+      // Stored, and readable, but in no feed yet: each waits in the queue, for its hashtag's index and its publisher's.
+      expect((await ctx.app.inject({ method: 'GET', url: `/content/${ids[0]}/raw` })).body).toBe('item 0 #news');
+      expect(allIds((await getFeed('tags=news')).json())).toEqual([]);
+      expect(await queue()).toEqual(ids.flatMap((id) => rowsOf(alice, id, 'news')).sort());
 
-      await ctx.compact();
-      expect(await readHead('news')).toMatchObject({ v: 4, manifest: expect.any(String) });
+      // The next run takes them all, with nothing to wait for, and swaps each head once.
+      const set = vi.spyOn(ctx.hot, 'setMany');
+      expect((await ctx.compactor.runOnce()).tags).toEqual([own(alice), 'news'].sort());
+      expect(keysSet(set).filter((key) => key === headKey('news'))).toHaveLength(1);
+      expect(await queue()).toEqual([]);
+      expect(await readHead('news')).toMatchObject({ v: 5, manifest: expect.any(String) });
       const manifest = await readManifest('news');
       expect(manifest.days).toHaveLength(1);
       const [day] = manifest.days;
@@ -149,10 +171,10 @@ for (const target of TARGETS) {
       expect((await ctx.hot.get(dayKey('news', day!.gen)))!.length).toBe(5 * DAY_ENTRY_BYTES);
       const entries = await dayIndex('news', day!);
       expect(entries.map((e) => e.contentId)).toEqual([...ids].reverse());
+      expect(allIds((await getFeed('tags=news')).json())).toEqual([...ids].reverse());
 
-      const after = (await getFeed('tags=news')).json();
-      expect(allIds(after)).toEqual(allIds(before));
-      expect(after.days[0].tags.news[0]).toEqual(before.days[0].tags.news[0]);
+      // A run with nothing queued compacts nothing.
+      expect((await ctx.compactor.runOnce()).tags).toEqual([]);
     });
 
     it('lets readers holding an old head keep reading while compaction swaps the head, then lets the superseded keys expire', async () => {
@@ -168,21 +190,18 @@ for (const target of TARGETS) {
       expect(newHead.manifest).not.toBe(oldHead.manifest);
       const current = await readManifest('news');
 
-      // A reader that loaded the old head still sees a consistent view (old indexes + tails since).
-      const view = await ctx.feedReader.view('news', ctx.clock.now, oldHead);
-      expect(view.candidates.map((c) => c.contentId).sort()).toEqual([a, b].sort());
+      // A reader that loaded the old head still sees a consistent view: the index as it was then.
+      const view = await ctx.feedReader.view('news', oldHead.manifest);
+      expect(view.candidates.map((c) => c.contentId)).toEqual([a]);
 
       const superseded = [manifestKey('news', oldHead.manifest!), ...oldManifest.days.map((d) => dayKey('news', d.gen))];
       const live = [manifestKey('news', newHead.manifest!), ...current.days.map((d) => dayKey('news', d.gen))];
-      const windows = await ctx.hot.scores(tailIndexKey('news'), 0, Infinity);
-      expect(windows).toHaveLength(2);
-      expect(await ctx.hot.exists([...superseded, ...windows.map((w) => tailKey('news', w))])).toEqual([true, true, true, true]);
+      expect(await ctx.hot.exists(superseded)).toEqual([true, true]);
       // Redis expires keys by its own clock, so only the in-process store can be moved past the retention period.
       if (target.hot === 'memory') {
         await ctx.compact(11 * 60_000);
-        expect(await ctx.hot.exists([...superseded, ...windows.map((w) => tailKey('news', w))])).toEqual([false, false, false, false]);
+        expect(await ctx.hot.exists(superseded)).toEqual([false, false]);
         expect(await ctx.hot.exists(live)).toEqual([true, true]);
-        expect(await ctx.hot.scores(tailIndexKey('news'), 0, Infinity)).toEqual([]);
       }
       expect(allIds((await getFeed('tags=news')).json()).sort()).toEqual([a, b].sort());
     });
@@ -216,8 +235,10 @@ for (const target of TARGETS) {
       expect(oldIds.length).toBe(3);
       expect(oldIds[0]).toBe(popular);
       expect(manifest.days[0]!.count).toBe(20);
-      const feed = (await getFeed('tags=news&hours=24')).json() as Feed;
-      expect(allIds(feed)).toContain(popular);
+      // A feed of the past day has only the flood; one whose window reaches the old day puts the liked post first.
+      expect(allIds((await getFeed('tags=news&hours=24')).json())).not.toContain(popular);
+      const feed = (await getFeed('tags=news&hours=720')).json() as Feed;
+      expect(allIds(feed)[0]).toBe(popular);
     });
 
     it('rewrites only the day index of liked content and re-admits liked content that was trimmed', async () => {
@@ -273,13 +294,16 @@ for (const target of TARGETS) {
       expect(allIds((await getFeed('tags=sports')).json())).toEqual([id]);
       const upd = await update(alice, id, 'second #news');
       expect(upd.statusCode, upd.body).toBe(200);
-      await ctx.compact();
+      // Left out of #sports at once, by its summary, which no longer carries the hashtag; the index still holds its entry.
+      expect(allIds((await getFeed('tags=sports')).json())).toEqual([]);
+      expect(await indexIds('sports')).toEqual([id]);
+      await ctx.compactor.runOnce();
       expect((await readManifest('sports')).days).toEqual([]);
       expect(allIds((await getFeed('tags=sports')).json())).toEqual([]);
       expect(allIds((await getFeed('tags=news')).json())).toEqual([id]);
     });
 
-    it('hides content set for deletion at once, then removes it from every index, the summaries and the database in one compaction', async () => {
+    it('keeps content set for deletion in feeds until the next run, which removes it from every index, the summaries and the database together', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const bob = await ctx.register('bob');
@@ -294,20 +318,23 @@ for (const target of TARGETS) {
       expect(await shown('news')).toEqual([[id, 'v2 #news #tech'], [keep, 'keep #news']]);
       expect(await shown('tech')).toEqual([[id, 'v2 #news #tech']]);
 
-      const del = await ctx.app.inject({ method: 'DELETE', url: `/content/${id}`, payload: { ...alice } });
-      expect(del.statusCode, del.body).toBe(202);
-      expect(await shown('news')).toEqual([[keep, 'keep #news']]);
-      expect(await shown('tech')).toEqual([]);
+      await del(alice, id);
+      // Gone for anyone who asks for it, and for good: it can't be read, liked or updated.
       expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}` })).statusCode).toBe(404);
-      // Only hidden so far: the indexes, the summary, the row and the bytes are untouched until the compactor runs.
+      expect((await api.like(alice, id)).statusCode).toBe(404);
+      expect((await update(alice, id, 'v3 #news')).statusCode).toBe(409);
+      // Feeds still have it: the indexes, the summary, the row and the bytes are untouched until the compactor runs.
+      expect(await shown('news')).toEqual([[id, 'v2 #news #tech'], [keep, 'keep #news']]);
       expect(await indexIds('tech')).toEqual([id]);
       expect(await contentRow(id)).toBeDefined();
       expect(await ctx.content.getMeta(id)).not.toBeNull();
       const ref = { contentId: id, createdAt };
       expect(await ctx.hot.exists([summaryKey(ref)])).toEqual([true]);
 
-      expect((await ctx.compact()).deleted).toEqual([id]);
+      // The next run, with nothing to wait for.
+      expect((await ctx.compactor.runOnce()).deleted).toEqual([id]);
       expect(await shown('news')).toEqual([[keep, 'keep #news']]);
+      expect(await shown('tech')).toEqual([]);
       expect(await indexIds('news')).toEqual([keep]);
       expect((await readManifest('tech')).days).toEqual([]);
       expect(await contentRow(id)).toBeUndefined();
@@ -320,22 +347,18 @@ for (const target of TARGETS) {
       expect((await ctx.compact()).deleted).toEqual([]);
     });
 
-    it('hides content set for deletion while the database keeps it until its open tail window is merged', async () => {
+    it('deletes content that was written a moment ago on the next run, before it was ever in a feed', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const id = await store(alice, 'fresh #news');
-      expect((await ctx.app.inject({ method: 'DELETE', url: `/content/${id}`, payload: { ...alice } })).statusCode).toBe(202);
-      expect(await items('news')).toEqual([]);
+      await del(alice, id);
+      expect(await queue()).toEqual(rowsOf(alice, id, 'news').sort());
 
-      // A minute later the tail window holding the entry is still open, so the compactor can't drop it yet.
-      ctx.clock.now += 60_000;
-      expect((await ctx.compactor.runOnce()).deleted).toEqual([]);
-      expect(await items('news')).toEqual([]);
-      expect(await contentRow(id)).toBeDefined();
-
-      expect((await ctx.compact()).deleted).toEqual([id]);
+      expect(await ctx.compactor.runOnce()).toMatchObject({ tags: [own(alice), 'news'].sort(), deleted: [id] });
       expect(await items('news')).toEqual([]);
       expect(await contentRow(id)).toBeUndefined();
+      // Its rows in the queue went with it.
+      expect(await queue()).toEqual([]);
     });
 
     it('skips a compactor run while another is going, so a slower run never republishes content a newer one deleted', async () => {
@@ -352,9 +375,7 @@ for (const target of TARGETS) {
       const runA = ctx.compactor.runOnce();
       await slow.paused;
 
-      // The tombstone append fails, so only the compactor can take the post out of #news.
-      vi.spyOn(ctx.appender, 'tombstone').mockResolvedValue(['news']);
-      expect((await ctx.app.inject({ method: 'DELETE', url: `/content/${id}`, payload: { ...alice } })).statusCode).toBe(202);
+      await del(alice, id);
       ctx.clock.now += 1000;
       expect(await ctx.compactor.runOnce()).toEqual({ tags: [], deleted: [], skipped: true });
       expect(await contentRow(id)).toBeDefined();
@@ -383,9 +404,8 @@ for (const target of TARGETS) {
       runA.catch(() => {});
       await stalled.paused;
 
-      vi.spyOn(ctx.appender, 'tombstone').mockResolvedValue(['news']);
-      expect((await ctx.app.inject({ method: 'DELETE', url: `/content/${id}`, payload: { ...alice } })).statusCode).toBe(202);
-      // Once the lease has expired, and the tail window of the deletion has closed.
+      await del(alice, id);
+      // Once the lease has expired.
       expect((await ctx.compact(ctx.config.compact.leaseSeconds * 1000)).deleted).toEqual([id]);
       expect((await readManifest('news')).days).toEqual([]);
       const head = await readHead('news');
@@ -397,7 +417,7 @@ for (const target of TARGETS) {
       expect(await items('news')).toEqual([]);
     });
 
-    it('hides deleted content from later pages of a feed session without skipping or repeating other records', async () => {
+    it('leaves deleted content out of later pages of a feed session, which read the index of its first page, without skipping or repeating other records', async () => {
       ctx = await createTestContext(target, { feed: { pageSize: 5 } });
       const alice = await ctx.register('alice');
       const ids: string[] = [];
@@ -408,26 +428,43 @@ for (const target of TARGETS) {
       await ctx.compact();
 
       const first = (await getFeed('tags=news')).json() as Feed;
-      const seen = allIds(first);
       // One record the session has already returned, one it hasn't reached yet.
-      const shown = seen[0]!;
-      const unseen = ids.find((id) => !seen.includes(id))!;
-      for (const id of [shown, unseen]) {
-        expect((await ctx.app.inject({ method: 'DELETE', url: `/content/${id}`, payload: { ...alice } })).statusCode).toBe(202);
-      }
-      let cursor = first.nextCursor;
-      for (let page = 0; cursor && page < 40; page++) {
-        const res = await getFeed(`tags=news&cursor=${cursor}`);
-        expect(res.statusCode, res.body).toBe(200);
-        const f = res.json() as Feed;
-        seen.push(...allIds(f));
-        cursor = f.nextCursor;
-      }
+      const shown = allIds(first)[0]!;
+      const unseen = ids.find((id) => !allIds(first).includes(id))!;
+      for (const id of [shown, unseen]) await del(alice, id);
+      // The run that deletes them erases their summaries, which is what the session's pages leave them out by.
+      expect((await ctx.compactor.runOnce()).deleted.sort()).toEqual([shown, unseen].sort());
+
+      const seen = await restOf('tags=news', first);
       expect(new Set(seen).size).toBe(seen.length);
       expect(seen.sort()).toEqual(ids.filter((id) => id !== unseen).sort());
     });
 
-    it('writes an update over the post, hiding it at once from each hashtag the update dropped and showing it under each it gave', async () => {
+    it('leaves a post out of later pages of a feed session for a hashtag an update dropped, and shows it under one it still carries', async () => {
+      ctx = await createTestContext(target, { feed: { pageSize: 2 } });
+      const alice = await ctx.register('alice');
+      const ids: string[] = [];
+      for (let i = 0; i < 6; i++) {
+        ids.push(await store(alice, `post ${i} #news #sports`));
+        ctx.clock.now += 1000;
+      }
+      await ctx.compact();
+
+      const news = (await getFeed('tags=news')).json() as Feed;
+      const sports = (await getFeed('tags=sports')).json() as Feed;
+      const moved = ids.find((id) => !allIds(news).includes(id))!;
+      expect((await update(alice, moved, 'moved #sports')).statusCode).toBe(200);
+      // With the index rebuilt or not: the sessions read the one their first page did, which holds the post under both.
+      await ctx.compactor.runOnce();
+      expect(await indexIds('news')).not.toContain(moved);
+
+      const inNews = await restOf('tags=news', news);
+      expect(inNews.sort()).toEqual(ids.filter((id) => id !== moved).sort());
+      const inSports = await restOf('tags=sports', sports);
+      expect(inSports.sort()).toEqual([...ids].sort());
+    });
+
+    it('writes an update over the post: shown as it now is and left out of each hashtag it dropped at once, and under each it gave after the next run', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const { contentId: id, createdAt } = await post(alice, 'v1 #news #old');
@@ -439,55 +476,89 @@ for (const target of TARGETS) {
 
       expect(await shown('news')).toEqual([[id, 'v3 #news #tech']]);
       expect(await shown('old')).toEqual([]);
-      expect(await shown('tech')).toEqual([[id, 'v3 #news #tech']]);
+      // Not under the hashtag it gained until the compactor has run.
+      expect(await shown('tech')).toEqual([]);
       // One post: one file, one meta file, one summary, however often it is updated.
       expect(await storedFiles(id)).toEqual([id, `${id}.meta.json`]);
       expect(await storedSummaries(id, createdAt)).toEqual([`${id}.br`]);
       expect(await ctx.db.selectFrom('content').select('id').execute()).toEqual([{ id }]);
+      // Two updates, and one row for each index they changed its place in.
+      expect(await queue()).toEqual(rowsOf(alice, id, 'news', 'old', 'tech').sort());
 
-      await ctx.compact();
+      await ctx.compactor.runOnce();
       expect((await readManifest('old')).days).toEqual([]);
       expect(await indexIds('tech')).toEqual([id]);
       expect(await shown('news')).toEqual([[id, 'v3 #news #tech']]);
       expect(await shown('old')).toEqual([]);
-      expect(await pendingAppends()).toEqual([]);
+      expect(await shown('tech')).toEqual([[id, 'v3 #news #tech']]);
+      expect(await queue()).toEqual([]);
 
-      // A hashtag an update gives back shows the post again, before the compactor merges the tombstone and after.
+      // A hashtag an update gives back shows the post again, once the compactor has run.
       ctx.clock.now += 1000;
       expect((await update(alice, id, 'v4 #news #old')).statusCode).toBe(200);
-      expect(await shown('old')).toEqual([[id, 'v4 #news #old']]);
+      expect(await shown('old')).toEqual([]);
       expect(await shown('tech')).toEqual([]);
-      await ctx.compact();
+      await ctx.compactor.runOnce();
       expect(await indexIds('old')).toEqual([id]);
       expect((await readManifest('tech')).days).toEqual([]);
       expect(await shown('old')).toEqual([[id, 'v4 #news #old']]);
     });
 
-    it('takes a post out of a hashtag an update dropped on the next compaction, when the tombstone append failed', async () => {
+    it('queues a post once per index however often it is written between two runs, and builds its entry from what it is when the run reads it', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
-      const id = await store(alice, 'v1 #news #old');
-      await ctx.compact();
+      const id = await store(alice, 'v1 #news #sports');
+      expect((await update(alice, id, 'v2 #news #sports')).statusCode).toBe(200);
+      expect((await update(alice, id, 'v3 #news')).statusCode).toBe(200);
+      expect(await queue()).toEqual(rowsOf(alice, id, 'news', 'sports').sort());
 
-      const append = ctx.appender.append.bind(ctx.appender);
-      const failing = vi
-        .spyOn(ctx.appender, 'append')
-        .mockImplementation((tag, entry) => (tag === 'old' ? Promise.reject(new Error('redis unavailable')) : append(tag, entry)));
-      ctx.clock.now += 1000;
-      expect((await update(alice, id, 'v2 #news')).statusCode).toBe(200);
-      failing.mockRestore();
-      // Nothing hides it from #old yet, where it shows as it now is.
-      expect(await shown('old')).toEqual([[id, 'v2 #news']]);
-      expect(await pendingAppends()).toEqual([`${id} old`]);
-
-      await ctx.compact();
-      expect(await shown('old')).toEqual([]);
-      expect((await readManifest('old')).days).toEqual([]);
-      expect(await shown('news')).toEqual([[id, 'v2 #news']]);
-      expect(await pendingAppends()).toEqual([]);
+      expect((await ctx.compactor.runOnce()).tags).toEqual([own(alice), 'news', 'sports'].sort());
+      expect(await shown('news')).toEqual([[id, 'v3 #news']]);
+      // Never in #sports: the run found it without the hashtag.
+      expect((await readManifest('sports')).days).toEqual([]);
+      expect(await queue()).toEqual([]);
     });
 
-    it('appends only after the database commits; an update whose commit failed is reported as failed and completed by sending it again', async () => {
+    it('leaves for the next run a row that a write stamped again while the run was under way', async () => {
+      ctx = await createTestContext(target);
+      const alice = await ctx.register('alice');
+      const id = await store(alice, 'v1 #news');
+
+      // The run has read the queue and the post, and is about to publish #news.
+      const publishing = pauseSet((key) => key === headKey('news'));
+      const run = ctx.compactor.runOnce();
+      await publishing.paused;
+      expect((await update(alice, id, 'v2 #news #sports')).statusCode).toBe(200);
+      publishing.release();
+      expect((await run).tags).toEqual([own(alice), 'news'].sort());
+
+      // The update's rows are its own, not the ones the run took: all of them wait, the hashtags it kept too.
+      expect(await queue()).toEqual(rowsOf(alice, id, 'news', 'sports').sort());
+      expect(await shown('news')).toEqual([[id, 'v2 #news #sports']]);
+      expect(await shown('sports')).toEqual([]);
+      await ctx.compactor.runOnce();
+      expect(await shown('sports')).toEqual([[id, 'v2 #news #sports']]);
+      expect(await queue()).toEqual([]);
+    });
+
+    it('publishes nothing for an update that leaves the index as it is', async () => {
+      ctx = await createTestContext(target);
+      const alice = await ctx.register('alice');
+      const id = await store(alice, 'v1 #news');
+      await ctx.compact();
+      const head = await readHead('news');
+
+      // Only the text changed: the entry is the same, so the day keeps its index and the hashtag its head.
+      expect((await update(alice, id, 'v2 #news')).statusCode).toBe(200);
+      const set = vi.spyOn(ctx.hot, 'setMany');
+      expect((await ctx.compactor.runOnce()).tags).toEqual([own(alice), 'news'].sort());
+      expect(keysSet(set)).toEqual([]);
+      expect(await readHead('news')).toEqual(head);
+      expect(await shown('news')).toEqual([[id, 'v2 #news']]);
+      expect(await queue()).toEqual([]);
+    });
+
+    it('queues a write when the database commits it; an update whose commit failed is reported as failed, repaired after the grace period and completed by sending it again', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const { contentId: id, createdAt } = await post(alice, 'v1 #news #old');
@@ -496,28 +567,31 @@ for (const target of TARGETS) {
       ctx.clock.now += 1000;
       failNextCommit(false);
       expect((await update(alice, id, 'v2 draft #news')).statusCode).toBe(500);
-      // Nothing was pushed for it, but it wrote over the post, which has one version: that can't be taken back.
-      expect((await tailLines(ctx.hot, 'news')).map((l) => [isTombstone(l), l.contentId])).toEqual([[false, id]]);
-      expect((await tailRecords('news')).map((r) => r.updatedAt)).toEqual([createdAt]);
+      // It wrote over the post, which has one version: that can't be taken back.
       expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}/raw` })).body).toBe('v2 draft #news');
       expect(await shown('news')).toEqual([[id, 'v2 draft #news']]);
-      // The compactor is told which indexes to look at again, and takes the post out of the hashtag it lost.
-      expect(await pendingAppends()).toEqual([`${id} ${own(alice)}`, `${id} news`, `${id} old`].sort());
+      expect(await shown('old')).toEqual([]);
+      // The rows it queued before it wrote anything tell the compactor which indexes to look at again. They
+      // are not committed, so a run leaves them until the update has had the grace period to finish.
+      expect(await queue()).toEqual(rowsOf(alice, id, 'news', 'old').sort());
+      expect((await ctx.compactor.runOnce()).tags).toEqual([]);
+      expect(await queue()).toEqual(rowsOf(alice, id, 'news', 'old').sort());
+      expect(await indexIds('old')).toEqual([id]);
+      // Then it takes the post out of the hashtag it lost.
       await ctx.compact();
       expect(await shown('news')).toEqual([[id, 'v2 draft #news']]);
-      expect(await shown('old')).toEqual([]);
-      expect(await pendingAppends()).toEqual([]);
+      expect((await readManifest('old')).days).toEqual([]);
+      expect(await queue()).toEqual([]);
 
       ctx.clock.now += 1000;
       const retry = await update(alice, id, 'v2 #news');
       expect(retry.statusCode, retry.body).toBe(200);
-      expect((await tailRecords('news')).map((r) => r.updatedAt)).toEqual([createdAt, ctx.clock.now]);
       expect(await shown('news')).toEqual([[id, 'v2 #news']]);
-      await ctx.compact();
+      await ctx.compactor.runOnce();
       expect(await shown('news')).toEqual([[id, 'v2 #news']]);
       expect(await storedFiles(id)).toEqual([id, `${id}.meta.json`]);
       expect(await storedSummaries(id, createdAt)).toEqual([`${id}.br`]);
-      expect(await pendingAppends()).toEqual([]);
+      expect(await queue()).toEqual([]);
     });
 
     it('leaves an update that could not be written as it was in feeds, and in the database', async () => {
@@ -536,10 +610,10 @@ for (const target of TARGETS) {
       await ctx.compact();
       expect(await shown('news')).toEqual([[id, 'v1 #news']]);
       expect(await shown('tech')).toEqual([]);
-      expect(await pendingAppends()).toEqual([]);
+      expect(await queue()).toEqual([]);
     });
 
-    it('keeps and appends a write whose commit went through even though it reported an error', async () => {
+    it('keeps and queues a write whose commit went through even though it reported an error', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       failNextCommit(true);
@@ -547,8 +621,10 @@ for (const target of TARGETS) {
       expect(res.statusCode, res.body).toBe(201);
       const { contentId } = res.json();
       expect((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}/raw` })).body).toBe('kept #news');
+      expect(await queue()).toEqual(rowsOf(alice, contentId, 'news').sort());
+      await ctx.compactor.runOnce();
       expect(await shown('news')).toEqual([[contentId, 'kept #news']]);
-      expect(await ctx.db.selectFrom('pending_appends').selectAll().execute()).toEqual([]);
+      expect(await queue()).toEqual([]);
     });
 
     it('keeps the last of two overlapping updates to be written', async () => {
@@ -567,20 +643,19 @@ for (const target of TARGETS) {
       first.release();
       expect((await firstRes).statusCode).toBe(200);
 
-      const check = async () => {
-        expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}/raw` })).body).toBe('first #news #sports');
-        expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}` })).json()).toMatchObject({
-          preview: { kind: 'text', text: 'first #news #sports' },
-          tags: ['news', 'sports'],
-        });
-        expect(await shown('news')).toEqual([[id, 'first #news #sports']]);
-        expect(await shown('sports')).toEqual([[id, 'first #news #sports']]);
-      };
-      await check();
+      expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}/raw` })).body).toBe('first #news #sports');
+      expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}` })).json()).toMatchObject({
+        preview: { kind: 'text', text: 'first #news #sports' },
+        tags: ['news', 'sports'],
+      });
+      expect(await shown('news')).toEqual([[id, 'first #news #sports']]);
       expect(await storedFiles(id)).toEqual([id, `${id}.meta.json`]);
       expect(await storedSummaries(id, createdAt)).toEqual([`${id}.br`]);
-      await ctx.compact();
-      await check();
+      // The index follows the meta file, whichever update queued the rows last.
+      await ctx.compactor.runOnce();
+      expect(await shown('news')).toEqual([[id, 'first #news #sports']]);
+      expect(await shown('sports')).toEqual([[id, 'first #news #sports']]);
+      expect(await queue()).toEqual([]);
     });
 
     it('stores nothing when the summary cannot be written', async () => {
@@ -591,37 +666,92 @@ for (const target of TARGETS) {
       const res = await ctx.app.inject({ method: 'POST', url: '/store', payload: { ...alice, type: 'text', text: 'lost #news', tags: ['news'] } });
       expect(res.statusCode, res.body).toBe(500);
       expect(await ctx.db.selectFrom('content').selectAll().execute()).toEqual([]);
-      expect(await tailLines(ctx.hot, 'news')).toEqual([]);
+      expect(await queue()).toEqual([]);
       const files = (dir: string) => readdir(dir).catch(() => []);
       expect(await files(join(ctx.dir, 'content', 'content'))).toEqual([]);
       expect(await files(summaryDir(ctx.clock.now))).toEqual([]);
     });
 
-    it('adds entries whose tail append failed after the commit on the next compaction', async () => {
+    it('keeps the row of an index it could not compact, for the next run, and deletes the rest of the write', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
-      const id = await store(alice, 'v1 #news #sports');
+      await store(alice, 'first #news');
       await ctx.compact();
 
-      const append = ctx.appender.append.bind(ctx.appender);
-      const failing = vi
-        .spyOn(ctx.appender, 'append')
-        .mockImplementation((tag, entry) => (tag === 'news' ? Promise.reject(new Error('redis unavailable')) : append(tag, entry)));
-      ctx.clock.now += 1000;
-      // The database accepted both writes, so both requests succeed.
-      expect((await update(alice, id, 'v2 #news #sports')).statusCode).toBe(200);
-      const fresh = await store(alice, 'fresh #news');
-      failing.mockRestore();
+      const second = await store(alice, 'second #news');
+      // One of the post's two indexes can't be published: part of it was evicted before its head was swapped.
+      const persist = ctx.hot.persist.bind(ctx.hot);
+      vi.spyOn(ctx.hot, 'persist').mockImplementationOnce(async (keys) => (await persist(keys)).map((kept, i) => kept && i > 0));
+      expect((await ctx.compactor.runOnce()).tags).toEqual([own(alice), 'news'].sort());
+      const left = await queue();
+      expect(left).toHaveLength(1);
+      expect(rowsOf(alice, second, 'news')).toContain(left[0]);
 
-      expect(await pendingAppends()).toEqual([`${fresh} news`, `${id} news`].sort());
-      expect(await shown('sports')).toEqual([[id, 'v2 #news #sports']]);
-      // The new post isn't in #news yet; the updated one is there by its entry from before, and shows as it now is.
-      expect(await shown('news')).toEqual([[id, 'v2 #news #sports']]);
+      // The next run takes only that one.
+      expect((await ctx.compactor.runOnce()).tags).toEqual([left[0]!.split(' ')[1]]);
+      expect(await indexIds('news')).toContain(second);
+      expect(await indexIds(own(alice))).toContain(second);
+      expect(await queue()).toEqual([]);
+      expect((await ctx.compactor.runOnce()).tags).toEqual([]);
+    });
 
+    it('compacts the indexes of a run together, in round trips to Redis that do not grow with the publishers who posted', async () => {
+      ctx = await createTestContext(target, { registerRateLimitPerHour: 100 });
+      const users: User[] = [];
+      for (let i = 0; i < 12; i++) users.push(await ctx.register(`user${i}`));
+      const first: string[] = [];
+      for (const user of users) first.push(await store(user, 'first #news'));
       await ctx.compact();
-      expect(await shown('news')).toEqual([[fresh, 'fresh #news'], [id, 'v2 #news #sports']]);
-      expect(await shown('sports')).toEqual([[id, 'v2 #news #sports']]);
-      expect(await pendingAppends()).toEqual([]);
+
+      // Each publisher's own index, #news, and three hashtags that are new.
+      const second: string[] = [];
+      for (const [i, user] of users.entries()) second.push(await store(user, `second #news #topic${i % 3}`));
+      const mget = vi.spyOn(ctx.hot, 'mget');
+      const set = vi.spyOn(ctx.hot, 'set');
+      const setMany = vi.spyOn(ctx.hot, 'setMany');
+      const persist = vi.spyOn(ctx.hot, 'persist');
+      const expire = vi.spyOn(ctx.hot, 'expire');
+      const exists = vi.spyOn(ctx.hot, 'exists');
+      expect((await ctx.compactor.runOnce()).tags).toHaveLength(users.length + 4);
+
+      // The heads, the manifests they name, and the day indexes to rebuild.
+      expect(mget.mock.calls.map(([keys]) => keys.length)).toEqual([16, 13, 13]);
+      // The new day indexes and manifests, made to last together, and then the heads.
+      expect(setMany.mock.calls.map(([entries]) => entries.length)).toEqual([32, 16]);
+      expect(keysSet(setMany).slice(32).sort()).toEqual([...users.map(own), 'news', 'topic0', 'topic1', 'topic2'].map(headKey).sort());
+      expect(persist.mock.calls.map(([keys]) => keys.length)).toEqual([32]);
+      // What the 13 indexes that were there no longer use: a day index and a manifest each.
+      expect(expire.mock.calls.map(([keys]) => keys.length)).toEqual([26]);
+      // The summaries of the posts rebuilt, asked about once each however many indexes a post is in.
+      expect(exists.mock.calls.map(([keys]) => keys.length)).toEqual([12]);
+      expect(set.mock.calls.filter(([key]) => /^(head|man|day):/.test(key))).toEqual([]);
+
+      expect((await indexIds('news')).sort()).toEqual([...first, ...second].sort());
+      for (const [i, user] of users.entries()) expect((await indexIds(own(user))).sort()).toEqual([first[i], second[i]].sort());
+      expect((await indexIds('topic1')).sort()).toEqual(second.filter((_, i) => i % 3 === 1).sort());
+      expect(await queue()).toEqual([]);
+    });
+
+    it('leaves a hashtag whose index is damaged as it is, and compacts the rest of its batch', async () => {
+      ctx = await createTestContext(target);
+      const alice = await ctx.register('alice');
+      const first = await store(alice, 'first #news #sports');
+      await ctx.compact();
+      const head = await readHead('news');
+      await ctx.hot.del([manifestKey('news', head.manifest!)]);
+
+      const second = await store(alice, 'second #news #sports');
+      expect((await ctx.compactor.runOnce()).tags).toEqual([own(alice), 'news', 'sports'].sort());
+      expect(await readHead('news')).toEqual(head);
+      expect((await indexIds('sports')).sort()).toEqual([first, second].sort());
+      expect((await indexIds(own(alice))).sort()).toEqual([first, second].sort());
+      // The post still waits for #news, and for nothing else.
+      expect(await queue()).toEqual([`${second} news`]);
+
+      // A rebuild takes the missing manifest for an empty one.
+      await ctx.compactor.runOnce({ rebuild: true });
+      expect((await indexIds('news')).sort()).toEqual([first, second].sort());
+      expect(await queue()).toEqual([]);
     });
 
     it('reads summaries of posts younger than the hot window from Redis and older ones from the object store', async () => {
@@ -642,7 +772,7 @@ for (const target of TARGETS) {
       // The recent posts need nothing from the object store; the old one is read from it.
       for (const r of [week, today]) await rm(join(ctx.dir, 'summaries', summaryObjectKey(r)));
       const mget = vi.spyOn(ctx.hot, 'mget');
-      expect(allIds((await getFeed('tags=news')).json())).toEqual([today, week, old].map((r) => r.contentId));
+      expect(allIds((await getFeed('tags=news&hours=336')).json())).toEqual([today, week, old].map((r) => r.contentId));
       const asked = mget.mock.calls.flatMap(([keys]) => keys);
       expect(asked).toEqual(expect.arrayContaining([summaryKey(week), summaryKey(today)]));
       expect(asked).not.toContain(summaryKey(old));
@@ -652,7 +782,8 @@ for (const target of TARGETS) {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const lost = await post(alice, 'lost #news');
-      ctx.clock.now += DAY;
+      await ctx.compact();
+      ctx.clock.now += 12 * HOUR;
       await ctx.hot.del([summaryKey(lost)]);
 
       expect((await items('news')).map((i) => i.preview.text)).toEqual(['lost #news']);
@@ -682,6 +813,7 @@ for (const target of TARGETS) {
       expect(plain.toString('utf8')).toBe(
         [`${r.createdAt} ${r.createdAt} 0 0`, alice.userId, 'text/plain', 'news mumbai', 'text', text].join('\n'),
       );
+      await ctx.compactor.runOnce();
       const [item] = await items('news');
       expect(blob.length).toBeLessThan(plain.length);
       expect(plain.length).toBeLessThan(Buffer.byteLength(JSON.stringify(item)));
@@ -699,10 +831,12 @@ for (const target of TARGETS) {
       await ctx.compact();
       ctx.clock.now += 1000;
       const late = await store(bob, 'late #news');
-      const records = async (tag: string) => ((await getFeed(`tags=${tag}`)).json() as Feed).days.map((d) => d.tags);
+      await ctx.compactor.runOnce();
+      // Of the past 14 days, which holds all three; most liked first, then newest.
+      const records = async (tag: string) => ((await getFeed(`tags=${tag}&hours=336`)).json() as Feed).tags;
       const news = await records('news');
       const sports = await records('sports');
-      expect(news.flatMap((t) => t.news!.map((i) => i.contentId))).toEqual([late, recent, old]);
+      expect(news.news!.map((i) => i.contentId)).toEqual([old, late, recent]);
 
       // Redis loses everything, and the object store loses these summaries too.
       await ctx.hot.clear();
@@ -742,6 +876,7 @@ for (const target of TARGETS) {
         ids.push(await store(alice, `post ${i} ${tagSets[i % 4]}`));
         ctx.clock.now += 1000;
       }
+      await ctx.compact();
 
       const seen: string[] = [];
       let cursor: string | null = null;
@@ -762,7 +897,7 @@ for (const target of TARGETS) {
       expect(seen.sort()).toEqual([...ids].sort());
     });
 
-    it('leaves out of a feed session a post stamped before its first page but pushed after it', async () => {
+    it('leaves out of a feed session a post that reaches the index after its first page, however old its timestamp', async () => {
       ctx = await createTestContext(target, { feed: { pageSize: 3 } });
       const alice = await ctx.register('alice');
       const ids: string[] = [];
@@ -770,6 +905,7 @@ for (const target of TARGETS) {
         ids.push(await store(alice, `post ${i} #news`));
         ctx.clock.now += 1000;
       }
+      await ctx.compact();
       // The post is stamped before its bytes are uploaded, and the first page is read during the upload.
       const late = pauseStore('putFile', 'late #news');
       const stored = store(alice, 'late #news');
@@ -778,23 +914,13 @@ for (const target of TARGETS) {
       const first = (await getFeed('tags=news')).json() as Feed;
       expect(first.nextCursor).toBeTruthy();
       late.release();
-      await stored;
+      const lateId = await stored;
+      await ctx.compactor.runOnce();
+      expect(await indexIds('news')).toContain(lateId);
 
-      const seen = allIds(first);
-      let cursor = first.nextCursor;
-      for (let page = 0; cursor && page < 40; page++) {
-        const res = await getFeed(`tags=news&cursor=${cursor}`);
-        expect(res.statusCode, res.body).toBe(200);
-        const f = res.json() as Feed;
-        seen.push(...allIds(f));
-        cursor = f.nextCursor;
-      }
+      const seen = await restOf('tags=news', first);
       expect(new Set(seen).size).toBe(seen.length);
       expect(seen.sort()).toEqual([...ids].sort());
-
-      // A tail the first page read that Redis has since lost ends the session, rather than skipping its posts.
-      await ctx.hot.del((await ctx.hot.scores(tailIndexKey('news'), 0, Infinity)).map((w) => tailKey('news', w)));
-      expect((await getFeed(`tags=news&cursor=${first.nextCursor}`)).statusCode).toBe(410);
     });
 
     it('injects new unliked content between liked content read from a day index', async () => {
@@ -821,7 +947,7 @@ for (const target of TARGETS) {
       // The page is assembled out of index order (liked, fresh, liked, ...) and must still be valid JSON.
       const res = await getFeed('tags=news');
       expect(res.statusCode, res.body).toBe(200);
-      const page = (res.json() as Feed).days[0]!.tags.news!.map((r) => r.contentId);
+      const page = (res.json() as Feed).tags.news!.map((r) => r.contentId);
       expect(page).toHaveLength(4);
       expect(liked).toContain(page[0]);
       expect(fresh).toContain(page[1]);
@@ -840,11 +966,11 @@ for (const target of TARGETS) {
 
       // The run dies as it is about to swap the head of #news: nothing after that point happens, not even tidying up.
       await store(alice, 'second #news');
-      const set = ctx.hot.set.bind(ctx.hot);
+      const setMany = ctx.hot.setMany.bind(ctx.hot);
       const written: string[] = [];
-      vi.spyOn(ctx.hot, 'set').mockImplementation(async (...args) => {
-        if (args[0].startsWith('day:news:') || args[0].startsWith('man:news:')) written.push(args[0]);
-        return set(...args);
+      vi.spyOn(ctx.hot, 'setMany').mockImplementation(async (entries) => {
+        written.push(...entries.map((e) => e.key).filter((key) => key.startsWith('day:news:') || key.startsWith('man:news:')));
+        return setMany(entries);
       });
       vi.spyOn(ctx.hot, 'persist').mockRejectedValue(new Error('killed'));
       vi.spyOn(ctx.hot, 'del').mockRejectedValue(new Error('killed'));
@@ -865,34 +991,11 @@ for (const target of TARGETS) {
       expect(await ctx.hot.exists([...written, ...published, ...current])).toEqual([gone, gone, gone, gone, true, true]);
     });
 
-    it('looks for tails to merge once a tail window has closed, not at every run, and again after a hashtag failed', async () => {
-      ctx = await createTestContext(target);
-      const alice = await ctx.register('alice');
-      await store(alice, 'first #news');
-      expect((await ctx.compact()).tags).toEqual([own(alice), 'news'].sort());
-
-      // Until the next window closes there are no tails to merge, so runs don't go looking for any: a
-      // post made meanwhile shows from its tail, and is merged by the run after its window has closed.
-      const second = await store(alice, 'second #sports');
-      expect((await ctx.compactor.runOnce()).tags).toEqual([]);
-      expect(await shown('sports')).toEqual([[second, 'second #sports']]);
-      expect((await ctx.compact()).tags).toEqual([own(alice), 'sports'].sort());
-      expect(await indexIds('sports')).toEqual([second]);
-
-      // A run that couldn't compact a hashtag is followed by one that looks again, without waiting for a window.
-      const third = await store(alice, 'third #news');
-      vi.spyOn(ctx.hot, 'persist').mockRejectedValueOnce(new Error('redis is unavailable'));
-      await ctx.compact();
-      expect((await ctx.compactor.runOnce()).tags).toHaveLength(1);
-      expect(await indexIds('news')).toContain(third);
-      expect(await indexIds(own(alice))).toContain(third);
-      expect((await ctx.compactor.runOnce()).tags).toEqual([]);
-    });
-
     it('rejects cursors older than the retention period', async () => {
       ctx = await createTestContext(target, { feed: { pageSize: 2, genRetentionMinutes: 5 } });
       const alice = await ctx.register('alice');
       for (let i = 0; i < 5; i++) await store(alice, `post ${i} #news`);
+      await ctx.compact();
       const first = (await getFeed('tags=news')).json() as Feed;
       expect(first.nextCursor).toBeTruthy();
       ctx.clock.now += 6 * 60_000;

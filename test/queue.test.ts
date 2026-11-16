@@ -3,8 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { routeOf } from '../src/moderation/trust.js';
-import { isApproval } from '../src/tagfeed/layout.js';
-import { as, createTestContext, requests, tailLines, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
+import { as, createTestContext, queued, requests, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
 
 const NO_CONTENT = '00000000-0000-4000-8000-000000000000';
 const REFUSED = "the post contains a word or phrase this server doesn't allow, so it wasn't published";
@@ -51,7 +50,7 @@ for (const target of TARGETS) {
       return u;
     };
     const ids = (items: { contentId: string }[]) => items.map((i) => i.contentId);
-    const records = (f: Feed, tag: string) => f.days.flatMap((d) => d.tags[tag] ?? []);
+    const records = (f: Feed, tag: string) => f.tags[tag] ?? [];
     /** The server's moderation queue, as an admin reads it. */
     const queue = async (u: User, query = '') => ok(await req(u, 'GET', `/moderation/queue${query}`), 200);
     const decide = (u: User | null, contentId: string, decision: 'accept' | 'reject') => req(u, 'POST', `/moderation/queue/${contentId}/${decision}`);
@@ -71,7 +70,7 @@ for (const target of TARGETS) {
       const bob = await ctx.register('bob');
       ok(await req(root, 'POST', '/moderation/blocked-words', { words: ['spam'] }), 200);
       ok(await req(bob, 'PUT', `/users/${bob.userId}/following/${alice.userId}`));
-      const following = async () => ids((await req(null, 'GET', `/feed/following?userId=${bob.userId}`)).json().records).sort();
+      const following = async () => ids(ok(await req(bob, 'GET', `/feed/following?userId=${bob.userId}`), 200).records).sort();
 
       const fine = ok(await store(alice, 'An honest post #news'));
       expect(fine).not.toHaveProperty('status');
@@ -82,11 +81,12 @@ for (const target of TARGETS) {
       expect(held).toEqual({ contentId: expect.any(String), status: 'pending_review', tags: ['news', 'deals'], preview: { kind: 'text', text }, aiGenerated: false, comments: false });
       const { contentId } = held;
 
-      // It is stored, with its score, and in no feed.
+      // It is stored, with its score, and in no feed: nothing is queued for the compactor to put it in one.
       expect(await ctx.db.selectFrom('moderation_queue').selectAll().execute()).toEqual([{ content_id: contentId, trust_score: 0, created_at: ctx.clock.now }]);
+      expect((await queued(ctx)).filter((row) => row.startsWith(contentId))).toEqual([]);
+      await ctx.compactor.runOnce();
       expect(ids(await feedOf('news'))).toEqual([fine.contentId]);
       expect(await feedOf('deals')).toEqual([]);
-      expect(await tailLines(ctx.hot, 'deals')).toEqual([]);
       expect(await following()).toEqual([fine.contentId]);
 
       // Only its publisher and admins can read it; to anyone else it isn't there, nor to a hashtag's moderators.
@@ -148,13 +148,18 @@ for (const target of TARGETS) {
       expect(await feedOf('deals')).toEqual([]);
       expect(await following()).toEqual([fine.contentId]);
 
-      // An admin accepts it: it is published at once, under its hashtags, as posted when it was sent.
+      // An admin accepts it: it is published, under its hashtags, as posted when it was sent, and in feeds
+      // after the compactor's next run like any post.
       for (const u of [alice, bob]) expect((await decide(u, contentId, 'accept')).statusCode).toBe(403);
       expect((await decide(null, contentId, 'accept')).statusCode).toBe(401);
       expect((await decide(root, NO_CONTENT, 'accept')).statusCode).toBe(404);
       expect((await decide(root, fine.contentId, 'accept')).json().error).toBe(NOT_QUEUED);
       ctx.clock.now += 1000;
       expect(ok(await decide(root, contentId, 'accept'), 200)).toEqual({ contentId, status: 'published', tags: ['news', 'deals'] });
+      expect(ok(await req(null, 'GET', `/content/${contentId}`), 200)).not.toHaveProperty('status');
+      expect(await queued(ctx)).toEqual([`@${alice.userId}`, 'deals', 'news'].map((tag) => `${contentId} ${tag}`).sort());
+      expect(await feedOf('deals')).toEqual([]);
+      await ctx.compactor.runOnce();
       expect(await feedOf('deals')).toEqual([
         {
           contentId,
@@ -179,7 +184,7 @@ for (const target of TARGETS) {
       expect(ok(await like(bob, contentId))).toMatchObject({ likes: 1 });
       await ctx.compact();
       expect((await feedOf('deals')).map((i) => [i.contentId, i.likes])).toEqual([[contentId, 1]]);
-      expect(await ctx.db.selectFrom('pending_appends').selectAll().execute()).toEqual([]);
+      expect(await queued(ctx)).toEqual([]);
 
       // An admin rejects the other: it is deleted.
       expect((await decide(alice, later, 'reject')).statusCode).toBe(403);
@@ -217,7 +222,7 @@ for (const target of TARGETS) {
       expect((await req(root, 'PUT', '/moderators/mod')).statusCode).toBe(400);
       expect(await moderators()).toEqual([{ userId: mod.userId, username: 'mod' }]);
       expect(await profile(mod)).toMatchObject({ admin: false, moderator: true, moderates: [] });
-      expect(await whoami(mod)).toEqual({ userId: mod.userId, username: 'mod', language: 'en', admin: false, moderator: true, moderates: [], messages: true });
+      expect(await whoami(mod)).toEqual({ userId: mod.userId, username: 'mod', language: 'en', admin: false, moderator: true, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false });
       // An admin isn't one, and doesn't need to be.
       expect(await profile(root)).toMatchObject({ admin: true, moderator: false });
       expect((await req(mod, 'GET', '/moderators')).statusCode).toBe(403);
@@ -237,6 +242,7 @@ for (const target of TARGETS) {
 
       // They accept and reject what waits there, as an admin does; what is published is not theirs to reject.
       expect(ok(await decide(mod, held, 'accept'), 200)).toEqual({ contentId: held, status: 'published', tags: ['news'] });
+      await ctx.compactor.runOnce();
       expect(ids(await feedOf('news'))).toEqual([held]);
       expect(ok(await decide(mod, other, 'reject'), 202)).toEqual({ contentId: other, status: 'pending_deletion', requestedAt: now() });
       expect((await decide(mod, held, 'reject')).json().error).toBe(NOT_QUEUED);
@@ -260,6 +266,7 @@ for (const target of TARGETS) {
         ['POST', '/tags/news/blocked-words', { words: ['honest'] }],
       ];
       for (const [method, url, payload] of notTheirs) expect((await req(mod, method, url, payload)).statusCode, `${method} ${url}`).toBe(403);
+      await ctx.compactor.runOnce();
       expect(ids(await feedOf('news')).sort()).toEqual([held, published].sort());
 
       // No longer one: the queue is closed to them at once, and what they decided stays decided.
@@ -450,16 +457,25 @@ for (const target of TARGETS) {
       ok(await req(root, 'POST', '/moderation/blocked-words', { words: ['spam'] }), 200);
       const { contentId } = ok(await store(alice, 'Deals of the day #news #deals'));
       const other = ok(await store(alice, 'Other news #news')).contentId;
-      // Once from the day index, and once from the tail.
       await ctx.compact();
+      const createdAt = ctx.clock.now - ctx.config.compact.graceSeconds * 1000 - 1000;
+      const summaryOf = async () => (await ctx.summaries.getMany([{ contentId, createdAt }]))[0];
+      const published = await summaryOf();
+      expect(published).toMatchObject({ contentId, tags: ['news', 'deals'] });
 
+      // Held: its summary is erased, which leaves it out of every feed whose index still holds it.
       ctx.clock.now += 1000;
       expect(ok(await store(alice, 'Spam of the day #news', { contentId }), 202)).toMatchObject({ contentId, status: 'pending_review', tags: ['news'] });
+      expect(await summaryOf()).toBeNull();
       expect(ids(await feedOf('news'))).toEqual([other]);
       expect(await feedOf('deals')).toEqual([]);
       expect((await req(null, 'GET', `/content/${contentId}`)).statusCode).toBe(404);
       expect((await queue(root)).queue).toMatchObject([{ contentId, tags: ['news'], trustScore: 0, queuedAt: now() }]);
+      // The compactor takes its entries out of the indexes, and writes no summary for it. One that a run
+      // restored as the update went through, having read the post as published, is erased again.
+      await ctx.summaries.put(published!);
       await ctx.compact();
+      expect(await summaryOf()).toBeNull();
       expect(ids(await feedOf('news'))).toEqual([other]);
       expect(await feedOf('deals')).toEqual([]);
 
@@ -468,20 +484,22 @@ for (const target of TARGETS) {
       const clean = ok(await store(alice, 'Deals of the day, again #news', { contentId }), 200);
       expect(clean).toMatchObject({ contentId, tags: ['news'] });
       expect(clean).not.toHaveProperty('status');
-      expect(ids(await feedOf('news')).sort()).toEqual([contentId, other].sort());
       expect(await queue(root)).toEqual({ queue: [], nextCursor: null });
       expect((await decide(root, contentId, 'accept')).json().error).toBe(NOT_QUEUED);
+      await ctx.compactor.runOnce();
+      expect(ids(await feedOf('news')).sort()).toEqual([contentId, other].sort());
 
-      // Held again from the tail, and accepted in the same instant: the accepted entry is the one that shows.
+      // Held again while an index holds it, and accepted before the compactor runs: it shows where it was
+      // at once, as accepted, and under the hashtag the update gave after the next run.
       expect(ok(await store(alice, 'Spam again #news #deals', { contentId }), 202)).toMatchObject({ status: 'pending_review' });
       expect(ids(await feedOf('news'))).toEqual([other]);
       expect(ok(await decide(root, contentId, 'accept'), 200)).toMatchObject({ tags: ['news', 'deals'] });
-      expect(ids(await feedOf('news')).sort()).toEqual([contentId, other].sort());
-      expect(ids(await feedOf('deals'))).toEqual([contentId]);
+      expect((await feedOf('news')).map((i) => i.preview.text).sort()).toEqual(['Other news #news', 'Spam again #news #deals']);
+      expect(await feedOf('deals')).toEqual([]);
       await ctx.compact();
       expect(ids(await feedOf('news')).sort()).toEqual([contentId, other].sort());
       expect((await feedOf('deals')).map((i) => [i.contentId, i.preview.text])).toEqual([[contentId, 'Spam again #news #deals']]);
-      expect(await ctx.db.selectFrom('pending_appends').selectAll().execute()).toEqual([]);
+      expect(await queued(ctx)).toEqual([]);
     });
 
     it('refuses what scores under the lower threshold, storing nothing, and holds every post when the upper one is out of reach', async () => {
@@ -498,8 +516,9 @@ for (const target of TARGETS) {
       expect((await queue(root)).queue).toMatchObject([{ contentId, trustScore: 100 }]);
       expect(await feedOf('news')).toEqual([]);
       ok(await decide(root, contentId, 'accept'), 200);
+      await ctx.compactor.runOnce();
       expect(ids(await feedOf('news'))).toEqual([contentId]);
-      // An update of it waits like any post.
+      // An update of it waits like any post, and takes it out of the feed at once.
       ctx.clock.now += 1000;
       ok(await store(alice, 'An honest post, corrected #news', { contentId }), 202);
       expect(await feedOf('news')).toEqual([]);
@@ -523,6 +542,7 @@ for (const target of TARGETS) {
       await ctx.compact();
       ctx.clock.now += 1000;
       const c = ok(await store(alice, 'Third #news #weather')).contentId;
+      await ctx.compactor.runOnce();
 
       // Every post is published unmoderated, which is what puts it in the queue of each of its hashtags.
       const all = { [a]: false, [b]: false, [c]: false };
@@ -540,8 +560,13 @@ for (const target of TARGETS) {
       expect(ok(await approve(root, a), 200)).toEqual({ contentId: a, tag: 'news', moderated: true, alreadyApproved: true });
       ok(await approve(root, c));
 
-      // It shows at once, for a post in a day index and one in the tail alike, and only under that hashtag.
+      // The decision is recorded at once, and feeds show it after the compactor's next run, only under that hashtag.
       const approved = { [a]: true, [b]: false, [c]: true };
+      expect(await decisions()).toEqual([[a, 'news', 'approved', null], [c, 'news', 'approved', null]].sort());
+      expect(await flagsOf('news')).toEqual(all);
+      await ctx.compact();
+      const appliedAt = ctx.clock.now;
+      expect(await decisions()).toEqual([[a, 'news', 'approved', appliedAt], [c, 'news', 'approved', appliedAt]].sort());
       expect(await flagsOf('news')).toEqual(approved);
       expect(await flagsOf('news', '&moderated=false')).toEqual({ [b]: false });
       expect(await flagsOf('news', '&moderated=true')).toEqual({ [a]: true, [c]: true });
@@ -550,12 +575,10 @@ for (const target of TARGETS) {
       const both = await feed('tags=news,mumbai&moderated=false');
       expect(ids(records(both, 'news'))).toEqual([b]);
       expect(ids(records(both, 'mumbai'))).toContain(a);
-      expect((await tailLines(ctx.hot, 'news')).filter(isApproval).map((l) => l.contentId)).toEqual([a, c]);
-      expect(await decisions()).toEqual([[a, 'news', 'approved', null], [c, 'news', 'approved', null]].sort());
 
-      // The compactor applies it to the index, and nothing it does afterwards undoes it: not a like, nor a rebuild.
+      // Nothing the compactor does afterwards undoes it: not a later run, nor a like, nor a rebuild.
       await ctx.compact();
-      expect(await decisions()).toEqual([[a, 'news', 'approved', ctx.clock.now], [c, 'news', 'approved', ctx.clock.now]].sort());
+      expect(await decisions()).toEqual([[a, 'news', 'approved', appliedAt], [c, 'news', 'approved', appliedAt]].sort());
       expect(await flagsOf('news')).toEqual(approved);
       ok(await like(mod, a));
       await ctx.compact();
@@ -570,24 +593,30 @@ for (const target of TARGETS) {
       // An approval is of the post as it was: an update puts it back in the queue, until it is approved again.
       ctx.clock.now += 1000;
       ok(await store(alice, 'First, corrected #news #mumbai', { contentId: a }), 200);
-      expect(await flagsOf('news')).toEqual({ ...approved, [a]: false });
       expect(await decisions()).toEqual([[c, 'news', 'approved', expect.any(Number)]]);
+      await ctx.compactor.runOnce();
+      expect(await flagsOf('news')).toEqual({ ...approved, [a]: false });
       expect(ok(await approve(mod, a))).toMatchObject({ alreadyApproved: false });
+      await ctx.compact();
       expect(await flagsOf('news')).toEqual(approved);
       // Also an update that comes before the compactor has applied the approval.
       ctx.clock.now += 1000;
       ok(await store(alice, 'First, corrected twice #news #mumbai', { contentId: a }), 200);
-      expect(await flagsOf('news')).toEqual({ ...approved, [a]: false });
+      expect(ok(await approve(mod, a))).toMatchObject({ alreadyApproved: false });
+      ctx.clock.now += 1000;
+      ok(await store(alice, 'First, corrected three times #news #mumbai', { contentId: a }), 200);
       await ctx.compact();
       expect(await flagsOf('news')).toEqual({ ...approved, [a]: false });
 
-      // Removing the hashtag is the other way out of the queue, also for a post that was approved.
+      // Removing the hashtag is the other way out of the queue, also for a post that was approved. The
+      // compactor's next run takes the post out of the hashtag's feed.
       expect(ok(await req(mod, 'DELETE', `/content/${b}/tags/news`), 200)).toMatchObject({ tags: ['mumbai'] });
       expect(ok(await req(mod, 'DELETE', `/content/${c}/tags/news`), 200)).toMatchObject({ tags: ['weather'] });
-      expect(await flagsOf('news')).toEqual({ [a]: false });
-      expect(await flagsOf('news', '&moderated=true')).toEqual({});
       expect((await approve(mod, c)).json().error).toBe("the content isn't tagged #news");
       expect(await decisions()).toEqual([[b, 'news', 'removed', null], [c, 'news', 'removed', null]].sort());
+      await ctx.compact();
+      expect(await flagsOf('news')).toEqual({ [a]: false });
+      expect(await flagsOf('news', '&moderated=true')).toEqual({});
       await ctx.compact();
       expect(await flagsOf('news')).toEqual({ [a]: false });
       expect((await feedOf('weather')).map((i) => [i.contentId, i.tags, i.moderated])).toEqual([[c, ['weather'], false]]);
@@ -605,11 +634,13 @@ for (const target of TARGETS) {
       for (let n = 0; n < 3; n++) await post(n);
       await ctx.compact();
       for (let n = 3; n < 5; n++) await post(n);
+      await ctx.compactor.runOnce();
 
       const first = await feed('tags=news&moderated=false');
       expect(first.count).toBe(2);
       expect(first.nextCursor).toBeTruthy();
       for (const id of posted) ok(await req(root, 'PUT', `/content/${id}/tags/news`));
+      await ctx.compact();
 
       // A session that starts now finds the queue empty; the one under way reads on as it began.
       expect(await feed('tags=news&moderated=false')).toMatchObject({ count: 0, nextCursor: null });

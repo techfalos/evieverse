@@ -3,16 +3,18 @@ import { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { Config } from '../config.js';
+import type { AppDeps } from '../deps.js';
 import { decodeCursor, decodeFollowingCursor, encodeCursor, encodeFollowingCursor } from '../feed/cursor.js';
 import { planFollowing } from '../feed/following.js';
 import { FEED_ALGORITHMS, FEED_HOURS, planFeed } from '../feed/plan.js';
 import { relatedTo } from '../feed/related.js';
 import { followingRecords, loadBodies, planned, renderFeed } from '../feed/render.js';
+import { requireShownFollows } from '../follows.js';
 import { badRequest } from '../http/errors.js';
 import { invalidCursor } from '../http/listCursor.js';
 import { HASHTAG } from '../http/schemas.js';
 import { messageKey, msg } from '../language.js';
-import type { FollowStore, PublisherStore, RelatedTagStore, SummaryStore } from '../storage/index.js';
+import type { PublisherStore, RelatedTagStore, SummaryStore } from '../storage/index.js';
 import { normalizeTag } from '../tags.js';
 import { authorIndex } from '../tagfeed/layout.js';
 import { cursorExpired, type TagFeedReader } from '../tagfeed/reader.js';
@@ -47,7 +49,7 @@ const Query = z.object({
   tags: z.union([z.string(), z.array(z.string())]),
   hours: Hours,
   limit: Limit,
-  /** popular: most liked first. chronological: newest first. */
+  /** Which of the window's posts come first. popular: the most liked. chronological: the newest. */
   algorithm: z.enum(FEED_ALGORITHMS).default('popular'),
   addRelated: AddRelated,
   aiGenerated: AiGenerated,
@@ -56,32 +58,31 @@ const Query = z.object({
 });
 
 const FollowingQuery = z.object({
-  /** Whose follows: they're public, so reading the feed needs no key. */
+  /** Whose follows. Theirs to read by their key; anyone's, with no key, if they show whom they follow. */
   userId: z.string().uuid(),
   limit: Limit,
   aiGenerated: AiGenerated,
   cursor: z.string().optional(),
 });
 
-/** Only the feed index, summaries, publisher credits, follows and related hashtags are passed in: feeds never touch the database. */
+/** The size of the page a feed request asks for; 400 if it is more than a page can hold. */
+function pageLimit(config: Config, requested: number | undefined): number {
+  const limit = requested ?? config.feed.pageSize;
+  if (limit > config.feed.maxPageSize) throw badRequest(msg('feed.limit_too_large', { max: config.feed.maxPageSize }));
+  return limit;
+}
+
+/** Only the feed index, summaries, publisher credits and related hashtags are passed in: hashtag feeds never touch the database. */
 export interface FeedDeps {
   config: Config;
   feedReader: TagFeedReader;
-  authorReader: TagFeedReader;
   summaries: SummaryStore;
   publishers: PublisherStore;
-  follows: FollowStore;
   relatedTags: RelatedTagStore;
   now?: () => number;
 }
 
-export function feedRoutes(app: FastifyInstance, { config, feedReader, authorReader, summaries, publishers, follows, relatedTags, now = Date.now }: FeedDeps) {
-  const pageLimit = (requested: number | undefined) => {
-    const limit = requested ?? config.feed.pageSize;
-    if (limit > config.feed.maxPageSize) throw badRequest(msg('feed.limit_too_large', { max: config.feed.maxPageSize }));
-    return limit;
-  };
-
+export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries, publishers, relatedTags, now = Date.now }: FeedDeps) {
   /**
    * retrieve_feed. Each record says whether a moderator of the hashtag it is listed under has approved
    * it there (`moderated`), and `moderated=false` leaves only those none has: the hashtag's
@@ -98,7 +99,7 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, authorRea
     if (!tags.length || tags.includes(null)) throw badRequest(msg('feed.tags_invalid'));
     if (tags.length > MAX_TAGS) throw badRequest(msg('feed.too_many_tags', { max: MAX_TAGS }));
     const tagList = tags as string[];
-    const limit = pageLimit(q.limit);
+    const limit = pageLimit(config, q.limit);
 
     const addRelated = q.addRelated ?? false;
 
@@ -128,7 +129,8 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, authorRea
       : (cursor?.related ?? relatedTo(tagList, await Promise.all(tagList.map((tag) => relatedTags.get(tag))), MAX_TAGS));
     const feedTags = related ? [...tagList, ...related] : tagList;
 
-    const views = await Promise.all(feedTags.map((tag) => feedReader.view(tag, anchor, cursor?.pins[tag])));
+    // A tag the cursor has no pin for is read as it is now: only a cursor that was tampered with lacks one.
+    const views = await Promise.all(feedTags.map((tag) => feedReader.view(tag, cursor?.pins[tag])));
     const plan = planFeed(
       views.map((v) => v.candidates),
       {
@@ -138,7 +140,6 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, authorRea
         hours: q.hours,
         anchor,
         limit,
-        maxLookbackDays: config.feed.maxLookbackDays,
         positions: cursor?.positions,
         fresh: { every: freshEvery, maxLikes: freshMaxLikes, pool: freshPool, seed, positions: cursor?.freshPositions },
       },
@@ -164,19 +165,31 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, authorRea
     reply.type('application/json; charset=utf-8');
     return reply.send(Readable.from(renderFeed(plan, feedTags, bodies, nextCursor, related)));
   });
+}
 
+/**
+ * The following feed, which is served apart from the hashtag feeds (see functions/groups.ts): its
+ * records say whose posts a user follows, so it reads the database to learn who may read it.
+ */
+export function followingFeedRoutes(app: FastifyInstance, { db, config, authorReader, summaries, publishers, follows, now = Date.now }: AppDeps) {
   /**
    * The posts of the users `userId` follows, newest first, reaching back up to maxLookbackDays. Read
-   * from each followed publisher's own index; a user who follows nobody (or doesn't exist) gets none.
+   * from each followed publisher's own index; a user who follows nobody gets none.
+   *
+   * It is the user's own to read, by their key, and anyone's if the user shows whom they follow:
+   * the same rule as the list of them, which the feed would otherwise give away (see
+   * requireShownFollows). That is all it asks the database: whom they follow, and the posts, come
+   * from Redis and the summary store, as a hashtag feed's do.
    */
   app.get('/feed/following', async (req) => {
     const q = FollowingQuery.parse(req.query);
-    const limit = pageLimit(q.limit);
+    const limit = pageLimit(config, q.limit);
     const after = q.cursor ? decodeFollowingCursor(q.cursor) : undefined;
+    await requireShownFollows(db, req, q.userId, 'following');
     const t = now();
 
     const followees = await follows.get(q.userId);
-    const indexes = await Promise.all(followees.map((id) => authorReader.open(authorIndex(id), t)));
+    const indexes = await Promise.all(followees.map((id) => authorReader.open(authorIndex(id))));
     const plan = await planFollowing(authorReader, indexes, {
       limit,
       after,

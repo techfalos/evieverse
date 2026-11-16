@@ -28,6 +28,8 @@ const UserParams = z.object({ userId: z.string().uuid() });
 const ContentParams = z.object({ contentId: z.string().uuid() });
 const ContentTagParams = z.object({ contentId: z.string().uuid(), tag: Tag });
 const CommentParams = z.object({ contentId: z.string().uuid(), commentId: z.string().uuid() });
+/** Why a user is banned, which only moderators read. */
+const BanBody = Credentials.extend({ reason: z.string().trim().min(1).max(500).optional() });
 const WordsBody = Credentials.extend({ words: z.array(z.string().max(1000)).min(1).max(1000) });
 const RemoveTagBody = Credentials.extend({ mute: Flag.default(false) });
 /** A page of the moderation queue: smaller than other lists', as each post's meta file, or each comment, is read for it. */
@@ -44,7 +46,7 @@ const REVOKE_ATTEMPTS = 3;
 
 /**
  * Moderation: admins make and revoke admins, appoint server moderators and tag moderators, and keep
- * the server's blocked words; server moderators (and admins) accept or reject the posts and the
+ * the server's blocked words; server moderators and admins ban users; server moderators (and admins) accept or reject the posts and the
  * comments their trust score sent to the moderation queue; a tag's moderators (and admins) keep its
  * blocked words, mute users on it, and approve the content under it or remove it from content.
  * Mutes and blocked words apply to what is written from then on; what a tag's moderator decides
@@ -77,8 +79,9 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     return user;
   }
 
+  /** A user who is there: one whose account was deleted isn't, though its row may be for a while. */
   async function findUser(userId: string) {
-    const user = await db.selectFrom('users').select(['id', 'username']).where('id', '=', userId).executeTakeFirst();
+    const user = await db.selectFrom('users').select(['id', 'username', 'admin', 'moderator']).where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
     if (!user) throw notFound(msg('user.not_found'));
     return user;
   }
@@ -166,6 +169,96 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     await asAdmin(req, Credentials.parse(req.body ?? {}));
     const res = await db.updateTable('users').set({ moderator: 0 }).where('id', '=', userId).where('moderator', '=', 1).executeTakeFirst();
     return { userId, wasModerator: Number(res.numUpdatedRows) > 0 };
+  });
+
+  // Bans: who can't post, comment or send messages.
+
+  /**
+   * Users who are banned, most recently banned first, a page at a time, with who banned each and why.
+   * Server moderators and admins.
+   */
+  app.get('/banned', async (req) => {
+    const page = listQuery(req.query);
+    await asServerModerator(req, Credentials.parse(req.body ?? {}));
+    const query = db
+      .selectFrom('users')
+      .leftJoin('users as bans', 'bans.id', 'users.banned_by')
+      .select((eb) => [
+        'users.id',
+        'users.username',
+        eb.ref('users.banned_at').$castTo<number>().as('created_at'),
+        'users.ban_reason',
+        'bans.id as by_id',
+        'bans.username as by_username',
+      ])
+      .where('users.banned_at', 'is not', null)
+      .where('users.deleted_at', 'is', null);
+    const { rows, nextCursor } = await listPage(query, { createdAt: 'users.banned_at', userId: 'users.id' }, page);
+    return {
+      banned: rows.map((r) => ({
+        userId: r.id,
+        username: r.username,
+        bannedAt: iso(r.created_at),
+        reason: r.ban_reason,
+        bannedBy: r.by_id !== null && r.by_username !== null ? { userId: r.by_id, username: r.by_username } : null,
+      })),
+      nextCursor,
+    };
+  });
+
+  /**
+   * Bans a user: they keep their account and can read, but are refused whatever writes a post, a
+   * comment or a message (see refuseBanned). `reason` is kept for moderators. Server moderators and
+   * admins, and never of an admin or a server moderator, whose role has to end first, or of
+   * oneself. The user is told, once: `201`, or `200` with `alreadyBanned` and the first ban's time
+   * and reason for one who already was.
+   */
+  app.put('/banned/:userId', async (req, reply) => {
+    const { userId } = UserParams.parse(req.params);
+    const body = BanBody.parse(req.body ?? {});
+    const moderator = await asServerModerator(req, body);
+    if (userId === moderator.id) throw badRequest(msg('moderation.ban_yourself'));
+    const { username, admin, moderator: staff } = await findUser(userId);
+    if (admin === 1 || staff === 1) throw forbidden(msg('moderation.ban_staff'));
+    const at = now();
+    // Only a user who isn't banned and holds no role, so a ban never overwrites the first, nor lands on someone made staff meanwhile.
+    const res = await db
+      .updateTable('users')
+      .set({ banned_at: at, banned_by: moderator.id, ban_reason: body.reason ?? null })
+      .where('id', '=', userId)
+      .where('banned_at', 'is', null)
+      .where('admin', '=', 0)
+      .where('moderator', '=', 0)
+      .where('deleted_at', 'is', null)
+      .executeTakeFirst();
+    if (Number(res.numUpdatedRows) === 0) {
+      const current = await db.selectFrom('users').select(['banned_at', 'ban_reason']).where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
+      if (!current) throw notFound(msg('user.not_found'));
+      if (current.banned_at === null) throw forbidden(msg('moderation.ban_staff'));
+      return { userId, username, bannedAt: iso(current.banned_at), reason: current.ban_reason, alreadyBanned: true };
+    }
+    req.log.info({ userId, moderator: moderator.id }, 'banned a user');
+    await notify(deps, { userId, kind: 'user_banned', by: moderator.id }, req.log);
+    return reply.status(201).send({ userId, username, bannedAt: iso(at), reason: body.reason ?? null, alreadyBanned: false });
+  });
+
+  /** Ends a ban, which the user is told of. Server moderators and admins. */
+  app.delete('/banned/:userId', async (req) => {
+    const { userId } = UserParams.parse(req.params);
+    const moderator = await asServerModerator(req, Credentials.parse(req.body ?? {}));
+    const res = await db
+      .updateTable('users')
+      .set({ banned_at: null, banned_by: null, ban_reason: null })
+      .where('id', '=', userId)
+      .where('banned_at', 'is not', null)
+      .where('deleted_at', 'is', null)
+      .executeTakeFirst();
+    const wasBanned = Number(res.numUpdatedRows) > 0;
+    if (wasBanned) {
+      req.log.info({ userId, moderator: moderator.id }, 'ended a ban');
+      await notify(deps, { userId, kind: 'user_unbanned', by: moderator.id }, req.log);
+    }
+    return { userId, wasBanned };
   });
 
   // Blocked words: the server's list, and each hashtag's.
@@ -327,7 +420,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   app.put('/content/:contentId/tags/:tag', async (req, reply) => {
     const { contentId, tag } = ContentTagParams.parse(req.params);
     const moderator = await asModerator(req, tag, Credentials.parse(req.body ?? {}));
-    const { alreadyApproved } = await approveTag(deps, contentId, tag, moderator.id, req.log);
+    const { alreadyApproved } = await approveTag(deps, contentId, tag, moderator.id);
     return reply.status(alreadyApproved ? 200 : 201).send({ contentId, tag, moderated: true, alreadyApproved });
   });
 
@@ -340,7 +433,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     const { contentId, tag } = ContentTagParams.parse(req.params);
     const body = RemoveTagBody.parse(req.body ?? {});
     const moderator = await asModerator(req, tag, body);
-    const { userId, ...removal } = await removeTag(deps, contentId, tag, moderator.id, req.log);
+    const { userId, ...removal } = await removeTag(deps, contentId, tag, moderator.id);
     const muted = body.mute ? await mute(tag, userId) : null;
     await notify(deps, { userId, kind: removal.status ? 'last_tag_removed' : 'tag_removed', contentId, tag, by: moderator.id }, req.log);
     if (muted && !muted.already) await notify(deps, { userId, kind: 'tag_muted', tag, by: moderator.id }, req.log);
@@ -406,7 +499,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     const moderator = await asServerModerator(req, Credentials.parse(req.body ?? {}));
     const row = await loadContent(db, contentId);
     if (!row.queued) throw notQueued();
-    const requestedAt = await setForDeletion(deps, row, req.log);
+    const requestedAt = await setForDeletion(deps, row);
     req.log.info({ contentId, moderator: moderator.id }, 'rejected from the moderation queue');
     await notify(deps, { userId: row.user_id, kind: 'post_rejected', contentId, by: moderator.id }, req.log);
     return reply.status(202).send({ contentId, status: 'pending_deletion', requestedAt: iso(requestedAt) });

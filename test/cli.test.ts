@@ -15,6 +15,7 @@ import { writeProfile } from '../src/cli/profiles.js';
 import { bootstrapAdmin, ensureAdmin, type BootstrapAdmin } from '../src/moderation/bootstrap.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { loadCliRelease, type CliRelease } from '../src/routes/cli.js';
+import { DAY } from '../src/time.js';
 import { as, createTestContext, post, storeText, TARGETS, type TestContext, type User } from './helpers.js';
 
 const exec = promisify(execFile);
@@ -137,8 +138,8 @@ for (const target of TARGETS) {
 
       expect((await req(null, 'GET', '/whoami')).statusCode).toBe(401);
       expect((await req({ userId: carol.userId, apiKey: root.apiKey }, 'GET', '/whoami')).statusCode).toBe(401);
-      expect(ok(await req(root, 'GET', '/whoami'))).toEqual({ userId: root.userId, username: 'root', language: 'en', admin: true, moderator: false, moderates: [], messages: true });
-      expect(ok(await req(carol, 'GET', '/whoami'))).toEqual({ userId: carol.userId, username: 'carol', language: 'en', admin: false, moderator: false, moderates: ['news', 'sports'], messages: true });
+      expect(ok(await req(root, 'GET', '/whoami'))).toEqual({ userId: root.userId, username: 'root', language: 'en', admin: true, moderator: false, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false });
+      expect(ok(await req(carol, 'GET', '/whoami'))).toEqual({ userId: carol.userId, username: 'carol', language: 'en', admin: false, moderator: false, moderates: ['news', 'sports'], messages: true, showFollowing: false, showFollowers: false, banned: false });
       ok(await req(root, 'PUT', `/moderators/${carol.userId}`), 201);
       expect(ok(await req(carol, 'GET', '/whoami'))).toMatchObject({ admin: false, moderator: true, moderates: ['news', 'sports'] });
     });
@@ -160,7 +161,7 @@ for (const target of TARGETS) {
       const env = { BOOTSTRAP_ADMIN: JSON.stringify(first.admin) };
       expect(await bootstrapAdmin(ctx.db, env)).toEqual({ userId: first.admin.userId, username: 'operator', created: true, keyChanged: true });
       // An account the operator set up registered in no language, so it is answered in the server's default.
-      expect(ok(await whoami(first.user))).toEqual({ userId: first.admin.userId, username: 'operator', language: 'en', admin: true, moderator: false, moderates: [], messages: true });
+      expect(ok(await whoami(first.user))).toEqual({ userId: first.admin.userId, username: 'operator', language: 'en', admin: true, moderator: false, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false });
 
       // Every later deploy runs it again, and changes nothing: not a profile renamed since, either.
       ok(await ctx.app.inject({ method: 'PATCH', url: `/users/${first.admin.userId}`, headers: as(first.user), payload: { username: 'root' } }));
@@ -334,7 +335,7 @@ describe('the CLI', () => {
     expect((await cli(['login', SERVER, bob.userId, '--profile', 'work'], { env: { EVIEVERSE_API_KEY: bob.apiKey } })).code).toBe(0);
     expect(await ran('profiles')).toBe(`default  ${SERVER}  alice\nwork     ${SERVER}  bob`);
     expect(await cli(['whoami'])).toMatchObject({ code: 1, err: 'evieverse: there are several profiles (default, work): choose one with --profile <name> or EVIEVERSE_PROFILE' });
-    expect(await json('--profile=work', 'whoami')).toEqual({ profile: 'work', server: SERVER, userId: bob.userId, username: 'bob', language: 'en', admin: false, moderator: false, moderates: [], messages: true });
+    expect(await json('--profile=work', 'whoami')).toEqual({ profile: 'work', server: SERVER, userId: bob.userId, username: 'bob', language: 'en', admin: false, moderator: false, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false });
     expect((await cli(['whoami'], { env: { EVIEVERSE_PROFILE: 'default' } })).out).toContain('alice');
     expect(await cli(['whoami', '--profile', 'nobody'])).toMatchObject({ code: 1 });
     expect(await cli(['whoami', '--profile', '../default'])).toMatchObject({ code: 2 });
@@ -411,6 +412,39 @@ describe('the CLI', () => {
     expect(await cli(['content', 'delete', NO_USER])).toMatchObject({ code: 1, err: 'evieverse: content not found' });
   });
 
+  it('registers a user as an admin, without the challenge anyone else is asked to solve', async () => {
+    await setup({ challenge: { register: true } });
+    const root = await ctx.register('root');
+    await setAdmin(ctx.db, 'root', true);
+    const alice = await ctx.register('alice');
+    await profile('root', root);
+    await profile('alice', alice);
+    const by = (name: string, ...args: string[]) => ran(...args, '--profile', name);
+    const refused = (name: string, ...args: string[]) => cli([...args, '--profile', name]);
+    const whoami = (u: User) => ctx.app.inject({ method: 'GET', url: '/whoami', headers: as(u) });
+
+    // The id and the key that come back are the new user's, and the key works at once.
+    const registered = /^Registered bob \((\S{36})\)\.\nTheir API key, shown this once: (tu_\S+)$/.exec(await by('root', 'register', 'bob'));
+    expect(registered).not.toBeNull();
+    const [, userId, apiKey] = registered!;
+    expect((await whoami({ userId: userId!, apiKey: apiKey! })).json()).toMatchObject({ userId, username: 'bob', language: 'en', admin: false });
+    // --json is the server's answer, key and all, for a script to read.
+    const carol = await json('register', 'Carol Jones', '--language', 'EN', '--profile', 'root');
+    expect(carol).toEqual({ userId: expect.any(String), username: 'Carol Jones', language: 'en', apiKey: expect.stringMatching(/^tu_/), note: 'Store this apiKey now; it cannot be retrieved again.' });
+    expect((await whoami(carol)).statusCode).toBe(200);
+
+    expect(await refused('root', 'register', 'bob')).toMatchObject({ code: 1, err: 'evieverse: username is already taken' });
+    expect(await refused('root', 'register', 'dave', '--language', 'xx')).toMatchObject({ code: 1, err: 'evieverse: "xx" is not one of this server\'s languages: en' });
+    expect(await refused('root', 'register')).toMatchObject({ code: 2, err: 'evieverse: usage: evieverse register <username> [--language <code>]' });
+    // Anyone else's key spares no challenge, and the CLI has no way to show one: nobody is registered.
+    expect(await refused('alice', 'register', 'dave')).toMatchObject({
+      code: 1,
+      out: '',
+      err: 'evieverse: only an admin registers a user with the CLI: the server asks anyone else to solve a challenge, which takes a client that shows its image',
+    });
+    expect(await ctx.db.selectFrom('users').select('username').orderBy('username').execute()).toEqual(['Carol Jones', 'alice', 'bob', 'root'].map((username) => ({ username })));
+  });
+
   it("works through a hashtag's moderation queue, and the server's", async () => {
     await setup({ trust: { deleteBelow: 0 } });
     const root = await ctx.register('root');
@@ -428,9 +462,18 @@ describe('the CLI', () => {
 
     // A hashtag's queue: what is under it that none of its moderators has approved, or removed it from.
     expect(await by('carol', 'tag', 'queue', 'news')).toBe('Nothing under #news waits for a moderator.');
+    // It is everything that waits under the hashtag, however old: not the last day's posts, which is what a feed is of unless it says.
+    ctx.clock.now -= 30 * DAY;
+    const old = await post(ctx, alice, 'Last month #news');
+    ctx.clock.now += 30 * DAY;
+    await ctx.compact();
+    expect(await by('carol', 'tag', 'queue', 'news')).toMatch(new RegExp(`^${old}  alice  2026-\\S+  Last month #news$`));
+    expect(await by('carol', 'tag', 'approve', old, 'news')).toBe(`Approved ${old} under #news.`);
     const first = await post(ctx, alice, 'Flooding closes roads #news #mumbai');
     ctx.clock.now += 1000;
     const second = await post(ctx, alice, 'Rumours of more rain #news #mumbai');
+    // The compactor's next run puts the posts in the queue, and takes out the one that was approved.
+    await ctx.compact();
     const waiting = (await by('carol', 'tag', 'queue', 'news')).split('\n');
     expect(waiting).toHaveLength(2);
     expect(waiting.find((line) => line.startsWith(first))).toMatch(new RegExp(`^${first}  alice  2026-\\S+  Flooding closes roads #news #mumbai$`));
@@ -439,6 +482,7 @@ describe('the CLI', () => {
     expect(await by('carol', 'tag', 'approve', first, 'news')).toBe(`${first} was already approved under #news.`);
     expect(await refused('carol', 'tag', 'approve', first, 'mumbai')).toMatchObject({ code: 1, err: 'evieverse: only an admin or a moderator of #mumbai can do this' });
     expect(await by('carol', 'tag', 'remove', second, 'news')).toBe(`Removed #news from ${second}: it's now under #mumbai.`);
+    await ctx.compact();
     expect(await by('carol', 'tag', 'queue', 'news')).toBe('Nothing under #news waits for a moderator.');
 
     // The server's queue: the posts a trust score held back, for admins and the server moderators they appoint.
@@ -483,6 +527,7 @@ describe('the CLI', () => {
     expect(await by('root', 'server-moderators', 'remove', dave.userId)).toBe(`${dave.userId} wasn't a server moderator.`);
     expect(await refused('dave', 'queue', 'list')).toMatchObject({ code: 1, err: NOT_A_MODERATOR });
     // What an admin accepted is published unmoderated, so it waits for the hashtag's moderators next.
+    await ctx.compact();
     expect(await by('carol', 'tag', 'queue', 'news')).toMatch(new RegExp(`^${held}  alice  2026-\\S+  Free spam #news$`));
   });
 
@@ -687,6 +732,60 @@ describe('the CLI', () => {
     expect(await refused('alice', 'messages', 'send', bob.userId)).toMatchObject({ code: 2, err: 'evieverse: usage: evieverse messages send <userId> <text>' });
   });
 
+  it('bans users, and deletes accounts, for the roles that may', async () => {
+    await setup();
+    const root = await ctx.register('root');
+    await setAdmin(ctx.db, 'root', true);
+    const mod = await ctx.register('mod');
+    const alice = await ctx.register('alice');
+    const bob = await ctx.register('bob');
+    const carol = await ctx.register('carol');
+    for (const [name, u] of [['root', root], ['mod', mod], ['alice', alice], ['bob', bob], ['carol', carol]] as const) await profile(name, u);
+    const by = (name: string, ...args: string[]) => ran(...args, '--profile', name);
+    const refused = (name: string, ...args: string[]) => cli([...args, '--profile', name]);
+    await by('root', 'server-moderators', 'add', mod.userId);
+    const BANNED = "evieverse: your account is banned: you can't post, comment or send messages";
+    const CONFIRM = "can't be undone: run the command again with --yes to go ahead";
+
+    // Bans are for server moderators and admins.
+    expect(await by('mod', 'bans', 'list')).toBe('Nobody is banned.');
+    expect(await refused('alice', 'bans', 'list')).toMatchObject({ code: 1, err: 'evieverse: only an admin or a server moderator can do this' });
+    expect(await refused('alice', 'bans', 'add', bob.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin or a server moderator can do this' });
+    expect(await by('mod', 'bans', 'add', alice.userId, '--reason', 'Spam\nand more')).toBe(`alice (${alice.userId}) is banned: they can't post, comment or send messages.`);
+    expect(await by('mod', 'bans', 'add', alice.userId)).toBe(`alice (${alice.userId}) was already banned.`);
+    expect(await by('mod', 'bans', 'list')).toMatch(new RegExp(`^${alice.userId}\\s+alice\\s+since 2026-\\S+\\s+by mod\\s+Spam and more$`));
+    expect(await json('bans', 'list', '--profile', 'root')).toMatchObject({ banned: [{ userId: alice.userId, reason: 'Spam\nand more', bannedBy: { username: 'mod' } }] });
+    expect(await refused('mod', 'bans', 'add', root.userId)).toMatchObject({ code: 1, err: "evieverse: admins and server moderators can't be banned: end their role first" });
+
+    // A banned user is told so by whoami, and is refused by the server what writes.
+    expect(await by('alice', 'whoami')).toContain("banned, so you can't post, comment or send messages");
+    expect(await json('whoami', '--profile', 'alice')).toMatchObject({ banned: true });
+    expect(await refused('alice', 'messages', 'send', bob.userId, 'Hi')).toMatchObject({ code: 1, err: BANNED });
+    expect(await by('mod', 'bans', 'remove', alice.userId)).toBe(`${alice.userId} is no longer banned.`);
+    expect(await by('mod', 'bans', 'remove', alice.userId)).toBe(`${alice.userId} wasn't banned.`);
+    expect(await by('mod', 'bans', 'list')).toBe('Nobody is banned.');
+    expect(await by('alice', 'messages', 'send', bob.userId, 'Hi')).toBe(`Sent to bob (${bob.userId}).`);
+
+    // Deleting an account can't be undone, so it takes --yes, which is checked before the server is asked.
+    expect(await refused('alice', 'account', 'delete')).toMatchObject({ code: 2, err: `evieverse: deleting your account ${CONFIRM}` });
+    expect(await refused('root', 'users', 'delete', bob.userId)).toMatchObject({ code: 2, err: `evieverse: deleting an account ${CONFIRM}` });
+    expect(await by('bob', 'whoami')).toContain('bob');
+    // Another user's account is an admin's to delete.
+    expect(await refused('mod', 'users', 'delete', bob.userId, '--yes')).toMatchObject({ code: 1, err: "evieverse: you can only delete your own account, unless you're an admin" });
+    expect(await by('root', 'users', 'delete', bob.userId, '--yes')).toBe(`Deleted account ${bob.userId}.`);
+    expect(await refused('bob', 'whoami')).toMatchObject({ code: 1 });
+    expect(await refused('root', 'users', 'delete', NO_USER, '--yes')).toMatchObject({ code: 1, err: 'evieverse: user not found' });
+    expect(await refused('root', 'users', 'delete', root.userId, '--yes')).toMatchObject({ code: 1, err: 'evieverse: this is the only admin: make another user an admin first' });
+
+    // One's own account: the profile goes with it, as it is of no use. With posts, the account waits for their removal.
+    expect(await by('alice', 'account', 'delete', '--yes')).toBe(`Deleted account ${alice.userId}.\nRemoved profile "alice" from this machine.`);
+    expect(await refused('alice', 'whoami')).toMatchObject({ code: 1 });
+    expect(await by('root', 'profiles')).not.toContain('alice');
+    await post(ctx, carol, 'Something to remove #news');
+    expect(await json('account', 'delete', '--yes', '--profile', 'carol')).toEqual({ profile: 'carol', userId: carol.userId, status: 'pending_deletion', requestedAt: expect.any(String) });
+    expect(await refused('carol', 'whoami')).toMatchObject({ code: 1 });
+  });
+
   it('is refused by the server what its key may not do, and shows in its help what it may', async () => {
     await setup();
     const root = await ctx.register('root');
@@ -807,7 +906,7 @@ describe('the CLI', () => {
     await writeProfile(home, 'alice', { server, ...alice });
     const env = { ...process.env, EVIEVERSE_HOME: home, PATH: `${dirname(process.execPath)}${delimiter}${process.env.PATH}` };
     const evieverse = join(home, 'bin', 'evieverse');
-    const whoami = { profile: 'alice', server, userId: alice.userId, username: 'alice', language: 'en', admin: false, moderator: false, moderates: [], messages: true };
+    const whoami = { profile: 'alice', server, userId: alice.userId, username: 'alice', language: 'en', admin: false, moderator: false, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false };
 
     const install = await exec('sh', ['-c', `curl -fsSL ${server}/cli/install.sh | sh`], { env });
     expect(install.stdout).toContain(`Installed evieverse ${shipped.version} in ${join(home, 'bin')}`);
