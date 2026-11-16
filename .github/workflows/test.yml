@@ -1,0 +1,33 @@
+name: Tests
+
+# Every branch push, and every pull request. The pull request run is the one a fork's PR gets, and it
+# tests the PR merged with its base branch.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to a branch or PR replaces the run of the older one, except on the default branch,
+# where every commit keeps its result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_name != github.event.repository.default_branch }}
+
+jobs:
+  # The name of the status check to require: "test".
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      # SQLite with the in-process store: the suite as `npm test` runs it with no TEST_*_URL set.
+      - run: npm test
