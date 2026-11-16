@@ -6,44 +6,29 @@
 #   curl http://localhost:3000/health
 #
 # To start over: docker compose -f docker-compose.server.yml down -v
-name: theuniverse-server
+#
+# The services shared with the other compose files are defined in compose.base.yml.
+name: evieverse-server
 
 services:
   postgres:
-    image: postgres:17
-    environment:
-      POSTGRES_USER: theuniverse
-      POSTGRES_PASSWORD: theuniverse
-      POSTGRES_DB: theuniverse
+    extends: { file: compose.base.yml, service: postgres }
     ports: ['${SERVER_POSTGRES_PORT:-25432}:5432']
     volumes: [postgres:/var/lib/postgresql/data]
-    healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U theuniverse']
-      interval: 2s
-      retries: 30
 
-  # volatile-lru only evicts keys with a TTL (hot summaries, superseded index keys), never the live index.
   redis:
-    image: valkey/valkey:8
-    command: ['valkey-server', '--maxmemory', '512mb', '--maxmemory-policy', 'volatile-lru', '--save', '60', '1']
+    extends: { file: compose.base.yml, service: redis }
     ports: ['${SERVER_REDIS_PORT:-26379}:6379']
     volumes: [redis:/data]
-    healthcheck:
-      test: ['CMD', 'valkey-cli', 'ping']
-      interval: 2s
-      retries: 30
 
   app:
-    build: .
-    image: theuniverse-server-app
+    extends: { file: compose.base.yml, service: app }
+    image: evieverse-server-app
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     ports: ['${SERVER_PORT:-3000}:3000']
     environment:
-      DB_DIALECT: postgres
-      DATABASE_URL: postgres://theuniverse:theuniverse@postgres:5432/theuniverse
-      REDIS_URL: redis://redis:6379
       CONTENT_SCHEME: fs
       CONTENT_OPTIONS: '{"root":"/app/data/content"}'
       PUBLIC_BASE_URL: http://localhost:${SERVER_PORT:-3000}
@@ -55,10 +40,6 @@ services:
       TAGGING_MODE: ${TAGGING_MODE:-user}
       TAGGING_SERVER_TAGS: ${TAGGING_SERVER_TAGS:-}
     volumes: [content:/app/data]
-    healthcheck:
-      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
-      interval: 3s
-      retries: 30
 
 volumes:
   postgres:

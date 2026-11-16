@@ -4,19 +4,20 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryHotStore, SummaryStore, type Summary } from '../src/storage/index.js';
 import { decodeSummary, encodeSummary, summaryKey } from '../src/storage/summaryStore.js';
-import { DAY, DAY_ENTRY_BYTES, decodeTail, encodeTail, packDay, unpackDay, type IndexEntry } from '../src/tagfeed/layout.js';
+import { DAY_ENTRY_BYTES, decodeTail, encodeTail, packDay, unpackDay, type IndexEntry } from '../src/tagfeed/layout.js';
+import { DAY } from '../src/time.js';
 
 const NOW = Date.UTC(2026, 10, 6, 12);
 const ID = '0f8fad5b-d9cb-469f-a165-70867728950e';
 
 const summary = (o: Partial<Summary> = {}): Summary => ({
   contentId: ID,
-  version: 3,
   createdAt: NOW - 1234,
   updatedAt: NOW,
   userId: '7c9e6679-7425-40de-944b-e07fc1f90ae7',
   mimeType: 'text/plain',
   aiGenerated: false,
+  comments: false,
   tags: ['news', 'mumbai'],
   preview: { kind: 'text', text: 'Flooding closes roads.\n\nMore below.' },
   ...o,
@@ -28,12 +29,16 @@ describe('summary text', () => {
     expect(decodeSummary(ID, encodeSummary(s), '')).toEqual(s);
   });
 
-  it('round-trips the AI-generated flag, and reads summaries written before it as not AI-generated', () => {
+  it('round-trips the AI-generated flag', () => {
     const s = summary({ aiGenerated: true });
     expect(decodeSummary(ID, encodeSummary(s), '')).toEqual(s);
-    const before = encodeSummary(summary()).replace(/^(\d+ \d+ \d+) 0\n/, '$1\n');
-    expect(before.split('\n')[0]).toBe(`3 ${NOW - 1234} ${NOW}`);
-    expect(decodeSummary(ID, before, '')).toEqual(summary());
+  });
+
+  it('round-trips the comments flag, which a summary written before it reads as off', () => {
+    const s = summary({ comments: true });
+    const text = encodeSummary(s);
+    expect(decodeSummary(ID, text, '')).toEqual(s);
+    expect(decodeSummary(ID, text.replace(`${NOW} 0 1\n`, `${NOW} 0\n`), '')).toEqual(summary());
   });
 
   it('round-trips empty texts and no hashtags', () => {
@@ -41,23 +46,16 @@ describe('summary text', () => {
     expect(decodeSummary(ID, encodeSummary(s), '')).toEqual(s);
   });
 
-  it('strips the separator character from the preview', () => {
-    const s = summary({ preview: { kind: 'text', text: 'c\n\u001e\nd' } });
-    expect(decodeSummary(ID, encodeSummary(s), '')).toEqual({ ...s, preview: { kind: 'text', text: 'c\n\nd' } });
-  });
-
-  it('leaves an empty line where releases with an AI kept its summary, and skips that summary in what they wrote', () => {
-    const header = `3 ${NOW - 1234} ${NOW} 0\n7c9e6679-7425-40de-944b-e07fc1f90ae7\ntext/plain\nnews mumbai\ntext\n`;
-    expect(encodeSummary(summary())).toBe(`${header}\n\n\u001e\nFlooding closes roads.\n\nMore below.`);
-    const withAi = `${header}\nRelated: flooding\nin Mumbai\n\u001e\nFlooding closes roads.\n\nMore below.`;
-    expect(decodeSummary(ID, withAi, '')).toEqual(summary());
+  it("writes five header lines, then the preview's text", () => {
+    const header = `${NOW - 1234} ${NOW} 0 0\n7c9e6679-7425-40de-944b-e07fc1f90ae7\ntext/plain\nnews mumbai\ntext\n`;
+    expect(encodeSummary(summary())).toBe(`${header}Flooding closes roads.\n\nMore below.`);
   });
 
   it("stores an image's, video's or audio's caption but not its URL, which is built when read", () => {
     const s = summary({ mimeType: 'image/png', preview: { kind: 'image', url: 'https://old.example/ignored', text: 'Sunset over the bay' } });
     const text = encodeSummary(s);
     expect(text).not.toContain('ignored');
-    const url = `https://api.example.com/content/${ID}/raw?version=3`;
+    const url = `https://api.example.com/content/${ID}/raw`;
     expect(decodeSummary(ID, text, 'https://api.example.com').preview).toEqual({ kind: 'image', url, text: 'Sunset over the bay' });
     for (const [mimeType, kind] of [['video/mp4', 'video'], ['audio/mpeg', 'audio']] as const) {
       const media = summary({ mimeType, preview: { kind, url: 'https://old.example/ignored' } });
@@ -70,81 +68,58 @@ describe('summary text', () => {
     expect(decodeSummary(ID, encodeSummary(s), 'https://api.example.com')).toEqual(s);
   });
 
-  it('reads summaries written before post types: files of a post type as that type, plain text as text, any other file as a link to its bytes', () => {
-    const before = (mimeType: string, kind: string, text = '') =>
-      `3 ${NOW - 1234} ${NOW} 0\n7c9e6679-7425-40de-944b-e07fc1f90ae7\n${mimeType}\nnews\n${kind}\n\n\n\u001e\n${text}`;
-    const url = `https://api.example.com/content/${ID}/raw?version=3`;
-    const read = (mimeType: string, kind: string, text?: string) => decodeSummary(ID, before(mimeType, kind, text), 'https://api.example.com').preview;
-    expect(read('image/png', 'media')).toEqual({ kind: 'image', url });
-    expect(read('video/mp4', 'media')).toEqual({ kind: 'video', url });
-    expect(read('audio/mpeg', 'media')).toEqual({ kind: 'audio', url });
-    expect(read('text/plain', 'text', 'hello')).toEqual({ kind: 'text', text: 'hello' });
-    expect(read('text/markdown', 'text', '# hello')).toEqual({ kind: 'text', text: '# hello' });
-    expect(read('application/pdf', 'text', 'Annual report')).toEqual({ kind: 'link', url });
-    expect(read('text/html', 'text', 'A page')).toEqual({ kind: 'link', url });
-    expect(read('application/zip', 'media')).toEqual({ kind: 'link', url });
-  });
-
-  it('round-trips the origin of federated content, whose files link to the origin server', () => {
-    const origin = { server: 'https://a.example/api', contentId: '5c06badf-f69d-4900-8cab-256a1b626b10', version: 7 };
-    const s = summary({ origin });
-    expect(decodeSummary(ID, encodeSummary(s), '')).toEqual(s);
-    const media = summary({ mimeType: 'image/png', preview: { kind: 'image', url: 'https://old.example/ignored' }, origin });
-    expect(decodeSummary(ID, encodeSummary(media), 'https://b.example').preview).toEqual({
-      kind: 'image',
-      url: `https://a.example/api/content/${origin.contentId}/raw?version=7`,
-    });
-  });
-
-  it('rejects truncated text', () => {
+  it('rejects truncated text and preview kinds it does not know', () => {
     const text = encodeSummary(summary());
     expect(() => decodeSummary(ID, text.slice(0, 20), '')).toThrow(/truncated/);
-    expect(() => decodeSummary(ID, text.slice(0, text.indexOf('\u001e')), '')).toThrow(/separator/);
+    expect(() => decodeSummary(ID, text.replace('\ntext\n', '\nmedia\n'), '')).toThrow(/unknown preview kind/);
   });
 });
 
 describe('day index entries', () => {
-  it('packs each entry into 30 bytes, keeping whole seconds of the creation time', () => {
+  it('packs each entry into 25 bytes, keeping whole seconds of the creation time', () => {
     const entries: IndexEntry[] = [
-      { contentId: ID, version: 65535, createdAt: NOW + 999, likes: 4_000_000_000, size: 0xffffff, aiGenerated: true },
-      { contentId: '00000000-0000-4000-8000-000000000001', version: 1, createdAt: NOW, likes: 0, size: 0, aiGenerated: false },
+      { contentId: ID, createdAt: NOW + 999, likes: 4_000_000_000, aiGenerated: true, moderated: false },
+      { contentId: '00000000-0000-4000-8000-000000000001', createdAt: NOW, likes: 0, aiGenerated: false, moderated: false },
+      { contentId: '00000000-0000-4000-8000-000000000002', createdAt: NOW, likes: 1, aiGenerated: false, moderated: true },
+      { contentId: '00000000-0000-4000-8000-000000000003', createdAt: NOW, likes: 2, aiGenerated: true, moderated: true },
     ];
     const buf = packDay(entries);
-    expect(buf.length).toBe(2 * DAY_ENTRY_BYTES);
-    expect(unpackDay(buf)).toEqual([{ ...entries[0]!, createdAt: NOW }, entries[1]]);
+    expect(DAY_ENTRY_BYTES).toBe(25);
+    expect(buf.length).toBe(4 * DAY_ENTRY_BYTES);
+    expect(unpackDay(buf)).toEqual([{ ...entries[0]!, createdAt: NOW }, ...entries.slice(1)]);
+    // The flags are the entry's last byte: 1 for AI-generated, 2 for moderated.
+    expect(entries.map((_, i) => buf[(i + 1) * DAY_ENTRY_BYTES - 1])).toEqual([1, 0, 2, 3]);
   });
 
-  it('reads entries packed with a 32-bit size, before flags existed, as not AI-generated', () => {
-    const old = Buffer.alloc(DAY_ENTRY_BYTES);
-    Buffer.from(ID.replace(/-/g, ''), 'hex').copy(old);
-    old.writeUInt32BE(7, 16);
-    old.writeUInt32BE(NOW / 1000, 20);
-    old.writeUInt32BE(1234, 24);
-    old.writeUInt16BE(2, 28);
-    expect(unpackDay(old)).toEqual([{ contentId: ID, version: 2, createdAt: NOW, likes: 7, size: 1234, aiGenerated: false }]);
-  });
-
-  it('clamps likes to 32 bits and sizes to 24, and refuses ids that are not UUIDs', () => {
-    const [e] = unpackDay(packDay([{ contentId: ID, version: 1, createdAt: NOW, likes: 2 ** 40, size: -5, aiGenerated: false }]));
-    expect(e).toMatchObject({ likes: 0xffffffff, size: 0 });
-    const [big] = unpackDay(packDay([{ contentId: ID, version: 1, createdAt: NOW, likes: 0, size: 2 ** 24, aiGenerated: true }]));
-    expect(big).toMatchObject({ size: 0xffffff, aiGenerated: true });
-    expect(() => packDay([{ contentId: 'c-1', version: 1, createdAt: NOW, likes: 0, size: 0, aiGenerated: false }])).toThrow(/UUID/);
+  it('clamps likes to 32 bits, and refuses ids that are not UUIDs', () => {
+    const [e] = unpackDay(packDay([{ contentId: ID, createdAt: NOW, likes: 2 ** 40, aiGenerated: true, moderated: false }]));
+    expect(e).toMatchObject({ likes: 0xffffffff, aiGenerated: true });
+    const [none] = unpackDay(packDay([{ contentId: ID, createdAt: NOW, likes: -5, aiGenerated: false, moderated: false }]));
+    expect(none).toMatchObject({ likes: 0, aiGenerated: false });
+    expect(() => packDay([{ contentId: 'c-1', createdAt: NOW, likes: 0, aiGenerated: false, moderated: false }])).toThrow(/UUID/);
   });
 });
 
 describe('tail lines', () => {
-  it('round-trips records and tombstones, and ignores lines it cannot read', () => {
-    const record = { contentId: ID, version: 2, createdAt: NOW - 5, updatedAt: NOW, likes: 0, size: 456, aiGenerated: false };
-    expect(encodeTail(record)).toBe(`r ${ID} 2 ${NOW - 5} ${NOW} 456 0`);
+  it('round-trips records, tombstones and approvals, and ignores lines it cannot read', () => {
+    const record = { contentId: ID, createdAt: NOW - 5, updatedAt: NOW, likes: 0, aiGenerated: false, moderated: false };
+    expect(encodeTail(record)).toBe(`r ${ID} ${NOW - 5} ${NOW} 0`);
     expect(decodeTail(encodeTail(record))).toEqual(record);
     const ai = { ...record, aiGenerated: true };
-    expect(encodeTail(ai)).toBe(`r ${ID} 2 ${NOW - 5} ${NOW} 456 1`);
+    expect(encodeTail(ai)).toBe(`r ${ID} ${NOW - 5} ${NOW} 1`);
     expect(decodeTail(encodeTail(ai))).toEqual(ai);
-    // Pushed before flags existed.
-    expect(decodeTail(`r ${ID} 2 ${NOW - 5} ${NOW} 456`)).toEqual(record);
-    for (const below of [3, null]) {
-      const t = { tombstone: true as const, contentId: ID, below, createdAt: NOW };
+    const moderated = { ...ai, moderated: true };
+    expect(encodeTail(moderated)).toBe(`r ${ID} ${NOW - 5} ${NOW} 3`);
+    expect(decodeTail(encodeTail(moderated))).toEqual(moderated);
+    const approval = { approval: true as const, contentId: ID, createdAt: NOW - 5 };
+    expect(encodeTail(approval)).toBe(`a ${ID} ${NOW - 5}`);
+    expect(decodeTail(encodeTail(approval))).toEqual(approval);
+    expect(decodeTail(`a ${ID}`)).toBeNull();
+    // A record with no flags isn't one this server wrote.
+    expect(decodeTail(`r ${ID} ${NOW - 5} ${NOW}`)).toBeNull();
+    for (const before of [NOW, null]) {
+      const t = { tombstone: true as const, contentId: ID, before, createdAt: NOW - 5 };
+      expect(encodeTail(t)).toBe(`t ${ID} ${before ?? '*'} ${NOW - 5}`);
       expect(decodeTail(encodeTail(t))).toEqual(t);
     }
     expect(decodeTail('{"contentId":"x"}')).toBeNull();
@@ -173,6 +148,37 @@ describe('MemoryHotStore', () => {
     await hot.zrem('tails', [0, 300, 600]);
     expect(await hot.scores('tails', 0, Infinity)).toEqual([]);
   });
+
+  it('keeps a set in the order of its members, read a range at a time from either end, which lasts from when it was begun', async () => {
+    let now = NOW;
+    const hot = new MemoryHotStore(() => now);
+    expect(await hot.lexRange('ids', { limit: 10 })).toEqual([]);
+    expect([await hot.lexCount('ids'), await hot.lexHas('ids', 'b')]).toEqual([0, false]);
+    await hot.lexAdd('ids', [], 1000);
+    expect(await hot.exists(['ids'])).toEqual([false]);
+
+    await hot.lexAdd('ids', ['d', 'b', '~'], 1000);
+    now += 600;
+    // Adding to it doesn't make it last longer; adding a member again changes nothing.
+    await hot.lexAdd('ids', ['a', 'c', 'b'], 1000);
+    expect(await hot.lexRange('ids', { limit: 10 })).toEqual(['a', 'b', 'c', 'd', '~']);
+    expect(await hot.lexRange('ids', { before: '~', limit: 2 })).toEqual(['a', 'b']);
+    expect(await hot.lexRange('ids', { after: 'b', before: '~', limit: 10 })).toEqual(['c', 'd']);
+    expect(await hot.lexRange('ids', { before: '~', limit: 2, reverse: true })).toEqual(['d', 'c']);
+    expect(await hot.lexRange('ids', { after: 'a', before: 'c', limit: 10, reverse: true })).toEqual(['b']);
+    expect([await hot.lexCount('ids'), await hot.lexCount('ids', { before: '~' }), await hot.lexCount('ids', { after: 'b', before: 'd' })]).toEqual([5, 4, 1]);
+    expect([await hot.lexHas('ids', '~'), await hot.lexHas('ids', 'e')]).toEqual([true, false]);
+
+    await hot.lexRem('ids', ['b', 'e']);
+    expect(await hot.lexRange('ids', { before: '~', limit: 10 })).toEqual(['a', 'c', 'd']);
+    now += 400;
+    expect(await hot.lexRange('ids', { limit: 10 })).toEqual([]);
+
+    // A set left with no member is gone, and begins again with the next.
+    await hot.lexAdd('ids', ['a'], 1000);
+    await hot.lexRem('ids', ['a']);
+    expect(await hot.exists(['ids'])).toEqual([false]);
+  });
 });
 
 describe('SummaryStore', () => {
@@ -182,9 +188,9 @@ describe('SummaryStore', () => {
   });
 
   const create = async (now: () => number) => {
-    dir = await mkdtemp(join(tmpdir(), 'theuniverse-summaries-'));
+    dir = await mkdtemp(join(tmpdir(), 'evieverse-summaries-'));
     const hot = new MemoryHotStore(now);
-    const store = new SummaryStore(hot, { scheme: 'fs', options: { root: dir } }, { hotDays: 8, quality: 11, cacheSize: 0, publicBaseUrl: '' }, now);
+    const store = new SummaryStore(hot, { scheme: 'fs', options: { root: dir } }, { hotDays: 8, quality: 11, cacheSize: 16, cacheSeconds: 60, publicBaseUrl: '' }, now);
     return { hot, store };
   };
 
@@ -196,6 +202,18 @@ describe('SummaryStore', () => {
     await store.put(old);
     expect(await hot.exists([summaryKey(recent), summaryKey(old)])).toEqual([true, false]);
     expect(await store.getMany([recent, old])).toEqual([recent, old]);
+  });
+
+  it('writes an update over the summary, in both tiers', async () => {
+    const { store } = await create(() => NOW);
+    const posts = [summary({ createdAt: NOW - DAY }), summary({ contentId: '00000000-0000-4000-8000-000000000002', createdAt: NOW - 9 * DAY })];
+    for (const s of posts) await store.put(s);
+    expect(await store.getMany(posts)).toEqual(posts);
+    const updated = posts.map((s) => ({ ...s, updatedAt: NOW + 5, tags: ['news'], preview: { kind: 'text' as const, text: 'Roads reopen.' } }));
+    for (const s of updated) await store.put(s);
+    expect(await store.getMany(posts)).toEqual(updated);
+    const files = await readdir(join(dir, 'summaries'), { recursive: true, withFileTypes: true });
+    expect(files.filter((f) => f.isFile()).map((f) => f.name).sort()).toEqual(posts.map((s) => `${s.contentId}.br`).sort());
   });
 
   it('restores a missing tier with ensure, and deletes whole days past retention', async () => {

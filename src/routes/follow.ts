@@ -1,19 +1,17 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
-import { isUniqueViolation } from '../db/index.js';
+import { isUniqueViolation, lockUser } from '../db/index.js';
 import type { AppDeps } from '../deps.js';
 import { syncFollowing } from '../follows.js';
-import { badRequest, conflict, forbidden, notFound } from '../http/errors.js';
-import { decodeListCursor, encodeListCursor } from '../http/listCursor.js';
+import { badRequest, conflict, forbidden, HttpError, notFound } from '../http/errors.js';
+import { listPage, listQuery } from '../http/listCursor.js';
+import { Credentials } from '../http/schemas.js';
+import { msg } from '../language.js';
+import { iso } from '../time.js';
 
 const Params = z.object({ userId: z.string().uuid() });
 const PairParams = z.object({ userId: z.string().uuid(), followeeId: z.string().uuid() });
-const Credentials = z.object({ userId: z.string().optional(), apiKey: z.string().optional() });
-const ListQuery = z.object({
-  limit: z.coerce.number().int().min(1).max(1000).default(100),
-  cursor: z.string().optional(),
-});
 
 /** Each list is the user's side of a follow, and the other user's. */
 const SIDES = {
@@ -21,20 +19,23 @@ const SIDES = {
   followers: { own: 'follows.followee_id', other: 'follows.follower_id' },
 } as const;
 
-const iso = (ms: number) => new Date(ms).toISOString();
-
 export function followRoutes(app: FastifyInstance, { db, config, follows, now = Date.now }: AppDeps) {
   /**
    * Following feeds read whom a user follows from Redis. Every request rewrites it, so repeating one
-   * repairs a write that failed; the compactor also re-syncs users whose follows changed.
+   * repairs a write that failed. The compactor also re-syncs users who followed someone since its last
+   * run, so a follow whose write fails still succeeds. An unfollow leaves no row for it to find them
+   * by, so one whose write fails says so (`unfollowing`).
    */
-  const sync = (userId: string) =>
-    syncFollowing(db, follows, [userId]).catch((err) => app.log.warn({ err, userId }, 'could not write the follows to Redis'));
+  const sync = (userId: string, unfollowing = false) =>
+    syncFollowing(db, follows, [userId]).catch((err) => {
+      app.log.warn({ err, userId }, 'could not write the follows to Redis');
+      if (unfollowing) throw new HttpError(503, msg('follow.unfollowed_feed_not_updated'));
+    });
 
   /** The caller, who must be the user named in the path. */
   async function caller(req: FastifyRequest, userId: string) {
     const user = await authenticate(db, req, Credentials.parse(req.body ?? {}));
-    if (user.id !== userId) throw forbidden('you can only change whom you follow');
+    if (user.id !== userId) throw forbidden(msg('follow.own_only'));
     return user;
   }
 
@@ -45,9 +46,9 @@ export function followRoutes(app: FastifyInstance, { db, config, follows, now = 
   app.put('/users/:userId/following/:followeeId', async (req, reply) => {
     const { userId, followeeId } = PairParams.parse(req.params);
     await caller(req, userId);
-    if (followeeId === userId) throw badRequest("you can't follow yourself");
+    if (followeeId === userId) throw badRequest(msg('follow.yourself'));
     const followee = await db.selectFrom('users').select('id').where('id', '=', followeeId).executeTakeFirst();
-    if (!followee) throw notFound('user not found');
+    if (!followee) throw notFound(msg('user.not_found'));
 
     let followedAt = (await findFollow(userId, followeeId))?.created_at;
     const alreadyFollowing = followedAt !== undefined;
@@ -55,14 +56,14 @@ export function followRoutes(app: FastifyInstance, { db, config, follows, now = 
       const ts = now();
       try {
         await db.transaction().execute(async (trx) => {
-          // First, so the user's row is locked: their follows take turns, and none gets past the limit.
-          await trx.updateTable('users').set({ following_changed_at: ts }).where('id', '=', userId).execute();
+          // First: the user's follows then take turns, and none gets past the limit.
+          await lockUser(trx, config.db.dialect, userId);
           const { n } = await trx
             .selectFrom('follows')
             .select((eb) => eb.fn.countAll().as('n'))
             .where('follower_id', '=', userId)
             .executeTakeFirstOrThrow();
-          if (Number(n) >= config.maxFollowing) throw conflict(`you can follow at most ${config.maxFollowing} users`);
+          if (Number(n) >= config.maxFollowing) throw conflict(msg('follow.limit', { max: config.maxFollowing }));
           await trx.insertInto('follows').values({ follower_id: userId, followee_id: followeeId, created_at: ts }).execute();
         });
         followedAt = ts;
@@ -80,48 +81,30 @@ export function followRoutes(app: FastifyInstance, { db, config, follows, now = 
   app.delete('/users/:userId/following/:followeeId', async (req) => {
     const { userId, followeeId } = PairParams.parse(req.params);
     await caller(req, userId);
-    const wasFollowing = (await findFollow(userId, followeeId)) !== undefined;
-    if (wasFollowing) {
-      await db.transaction().execute(async (trx) => {
-        // The user's row before the follows row, as when following, so the two can't deadlock.
-        await trx.updateTable('users').set({ following_changed_at: now() }).where('id', '=', userId).execute();
-        await trx.deleteFrom('follows').where('follower_id', '=', userId).where('followee_id', '=', followeeId).execute();
-      });
-    }
-    await sync(userId);
-    return { userId, followeeId, wasFollowing };
+    const removed = await db.deleteFrom('follows').where('follower_id', '=', userId).where('followee_id', '=', followeeId).executeTakeFirst();
+    await sync(userId, true);
+    return { userId, followeeId, wasFollowing: Number(removed.numDeletedRows) === 1 };
   });
 
   /** Follows are public, like posts: anyone can list whom a user follows, and who follows them. */
   for (const list of ['following', 'followers'] as const) {
     app.get(`/users/:userId/${list}`, async (req) => {
       const { userId } = Params.parse(req.params);
-      const q = ListQuery.parse(req.query);
-      const after = q.cursor ? decodeListCursor(q.cursor) : undefined;
+      const page = listQuery(req.query);
       const user = await db.selectFrom('users').select('id').where('id', '=', userId).executeTakeFirst();
-      if (!user) throw notFound('user not found');
+      if (!user) throw notFound(msg('user.not_found'));
 
       const { own, other } = SIDES[list];
-      let query = db
+      const query = db
         .selectFrom('follows')
         .innerJoin('users', 'users.id', other)
-        .select(['users.id', 'users.username', 'users.publisher_url', 'follows.created_at'])
-        .where(own, '=', userId)
-        .orderBy('follows.created_at', 'desc')
-        .orderBy(other, 'asc')
-        .limit(q.limit + 1);
-      if (after) {
-        query = query.where((eb) =>
-          eb.or([eb('follows.created_at', '<', after.createdAt), eb.and([eb('follows.created_at', '=', after.createdAt), eb(other, '>', after.userId)])]),
-        );
-      }
-      const rows = await query.execute();
-      const page = rows.slice(0, q.limit);
-      const last = page.at(-1);
+        .select(['users.id', 'users.username', 'follows.created_at'])
+        .where(own, '=', userId);
+      const { rows, nextCursor } = await listPage(query, { createdAt: 'follows.created_at', userId: other }, page);
       return {
         userId,
-        [list]: page.map((r) => ({ userId: r.id, username: r.username, publisherUrl: r.publisher_url, followedAt: iso(r.created_at) })),
-        nextCursor: rows.length > q.limit && last ? encodeListCursor(last.created_at, last.id) : null,
+        [list]: rows.map((r) => ({ userId: r.id, username: r.username, followedAt: iso(r.created_at) })),
+        nextCursor,
       };
     });
   }

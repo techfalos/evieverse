@@ -1,5 +1,5 @@
 import type { HotStore } from '../storage/index.js';
-import { encodeTail, tailIndexKey, tailKey, type TailRecord, type Tombstone } from './layout.js';
+import { encodeTail, tailIndexKey, tailKey, type TailLine, type Tombstone } from './layout.js';
 
 /**
  * "Prepends" entries to a tag by pushing one line onto the tag's Redis list for the current window;
@@ -13,7 +13,7 @@ export class TagAppender {
     private readonly now: () => number = Date.now,
   ) {}
 
-  append(tag: string, entry: TailRecord | Tombstone): Promise<void> {
+  append(tag: string, entry: TailLine): Promise<void> {
     const window = Math.floor(this.now() / this.opts.windowMs) * this.opts.windowMs;
     return this.hot.push(tailKey(tag, window), encodeTail(entry), { key: tailIndexKey(tag), score: window });
   }

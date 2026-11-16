@@ -10,7 +10,7 @@ variable "location" {
 variable "name" {
   description = "Prefix for every resource name (lowercase letters and digits)."
   type        = string
-  default     = "theuniverse"
+  default     = "evieverse"
 }
 
 variable "image" {
@@ -20,13 +20,57 @@ variable "image" {
 }
 
 variable "min_replicas" {
-  type    = number
-  default = 1
+  description = "Replicas each route group keeps running. 0 lets a group with no traffic cost nothing; its next request then waits for a replica to start."
+  type        = number
+  default     = 0
 }
 
 variable "max_replicas" {
-  type    = number
-  default = 10
+  description = "Most replicas of each route group that uses the database (content, store, api). Each keeps up to `db_pool_size` connections, and together with the compactor they must stay under the database's limit: 3 x max_replicas x db_pool_size + 5 <= the connections the server leaves for users (35 on B_Standard_B1ms)."
+  type        = number
+  default     = 3
+}
+
+variable "feed_max_replicas" {
+  description = "Most replicas of the feed group, which reads Redis and blobs only."
+  type        = number
+  default     = 10
+}
+
+variable "db_pool_size" {
+  description = "Database connections per replica. See `max_replicas`."
+  type        = number
+  default     = 3
+}
+
+variable "request_timeout" {
+  description = "Seconds Front Door waits for an app to answer (16 to 240), e.g. for a post whose AI analysis is slow."
+  type        = number
+  default     = 240
+}
+
+variable "trust_proxy" {
+  description = "How many proxies in front of an app add to X-Forwarded-For (Front Door, then the Container Apps ingress). The address counted for per-address limits is read that many entries from the end. Check it after the first apply: see deploy/README.md."
+  type        = number
+  default     = 2
+}
+
+variable "compactor_cpu" {
+  description = "CPUs of the compactor's replica. The compactor is one replica that is always up; how often it makes a pass is COMPACT_INTERVAL_SECONDS in `environment` (5 by default)."
+  type        = number
+  default     = 0.5
+}
+
+variable "compactor_memory" {
+  description = "Memory of the compactor's replica. Container Apps takes 2Gi for each CPU."
+  type        = string
+  default     = "1Gi"
+}
+
+variable "upload_origins" {
+  description = "Origins whose pages may send files straight to blob storage with an upload link. The link itself is the permission; this only tells browsers which pages may use one."
+  type        = list(string)
+  default     = ["*"]
 }
 
 variable "db_sku" {
@@ -57,4 +101,20 @@ variable "secrets" {
   type        = map(string)
   default     = {}
   sensitive   = true
+}
+
+variable "admin_username" {
+  description = "Username of the admin account the deployment creates. It names the account when it's created: to rename it afterwards, use PATCH /users/:userId."
+  type        = string
+  default     = "admin"
+  validation {
+    condition     = length(trimspace(var.admin_username)) >= 1 && length(trimspace(var.admin_username)) <= 64
+    error_message = "A username is 1 to 64 characters."
+  }
+}
+
+variable "install_admin_profile" {
+  description = "Write the admin account's API key to ~/.evieverse/profiles/<name>.json on the machine that applies, where the CLI reads it. Turn it off where applies run unattended, and read the key with `terraform output -raw admin_api_key`."
+  type        = bool
+  default     = true
 }

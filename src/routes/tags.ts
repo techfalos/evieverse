@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { AppDeps } from '../deps.js';
+import { iso } from '../time.js';
 
 const Query = z.object({
   prefix: z
@@ -24,6 +25,6 @@ export function tagRoutes(app: FastifyInstance, { db }: AppDeps) {
     const prefix = q.prefix?.replace(/^#/, '').toLowerCase();
     if (prefix) query = query.where('name', 'like', `${prefix}%`);
     const rows = await query.execute();
-    return { tags: rows.map((r) => ({ tag: r.name, lastActiveAt: new Date(r.last_appended_at).toISOString() })) };
+    return { tags: rows.map((r) => ({ tag: r.name, lastActiveAt: iso(r.last_appended_at) })) };
   });
 }

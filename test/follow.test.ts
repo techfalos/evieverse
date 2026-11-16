@@ -1,11 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DAY } from '../src/feed/plan.js';
 import { authorIndex, compareRecent } from '../src/tagfeed/layout.js';
-import { createTestContext, hashtags, TARGETS, type TestContext } from './helpers.js';
+import { DAY } from '../src/time.js';
+import { as, createTestContext, requests, TARGETS, type FeedItem, type TestContext, type User } from './helpers.js';
 
-type User = { userId: string; apiKey: string };
-type Item = { contentId: string; version: number; likes: number; aiGenerated: boolean; tags: string[]; publisher: { userId: string } };
-type FollowingFeed = { count: number; truncated: boolean; nextCursor: string | null; records: Item[] };
+type FollowingFeed = { count: number; truncated: boolean; nextCursor: string | null; records: FeedItem[] };
 type UserList = { userId: string; nextCursor: string | null } & Record<'following' | 'followers', { userId: string; username: string; followedAt: string }[]>;
 
 for (const target of TARGETS) {
@@ -16,7 +14,6 @@ for (const target of TARGETS) {
       await ctx.close();
     });
 
-    const as = (u: User) => ({ authorization: `Bearer ${u.apiKey}`, 'x-user-id': u.userId });
     const follow = (u: User, followeeId: string) => ctx.app.inject({ method: 'PUT', url: `/users/${u.userId}/following/${followeeId}`, headers: as(u) });
     const unfollow = (u: User, followeeId: string) => ctx.app.inject({ method: 'DELETE', url: `/users/${u.userId}/following/${followeeId}`, headers: as(u) });
     const list = async (userId: string, which: 'following' | 'followers', query = '') => {
@@ -24,11 +21,7 @@ for (const target of TARGETS) {
       expect(res.statusCode, res.body).toBe(200);
       return res.json() as UserList;
     };
-    const post = async (u: User, text: string, extra: Record<string, unknown> = {}) => {
-      const res = await ctx.app.inject({ method: 'POST', url: '/store', payload: { ...u, type: 'text', text, tags: hashtags(text), ...extra } });
-      expect(res.statusCode, res.body).toBe(201);
-      return res.json().contentId as string;
-    };
+    const { post } = requests(() => ctx);
     const feed = async (userId: string, query = ''): Promise<FollowingFeed> => {
       const res = await ctx.app.inject({ method: 'GET', url: `/feed/following?userId=${userId}${query}` });
       expect(res.statusCode, res.body).toBe(200);
@@ -127,9 +120,11 @@ for (const target of TARGETS) {
       const f = await feed(dave.userId);
       expect(ids(f)).toEqual([a2, b1, a1]);
       expect(f).toMatchObject({ count: 3, truncated: false, nextCursor: null });
-      // The same records as hashtag feeds return.
+      // The same records as hashtag feeds return, but for `moderated`, which is a post's standing under one hashtag.
       const news = (await ctx.app.inject({ method: 'GET', url: '/feed?tags=news' })).json();
-      expect(f.records[2]).toEqual(news.days[0].tags.news.find((r: Item) => r.contentId === a1));
+      const { moderated, ...record } = news.days[0].tags.news.find((r: FeedItem) => r.contentId === a1);
+      expect(moderated).toBe(false);
+      expect(f.records[2]).toEqual(record);
       expect(f.records[1]).toMatchObject({ publisher: { userId: bob.userId, username: 'bob' }, tags: ['sports'], aiGenerated: true });
       expect(ids(await feed(dave.userId, '&aiGenerated=true'))).toEqual([b1]);
       expect(ids(await feed(dave.userId, '&aiGenerated=false'))).toEqual([a2, a1]);
@@ -163,7 +158,7 @@ for (const target of TARGETS) {
       await ctx.compact();
 
       const news = (await ctx.app.inject({ method: 'GET', url: '/feed?tags=news' })).json();
-      expect(news.days[0].tags.news.map((r: Item) => r.contentId).sort()).toEqual(posts.slice(0, 2).sort());
+      expect(news.days[0].tags.news.map((r: FeedItem) => r.contentId).sort()).toEqual(posts.slice(0, 2).sort());
       // FEED_AUTHOR_DAY_MAX_POSTS keeps the newest 4.
       const f = await feed(bob.userId);
       expect(ids(f)).toEqual([...posts].reverse().slice(0, 4));
@@ -204,7 +199,7 @@ for (const target of TARGETS) {
       expect((await ctx.app.inject({ method: 'GET', url: `/feed/following?userId=${reader.userId}&cursor=${tagCursor}` })).statusCode).toBe(400);
     });
 
-    it('hides deleted posts and shows new versions in their place at once, and like counts after compaction', async () => {
+    it('hides deleted posts and shows updated posts as they now are at once, and like counts after compaction', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const bob = await ctx.register('bob');
@@ -218,7 +213,7 @@ for (const target of TARGETS) {
 
       const upd = await ctx.app.inject({ method: 'POST', url: '/store', payload: { ...alice, contentId: p2, type: 'text', text: 'second, edited #sports', tags: ['sports'] } });
       expect(upd.statusCode, upd.body).toBe(200);
-      expect((await feed(bob.userId)).records.map((r) => [r.contentId, r.version])).toEqual([[p3, 1], [p2, 2], [p1, 1]]);
+      expect((await feed(bob.userId)).records.map((r) => [r.contentId, r.preview.text])).toEqual([[p3, 'third #news'], [p2, 'second, edited #sports'], [p1, 'first #news']]);
       expect((await ctx.app.inject({ method: 'DELETE', url: `/content/${p1}`, headers: as(alice) })).statusCode).toBe(202);
       expect(ids(await feed(bob.userId))).toEqual([p3, p2]);
 
@@ -226,7 +221,7 @@ for (const target of TARGETS) {
       const run = await ctx.compact();
       expect(run.tags).toEqual([authorIndex(alice.userId), 'news', 'sports']);
       expect(run.deleted).toEqual([p1]);
-      expect((await feed(bob.userId)).records.map((r) => [r.contentId, r.version, r.likes])).toEqual([[p3, 1, 1], [p2, 2, 0]]);
+      expect((await feed(bob.userId)).records.map((r) => [r.contentId, r.preview.text, r.likes])).toEqual([[p3, 'third #news', 1], [p2, 'second, edited #sports', 0]]);
     });
 
     it('reaches back across days, loading only the day indexes a page needs', async () => {
@@ -263,7 +258,7 @@ for (const target of TARGETS) {
       expect(ids(await feed(reader.userId))).toEqual(order);
     });
 
-    it('keeps follows in Redis in step with the database: a repeated request, the next compactor run and --rebuild repair them', async () => {
+    it('keeps follows in Redis in step with the database: the next compactor run repairs a follow, a repeated request an unfollow, and --rebuild everything', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const bob = await ctx.register('bob');
@@ -280,8 +275,11 @@ for (const target of TARGETS) {
       await ctx.compact();
       expect(ids(await feed(reader.userId))).toEqual([fromBob, fromAlice]);
 
+      // Nothing is left of an unfollow for the compactor to find, so one whose Redis write fails says so.
       vi.spyOn(ctx.follows, 'put').mockRejectedValueOnce(new Error('redis is down'));
-      expect((await unfollow(reader, alice.userId)).json()).toMatchObject({ wasFollowing: true });
+      const failed = await unfollow(reader, alice.userId);
+      expect(failed.statusCode).toBe(503);
+      expect(failed.json().error).toBe("you no longer follow them, but your following feed couldn't be updated; send the request again");
       expect(ids(await feed(reader.userId))).toEqual([fromBob, fromAlice]);
       expect((await unfollow(reader, alice.userId)).json()).toMatchObject({ wasFollowing: false });
       expect(ids(await feed(reader.userId))).toEqual([fromBob]);

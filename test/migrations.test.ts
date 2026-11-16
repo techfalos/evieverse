@@ -21,57 +21,45 @@ describe('SQL migrations', () => {
       expect(tables).toEqual([
         'api_keys',
         'blocked_words',
+        'comment_queue',
+        'comment_reports',
         'compactor_lease',
         'content',
         'follows',
+        'inbox',
         'likes',
+        'moderation_queue',
         'pending_appends',
-        'removed_tags',
-        'superseded_versions',
+        'reports',
+        'tag_moderation',
         'tag_moderators',
         'tag_mutes',
+        'tag_pairs',
         'tags',
+        'user_blocks',
         'users',
       ]);
       const columns = async (table: string) =>
         (await db.introspection.getTables()).find((t) => t.name === table)!.columns.map((c) => c.name).sort();
-      expect(await columns('users')).toEqual([
-        'admin',
-        'created_at',
-        'following_changed_at',
-        'id',
-        'last_post_at',
-        'post_streak',
-        'publisher_url',
-        'recent_posts',
-        'updated_at',
-        'username',
-      ]);
-      expect(await columns('content')).toEqual([
-        'ai_generated',
-        'created_at',
-        'delete_requested_at',
-        'filename',
-        'id',
-        'like_count',
-        'mime_type',
-        'origin_content_id',
-        'origin_server',
-        'origin_version',
-        'reserved_version',
-        'sha256',
-        'size',
-        'updated_at',
-        'user_id',
-        'version',
-      ]);
+      expect(await columns('users')).toEqual(['admin', 'created_at', 'id', 'language', 'messages', 'moderator', 'updated_at', 'username']);
+      expect(await columns('inbox')).toEqual(['body', 'content_id', 'created_at', 'id', 'kind', 'read_at', 'sender_id', 'tag', 'user_id']);
+      expect(await columns('user_blocks')).toEqual(['blocked_id', 'created_at', 'user_id']);
+      expect(await columns('content')).toEqual(['ai_generated', 'created_at', 'delete_requested_at', 'id', 'like_count', 'user_id']);
+      expect(await columns('api_keys')).toEqual(['created_at', 'id', 'key_hash', 'revoked_at', 'user_id']);
+      expect(await columns('pending_appends')).toEqual(['content_id', 'created_at', 'tag']);
       expect(await columns('tags')).toEqual(['compacted_at', 'created_at', 'last_appended_at', 'name']);
+      expect(await columns('tag_pairs')).toEqual(['posts', 'tag_a', 'tag_b', 'updated_at']);
+      expect(await columns('moderation_queue')).toEqual(['content_id', 'created_at', 'trust_score']);
+      expect(await columns('tag_moderation')).toEqual(['applied_at', 'content_id', 'decided_at', 'decision', 'moderator_id', 'tag']);
+      expect(await columns('reports')).toEqual(['accepted_at', 'content_id', 'created_at', 'reason', 'user_id']);
+      expect(await columns('comment_queue')).toEqual(['comment_id', 'content_id', 'created_at', 'trust_score']);
+      expect(await columns('comment_reports')).toEqual(['accepted_at', 'comment_id', 'content_id', 'created_at', 'reason', 'user_id']);
 
       await sql`INSERT INTO users (id, username, created_at, updated_at) VALUES ('u1', 'alice', 0, 0)`.execute(db);
       await expect(sql`INSERT INTO users (id, username, created_at, updated_at) VALUES ('u2', 'alice', 0, 0)`.execute(db)).rejects.toThrow(/UNIQUE/);
-      await sql`INSERT INTO api_keys (id, user_id, key_prefix, key_hash, created_at) VALUES ('k1', 'u1', 'p', 'h', 0)`.execute(db);
+      await sql`INSERT INTO api_keys (id, user_id, key_hash, created_at) VALUES ('k1', 'u1', 'h', 0)`.execute(db);
       await expect(
-        sql`INSERT INTO api_keys (id, user_id, key_prefix, key_hash, created_at) VALUES ('k2', 'missing', 'p', 'h', 0)`.execute(db),
+        sql`INSERT INTO api_keys (id, user_id, key_hash, created_at) VALUES ('k2', 'missing', 'h', 0)`.execute(db),
       ).rejects.toThrow(/FOREIGN KEY/);
       await sql`DELETE FROM users WHERE id = 'u1'`.execute(db);
       expect((await db.selectFrom('api_keys').select('id').execute()).length).toBe(0);

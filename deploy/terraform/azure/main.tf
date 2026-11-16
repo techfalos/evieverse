@@ -1,15 +1,16 @@
-# theuniverse on Azure:
-#   Container Apps (HTTPS *.azurecontainerapps.io URL) for the API and a single-replica compactor,
-#   the feed index and hot summaries in Azure Managed Redis, content and summaries as blobs,
-#   and Azure Database for PostgreSQL Flexible Server.
+# Evieverse on Azure:
+#   Front Door (HTTPS *.azurefd.net URL) -> one Container App per route group (feed, content,
+#   store, api), each scaling with its own traffic, down to none. All run the one container image.
+#   The compactor is one process that is always up: a Container App of one replica, with no
+#   ingress. The feed index and hot summaries are in Azure Managed Redis, content and summaries are
+#   blobs, metadata is in Azure Database for PostgreSQL Flexible Server.
 
 locals {
-  root        = abspath("${path.module}/../../..")
-  source_hash = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json"]) : filesha1("${local.root}/${f}")]))
-  compact     = replace(var.name, "-", "")
-  image       = var.image != "" ? var.image : "${azurerm_container_registry.main.login_server}/app:${substr(local.source_hash, 0, 12)}"
-  # Deterministic app URL, known before the app exists (the app needs it as PUBLIC_BASE_URL).
-  url           = "https://${var.name}.${azurerm_container_app_environment.main.default_domain}"
+  root          = abspath("${path.module}/../../..")
+  source_hash   = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json", "scripts/build-cli.mjs"]) : filesha1("${local.root}/${f}")]))
+  compact       = replace(var.name, "-", "")
+  image         = var.image != "" ? var.image : "${azurerm_container_registry.main.login_server}/app:${substr(local.source_hash, 0, 12)}"
+  url           = "https://${azurerm_cdn_frontdoor_endpoint.main.host_name}"
   blob_endpoint = trimsuffix(azurerm_storage_account.main.primary_blob_endpoint, "/")
 
   blob_options = {
@@ -27,11 +28,35 @@ locals {
 
   # Env var name -> secret value. Container Apps secret names are lowercase with hyphens.
   secret_env = merge({
-    DATABASE_URL    = "postgres://theuniverse:${random_password.db.result}@${azurerm_postgresql_flexible_server.main.fqdn}:5432/theuniverse?sslmode=require"
+    DATABASE_URL    = "postgres://evieverse:${random_password.db.result}@${azurerm_postgresql_flexible_server.main.fqdn}:5432/evieverse?sslmode=require"
     REDIS_URL       = "rediss://:${azurerm_managed_redis.main.default_database[0].primary_access_key}@${azurerm_managed_redis.main.hostname}:${azurerm_managed_redis.main.default_database[0].port}"
     CONTENT_OPTIONS = jsonencode(merge(local.blob_options, { container = azurerm_storage_container.content.name }))
   }, var.secrets)
   secret_names = nonsensitive(toset(keys(local.secret_env)))
+
+  # The route groups of src/functions/groups.ts, and the paths Front Door sends to each: change the
+  # two together. The most specific pattern wins, so anything not listed goes to the api group.
+  # /content/* is the content group's for reading only: see the ContentWrites rule.
+  groups = {
+    feed    = { patterns = ["/feed", "/feed/*"], max_replicas = var.feed_max_replicas }
+    content = { patterns = ["/content/*"], max_replicas = var.max_replicas }
+    store   = { patterns = ["/uploads", "/store"], max_replicas = var.max_replicas }
+    api     = { patterns = ["/*"], max_replicas = var.max_replicas }
+  }
+
+  function_env = merge({
+    # Every replica keeps up to this many database connections. See `max_replicas`.
+    DB_POOL_SIZE = tostring(var.db_pool_size)
+    TRUST_PROXY  = tostring(var.trust_proxy)
+  }, local.env)
+  # Front Door sends this to the apps, whose own addresses are public; they refuse requests without it.
+  function_secret_env   = merge(local.secret_env, { FUNCTION_EDGE_SECRET = random_password.edge.result })
+  function_secret_names = setunion(local.secret_names, ["FUNCTION_EDGE_SECRET"])
+}
+
+resource "random_password" "edge" {
+  length  = 40
+  special = false
 }
 
 resource "random_string" "suffix" {
@@ -74,6 +99,17 @@ resource "azurerm_storage_account" "main" {
   account_replication_type        = "LRS"
   min_tls_version                 = "TLS1_2"
   allow_nested_items_to_be_public = false
+
+  # Browsers send files straight to the container, with the link POST /uploads signs.
+  blob_properties {
+    cors_rule {
+      allowed_methods    = ["PUT"]
+      allowed_origins    = var.upload_origins
+      allowed_headers    = ["*"]
+      exposed_headers    = ["ETag"]
+      max_age_in_seconds = 3600
+    }
+  }
 }
 
 # Summaries share this container, under summaries/<UTC day>/; the compactor deletes days past retention.
@@ -81,6 +117,25 @@ resource "azurerm_storage_container" "content" {
   name                  = "content"
   storage_account_id    = azurerm_storage_account.main.id
   container_access_type = "private"
+}
+
+# POST /store moves an upload into content/ and removes it; one nobody stored goes a day after it
+# was sent (Azure applies these rules about once a day).
+resource "azurerm_storage_management_policy" "uploads" {
+  storage_account_id = azurerm_storage_account.main.id
+  rule {
+    name    = "expire-unstored-uploads"
+    enabled = true
+    filters {
+      prefix_match = ["${azurerm_storage_container.content.name}/uploads/"]
+      blob_types   = ["blockBlob"]
+    }
+    actions {
+      base_blob {
+        delete_after_days_since_creation_greater_than = 1
+      }
+    }
+  }
 }
 
 # ---------------------------------------------------------------- redis
@@ -116,7 +171,7 @@ resource "azurerm_postgresql_flexible_server" "main" {
   resource_group_name           = azurerm_resource_group.main.name
   location                      = azurerm_resource_group.main.location
   version                       = "16"
-  administrator_login           = "theuniverse"
+  administrator_login           = "evieverse"
   administrator_password        = random_password.db.result
   sku_name                      = var.db_sku
   storage_mb                    = 32768
@@ -128,7 +183,7 @@ resource "azurerm_postgresql_flexible_server" "main" {
 }
 
 resource "azurerm_postgresql_flexible_server_database" "main" {
-  name      = "theuniverse"
+  name      = "evieverse"
   server_id = azurerm_postgresql_flexible_server.main.id
   charset   = "UTF8"
   collation = "en_US.utf8"
@@ -159,8 +214,157 @@ resource "azurerm_container_app_environment" "main" {
   log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
 }
 
-resource "azurerm_container_app" "app" {
-  name                         = var.name
+locals {
+  # What every app and job waits for before it starts.
+  ready = [
+    terraform_data.image,
+    azurerm_postgresql_flexible_server_firewall_rule.azure,
+    azurerm_postgresql_flexible_server_database.main,
+  ]
+}
+
+# ---------------------------------------------------------------- admin account
+
+# The server's first admin, and its API key in the server's own format (src/auth/apiKey.ts). The
+# migrate job below creates the account from the key's hash (src/moderation/bootstrap.ts), so
+# the key itself is only in the state and in the profile file. To replace the key:
+#   terraform apply -replace=random_password.admin_key
+resource "random_uuid" "admin" {}
+
+resource "random_id" "admin_key_prefix" {
+  byte_length = 6
+}
+
+# 43 characters of the 64 that base64url uses, which is what the server's keys end in.
+resource "random_password" "admin_key" {
+  length           = 43
+  override_special = "-_"
+}
+
+locals {
+  # random_uuid gives 32 random hex digits in a UUID's shape, where the server's ids are version 4
+  # UUIDs and its API takes nothing else. So the two digits that make it one are set here: the
+  # version (4) and the variant (8, 9, a or b).
+  admin_user_id = join("", [
+    substr(random_uuid.admin.result, 0, 14), "4", substr(random_uuid.admin.result, 15, 4),
+    element(["8", "9", "a", "b"], parseint(substr(random_uuid.admin.result, 19, 1), 16) % 4),
+    substr(random_uuid.admin.result, 20, 16),
+  ])
+  admin_api_key = sensitive("tu_${random_id.admin_key_prefix.hex}_${random_password.admin_key.result}")
+  bootstrap_admin = jsonencode({
+    userId   = local.admin_user_id
+    username = var.admin_username
+    keyHash  = nonsensitive(sha256(local.admin_api_key))
+  })
+  admin_profile_path = pathexpand("~/.evieverse/profiles/${var.name}.json")
+}
+
+# The admin's profile for the CLI, on the machine that applies: `evieverse --profile ${var.name} whoami`.
+resource "local_sensitive_file" "admin_profile" {
+  count                = var.install_admin_profile ? 1 : 0
+  filename             = local.admin_profile_path
+  file_permission      = "0600"
+  directory_permission = "0700"
+  content = jsonencode({
+    server   = local.url
+    userId   = local.admin_user_id
+    username = var.admin_username
+    apiKey   = local.admin_api_key
+  })
+  depends_on = [terraform_data.migrate]
+}
+
+# ---------------------------------------------------------------- migrations
+
+# Functions never migrate the database when they start (many start at once), so each apply that
+# changes the image or the admin account starts this job first and waits for it. The job also sets
+# up the admin account.
+resource "azurerm_container_app_job" "migrate" {
+  name                         = "${var.name}-migrate"
+  container_app_environment_id = azurerm_container_app_environment.main.id
+  resource_group_name          = azurerm_resource_group.main.name
+  location                     = azurerm_resource_group.main.location
+  replica_timeout_in_seconds   = 600
+  replica_retry_limit          = 0
+
+  manual_trigger_config {
+    parallelism              = 1
+    replica_completion_count = 1
+  }
+  registry {
+    server               = azurerm_container_registry.main.login_server
+    username             = azurerm_container_registry.main.admin_username
+    password_secret_name = "acr-password"
+  }
+  secret {
+    name  = "acr-password"
+    value = azurerm_container_registry.main.admin_password
+  }
+  secret {
+    name  = "database-url"
+    value = local.secret_env["DATABASE_URL"]
+  }
+
+  template {
+    container {
+      name    = "migrate"
+      image   = local.image
+      command = ["node", "dist/db/migrate.js"]
+      cpu     = 0.5
+      memory  = "1Gi"
+      env {
+        name  = "DB_DIALECT"
+        value = "postgres"
+      }
+      env {
+        name  = "BOOTSTRAP_ADMIN"
+        value = local.bootstrap_admin
+      }
+      env {
+        name        = "DATABASE_URL"
+        secret_name = "database-url"
+      }
+    }
+  }
+
+  depends_on = [local.ready]
+}
+
+resource "terraform_data" "migrate" {
+  triggers_replace = [local.image, local.bootstrap_admin]
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
+      job="--subscription ${var.subscription_id} --resource-group ${azurerm_resource_group.main.name} --name ${azurerm_container_app_job.migrate.name}"
+      run=$(az containerapp job start $job --query name --output tsv)
+      while :; do
+        status=$(az containerapp job execution show $job --job-execution-name "$run" --query properties.status --output tsv)
+        case "$status" in
+          Succeeded) exit 0 ;;
+          Failed | Stopped | Degraded) echo "the migration job ended as $status: see its logs" >&2; exit 1 ;;
+        esac
+        sleep 5
+      done
+    EOT
+  }
+
+  lifecycle {
+    precondition {
+      condition     = can(regex("^tu_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$", local.admin_api_key))
+      error_message = "The admin API key isn't in the format the server issues and accepts (KEY_PATTERN in src/auth/apiKey.ts)."
+    }
+    precondition {
+      condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", local.admin_user_id))
+      error_message = "The admin account's id isn't a version 4 UUID, which is what the server's user ids are."
+    }
+  }
+}
+
+# ---------------------------------------------------------------- functions
+
+resource "azurerm_container_app" "group" {
+  for_each                     = local.groups
+  name                         = "${var.name}-${each.key}"
   container_app_environment_id = azurerm_container_app_environment.main.id
   resource_group_name          = azurerm_resource_group.main.name
   revision_mode                = "Single"
@@ -175,10 +379,10 @@ resource "azurerm_container_app" "app" {
     value = azurerm_container_registry.main.admin_password
   }
   dynamic "secret" {
-    for_each = local.secret_names
+    for_each = local.function_secret_names
     content {
       name  = lower(replace(secret.value, "_", "-"))
-      value = local.secret_env[secret.value]
+      value = local.function_secret_env[secret.value]
     }
   }
 
@@ -195,21 +399,30 @@ resource "azurerm_container_app" "app" {
 
   template {
     min_replicas = var.min_replicas
-    max_replicas = var.max_replicas
+    max_replicas = each.value.max_replicas
+    http_scale_rule {
+      name                = "http"
+      concurrent_requests = "50"
+    }
     container {
-      name   = "app"
-      image  = local.image
-      cpu    = 1
-      memory = "2Gi"
+      name    = each.key
+      image   = local.image
+      command = ["node", "dist/functions/http.js"]
+      cpu     = 0.5
+      memory  = "1Gi"
+      env {
+        name  = "FUNCTION_GROUP"
+        value = each.key
+      }
       dynamic "env" {
-        for_each = local.env
+        for_each = local.function_env
         content {
           name  = env.key
           value = env.value
         }
       }
       dynamic "env" {
-        for_each = local.secret_names
+        for_each = local.function_secret_names
         content {
           name        = env.value
           secret_name = lower(replace(env.value, "_", "-"))
@@ -228,10 +441,17 @@ resource "azurerm_container_app" "app" {
     }
   }
 
-  depends_on = [terraform_data.image, azurerm_postgresql_flexible_server_firewall_rule.azure, azurerm_postgresql_flexible_server_database.main]
+  depends_on = [terraform_data.migrate, local.ready]
 }
 
-# Exactly one compactor replica, no ingress.
+# ---------------------------------------------------------------- compactor
+
+# The compactor is one process that stays up: pass after pass over the feed index, never two at
+# once, and never more than one in COMPACT_INTERVAL_SECONDS (5 unless `environment` says otherwise).
+# A scheduled job can't be that (a schedule starts one a minute at most), so it is a Container App
+# with no ingress and exactly one replica, which is started again whenever it stops. While a deploy
+# replaces the replica there can be two for a moment: their passes still don't overlap, since each
+# takes the compactor's lease in the database and a pass that finds it held is skipped.
 resource "azurerm_container_app" "compactor" {
   name                         = "${var.name}-compactor"
   container_app_environment_id = azurerm_container_app_environment.main.id
@@ -258,10 +478,71 @@ resource "azurerm_container_app" "compactor" {
   template {
     min_replicas = 1
     max_replicas = 1
+    # SIGTERM lets the pass that is running finish.
+    termination_grace_period_seconds = 120
     container {
       name    = "compactor"
       image   = local.image
       command = ["node", "dist/compact/main.js"]
+      cpu     = var.compactor_cpu
+      memory  = var.compactor_memory
+      dynamic "env" {
+        for_each = local.env
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+      dynamic "env" {
+        for_each = local.secret_names
+        content {
+          name        = env.value
+          secret_name = lower(replace(env.value, "_", "-"))
+        }
+      }
+    }
+  }
+
+  depends_on = [terraform_data.migrate, local.ready]
+}
+
+# `--rebuild` rebuilds the whole feed index from the database and blob storage, after Redis lost
+# data. It is a job, started by hand (see deploy/README.md). It can run beside the compactor: the
+# lease makes each wait for the other's pass.
+resource "azurerm_container_app_job" "rebuild" {
+  name                         = "${var.name}-rebuild"
+  container_app_environment_id = azurerm_container_app_environment.main.id
+  resource_group_name          = azurerm_resource_group.main.name
+  location                     = azurerm_resource_group.main.location
+  replica_timeout_in_seconds   = 86400
+  replica_retry_limit          = 0
+
+  manual_trigger_config {
+    parallelism              = 1
+    replica_completion_count = 1
+  }
+  registry {
+    server               = azurerm_container_registry.main.login_server
+    username             = azurerm_container_registry.main.admin_username
+    password_secret_name = "acr-password"
+  }
+  secret {
+    name  = "acr-password"
+    value = azurerm_container_registry.main.admin_password
+  }
+  dynamic "secret" {
+    for_each = local.secret_names
+    content {
+      name  = lower(replace(secret.value, "_", "-"))
+      value = local.secret_env[secret.value]
+    }
+  }
+
+  template {
+    container {
+      name    = "rebuild"
+      image   = local.image
+      command = ["node", "dist/compact/main.js", "--once", "--rebuild"]
       cpu     = 0.5
       memory  = "1Gi"
       dynamic "env" {
@@ -281,5 +562,106 @@ resource "azurerm_container_app" "compactor" {
     }
   }
 
-  depends_on = [terraform_data.image, azurerm_postgresql_flexible_server_firewall_rule.azure, azurerm_postgresql_flexible_server_database.main]
+  depends_on = [terraform_data.migrate, local.ready]
+}
+
+# ---------------------------------------------------------------- front door
+
+# One address for all four apps. No health probes: with one origin per group there is nothing to
+# fail over to, and probes would keep every app from scaling to none.
+resource "azurerm_cdn_frontdoor_profile" "main" {
+  name                     = var.name
+  resource_group_name      = azurerm_resource_group.main.name
+  sku_name                 = "Standard_AzureFrontDoor"
+  response_timeout_seconds = var.request_timeout
+}
+
+resource "azurerm_cdn_frontdoor_endpoint" "main" {
+  name                     = var.name
+  cdn_frontdoor_profile_id = azurerm_cdn_frontdoor_profile.main.id
+}
+
+resource "azurerm_cdn_frontdoor_origin_group" "group" {
+  for_each                 = local.groups
+  name                     = each.key
+  cdn_frontdoor_profile_id = azurerm_cdn_frontdoor_profile.main.id
+  load_balancing {}
+}
+
+resource "azurerm_cdn_frontdoor_origin" "group" {
+  for_each                       = local.groups
+  name                           = each.key
+  cdn_frontdoor_origin_group_id  = azurerm_cdn_frontdoor_origin_group.group[each.key].id
+  enabled                        = true
+  host_name                      = azurerm_container_app.group[each.key].ingress[0].fqdn
+  origin_host_header             = azurerm_container_app.group[each.key].ingress[0].fqdn
+  https_port                     = 443
+  certificate_name_check_enabled = true
+}
+
+# On every request: the secret that proves it came through Front Door.
+resource "azurerm_cdn_frontdoor_rule_set" "edge" {
+  name                     = "edge"
+  cdn_frontdoor_profile_id = azurerm_cdn_frontdoor_profile.main.id
+}
+
+resource "azurerm_cdn_frontdoor_rule" "edge_secret" {
+  name                      = "EdgeSecret"
+  cdn_frontdoor_rule_set_id = azurerm_cdn_frontdoor_rule_set.edge.id
+  order                     = 1
+  behavior_on_match         = "Continue"
+  actions {
+    request_header_action {
+      header_action = "Overwrite"
+      header_name   = "X-Edge-Secret"
+      value         = random_password.edge.result
+    }
+  }
+  depends_on = [azurerm_cdn_frontdoor_origin_group.group, azurerm_cdn_frontdoor_origin.group]
+}
+
+# On /content/* only: Front Door routes by path, and deleting content belongs to the api group.
+resource "azurerm_cdn_frontdoor_rule_set" "content" {
+  name                     = "content"
+  cdn_frontdoor_profile_id = azurerm_cdn_frontdoor_profile.main.id
+}
+
+resource "azurerm_cdn_frontdoor_rule" "content_writes" {
+  name                      = "ContentWrites"
+  cdn_frontdoor_rule_set_id = azurerm_cdn_frontdoor_rule_set.content.id
+  order                     = 1
+  behavior_on_match         = "Continue"
+  conditions {
+    request_method_condition {
+      operator         = "Equal"
+      negate_condition = true
+      match_values     = ["GET", "HEAD", "OPTIONS"]
+    }
+  }
+  actions {
+    route_configuration_override_action {
+      cdn_frontdoor_origin_group_id = azurerm_cdn_frontdoor_origin_group.group["api"].id
+      forwarding_protocol           = "HttpsOnly"
+      cache_behavior                = "Disabled"
+    }
+  }
+  depends_on = [azurerm_cdn_frontdoor_origin_group.group, azurerm_cdn_frontdoor_origin.group]
+}
+
+resource "azurerm_cdn_frontdoor_route" "group" {
+  for_each                      = local.groups
+  name                          = each.key
+  cdn_frontdoor_endpoint_id     = azurerm_cdn_frontdoor_endpoint.main.id
+  cdn_frontdoor_origin_group_id = azurerm_cdn_frontdoor_origin_group.group[each.key].id
+  cdn_frontdoor_origin_ids      = [azurerm_cdn_frontdoor_origin.group[each.key].id]
+  cdn_frontdoor_rule_set_ids = concat(
+    [azurerm_cdn_frontdoor_rule_set.edge.id],
+    each.key == "content" ? [azurerm_cdn_frontdoor_rule_set.content.id] : [],
+  )
+  patterns_to_match      = each.value.patterns
+  supported_protocols    = ["Http", "Https"]
+  https_redirect_enabled = true
+  forwarding_protocol    = "HttpsOnly"
+  link_to_default_domain = true
+  depends_on             = [azurerm_cdn_frontdoor_rule.edge_secret, azurerm_cdn_frontdoor_rule.content_writes]
 }

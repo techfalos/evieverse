@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { summaryKey, summaryObjectKey, type SummaryRef } from '../src/storage/summaryStore.js';
 import {
   authorIndex,
-  DAY,
   DAY_ENTRY_BYTES,
   dayKey,
   headKey,
@@ -15,21 +14,13 @@ import {
   tailIndexKey,
   tailKey,
   unpackDay,
-  utcDay,
   type DayRef,
   type Head,
   type Manifest,
   type TailRecord,
 } from '../src/tagfeed/layout.js';
-import { createTestContext, hashtags, tailLines, TARGETS, type TestContext } from './helpers.js';
-
-type User = { userId: string; apiKey: string };
-type Item = { contentId: string; version: number; preview: { kind: string; text?: string }; likes: number };
-type Feed = {
-  truncated: boolean;
-  nextCursor: string | null;
-  days: { tags: Record<string, Item[]> }[];
-};
+import { DAY, HOUR, utcDay } from '../src/time.js';
+import { createTestContext, requests, tailLines, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
 
 for (const target of TARGETS) {
   describe(`feed index (${target.name})`, () => {
@@ -39,17 +30,15 @@ for (const target of TARGETS) {
       await ctx.close();
     });
 
-    const store = async (user: User, text: string) => {
-      const res = await ctx.app.inject({ method: 'POST', url: '/store', payload: { ...user, type: 'text', text, tags: hashtags(text) } });
-      expect(res.statusCode, res.body).toBe(201);
-      return res.json().contentId as string;
-    };
+    const api = requests(() => ctx);
+    const { post: store, feedItems: items } = api;
     /** Stores a post and returns what locates its summary. */
     const post = async (user: User, content: string): Promise<SummaryRef> => {
       const createdAt = ctx.clock.now;
-      return { contentId: await store(user, content), version: 1, createdAt };
+      return { contentId: await store(user, content), createdAt };
     };
     const getFeed = async (query: string) => ctx.app.inject({ method: 'GET', url: `/feed?${query}` });
+    const own = (user: User) => authorIndex(user.userId);
     const allIds = (f: Feed) => f.days.flatMap((d) => Object.values(d.tags).flatMap((l) => l.map((i) => i.contentId)));
     const readJson = async <T>(key: string) => JSON.parse((await ctx.hot.get(key))!.toString()) as T;
     const readHead = (tag: string) => readJson<Head>(headKey(tag));
@@ -61,14 +50,15 @@ for (const target of TARGETS) {
       return (await Promise.all(days.map((d) => dayIds(tag, d)))).flat();
     };
     const like = async (user: User, contentId: string) => {
-      const res = await ctx.app.inject({ method: 'POST', url: '/like', payload: { ...user, contentId } });
+      const res = await api.like(user, contentId);
       expect(res.statusCode, res.body).toBe(201);
     };
-    const update = (user: User, contentId: string, text: string) =>
-      ctx.app.inject({ method: 'POST', url: '/store', payload: { ...user, contentId, type: 'text', text, tags: hashtags(text) } });
+    const update = (user: User, contentId: string, text: string) => api.storeText(user, text, { contentId });
     const contentRow = (contentId: string) => ctx.db.selectFrom('content').select('id').where('id', '=', contentId).executeTakeFirst();
-    const items = async (tag: string) => ((await getFeed(`tags=${tag}`)).json() as Feed).days.flatMap((d) => d.tags[tag] ?? []);
-    const versions = async (tag: string) => (await items(tag)).map((i) => [i.contentId, i.version]);
+    /** What a hashtag's feed shows: each post and its text. */
+    const shown = async (tag: string) => (await items(tag)).map((i) => [i.contentId, i.preview.text]);
+    const pendingAppends = async () =>
+      (await ctx.db.selectFrom('pending_appends').select(['content_id', 'tag']).execute()).map((r) => `${r.content_id} ${r.tag}`).sort();
     const tailRecords = async (tag: string) => (await tailLines(ctx.hot, tag)).filter((l): l is TailRecord => !isTombstone(l));
     /** Runs the next transaction's statements, then fails it the way a failed COMMIT would. */
     const failNextCommit = (committed: boolean) => {
@@ -99,7 +89,7 @@ for (const target of TARGETS) {
       if (at === 'putFile') {
         const putFile = ctx.content.putFile.bind(ctx.content);
         vi.spyOn(ctx.content, 'putFile').mockImplementation(async (...args) => {
-          if (readFileSync(args[2], 'utf8') === text) {
+          if (readFileSync(args[1], 'utf8') === text) {
             reached();
             await released;
           }
@@ -117,9 +107,9 @@ for (const target of TARGETS) {
       }
       return { paused, release };
     };
-    const storedFiles = async (contentId: string) => (await readdir(join(ctx.dir, 'content', 'content', contentId))).sort();
+    const storedFiles = async (contentId: string) => (await readdir(join(ctx.dir, 'content', 'content'))).filter((f) => f.startsWith(contentId)).sort();
     const summaryDir = (createdAt: number) => join(ctx.dir, 'summaries', 'summaries', String(utcDay(createdAt)).padStart(5, '0'));
-    const storedSummaries = async (contentId: string, createdAt: number) => (await readdir(join(summaryDir(createdAt), contentId))).sort();
+    const storedSummaries = async (contentId: string, createdAt: number) => (await readdir(summaryDir(createdAt))).filter((f) => f.startsWith(contentId)).sort();
     /** Pauses the first Redis write to a matching key until released, before the write happens. */
     const pauseSet = (matches: (key: string) => boolean) => {
       let reached!: () => void;
@@ -151,7 +141,7 @@ for (const target of TARGETS) {
       expect(allIds(before)).toEqual([...ids].reverse());
 
       await ctx.compact();
-      expect(await readHead('news')).toMatchObject({ v: 3, manifest: expect.any(String) });
+      expect(await readHead('news')).toMatchObject({ v: 4, manifest: expect.any(String) });
       const manifest = await readManifest('news');
       expect(manifest.days).toHaveLength(1);
       const [day] = manifest.days;
@@ -163,8 +153,6 @@ for (const target of TARGETS) {
       const after = (await getFeed('tags=news')).json();
       expect(allIds(after)).toEqual(allIds(before));
       expect(after.days[0].tags.news[0]).toEqual(before.days[0].tags.news[0]);
-      // Each entry's size is the byte length of the record the feed renders.
-      expect(entries.map((e) => e.size)).toEqual(after.days[0].tags.news.map((r: Item) => Buffer.byteLength(JSON.stringify(r))));
     });
 
     it('lets readers holding an old head keep reading while compaction swaps the head, then lets the superseded keys expire', async () => {
@@ -277,7 +265,7 @@ for (const target of TARGETS) {
       expect(await readdir(join(ctx.dir, 'summaries', 'summaries'))).toEqual([String(utcDay(fresh.createdAt)).padStart(5, '0')]);
     });
 
-    it('removes a record from tags that a new version no longer carries', async () => {
+    it('removes a record from tags that an update no longer carries', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const id = await store(alice, 'first #news #sports');
@@ -303,32 +291,31 @@ for (const target of TARGETS) {
       expect((await update(alice, id, 'v2 #news #tech')).statusCode).toBe(200);
       await like(bob, id);
       await ctx.compact();
-      expect(await versions('news')).toEqual([[id, 2], [keep, 1]]);
-      expect(await versions('tech')).toEqual([[id, 2]]);
-      // An update that reserved version 3 and uploaded it, but whose node stopped before it committed.
-      await ctx.db.updateTable('content').set({ reserved_version: 3 }).where('id', '=', id).execute();
-      await ctx.content.putMeta({ ...(await ctx.content.getMeta(id, 2))!, version: 3 });
+      expect(await shown('news')).toEqual([[id, 'v2 #news #tech'], [keep, 'keep #news']]);
+      expect(await shown('tech')).toEqual([[id, 'v2 #news #tech']]);
 
       const del = await ctx.app.inject({ method: 'DELETE', url: `/content/${id}`, payload: { ...alice } });
       expect(del.statusCode, del.body).toBe(202);
-      expect(await versions('news')).toEqual([[keep, 1]]);
-      expect(await versions('tech')).toEqual([]);
+      expect(await shown('news')).toEqual([[keep, 'keep #news']]);
+      expect(await shown('tech')).toEqual([]);
       expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}` })).statusCode).toBe(404);
       // Only hidden so far: the indexes, the summary, the row and the bytes are untouched until the compactor runs.
       expect(await indexIds('tech')).toEqual([id]);
       expect(await contentRow(id)).toBeDefined();
-      expect(await ctx.content.getMeta(id, 2)).not.toBeNull();
-      const refs = [1, 2, 3].map((version) => ({ contentId: id, version, createdAt }));
-      expect(await ctx.hot.exists(refs.map(summaryKey))).toEqual([false, true, false]);
+      expect(await ctx.content.getMeta(id)).not.toBeNull();
+      const ref = { contentId: id, createdAt };
+      expect(await ctx.hot.exists([summaryKey(ref)])).toEqual([true]);
 
       expect((await ctx.compact()).deleted).toEqual([id]);
-      expect(await versions('news')).toEqual([[keep, 1]]);
+      expect(await shown('news')).toEqual([[keep, 'keep #news']]);
       expect(await indexIds('news')).toEqual([keep]);
       expect((await readManifest('tech')).days).toEqual([]);
       expect(await contentRow(id)).toBeUndefined();
-      for (const v of [1, 2, 3]) expect(await ctx.content.getMeta(id, v)).toBeNull();
-      expect(await ctx.summaries.getMany(refs)).toEqual([null, null, null]);
-      expect(await ctx.hot.exists(refs.map(summaryKey))).toEqual([false, false, false]);
+      expect(await ctx.content.getMeta(id)).toBeNull();
+      expect(await storedFiles(id)).toEqual([]);
+      expect(await ctx.summaries.getMany([ref])).toEqual([null]);
+      expect(await storedSummaries(id, createdAt)).toEqual([]);
+      expect(await ctx.hot.exists([summaryKey(ref)])).toEqual([false]);
       expect(await ctx.db.selectFrom('likes').selectAll().execute()).toEqual([]);
       expect((await ctx.compact()).deleted).toEqual([]);
     });
@@ -338,16 +325,16 @@ for (const target of TARGETS) {
       const alice = await ctx.register('alice');
       const id = await store(alice, 'fresh #news');
       expect((await ctx.app.inject({ method: 'DELETE', url: `/content/${id}`, payload: { ...alice } })).statusCode).toBe(202);
-      expect(await versions('news')).toEqual([]);
+      expect(await items('news')).toEqual([]);
 
       // A minute later the tail window holding the entry is still open, so the compactor can't drop it yet.
       ctx.clock.now += 60_000;
       expect((await ctx.compactor.runOnce()).deleted).toEqual([]);
-      expect(await versions('news')).toEqual([]);
+      expect(await items('news')).toEqual([]);
       expect(await contentRow(id)).toBeDefined();
 
       expect((await ctx.compact()).deleted).toEqual([id]);
-      expect(await versions('news')).toEqual([]);
+      expect(await items('news')).toEqual([]);
       expect(await contentRow(id)).toBeUndefined();
     });
 
@@ -392,12 +379,14 @@ for (const target of TARGETS) {
       const stalled = pauseSet((key) => key.startsWith('day:news:'));
       ctx.clock.now += 1000;
       const runA = ctx.compactor.runOnce();
+      // Against a real database the run can find its lease gone, compacting alice's own index, before it is awaited below.
+      runA.catch(() => {});
       await stalled.paused;
 
       vi.spyOn(ctx.appender, 'tombstone').mockResolvedValue(['news']);
       expect((await ctx.app.inject({ method: 'DELETE', url: `/content/${id}`, payload: { ...alice } })).statusCode).toBe(202);
-      ctx.clock.now += ctx.config.compact.leaseSeconds * 1000;
-      expect((await ctx.compactor.runOnce()).deleted).toEqual([id]);
+      // Once the lease has expired, and the tail window of the deletion has closed.
+      expect((await ctx.compact(ctx.config.compact.leaseSeconds * 1000)).deleted).toEqual([id]);
       expect((await readManifest('news')).days).toEqual([]);
       const head = await readHead('news');
 
@@ -438,7 +427,7 @@ for (const target of TARGETS) {
       expect(seen.sort()).toEqual(ids.filter((id) => id !== unseen).sort());
     });
 
-    it('hides every replaced version at once, even after two quick updates, and erases them and their summaries on the next compaction', async () => {
+    it('writes an update over the post, hiding it at once from each hashtag the update dropped and showing it under each it gave', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const { contentId: id, createdAt } = await post(alice, 'v1 #news #old');
@@ -448,27 +437,33 @@ for (const target of TARGETS) {
       ctx.clock.now += 1000;
       expect((await update(alice, id, 'v3 #news #tech')).statusCode).toBe(200);
 
-      expect(await versions('news')).toEqual([[id, 3]]);
-      expect(await versions('old')).toEqual([]);
-      expect(await versions('tech')).toEqual([[id, 3]]);
-      for (const v of [1, 2]) {
-        expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}/raw?version=${v}` })).statusCode).toBe(404);
-      }
-      expect(await storedSummaries(id, createdAt)).toEqual(['1.br', '2.br', '3.br']);
+      expect(await shown('news')).toEqual([[id, 'v3 #news #tech']]);
+      expect(await shown('old')).toEqual([]);
+      expect(await shown('tech')).toEqual([[id, 'v3 #news #tech']]);
+      // One post: one file, one meta file, one summary, however often it is updated.
+      expect(await storedFiles(id)).toEqual([id, `${id}.meta.json`]);
+      expect(await storedSummaries(id, createdAt)).toEqual([`${id}.br`]);
+      expect(await ctx.db.selectFrom('content').select('id').execute()).toEqual([{ id }]);
 
       await ctx.compact();
       expect((await readManifest('old')).days).toEqual([]);
-      expect(await versions('news')).toEqual([[id, 3]]);
-      expect(await ctx.content.getMeta(id, 1)).toBeNull();
-      expect(await ctx.content.getMeta(id, 2)).toBeNull();
-      expect(await ctx.content.getMeta(id, 3)).not.toBeNull();
-      expect(await storedSummaries(id, createdAt)).toEqual(['3.br']);
-      const refs = [1, 2, 3].map((version) => ({ contentId: id, version, createdAt }));
-      expect(await ctx.hot.exists(refs.map(summaryKey))).toEqual([false, false, true]);
-      expect(await ctx.db.selectFrom('superseded_versions').selectAll().execute()).toEqual([]);
+      expect(await indexIds('tech')).toEqual([id]);
+      expect(await shown('news')).toEqual([[id, 'v3 #news #tech']]);
+      expect(await shown('old')).toEqual([]);
+      expect(await pendingAppends()).toEqual([]);
+
+      // A hashtag an update gives back shows the post again, before the compactor merges the tombstone and after.
+      ctx.clock.now += 1000;
+      expect((await update(alice, id, 'v4 #news #old')).statusCode).toBe(200);
+      expect(await shown('old')).toEqual([[id, 'v4 #news #old']]);
+      expect(await shown('tech')).toEqual([]);
+      await ctx.compact();
+      expect(await indexIds('old')).toEqual([id]);
+      expect((await readManifest('tech')).days).toEqual([]);
+      expect(await shown('old')).toEqual([[id, 'v4 #news #old']]);
     });
 
-    it('removes a replaced version whose tombstone append failed on the next compaction', async () => {
+    it('takes a post out of a hashtag an update dropped on the next compaction, when the tombstone append failed', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const id = await store(alice, 'v1 #news #old');
@@ -481,39 +476,67 @@ for (const target of TARGETS) {
       ctx.clock.now += 1000;
       expect((await update(alice, id, 'v2 #news')).statusCode).toBe(200);
       failing.mockRestore();
-      expect(await versions('old')).toEqual([[id, 1]]);
+      // Nothing hides it from #old yet, where it shows as it now is.
+      expect(await shown('old')).toEqual([[id, 'v2 #news']]);
+      expect(await pendingAppends()).toEqual([`${id} old`]);
 
       await ctx.compact();
-      expect(await versions('old')).toEqual([]);
-      expect(await ctx.content.getMeta(id, 1)).toBeNull();
+      expect(await shown('old')).toEqual([]);
+      expect((await readManifest('old')).days).toEqual([]);
+      expect(await shown('news')).toEqual([[id, 'v2 #news']]);
+      expect(await pendingAppends()).toEqual([]);
     });
 
-    it('appends only after the database commits, so a failed update leaves the previous version in place', async () => {
+    it('appends only after the database commits; an update whose commit failed is reported as failed and completed by sending it again', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
-      const { contentId: id, createdAt } = await post(alice, 'v1 #news');
+      const { contentId: id, createdAt } = await post(alice, 'v1 #news #old');
       await ctx.compact();
 
       ctx.clock.now += 1000;
       failNextCommit(false);
       expect((await update(alice, id, 'v2 draft #news')).statusCode).toBe(500);
-      expect((await tailRecords('news')).map((r) => r.version)).toEqual([1]);
-      expect(await ctx.content.getMeta(id, 2)).toBeNull();
-      expect(await storedSummaries(id, createdAt)).toEqual(['1.br']);
-      expect(await versions('news')).toEqual([[id, 1]]);
+      // Nothing was pushed for it, but it wrote over the post, which has one version: that can't be taken back.
+      expect((await tailLines(ctx.hot, 'news')).map((l) => [isTombstone(l), l.contentId])).toEqual([[false, id]]);
+      expect((await tailRecords('news')).map((r) => r.updatedAt)).toEqual([createdAt]);
+      expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}/raw` })).body).toBe('v2 draft #news');
+      expect(await shown('news')).toEqual([[id, 'v2 draft #news']]);
+      // The compactor is told which indexes to look at again, and takes the post out of the hashtag it lost.
+      expect(await pendingAppends()).toEqual([`${id} ${own(alice)}`, `${id} news`, `${id} old`].sort());
       await ctx.compact();
-      expect(await versions('news')).toEqual([[id, 1]]);
+      expect(await shown('news')).toEqual([[id, 'v2 draft #news']]);
+      expect(await shown('old')).toEqual([]);
+      expect(await pendingAppends()).toEqual([]);
 
-      // The failed write keeps its version number, so the retry is the only version the index ever sees after 1.
       ctx.clock.now += 1000;
       const retry = await update(alice, id, 'v2 #news');
-      expect(retry.json()).toMatchObject({ version: 3 });
-      expect((await tailRecords('news')).map((r) => r.version)).toEqual([1, 3]);
-      expect((await items('news')).map((i) => [i.version, i.preview.text])).toEqual([[3, 'v2 #news']]);
+      expect(retry.statusCode, retry.body).toBe(200);
+      expect((await tailRecords('news')).map((r) => r.updatedAt)).toEqual([createdAt, ctx.clock.now]);
+      expect(await shown('news')).toEqual([[id, 'v2 #news']]);
       await ctx.compact();
-      expect((await items('news')).map((i) => [i.version, i.preview.text])).toEqual([[3, 'v2 #news']]);
-      expect(await storedFiles(id)).toEqual(['3', '3.meta.json']);
-      expect(await storedSummaries(id, createdAt)).toEqual(['3.br']);
+      expect(await shown('news')).toEqual([[id, 'v2 #news']]);
+      expect(await storedFiles(id)).toEqual([id, `${id}.meta.json`]);
+      expect(await storedSummaries(id, createdAt)).toEqual([`${id}.br`]);
+      expect(await pendingAppends()).toEqual([]);
+    });
+
+    it('leaves an update that could not be written as it was in feeds, and in the database', async () => {
+      ctx = await createTestContext(target);
+      const alice = await ctx.register('alice');
+      const id = await store(alice, 'v1 #news');
+      await ctx.compact();
+
+      ctx.clock.now += 1000;
+      vi.spyOn(ctx.content, 'putMeta').mockRejectedValueOnce(new Error('store unavailable'));
+      expect((await update(alice, id, 'v2 #news #tech')).statusCode).toBe(500);
+      // The meta file says what the post is, and feeds show what it says.
+      expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}` })).json()).toMatchObject({ preview: { kind: 'text', text: 'v1 #news' }, tags: ['news'] });
+      expect(await shown('news')).toEqual([[id, 'v1 #news']]);
+      expect(await shown('tech')).toEqual([]);
+      await ctx.compact();
+      expect(await shown('news')).toEqual([[id, 'v1 #news']]);
+      expect(await shown('tech')).toEqual([]);
+      expect(await pendingAppends()).toEqual([]);
     });
 
     it('keeps and appends a write whose commit went through even though it reported an error', async () => {
@@ -524,61 +547,40 @@ for (const target of TARGETS) {
       expect(res.statusCode, res.body).toBe(201);
       const { contentId } = res.json();
       expect((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}/raw` })).body).toBe('kept #news');
-      expect(await versions('news')).toEqual([[contentId, 1]]);
+      expect(await shown('news')).toEqual([[contentId, 'kept #news']]);
       expect(await ctx.db.selectFrom('pending_appends').selectAll().execute()).toEqual([]);
     });
 
-    it('commits only one of two concurrent updates; the other neither overwrites its bytes nor reports success', async () => {
+    it('keeps the last of two overlapping updates to be written', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const { contentId: id, createdAt } = await post(alice, 'v1 #news');
       await ctx.compact();
 
-      // A client retries an update that timed out; the first attempt uploads its bytes after the retry has committed.
+      // A client retries an update that timed out; the first attempt writes its bytes after the retry is done.
       const first = pauseStore('putFile', 'first #news #sports');
       const firstRes = update(alice, id, 'first #news #sports');
       await first.paused;
       const retry = await update(alice, id, 'retry #news');
       expect(retry.statusCode, retry.body).toBe(200);
+      expect(await shown('news')).toEqual([[id, 'retry #news']]);
       first.release();
-      expect((await firstRes).statusCode).toBe(409);
+      expect((await firstRes).statusCode).toBe(200);
 
-      const { version } = retry.json();
-      expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}/raw` })).body).toBe('retry #news');
-      expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}` })).json()).toMatchObject({
-        version,
-        preview: { kind: 'text', text: 'retry #news' },
-        tags: ['news'],
-      });
-      expect((await tailRecords('news')).map((r) => r.version)).toEqual([1, version]);
-      expect((await items('news')).map((i) => i.preview.text)).toEqual(['retry #news']);
-      expect(await versions('sports')).toEqual([]);
-      expect(await storedFiles(id)).toEqual(['1', '1.meta.json', `${version}`, `${version}.meta.json`]);
-      expect(await storedSummaries(id, createdAt)).toEqual(['1.br', `${version}.br`]);
+      const check = async () => {
+        expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}/raw` })).body).toBe('first #news #sports');
+        expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}` })).json()).toMatchObject({
+          preview: { kind: 'text', text: 'first #news #sports' },
+          tags: ['news', 'sports'],
+        });
+        expect(await shown('news')).toEqual([[id, 'first #news #sports']]);
+        expect(await shown('sports')).toEqual([[id, 'first #news #sports']]);
+      };
+      await check();
+      expect(await storedFiles(id)).toEqual([id, `${id}.meta.json`]);
+      expect(await storedSummaries(id, createdAt)).toEqual([`${id}.br`]);
       await ctx.compact();
-      expect(await storedFiles(id)).toEqual([`${version}`, `${version}.meta.json`]);
-    });
-
-    it('removes only its own bytes when an update fails while a concurrent one is about to commit', async () => {
-      ctx = await createTestContext(target);
-      const alice = await ctx.register('alice');
-      const { contentId: id, createdAt } = await post(alice, 'v1 #news');
-      await ctx.compact();
-
-      const winner = pauseStore('putMeta', 'winner #news');
-      const winnerRes = update(alice, id, 'winner #news');
-      await winner.paused;
-      failNextCommit(false);
-      expect((await update(alice, id, 'loser #news')).statusCode).toBe(500);
-      winner.release();
-      const res = await winnerRes;
-      expect(res.statusCode, res.body).toBe(200);
-
-      const { version } = res.json();
-      expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}/raw` })).body).toBe('winner #news');
-      expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}` })).json()).toMatchObject({ version, preview: { kind: 'text', text: 'winner #news' } });
-      expect(await storedFiles(id)).toEqual(['1', '1.meta.json', `${version}`, `${version}.meta.json`]);
-      expect(await storedSummaries(id, createdAt)).toEqual(['1.br', `${version}.br`]);
+      await check();
     });
 
     it('stores nothing when the summary cannot be written', async () => {
@@ -590,10 +592,7 @@ for (const target of TARGETS) {
       expect(res.statusCode, res.body).toBe(500);
       expect(await ctx.db.selectFrom('content').selectAll().execute()).toEqual([]);
       expect(await tailLines(ctx.hot, 'news')).toEqual([]);
-      const files = async (root: string) => {
-        const dirs = await readdir(root).catch(() => []);
-        return (await Promise.all(dirs.map((d) => readdir(join(root, d)).catch(() => [])))).flat();
-      };
+      const files = (dir: string) => readdir(dir).catch(() => []);
       expect(await files(join(ctx.dir, 'content', 'content'))).toEqual([]);
       expect(await files(summaryDir(ctx.clock.now))).toEqual([]);
     });
@@ -614,18 +613,15 @@ for (const target of TARGETS) {
       const fresh = await store(alice, 'fresh #news');
       failing.mockRestore();
 
-      expect(await ctx.db.selectFrom('pending_appends').select(['content_id', 'version']).orderBy('version').execute()).toEqual([
-        { content_id: fresh, version: 1 },
-        { content_id: id, version: 2 },
-      ]);
-      expect(await versions('sports')).toEqual([[id, 2]]);
-      expect(await versions('news')).toEqual([[id, 1]]);
+      expect(await pendingAppends()).toEqual([`${fresh} news`, `${id} news`].sort());
+      expect(await shown('sports')).toEqual([[id, 'v2 #news #sports']]);
+      // The new post isn't in #news yet; the updated one is there by its entry from before, and shows as it now is.
+      expect(await shown('news')).toEqual([[id, 'v2 #news #sports']]);
 
       await ctx.compact();
-      expect(await versions('news')).toEqual([[fresh, 1], [id, 2]]);
-      expect((await items('news')).find((i) => i.contentId === id)!.preview.text).toBe('v2 #news #sports');
-      expect(await versions('sports')).toEqual([[id, 2]]);
-      expect(await ctx.db.selectFrom('pending_appends').selectAll().execute()).toEqual([]);
+      expect(await shown('news')).toEqual([[fresh, 'fresh #news'], [id, 'v2 #news #sports']]);
+      expect(await shown('sports')).toEqual([[id, 'v2 #news #sports']]);
+      expect(await pendingAppends()).toEqual([]);
     });
 
     it('reads summaries of posts younger than the hot window from Redis and older ones from the object store', async () => {
@@ -673,19 +669,18 @@ for (const target of TARGETS) {
       expect(allIds(res.json())).toEqual([]);
     });
 
-    it('stores one Brotli-compressed plain-text summary per version, shared by all its hashtags', async () => {
+    it('stores one Brotli-compressed plain-text summary per post, shared by all its hashtags', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const r = await post(alice, 'Flooding closes roads in central Mumbai. #news #mumbai');
-      expect(await readdir(summaryDir(r.createdAt))).toEqual([r.contentId]);
-      expect(await storedSummaries(r.contentId, r.createdAt)).toEqual(['1.br']);
-      const blob = await readFile(join(summaryDir(r.createdAt), r.contentId, '1.br'));
+      expect(await readdir(summaryDir(r.createdAt))).toEqual([`${r.contentId}.br`]);
+      const blob = await readFile(join(summaryDir(r.createdAt), `${r.contentId}.br`));
       expect(await ctx.hot.get(summaryKey(r))).toEqual(blob);
 
       const text = 'Flooding closes roads in central Mumbai. #news #mumbai';
       const plain = brotliDecompressSync(blob);
       expect(plain.toString('utf8')).toBe(
-        [`1 ${r.createdAt} ${r.createdAt} 0`, alice.userId, 'text/plain', 'news mumbai', 'text', '', '', '\u001e', text].join('\n'),
+        [`${r.createdAt} ${r.createdAt} 0 0`, alice.userId, 'text/plain', 'news mumbai', 'text', text].join('\n'),
       );
       const [item] = await items('news');
       expect(blob.length).toBeLessThan(plain.length);
@@ -709,7 +704,7 @@ for (const target of TARGETS) {
       const sports = await records('sports');
       expect(news.flatMap((t) => t.news!.map((i) => i.contentId))).toEqual([late, recent, old]);
 
-      // Redis loses everything, and the object store never had these summaries (as after a migration from tag files).
+      // Redis loses everything, and the object store loses these summaries too.
       await ctx.hot.clear();
       await rm(join(ctx.dir, 'summaries'), { recursive: true, force: true });
       expect(allIds((await getFeed('tags=news')).json())).toEqual([]);
@@ -718,7 +713,7 @@ for (const target of TARGETS) {
       expect((await ctx.compactor.runOnce({ rebuild: true })).tags).toEqual([authorIndex(alice.userId), authorIndex(bob.userId), 'news', 'sports'].sort());
       expect(await records('news')).toEqual(news);
       expect(await records('sports')).toEqual(sports);
-      expect(await storedSummaries(old, ctx.clock.now - 10 * DAY)).toEqual(['1.br']);
+      expect(await storedSummaries(old, ctx.clock.now - 10 * DAY)).toEqual([`${old}.br`]);
     });
 
     it('trims each day index to its quota of best records', async () => {
@@ -834,6 +829,64 @@ for (const target of TARGETS) {
       ctx.config.feed.freshEvery = 0;
       const plain = (await getFeed('tags=news')).json() as Feed;
       expect(allIds(plain).every((id) => liked.includes(id))).toBe(true);
+    });
+
+    it('leaves nothing for good of a run killed before it swapped a head', async () => {
+      ctx = await createTestContext(target);
+      const alice = await ctx.register('alice');
+      await store(alice, 'first #news');
+      await ctx.compact();
+      const published = [dayKey('news', (await readManifest('news')).days[0]!.gen), manifestKey('news', (await readHead('news')).manifest!)];
+
+      // The run dies as it is about to swap the head of #news: nothing after that point happens, not even tidying up.
+      await store(alice, 'second #news');
+      const set = ctx.hot.set.bind(ctx.hot);
+      const written: string[] = [];
+      vi.spyOn(ctx.hot, 'set').mockImplementation(async (...args) => {
+        if (args[0].startsWith('day:news:') || args[0].startsWith('man:news:')) written.push(args[0]);
+        return set(...args);
+      });
+      vi.spyOn(ctx.hot, 'persist').mockRejectedValue(new Error('killed'));
+      vi.spyOn(ctx.hot, 'del').mockRejectedValue(new Error('killed'));
+      await ctx.compact();
+      vi.restoreAllMocks();
+      expect(written).toHaveLength(2);
+      expect(await ctx.hot.exists(written)).toEqual([true, true]);
+
+      // The next run compacts the hashtag as if the killed one had never been.
+      expect((await ctx.compact()).tags).toContain('news');
+      expect(await indexIds('news')).toHaveLength(2);
+      const current = [dayKey('news', (await readManifest('news')).days[0]!.gen), manifestKey('news', (await readHead('news')).manifest!)];
+
+      // What the killed run wrote expires, like what the last run replaced; what a head names never does.
+      // (Only the in-process store keeps the test's time.)
+      if (target.hot === 'memory') ctx.clock.now += 2 * HOUR + ctx.config.feed.genRetentionMinutes * 60_000;
+      const gone = target.hot !== 'memory';
+      expect(await ctx.hot.exists([...written, ...published, ...current])).toEqual([gone, gone, gone, gone, true, true]);
+    });
+
+    it('looks for tails to merge once a tail window has closed, not at every run, and again after a hashtag failed', async () => {
+      ctx = await createTestContext(target);
+      const alice = await ctx.register('alice');
+      await store(alice, 'first #news');
+      expect((await ctx.compact()).tags).toEqual([own(alice), 'news'].sort());
+
+      // Until the next window closes there are no tails to merge, so runs don't go looking for any: a
+      // post made meanwhile shows from its tail, and is merged by the run after its window has closed.
+      const second = await store(alice, 'second #sports');
+      expect((await ctx.compactor.runOnce()).tags).toEqual([]);
+      expect(await shown('sports')).toEqual([[second, 'second #sports']]);
+      expect((await ctx.compact()).tags).toEqual([own(alice), 'sports'].sort());
+      expect(await indexIds('sports')).toEqual([second]);
+
+      // A run that couldn't compact a hashtag is followed by one that looks again, without waiting for a window.
+      const third = await store(alice, 'third #news');
+      vi.spyOn(ctx.hot, 'persist').mockRejectedValueOnce(new Error('redis is unavailable'));
+      await ctx.compact();
+      expect((await ctx.compactor.runOnce()).tags).toHaveLength(1);
+      expect(await indexIds('news')).toContain(third);
+      expect(await indexIds(own(alice))).toContain(third);
+      expect((await ctx.compactor.runOnce()).tags).toEqual([]);
     });
 
     it('rejects cursors older than the retention period', async () => {

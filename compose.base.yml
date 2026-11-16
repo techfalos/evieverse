@@ -1,0 +1,73 @@
+# The services this repo's compose files share. It isn't a stack of its own: docker-compose.yml,
+# docker-compose.server.yml and testbed/docker-compose.yml take their services from here with `extends`,
+# and add their own ports, volumes, dependencies and settings.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: evieverse
+      POSTGRES_PASSWORD: evieverse
+      POSTGRES_DB: evieverse
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U evieverse']
+      interval: 2s
+      retries: 30
+
+  # The feed index, tails, hot summaries and publisher credits (stands in for ElastiCache, Memorystore or
+  # Azure Managed Redis). volatile-lru only evicts keys with a TTL (hot summaries, superseded index keys),
+  # never a live head or day index.
+  redis:
+    image: valkey/valkey:8
+    command: ['valkey-server', '--maxmemory', '512mb', '--maxmemory-policy', 'volatile-lru', '--save', '60', '1']
+    healthcheck:
+      test: ['CMD', 'valkey-cli', 'ping']
+      interval: 2s
+      retries: 30
+
+  # S3-compatible store (RustFS) for content bytes, meta files and summaries. The S3 API is on port 9000,
+  # and its console on 9001 (evieverse / evieverse-secret).
+  s3:
+    image: rustfs/rustfs:1.0.4
+    environment:
+      RUSTFS_ACCESS_KEY: evieverse
+      RUSTFS_SECRET_KEY: evieverse-secret
+      RUSTFS_CONSOLE_ENABLE: 'true'
+
+  # Creates the bucket, once the store answers.
+  s3-init:
+    image: amazon/aws-cli:latest
+    environment:
+      AWS_ACCESS_KEY_ID: evieverse
+      AWS_SECRET_ACCESS_KEY: evieverse-secret
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint:
+      - sh
+      - -c
+      - until aws --endpoint-url http://s3:9000 s3api head-bucket --bucket evieverse 2>/dev/null || aws --endpoint-url http://s3:9000 s3 mb s3://evieverse; do sleep 1; done
+
+  # The API, built from this repo, on the postgres and redis services above.
+  app:
+    build: .
+    environment:
+      DB_DIALECT: postgres
+      DATABASE_URL: postgres://evieverse:evieverse@postgres:5432/evieverse
+      REDIS_URL: redis://redis:6379
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 3s
+      retries: 30
+
+  # The same, with content and summaries in the s3 service's bucket. Summaries share the content bucket
+  # (under summaries/) unless SUMMARY_SCHEME and SUMMARY_OPTIONS are set.
+  app-s3:
+    extends: app
+    environment:
+      CONTENT_SCHEME: s3
+      CONTENT_OPTIONS: '{"bucket":"evieverse","region":"us-east-1","endpoint":"http://s3:9000","access_key_id":"evieverse","secret_access_key":"evieverse-secret"}'
+
+  # The standalone compactor: the same image and settings, running the compactor instead of the API.
+  compactor:
+    extends: app-s3
+    command: ['node', 'dist/compact/main.js']
+    healthcheck:
+      disable: true

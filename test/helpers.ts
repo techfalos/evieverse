@@ -3,15 +3,19 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sql } from 'kysely';
+import { expect } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { challengeKey, leadingZeroBits, type Challenge } from '../src/challenge/challenges.js';
-import { Compactor } from '../src/compact/compactor.js';
+import { createCompactor } from '../src/compact/compactor.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { createDb, type Db } from '../src/db/index.js';
-import { migrateToLatest } from '../src/db/migrator.js';
-import { createStores } from '../src/deps.js';
+import { bootstrap } from '../src/deps.js';
+import type { Languages } from '../src/language.js';
+import type { TrustPlugin } from '../src/moderation/trust.js';
+import type { CliRelease } from '../src/routes/cli.js';
 import type { HotStore } from '../src/storage/index.js';
-import { decodeTail, tailIndexKey, tailKey, type TailRecord, type Tombstone } from '../src/tagfeed/layout.js';
+import { tailIndexKey, type TailLine } from '../src/tagfeed/layout.js';
+import { readTails } from '../src/tagfeed/read.js';
 
 export interface TestTarget {
   name: string;
@@ -33,15 +37,21 @@ export const TARGETS: TestTarget[] = [
 ];
 
 export const TABLES = [
-  'removed_tags',
+  'inbox',
+  'user_blocks',
+  'comment_reports',
+  'comment_queue',
+  'reports',
+  'tag_moderation',
+  'moderation_queue',
   'blocked_words',
   'tag_mutes',
   'tag_moderators',
   'follows',
   'likes',
   'pending_appends',
-  'superseded_versions',
   'compactor_lease',
+  'tag_pairs',
   'tags',
   'content',
   'api_keys',
@@ -67,15 +77,14 @@ export function proofOfWork({ prefix, bits }: Challenge['proofOfWork']): string 
 export const hashtags = (text: string) => [...text.matchAll(/#(\w+)/g)].map((m) => m[1]!);
 
 /** Every line of a tag's tail lists, oldest window first. */
-export async function tailLines(hot: HotStore, tag: string): Promise<(TailRecord | Tombstone)[]> {
+export async function tailLines(hot: HotStore, tag: string): Promise<TailLine[]> {
   const windows = await hot.scores(tailIndexKey(tag), 0, Infinity);
-  const lists = await hot.lists(windows.map((w) => tailKey(tag, w)));
-  return lists.flat().map((line) => decodeTail(line.toString('utf8'))!);
+  return (await readTails(hot, tag, windows)).flat().map((line) => line!);
 }
 
 /**
  * Challenges are off unless `challenge` turns them on, with a proof of work quick enough for tests, and
- * so is the limit on posts a minute.
+ * so are the limits on posts and on comments a minute.
  */
 export async function createTestContext(
   target: TestTarget,
@@ -84,13 +93,33 @@ export async function createTestContext(
     publicBaseUrl?: string;
     challenge?: Partial<Config['challenge']>;
     tagging?: Partial<Config['tagging']>;
+    /** The trust scores that have a post refused, queued or published; the server's defaults unless given. */
+    trust?: Partial<Config['trust']>;
     registerRateLimitPerHour?: number;
     postRateLimitPerMinute?: number;
     maxFollowing?: number;
+    /** The posts a user can report in an hour; the server's default unless given. */
+    reportsPerHour?: number;
+    /** The limit on messages a minute and how long inboxes keep them; the server's defaults unless given. */
+    inbox?: Partial<Config['inbox']>;
+    /** The limit on comments a minute, which tests have none of unless they say, and how long Redis keeps comments. */
+    comments?: Partial<Config['comments']>;
     corsOrigins?: string | string[];
+    compact?: Partial<Config['compact']>;
+    /** Replaces the content store, which is otherwise a directory of the test's own. */
+    content?: { scheme: string; options: Record<string, string> };
+    maxUploadBytes?: number;
+    uploadLinksPerMinute?: number;
+    trustProxy?: number | boolean | string;
+    /** The CLI the server ships. Tests ship none unless they say, whatever was last built. */
+    cli?: CliRelease;
+    /** The trust plugins, in place of the server's own (src/plugins/trust). */
+    trustPlugins?: TrustPlugin[];
+    /** The languages the server answers in, in place of its own (src/languages). */
+    languages?: Languages;
   } = {},
 ) {
-  const dir = await mkdtemp(join(tmpdir(), 'theuniverse-test-'));
+  const dir = await mkdtemp(join(tmpdir(), 'evieverse-test-'));
   const config = loadConfig(
     {
       logLevel: 'silent',
@@ -99,30 +128,39 @@ export async function createTestContext(
       redis: target.hot === 'redis' ? { url: process.env.TEST_REDIS_URL!, keyPrefix: `test:${dir.split('/').pop()}:` } : {},
       db: { dialect: target.dialect, url: target.url, poolSize: 4 },
       storage: {
-        content: { scheme: 'fs', options: { root: join(dir, 'content') } },
+        content: opts.content ?? { scheme: 'fs', options: { root: join(dir, 'content') } },
         summaries: { scheme: 'fs', options: { root: join(dir, 'summaries') } },
         tmpPath: join(dir, 'tmp'),
+        ...(opts.maxUploadBytes && { maxUploadBytes: opts.maxUploadBytes }),
+        ...(opts.uploadLinksPerMinute !== undefined && { uploadLinksPerMinute: opts.uploadLinksPerMinute }),
       },
       feed: { headCacheMs: 0, ...opts.feed },
       challenge: { register: false, postWindowSeconds: 0, powBits: 8, ...opts.challenge },
       ...(opts.tagging && { tagging: opts.tagging }),
+      ...(opts.trust && { trust: opts.trust }),
       ...(opts.registerRateLimitPerHour && { registerRateLimitPerHour: opts.registerRateLimitPerHour }),
       postRateLimitPerMinute: opts.postRateLimitPerMinute ?? 0,
       ...(opts.maxFollowing && { maxFollowing: opts.maxFollowing }),
+      ...(opts.reportsPerHour !== undefined && { reportsPerHour: opts.reportsPerHour }),
+      ...(opts.inbox && { inbox: opts.inbox }),
+      comments: { perMinute: 0, ...opts.comments },
       ...(opts.corsOrigins && { corsOrigins: opts.corsOrigins }),
+      ...(opts.compact && { compact: opts.compact }),
+      ...(opts.trustProxy !== undefined && { trustProxy: opts.trustProxy }),
     },
     {},
   );
-  const db = await createDb(config.db);
-  if (target.dialect !== 'sqlite') await resetDatabase(db, target.dialect);
-  await migrateToLatest(db);
+  if (target.dialect !== 'sqlite') {
+    const db = await createDb(config.db);
+    await resetDatabase(db, target.dialect);
+    await db.destroy();
+  }
 
   const clock = { now: Date.UTC(2026, 10, 6, 12) };
-  const now = () => clock.now;
-  const stores = createStores(config, now);
-  const app = await buildApp({ config, db, ...stores, now }, { logger: false });
+  const { close, ...deps } = await bootstrap(config, () => clock.now);
+  const app = await buildApp(deps, { logger: false, cli: opts.cli ?? null, trustPlugins: opts.trustPlugins, languages: opts.languages });
 
-  const compactor = new Compactor({ config, db, hot: stores.hot, summaries: stores.summaries, content: stores.content, now });
+  const compactor = createCompactor(deps);
   const windowMs = config.feed.tailWindowSeconds * 1000;
   const graceMs = config.compact.graceSeconds * 1000;
 
@@ -131,7 +169,7 @@ export async function createTestContext(
    * work. The clock moves on by `thinkMs` first, the shortest time an answer is accepted after by default.
    */
   async function solve(challenge: Challenge, thinkMs = config.challenge.minSolveMs) {
-    const issued = await stores.hot.get(challengeKey(challenge.id));
+    const issued = await deps.hot.get(challengeKey(challenge.id));
     clock.now += thinkMs;
     return {
       challengeId: challenge.id,
@@ -142,11 +180,9 @@ export async function createTestContext(
 
   return {
     app,
-    db,
-    config,
     clock,
     dir,
-    ...stores,
+    ...deps,
     compactor,
     /** Moves the clock past the current tail window (plus grace) and runs one compaction pass. */
     async compact(extraMs = 0) {
@@ -155,8 +191,8 @@ export async function createTestContext(
     },
     solve,
     /** Registers a user, solving the challenge if there is one. */
-    async register(username: string, publisherUrl: string | null = `https://${username}.example.com`) {
-      const payload = { username, ...(publisherUrl ? { publisherUrl } : {}) };
+    async register(username: string) {
+      const payload = { username };
       let res = await app.inject({ method: 'POST', url: '/register', payload });
       if (res.statusCode === 428) {
         res = await app.inject({ method: 'POST', url: '/register', payload: { ...payload, ...(await solve(res.json().challenge)) } });
@@ -165,9 +201,8 @@ export async function createTestContext(
     },
     async close() {
       await app.close();
-      await stores.hot.clear();
-      await stores.hot.close();
-      await db.destroy();
+      await deps.hot.clear();
+      await close();
       await rm(dir, { recursive: true, force: true });
     },
   };
@@ -177,7 +212,7 @@ export type TestContext = Awaited<ReturnType<typeof createTestContext>>;
 
 /** Builds a multipart/form-data body for app.inject. */
 export function multipart(fields: Record<string, string>, file?: { name: string; type: string; data: Buffer }) {
-  const boundary = `----theuniverse${Math.random().toString(16).slice(2)}`;
+  const boundary = `----evieverse${Math.random().toString(16).slice(2)}`;
   const chunks: Buffer[] = [];
   for (const [k, v] of Object.entries(fields)) {
     chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
@@ -192,3 +227,82 @@ export function multipart(fields: Record<string, string>, file?: { name: string;
   chunks.push(Buffer.from(`--${boundary}--\r\n`));
   return { payload: Buffer.concat(chunks), headers: { 'content-type': `multipart/form-data; boundary=${boundary}` } };
 }
+
+// 1x1 transparent PNG
+export const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64');
+
+// 8x8 grey JPEG, with nothing in it but a JFIF header and the image
+export const JPEG = Buffer.from(
+  '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDACgcHiMeGSgjISMtKygwPGRBPDc3PHtYXUlkkYCZlo+AjIqgtObDoKrarYqMyP/L2u71////m8H////6/+b9//j/wAALCAAIAAgBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAAAP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AP//Z',
+  'base64',
+);
+
+/** A registered user's credentials, as the fields of a request. */
+export type User = { userId: string; apiKey: string };
+
+/** A feed record, as far as tests read it. */
+export type FeedItem = {
+  contentId: string;
+  publisher: { userId: string; username: string };
+  aiGenerated: boolean;
+  /** Whether the post takes comments. */
+  comments: boolean;
+  preview: { kind: string; text?: string; url?: string };
+  tags: string[];
+  likes: number;
+  /** On a hashtag's feed: whether one of its moderators approved the record there. */
+  moderated?: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type Feed = {
+  count: number;
+  truncated: boolean;
+  nextCursor: string | null;
+  /** With addRelated: the related hashtags the feed added to the ones asked for. */
+  related?: string[];
+  days: { extended: boolean; count: number; tags: Record<string, FeedItem[]> }[];
+};
+
+type App = Pick<TestContext, 'app'>;
+
+/** The user's credentials as headers. */
+export const as = (u: User) => ({ authorization: `Bearer ${u.apiKey}`, 'x-user-id': u.userId });
+
+/** POST /store as `user`. */
+export const store = (ctx: App, user: User, payload: Record<string, unknown>) =>
+  ctx.app.inject({ method: 'POST', url: '/store', payload: { ...user, ...payload } });
+
+/** Stores a text post with the #hashtags written in it. */
+export const storeText = (ctx: App, user: User, text: string, extra: Record<string, unknown> = {}) =>
+  store(ctx, user, { type: 'text', text, tags: hashtags(text), ...extra });
+
+/** Stores a text post, which must be new content, and returns its id. */
+export async function post(ctx: App, user: User, text: string, extra: Record<string, unknown> = {}): Promise<string> {
+  const res = await storeText(ctx, user, text, extra);
+  expect(res.statusCode, res.body).toBe(201);
+  return res.json().contentId;
+}
+
+export const like = (ctx: App, user: User, contentId: string) => ctx.app.inject({ method: 'POST', url: '/like', payload: { ...user, contentId } });
+
+/** GET /feed?<query>, which must succeed. */
+export async function feed(ctx: App, query: string): Promise<Feed> {
+  const res = await ctx.app.inject({ method: 'GET', url: `/feed?${query}` });
+  expect(res.statusCode, res.body).toBe(200);
+  return res.json();
+}
+
+/** The records of a hashtag's feed. */
+export const feedItems = async (ctx: App, tag: string) => (await feed(ctx, `tags=${tag}`)).days.flatMap((d) => d.tags[tag] ?? []);
+
+/** The requests above on whichever context a test is running with, so its calls needn't pass it. */
+export const requests = (ctx: () => App) => ({
+  store: (user: User, payload: Record<string, unknown>) => store(ctx(), user, payload),
+  storeText: (user: User, text: string, extra?: Record<string, unknown>) => storeText(ctx(), user, text, extra),
+  post: (user: User, text: string, extra?: Record<string, unknown>) => post(ctx(), user, text, extra),
+  like: (user: User, contentId: string) => like(ctx(), user, contentId),
+  feed: (query: string) => feed(ctx(), query),
+  feedItems: (tag: string) => feedItems(ctx(), tag),
+});

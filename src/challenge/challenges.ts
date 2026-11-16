@@ -1,9 +1,10 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import type { Config } from '../config.js';
-import type { Db } from '../db/index.js';
 import { challengeRequired, tooManyRequests } from '../http/errors.js';
+import { msg, type Message } from '../language.js';
 import type { HotStore } from '../storage/index.js';
+import { iso } from '../time.js';
 import { challengeText, renderChallenge } from './image.js';
 
 /** Fields of a request that answers a challenge; form fields arrive as strings. */
@@ -63,32 +64,67 @@ export function leadingZeroBits(hash: Buffer): number {
  * How many challenges a post needs after `streak` posts in a row with challenges: 1, 1, 2, 4, 8, …, so
  * from the second on, each costs as many as the whole run before it.
  */
-export const postSteps = (streak: number) => (streak < 2 ? 1 : 2 ** (streak - 1));
+const postSteps = (streak: number) => (streak < 2 ? 1 : 2 ** (streak - 1));
 
 const normalizeAnswer = (s: string) => s.toUpperCase().replace(/[\s-]/g, '');
 
-/** Of the times in `users.recent_posts`, those less than a minute before `at`. */
+/** When a user's posts in the last minute were: epoch ms separated by spaces, oldest first. Kept a minute. */
+export const recentPostsKey = (userId: string) => `posts:${userId}`;
+/** A user's run of posts, as `<last> <streak>` (see PostRun). Kept one post window. */
+export const postRunKey = (userId: string) => `run:${userId}`;
+
+/** Of the times a user's recent posts are stored as, those less than a minute before `at`. */
 const postsInMinute = (stored: string | null, at: number) =>
   (stored ? stored.split(' ').map(Number) : []).filter((t) => t > at - 60_000);
+
+/**
+ * A user's run of posts: when they last posted or were challenged to (a post within the window after
+ * it must solve challenges), and how many posts in a row they made with challenges, which sets how
+ * many the next one needs. A user with none stored hasn't posted within the window.
+ */
+interface PostRun {
+  last: number;
+  streak: number;
+}
+
+/** A value in the hot store that requests change by compare-and-set. */
+interface Cell<T> {
+  key: string;
+  ttlMs: number;
+  read(stored: string | null): T;
+  /** Null: nothing worth keeping, so the key is deleted. */
+  write(value: T): string | null;
+}
+
+const postRun = (userId: string, ttlMs: number): Cell<PostRun | null> => ({
+  key: postRunKey(userId),
+  ttlMs,
+  read(stored) {
+    if (!stored) return null;
+    const [last, streak] = stored.split(' ').map(Number);
+    return { last: last!, streak: streak! };
+  },
+  write: (run) => run && `${run.last} ${run.streak}`,
+});
 
 /** Throws 429 if `times`, the user's posts in the minute before `at`, are already `limit`. */
 function refuseOverLimit(times: number[], at: number, limit: number) {
   if (times.length < limit) return;
   const seconds = Math.max(1, Math.ceil((times[times.length - limit]! + 60_000 - at) / 1000));
-  const most = limit === 1 ? 'once' : `${limit} times`;
-  throw tooManyRequests(`you can post at most ${most} a minute; try again in ${seconds} second${seconds === 1 ? '' : 's'}`, seconds);
+  throw tooManyRequests(msg('post.rate_limited', { rate: msg('post.rate', { count: limit }), count: seconds }), seconds);
 }
 
 /**
  * Challenges people solve to register, and to post again soon after posting: the characters in a
  * distorted image, plus a proof of work the client's software does meanwhile. Each lives in Redis for
  * `ttlSeconds`, and any answer uses it up, right or wrong, so every guess costs a new image and a new
- * proof of work. Settings are read on every request.
+ * proof of work. What a user posted lately is in Redis too, and nothing here reads the database.
+ * Settings are read on every request.
  */
 export class Challenges {
   private readonly now: () => number;
 
-  constructor(private readonly deps: { db: Db; hot: HotStore; config: Config; now?: () => number }) {
+  constructor(private readonly deps: { hot: HotStore; config: Config; now?: () => number }) {
     this.now = deps.now ?? Date.now;
   }
 
@@ -107,7 +143,7 @@ export class Challenges {
     return {
       id,
       image: `data:image/png;base64,${renderChallenge(answer).toString('base64')}`,
-      expiresAt: new Date(issued.expiresAt).toISOString(),
+      expiresAt: iso(issued.expiresAt),
       expiresInSeconds: ttlSeconds,
       step,
       steps,
@@ -120,20 +156,20 @@ export class Challenges {
    * if it does. The checks that don't need the answer come first, so an answer sent too soon or without
    * the work says nothing about whether it was right.
    */
-  private async check(scope: string, solution: ChallengeSolution): Promise<{ issued?: Issued; failed: string | null }> {
+  private async check(scope: string, solution: ChallengeSolution): Promise<{ issued?: Issued; failed: Message | null }> {
     const raw = await this.deps.hot.take(challengeKey(solution.challengeId!));
-    if (!raw) return { failed: 'the challenge has expired or was already used' };
+    if (!raw) return { failed: msg('challenge.used') };
     const issued = JSON.parse(raw.toString('utf8')) as Issued;
-    if (issued.scope !== scope) return { failed: 'the challenge was issued for another request' };
+    if (issued.scope !== scope) return { failed: msg('challenge.other_request') };
     const at = this.now();
-    const fail = (failed: string) => ({ issued, failed });
-    if (at > issued.expiresAt) return fail('the challenge has expired');
-    if (at - issued.issuedAt < this.settings.minSolveMs) return fail('the challenge was answered too quickly');
+    const fail = (failed: Message) => ({ issued, failed });
+    if (at > issued.expiresAt) return fail(msg('challenge.expired'));
+    if (at - issued.issuedAt < this.settings.minSolveMs) return fail(msg('challenge.too_quick'));
     const hash = createHash('sha256').update(`${solution.challengeId}:${solution.challengeNonce ?? ''}`).digest();
-    if (leadingZeroBits(hash) < issued.bits) return fail('the proof of work is wrong');
+    if (leadingZeroBits(hash) < issued.bits) return fail(msg('challenge.wrong_proof_of_work'));
     const answer = Buffer.from(normalizeAnswer(solution.challengeAnswer ?? ''));
     const expected = Buffer.from(issued.answer);
-    if (answer.length !== expected.length || !timingSafeEqual(answer, expected)) return fail('the characters are wrong');
+    if (answer.length !== expected.length || !timingSafeEqual(answer, expected)) return fail(msg('challenge.wrong_characters'));
     return { issued, failed: null };
   }
 
@@ -142,20 +178,20 @@ export class Challenges {
     if (!this.settings.register) return;
     const failed = solution.challengeId === undefined ? undefined : (await this.check('register', solution)).failed;
     if (failed === null) return;
-    throw challengeRequired(failed ? `${failed}; solve the new challenge` : 'solve the challenge to register', await this.issue('register'));
+    throw challengeRequired(failed ? msg('challenge.solve_new', { reason: failed }) : msg('challenge.register'), await this.issue('register'));
   }
 
   /**
-   * Lets a post (/store or /federated) through, or throws 429 or 428. A post past
+   * Lets a post (/store) through, or throws 429 or 428. A post past
    * `postRateLimitPerMinute` in the last minute is refused outright, with when to try again, before any
    * challenge, so nobody solves challenges for a post that can't go through. Otherwise it may need
    * challenges (see `passPostChallenges`).
    *
-   * Posts claim their place with conditional updates, so concurrent posts can't get past the limit, or
-   * past fewer challenges, together. Call the returned function if the post then fails: it gives the
+   * Posts claim their place by compare-and-set in Redis, so concurrent posts can't get past the limit,
+   * or past fewer challenges, together. Call the returned function if the post then fails: it gives the
    * claims back, so the post doesn't count, and a retry costs no more.
    */
-  async admitPost(userId: string, solution: ChallengeSolution): Promise<() => Promise<void>> {
+  private async admitPost(userId: string, solution: ChallengeSolution): Promise<() => Promise<void>> {
     const at = this.now();
     const limit = this.deps.config.postRateLimitPerMinute;
     if (limit > 0) refuseOverLimit(await this.changeRecentPosts(userId, at, (times) => times), at, limit);
@@ -179,27 +215,43 @@ export class Challenges {
     };
   }
 
-  /**
-   * Replaces the user's posts in the minute before `at` with `change(times)`, unless it returns `times`
-   * itself, and returns the `times` it was given. A compare-and-set on the whole column, tried again if
-   * another post changed it meanwhile.
-   */
-  private async changeRecentPosts(userId: string, at: number, change: (times: number[]) => number[]): Promise<number[]> {
-    const { db } = this.deps;
-    for (let attempt = 0; attempt < 20; attempt++) {
-      const { recent_posts: stored } = await db.selectFrom('users').select('recent_posts').where('id', '=', userId).executeTakeFirstOrThrow();
-      const times = postsInMinute(stored, at);
-      const next = change(times);
-      if (next === times) return times;
-      const swapped = await db
-        .updateTable('users')
-        .set({ recent_posts: next.join(' ') || null })
-        .where('id', '=', userId)
-        .where('recent_posts', stored === null ? 'is' : '=', stored)
-        .executeTakeFirst();
-      if (Number(swapped.numUpdatedRows) === 1) return times;
+  /** Lets a post through (see admitPost), then writes it; a post whose write fails doesn't count. */
+  async admitting<T>(userId: string, solution: ChallengeSolution, write: () => Promise<T>): Promise<T> {
+    const release = await this.admitPost(userId, solution);
+    try {
+      return await write();
+    } catch (err) {
+      await release();
+      throw err;
     }
-    throw tooManyRequests('too many posts at once; try again in 1 second', 1);
+  }
+
+  /**
+   * Replaces what a cell holds with `change(value)`, unless that returns `value` itself, and returns the
+   * `value` it was given. A compare-and-set on the whole value, tried again if another post changed it
+   * meanwhile.
+   */
+  private async change<T>(cell: Cell<T>, change: (value: T) => T): Promise<T> {
+    const { hot } = this.deps;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const stored = (await hot.get(cell.key))?.toString('utf8') ?? null;
+      const value = cell.read(stored);
+      const next = change(value);
+      if (next === value) return value;
+      if (await hot.swap(cell.key, stored, cell.write(next), cell.ttlMs)) return value;
+    }
+    throw tooManyRequests(msg('post.too_many_at_once'), 1);
+  }
+
+  /** Changes the user's posts in the minute before `at` (see `change`). */
+  private changeRecentPosts(userId: string, at: number, change: (times: number[]) => number[]): Promise<number[]> {
+    const cell: Cell<number[]> = {
+      key: recentPostsKey(userId),
+      ttlMs: 60_000,
+      read: (stored) => postsInMinute(stored, at),
+      write: (times) => times.join(' ') || null,
+    };
+    return this.change(cell, change);
   }
 
   /**
@@ -212,43 +264,43 @@ export class Challenges {
    * passes at each point of the run, so solving runs in parallel gains nothing.
    */
   private async passPostChallenges(userId: string, solution: ChallengeSolution, at: number): Promise<() => Promise<void>> {
-    const { db } = this.deps;
     const windowSeconds = this.settings.postWindowSeconds;
     if (windowSeconds === 0) return async () => {};
-    const user = () => db.updateTable('users').where('id', '=', userId);
-    const free = await user()
-      .set({ last_post_at: at, post_streak: 0 })
-      .where((eb) => eb.or([eb('last_post_at', 'is', null), eb('last_post_at', '<=', at - windowSeconds * 1000)]))
-      .executeTakeFirst();
-    if (Number(free.numUpdatedRows) === 1) {
+    const windowMs = windowSeconds * 1000;
+    const change = (to: (run: PostRun | null) => PostRun | null) => this.change(postRun(userId, windowMs), to);
+    /** Whether a whole window has gone by since the run's last post or challenge. */
+    const over = (run: PostRun) => run.last <= at - windowMs;
+
+    // After a quiet window the post claims the next one, and the run starts over. Otherwise it's in the run, and moves its window on.
+    const before = await change((run) => (!run || over(run) ? { last: at, streak: 0 } : run.last < at ? { ...run, last: at } : run));
+    if (!before || over(before)) {
       return async () => {
         // A failure here only means the retry needs a challenge.
-        await user().set({ last_post_at: null }).where('last_post_at', '=', at).execute().catch(() => {});
+        await change((run) => (run?.last === at ? null : run)).catch(() => {});
       };
     }
 
-    await user().set({ last_post_at: at }).where('last_post_at', '<', at).execute();
     const scope = `post:${userId}`;
     const { issued, failed } = solution.challengeId === undefined ? { issued: undefined, failed: undefined } : await this.check(scope, solution);
-    if (issued && failed) throw challengeRequired(`${failed}; solve the new challenge`, await this.issue(scope, issued));
+    if (issued && failed) throw challengeRequired(msg('challenge.solve_new', { reason: failed }), await this.issue(scope, issued));
     if (issued && issued.step < issued.steps) {
-      throw challengeRequired(`solved ${issued.step} of ${issued.steps}; solve the next challenge`, await this.issue(scope, { ...issued, step: issued.step + 1 }));
+      throw challengeRequired(msg('challenge.solve_next', { step: issued.step, steps: issued.steps }), await this.issue(scope, { ...issued, step: issued.step + 1 }));
     }
     if (issued) {
       const streak = issued.streak ?? 0;
-      const admitted = await user().set({ post_streak: streak + 1 }).where('post_streak', '=', streak).executeTakeFirst();
-      if (Number(admitted.numUpdatedRows) === 1) {
+      const was = await change((run) => ((run?.streak ?? 0) === streak ? { last: run?.last ?? at, streak: streak + 1 } : run));
+      if ((was?.streak ?? 0) === streak) {
         return async () => {
-          await user().set({ post_streak: streak }).where('post_streak', '=', streak + 1).execute().catch(() => {});
+          await change((run) => (run?.streak === streak + 1 ? { ...run, streak } : run)).catch(() => {});
         };
       }
     }
 
-    const { post_streak: streak } = await db.selectFrom('users').select('post_streak').where('id', '=', userId).executeTakeFirstOrThrow();
+    const streak = (await change((run) => run))?.streak ?? 0;
     const steps = postSteps(streak);
-    const fresh = issued || failed ? 'new ' : '';
-    const why = issued ? 'another post went through meanwhile' : (failed ?? `you posted or were challenged less than ${windowSeconds} seconds ago`);
-    const need = steps === 1 ? `the ${fresh}challenge` : `${steps} ${fresh}challenges`;
-    throw challengeRequired(`${why}; solve ${need} to post`, await this.issue(scope, { step: 1, steps, streak }));
+    const reason = issued ? msg('challenge.overtaken') : (failed ?? msg('challenge.posted_recently', { seconds: windowSeconds }));
+    // After a challenge that didn't let the post through, the ones to solve are new ones.
+    const need = msg(issued || failed ? 'challenge.to_post_new' : 'challenge.to_post', { reason, count: steps });
+    throw challengeRequired(need, await this.issue(scope, { step: 1, steps, streak }));
   }
 }

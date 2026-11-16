@@ -1,15 +1,21 @@
+import { setTimeout as sleep } from 'node:timers/promises';
 import pino from 'pino';
 import { loadConfig } from '../config.js';
-import { createDb } from '../db/index.js';
-import { migrateToLatest } from '../db/migrator.js';
-import { createStores } from '../deps.js';
-import { Compactor } from './compactor.js';
+import { bootstrap } from '../deps.js';
+import { createCompactor } from './compactor.js';
 
 /**
- * Standalone compactor: `npm run compact` loops, `npm run compact -- --once` runs a single pass (e.g.
- * from cron). `--all` first rebuilds every day of every tag. `--rebuild` first rebuilds the whole feed
- * index, the summaries and the publisher credits from the database and the meta files: run it after
- * Redis lost data, or to migrate from the tag-file layout.
+ * The compactor as a process of its own, which is how a deployment runs it: one copy, always up.
+ * `npm run compact` runs pass after pass until it is stopped, never two at once and never more than
+ * one in COMPACT_INTERVAL_SECONDS. A second copy does no harm (the lease lets one of them run at a
+ * time) and no good.
+ *
+ * `--all` first rebuilds every day of every tag, and works out every hashtag's related hashtags
+ * again. `--rebuild` first rebuilds the whole feed index, the summaries, the publisher credits and
+ * the related hashtags from the database and the meta files: run it after Redis lost data. `--once`
+ * runs a single pass and exits, which is how to run either of those by hand beside the process that
+ * is already up: a rebuild that finds that process mid-pass waits for it, rather than being skipped
+ * as an ordinary pass is.
  */
 const config = loadConfig();
 const log = pino({ level: config.logLevel });
@@ -17,24 +23,29 @@ if (!config.redis.url) {
   log.error('the standalone compactor needs REDIS_URL: without it the feed index lives inside each API process');
   process.exit(1);
 }
-const db = await createDb(config.db);
-await migrateToLatest(db);
-const { hot, summaries, content } = createStores(config);
-const compactor = new Compactor({ config, db, hot, summaries, content, log });
+const { close, ...deps } = await bootstrap(config);
+const compactor = createCompactor(deps, log);
 
 const opts = { all: process.argv.includes('--all'), rebuild: process.argv.includes('--rebuild') };
-const close = async () => {
-  await hot.close();
-  await db.destroy();
-};
+const asked = opts.all || opts.rebuild;
+
+/** One pass. What was asked for by hand isn't lost to a pass another compactor is making: it takes the next turn. */
+async function pass() {
+  for (;;) {
+    const result = await compactor.runOnce(opts);
+    if (!result.skipped || !asked) return result;
+    await sleep(1000);
+  }
+}
+
 if (process.argv.includes('--once')) {
-  const { tags, deleted, skipped } = await compactor.runOnce(opts);
+  const { tags, deleted, skipped } = await pass();
   if (!skipped) log.info({ tags: tags.length, deleted: deleted.length }, 'compaction pass complete');
   await close();
 } else {
-  if (opts.all || opts.rebuild) {
-    const { tags, skipped } = await compactor.runOnce(opts);
-    if (!skipped) log.info({ tags: tags.length }, opts.rebuild ? 'rebuilt the feed index' : 'rebuilt every tag');
+  if (asked) {
+    const { tags } = await pass();
+    log.info({ tags: tags.length }, opts.rebuild ? 'rebuilt the feed index' : 'rebuilt every tag');
   }
   const stop = compactor.start();
   const shutdown = async () => {

@@ -1,19 +1,20 @@
-import { compareRecords, utcDay } from '../tagfeed/layout.js';
+import { compareRecent, compareRecords } from '../tagfeed/layout.js';
 import type { Candidate } from '../tagfeed/reader.js';
-
-export const HOUR = 60 * 60 * 1000;
-export const DAY = 24 * HOUR;
+import { DAY, HOUR } from '../time.js';
 
 /**
  * popular: each tag's records by likes, most first (with fresh slots in the newest slice).
- * balanced: the most liked, middle and least liked thirds of each UTC day take turns.
+ * chronological: the newest records first, whatever their tag or their likes.
  */
-export const FEED_MODES = ['popular', 'balanced'] as const;
-export type FeedMode = (typeof FEED_MODES)[number];
+export const FEED_ALGORITHMS = ['popular', 'chronological'] as const;
+export type FeedAlgorithm = (typeof FEED_ALGORITHMS)[number];
+
+/** The windows a feed can be asked for, in hours: the past 1, 2, 4, 8 or 12 hours, or 1, 2, 3, 7, 14, 21, 30, 60 or 90 days. */
+export const FEED_HOURS: readonly number[] = [1, 2, 4, 8, 12, 24, 48, 72, 168, 336, 504, 720, 1440, 2160];
 
 export interface PlanOptions {
   /** Defaults to popular. */
-  mode?: FeedMode;
+  algorithm?: FeedAlgorithm;
   hours: number;
   /** End of the window (inclusive, UTC epoch ms); later pages of a cursor reuse the first page's anchor. */
   anchor: number;
@@ -22,10 +23,12 @@ export interface PlanOptions {
   maxLookbackDays: number;
   /** Per slice index, how far into each requested tag's ordered list earlier pages consumed. */
   positions?: Record<number, number[]>;
-  /** Fresh-content injection for the newest slice; omitted, `every: 0` or balanced mode disables it. */
+  /** Fresh-content injection for the newest slice; omitted, `every: 0` or the chronological algorithm disables it. */
   fresh?: FreshOptions;
   /** Only records created with AI (true) or without (false); omitted, both. */
   aiGenerated?: boolean;
+  /** Only records a moderator of their hashtag approved (true), or those none has yet (false), which is the hashtag's moderation queue; omitted, both. */
+  moderated?: boolean;
 }
 
 export interface FreshOptions {
@@ -70,7 +73,9 @@ interface Slice extends PlannedSlice {
   fresh: { lists: Candidate[][]; pos: number[]; picked: number[] } | null;
 }
 
-const isOrdered = (list: Candidate[]) => list.every((c, i) => i === 0 || compareRecords(list[i - 1]!, c) <= 0);
+type Order = (a: Candidate, b: Candidate) => number;
+
+const isOrdered = (list: Candidate[], order: Order) => list.every((c, i) => i === 0 || order(list[i - 1]!, c) <= 0);
 
 /** Small deterministic PRNG (mulberry32), so the same seed reproduces the same shuffle on every page. */
 function rng(seed: number): () => number {
@@ -99,29 +104,6 @@ function freshPool(list: Candidate[], fresh: FreshOptions, t: number): Candidate
 }
 
 /**
- * Balanced order of one tag's slice, from its likes order: each UTC day's records are split by rank
- * into thirds (most liked, middle, least liked), which take turns, each in likes order. When a day's
- * count isn't a multiple of three, the upper thirds take the extra records.
- */
-function balance(list: Candidate[]): Candidate[] {
-  const out: Candidate[] = [];
-  for (let start = 0; start < list.length; ) {
-    const day = utcDay(list[start]!.createdAt);
-    let end = start + 1;
-    while (end < list.length && utcDay(list[end]!.createdAt) === day) end++;
-    const middle = start + Math.ceil((end - start) / 3);
-    const bottom = start + Math.ceil((2 * (end - start)) / 3);
-    for (let i = 0; start + i < middle; i++) {
-      out.push(list[start + i]!);
-      if (middle + i < bottom) out.push(list[middle + i]!);
-      if (bottom + i < end) out.push(list[bottom + i]!);
-    }
-    start = end;
-  }
-  return out;
-}
-
-/**
  * Plans a feed page of at most `limit` records of the requested tags (index entries only; bodies
  * are fetched afterwards). Items of one content in several tags are returned once.
  *
@@ -136,16 +118,20 @@ function balance(list: Candidate[]): Candidate[] {
  * shuffle of the newest low-like records, so new content is seen (and can earn likes) even on
  * busy tags. Older slices are ordered strictly by likes.
  *
- * Balanced mode reorders each tag's records within each UTC day so the most liked, middle and least
- * liked thirds take turns (see balance). It has no fresh slots: the least liked third already gets a
- * third of the picks. The order depends only on the records, so cursor positions stay valid.
+ * The chronological algorithm returns the newest records first instead. Each tag's records are
+ * ordered by creation time alone, a slice's picks go to whichever tag's next record is the newest
+ * rather than to each tag in turn, and a slice is given the whole page before any older one gets a
+ * record: so a page is the newest `limit` records of the tags together, and the next page carries on
+ * from there. It has no fresh slots, which exist to lift new records out of a likes order. The order
+ * depends only on the records, so cursor positions stay valid.
  *
- * With `aiGenerated` set, every other record is left out before any of this, so the positions index
- * the filtered lists and later pages must use the same filter.
+ * With `aiGenerated` or `moderated` set, every other record is left out before any of this, so the
+ * positions index the filtered lists and later pages must use the same filters.
  */
 export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
   const { anchor } = opts;
-  const balanced = opts.mode === 'balanced';
+  const chronological = opts.algorithm === 'chronological';
+  const order: Order = chronological ? compareRecent : compareRecords;
   const windowStart = anchor - opts.hours * HOUR;
   const lookbackStart = Math.min(windowStart, anchor - opts.maxLookbackDays * DAY);
   const windowSlices = Math.ceil(opts.hours / 24);
@@ -166,6 +152,7 @@ export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
     for (const c of candidates) {
       if (c.createdAt > anchor || c.createdAt <= lookbackStart) continue;
       if (opts.aiGenerated !== undefined && c.aiGenerated !== opts.aiGenerated) continue;
+      if (opts.moderated !== undefined && c.moderated !== opts.moderated) continue;
       const index = sliceIndexOf(c.createdAt);
       let slice = slices.get(index);
       if (!slice) {
@@ -188,9 +175,8 @@ export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
   });
 
   for (const slice of slices.values()) {
-    // Day indexes are already in this order, so slices without tail entries usually skip the sort.
-    for (const list of slice.lists) if (!isOrdered(list)) list.sort(compareRecords);
-    if (balanced) slice.lists = slice.lists.map(balance);
+    // Day indexes are already in likes order, so popular slices without tail entries usually skip the sort.
+    for (const list of slice.lists) if (!isOrdered(list, order)) list.sort(order);
     const saved = opts.positions?.[slice.index];
     if (saved) {
       slice.lists.forEach((list, t) => {
@@ -200,7 +186,7 @@ export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
     }
   }
 
-  const fresh = !balanced && opts.fresh && opts.fresh.every > 0 ? opts.fresh : null;
+  const fresh = !chronological && opts.fresh && opts.fresh.every > 0 ? opts.fresh : null;
   const newest = slices.get(0);
   if (fresh && newest) {
     const lists = newest.lists.map((list, t) => freshPool(list, fresh, t));
@@ -236,19 +222,29 @@ export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
   };
   const hasMore = (slice: Slice) => slice.lists.some((_, t) => peek(slice, t) !== undefined);
 
-  /** Tags take turns until the allowance is used or the slice is exhausted. */
+  /**
+   * The tag the slice's next pick comes from, or -1 once it has none left: the next tag in turn that
+   * has a record or, in chronological order, the tag whose next record is the newest (of tags whose
+   * next records were created in the same second, the one with the lower content id, as in each list).
+   */
+  const turn = (slice: Slice): number => {
+    let t = -1;
+    for (let step = 0; step < T; step++) {
+      const candidate = chronological ? step : (slice.rr + step) % T;
+      const c = peek(slice, candidate);
+      if (!c) continue;
+      if (!chronological) return candidate;
+      if (t < 0 || compareRecent(c, peek(slice, t)!) < 0) t = candidate;
+    }
+    return t;
+  };
+
+  /** Picks records, a tag at a time (see turn), until the allowance is used or the slice is exhausted. */
   const fill = (slice: Slice, allowance: number): number => {
     let used = 0;
     slice.allocated += allowance;
     while (used < allowance) {
-      let t = -1;
-      for (let step = 0; step < T; step++) {
-        const candidate = (slice.rr + step) % T;
-        if (peek(slice, candidate)) {
-          t = candidate;
-          break;
-        }
-      }
+      const t = turn(slice);
       if (t < 0) break;
       const from = source(slice, t);
       const c = next(slice, from.lists, from.pos, t)!;
@@ -267,8 +263,9 @@ export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
   let carry = 0;
   let allocatedSoFar = 0;
   for (let i = 0; i < windowSlices; i++) {
-    // Rounded on the running total, so the oldest slice doesn't collect every slice's rounding.
-    const through = i === windowSlices - 1 ? opts.limit : Math.round(opts.limit * (1 - 2 ** -(i + 1)));
+    // Rounded on the running total, so the oldest slice doesn't collect every slice's rounding. Chronological
+    // order has no shares: the newest slice is allotted the whole page, and each older one what is left of it.
+    const through = chronological || i === windowSlices - 1 ? opts.limit : Math.round(opts.limit * (1 - 2 ** -(i + 1)));
     const allowance = through - allocatedSoFar + carry;
     allocatedSoFar = through;
     const slice = slices.get(i);

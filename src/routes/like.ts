@@ -2,15 +2,12 @@ import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
+import { contentNotFound } from '../content.js';
 import { isUniqueViolation } from '../db/index.js';
 import type { AppDeps } from '../deps.js';
-import { notFound } from '../http/errors.js';
+import { Credentials } from '../http/schemas.js';
 
-const Body = z.object({
-  userId: z.string().optional(),
-  apiKey: z.string().optional(),
-  contentId: z.string().uuid(),
-});
+const Body = Credentials.extend({ contentId: z.string().uuid() });
 
 export function likeRoutes(app: FastifyInstance, { db, now = Date.now }: AppDeps) {
   /** Likes are permanent and idempotent: liking twice succeeds without double-counting. */
@@ -21,13 +18,16 @@ export function likeRoutes(app: FastifyInstance, { db, now = Date.now }: AppDeps
     let alreadyLiked = false;
     try {
       await db.transaction().execute(async (trx) => {
+        // Published content only: what is set for deletion, or waits in the moderation queue, isn't there to like.
         const content = await trx
           .selectFrom('content')
-          .select('id')
-          .where('id', '=', body.contentId)
-          .where('delete_requested_at', 'is', null)
+          .leftJoin('moderation_queue', 'moderation_queue.content_id', 'content.id')
+          .select('content.id')
+          .where('content.id', '=', body.contentId)
+          .where('content.delete_requested_at', 'is', null)
+          .where('moderation_queue.content_id', 'is', null)
           .executeTakeFirst();
-        if (!content) throw notFound('content not found');
+        if (!content) throw contentNotFound();
         const existing = await trx
           .selectFrom('likes')
           .select('user_id')

@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>theuniverse testbed</title>
+  <title>evieverse testbed</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <header class="top">
-    <h1>theuniverse <span>testbed</span></h1>
+    <h1>evieverse <span>testbed</span></h1>
     <span id="status" class="status">checking the API…</span>
     <nav class="links">
       <a href="/api/tags" target="_blank">/api/tags</a>
@@ -28,12 +28,22 @@
         <label class="grow">Hashtags
           <input id="tags" list="tag-list" placeholder="news, ai, football" autocomplete="off" spellcheck="false">
         </label>
-        <label>Hours
+        <label>Posts of the past
           <select id="hours">
-            <option>1</option><option>6</option><option>12</option><option>24</option>
-            <option>48</option><option>72</option><option>168</option>
+            <option value="1">1 hour</option><option value="2">2 hours</option><option value="4">4 hours</option>
+            <option value="8">8 hours</option><option value="12">12 hours</option><option value="24">1 day</option>
+            <option value="48">2 days</option><option value="72">3 days</option><option value="168">7 days</option>
+            <option value="336">14 days</option><option value="504">21 days</option><option value="720">30 days</option>
+            <option value="1440">60 days</option><option value="2160">90 days</option>
           </select>
         </label>
+        <label>Algorithm
+          <select id="algorithm">
+            <option value="popular">popular</option>
+            <option value="chronological">chronological</option>
+          </select>
+        </label>
+        <label class="check" title="addRelated: also posts under the hashtags that tend to be on the same posts as these"><input type="checkbox" id="related"> Related hashtags</label>
         <label>AI content
           <select id="ai">
             <option value="">all</option>
@@ -99,7 +109,7 @@
           </div>
           <p class="hint">
             With <code>TAGGING_MODE=server</code>, every post gets <code>TAGGING_SERVER_TAGS</code> instead.
-            New posts show in feeds at once; likes after the next compactor run (about a minute).
+            New posts show in feeds at once; likes after the next compactor run (a few seconds).
           </p>
         </form>
         <pre id="post-result" class="result" hidden></pre>
@@ -110,7 +120,6 @@
           <summary>Register a user</summary>
           <form id="register-form" class="stack">
             <label>Username <input id="reg-username" required></label>
-            <label>Publisher URL <input id="reg-url" type="url" placeholder="https://me.example.com" required></label>
             <label>Interests <span class="muted">(hashtags for the User feed)</span>
               <input id="reg-interests" placeholder="ai, space">
             </label>

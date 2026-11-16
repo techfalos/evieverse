@@ -1,67 +1,65 @@
 import { promisify } from 'node:util';
 import { brotliCompress, brotliDecompressSync, constants } from 'node:zlib';
 import type { Operator } from 'opendal';
-import { bytesUrl, readPreview } from '../posts.js';
+import { mediaUrl, readPreview, type StoredPreview } from '../posts.js';
+import { DAY, utcDay } from '../time.js';
 import { Lru, mapLimit } from '../util.js';
-import type { Origin, Preview } from './contentStore.js';
+import type { Preview } from './contentStore.js';
 import type { HotStore } from './hotStore.js';
 import { createOperator, isNotFound } from './opendal.js';
 
 const compress = promisify(brotliCompress);
-const DAY = 24 * 60 * 60 * 1000;
-const SEPARATOR = '\u001e';
-const HEADER_LINES = 6;
+const HEADER_LINES = 5;
 const COLD_READS = 32;
 
-/** Everything a feed record holds except its likes and the publisher's name and URL. */
+/** Everything a feed record holds except its likes and the publisher's name. */
 export interface Summary {
   contentId: string;
-  version: number;
   createdAt: number;
+  /** When the content was last written. */
   updatedAt: number;
   userId: string;
   mimeType: string;
   /** Declared by the publisher at /store. */
   aiGenerated: boolean;
+  /** Whether the post takes comments, which its publisher says at /store. */
+  comments: boolean;
   tags: string[];
   preview: Preview;
-  /** Federated content only. */
-  origin?: Origin;
 }
 
 /** What locates a summary: the content's creation day picks its object-store prefix and its tier. */
 export interface SummaryRef {
   contentId: string;
-  version: number;
   createdAt: number;
 }
 
-export const summaryKey = (r: { contentId: string; version: number }) => `sum:${r.contentId}:${r.version}`;
-export const summaryDay = (createdAt: number) => Math.floor(createdAt / DAY);
+export const summaryKey = (r: { contentId: string }) => `sum:${r.contentId}`;
 const dayPrefix = (day: number) => `summaries/${String(day).padStart(5, '0')}/`;
-export const summaryObjectKey = (r: SummaryRef) => `${dayPrefix(summaryDay(r.createdAt))}${r.contentId}/${r.version}.br`;
-
-const clean = (s: string) => s.replaceAll(SEPARATOR, '');
+export const summaryObjectKey = (r: SummaryRef) => `${dayPrefix(utcDay(r.createdAt))}${r.contentId}.br`;
 
 /** What a summary holds after its header: a text post's text or a caption, or a link's URL. */
 const body = (p: Preview) => (p.kind === 'link' ? p.url : (p.text ?? ''));
 
+/** The preview a summary's kind line and body hold. */
+function storedPreview(contentId: string, kind: string, text: string): StoredPreview {
+  if (kind === 'link') return { kind, url: text };
+  if (kind === 'text' || kind === 'image' || kind === 'video' || kind === 'audio') return { kind, text };
+  throw new Error(`summary of ${contentId} has an unknown preview kind`);
+}
+
 /**
- * Plain text rather than JSON, which compresses better: a header line of numbers (version,
- * timestamps, and 1 if AI-generated, else 0), the publisher's id, MIME type, hashtags, preview kind
- * and origin ("<server> <contentId> <version>" for federated content, else empty), then an empty
- * line, a line holding only U+001E, and the preview's text (with U+001E removed): a text post's or a
- * caption, or a link's URL. An image's, video's or audio's URL isn't stored; it's built when read, on
- * the origin server for federated content. Summaries written before post types read as readPreview says.
- * Summaries written before the AI flag existed have three numbers, and read as not AI-generated.
- * Releases with an AI wrote its summary in place of the empty line, and need a line there to read
- * a summary; reading skips it.
+ * Plain text rather than JSON, which compresses better: a header line of numbers (when the content
+ * was created and last written, 1 if AI-generated, else 0, and 1 if it takes comments, else 0), then
+ * one line each for the publisher's id, MIME type, hashtags and preview kind. Everything after those
+ * five lines is the preview's text: a text post's or a caption, or a link's URL. An image's, video's
+ * or audio's URL isn't stored; it's built when read.
+ *
+ * A summary written before posts took comments has three numbers, and reads as one that takes none.
  */
 export function encodeSummary(s: Summary): string {
-  const numbers = `${s.version} ${s.createdAt} ${s.updatedAt} ${s.aiGenerated ? 1 : 0}`;
-  const origin = s.origin ? `${s.origin.server} ${s.origin.contentId} ${s.origin.version}` : '';
-  const header = [numbers, s.userId, s.mimeType, s.tags.join(' '), s.preview.kind, origin];
-  return `${header.join('\n')}\n\n${SEPARATOR}\n${clean(body(s.preview))}`;
+  const numbers = `${s.createdAt} ${s.updatedAt} ${s.aiGenerated ? 1 : 0} ${s.comments ? 1 : 0}`;
+  return [numbers, s.userId, s.mimeType, s.tags.join(' '), s.preview.kind, body(s.preview)].join('\n');
 }
 
 export function decodeSummary(contentId: string, text: string, publicBaseUrl: string): Summary {
@@ -73,26 +71,17 @@ export function decodeSummary(contentId: string, text: string, publicBaseUrl: st
     lines.push(text.slice(pos, nl));
     pos = nl + 1;
   }
-  const sep = text.indexOf(`\n${SEPARATOR}\n`, pos);
-  if (sep < 0) throw new Error(`summary of ${contentId} has no separator`);
-  const [version, createdAt, updatedAt, ai] = lines[0]!.split(' ').map(Number);
-  const kind = lines[4]!;
-  const mimeType = lines[2]!;
-  const [server, originId, originVersion] = lines[5]!.split(' ');
-  const origin = server && originId && originVersion ? { server, contentId: originId, version: Number(originVersion) } : undefined;
-  const rest = text.slice(sep + 3);
-  const bytes = bytesUrl(publicBaseUrl, { contentId, version: version!, origin });
+  const [createdAt, updatedAt, ai, comments] = lines[0]!.split(' ').map(Number);
   return {
     contentId,
-    version: version!,
     createdAt: createdAt!,
     updatedAt: updatedAt!,
     userId: lines[1]!,
-    mimeType,
+    mimeType: lines[2]!,
     aiGenerated: ai === 1,
+    comments: comments === 1,
     tags: lines[3] ? lines[3].split(' ') : [],
-    preview: readPreview(kind === 'link' ? { kind, url: rest } : { kind, text: rest }, mimeType, bytes),
-    ...(origin && { origin }),
+    preview: readPreview(storedPreview(contentId, lines[4]!, text.slice(pos)), mediaUrl(publicBaseUrl, contentId)),
   };
 }
 
@@ -101,21 +90,24 @@ export interface SummaryStoreOptions {
   hotDays: number;
   /** Brotli quality, 0-11. */
   quality: number;
-  /** Compressed summaries from the object store kept in this process. */
+  /** Compressed summaries from the object store kept in this process... */
   cacheSize: number;
+  /** ...for this long: how long a node may go on showing a post as it was before an update. */
+  cacheSeconds: number;
   publicBaseUrl: string;
 }
 
 /**
- * Feed summaries, Brotli-compressed, once per content version (not once per hashtag). The object
- * store holds every summary for the retention period under summaries/<createdAt day>/, so a day
- * past retention is deleted as a whole. Redis holds the same bytes until the post is `hotDays`
- * old: reads of younger posts take one MGET; older posts, and anything Redis lost, are read from
- * the object store (and the hot copy is restored while it's still due).
+ * Feed summaries, Brotli-compressed, one per piece of content (not one per hashtag); an update
+ * writes over it. The object store holds every summary for the retention period under
+ * summaries/<createdAt day>/, so a day past retention is deleted as a whole. Redis holds the same
+ * bytes until the post is `hotDays` old: reads of younger posts take one MGET; older posts, and
+ * anything Redis lost, are read from the object store (and the hot copy is restored while it's
+ * still due).
  */
 export class SummaryStore {
   private readonly op: Operator;
-  private readonly cache: Lru<Buffer>;
+  private readonly cache: Lru<{ blob: Buffer; at: number }>;
 
   constructor(
     private readonly hot: HotStore,
@@ -151,6 +143,7 @@ export class SummaryStore {
   async put(s: Summary, blob?: Buffer): Promise<void> {
     blob ??= await this.compress(s);
     await this.op.write(summaryObjectKey(s), blob);
+    this.cache.delete(summaryObjectKey(s));
     const ttl = this.hotTtl(s.createdAt);
     if (ttl > 0) await this.hot.set(summaryKey(s), blob, ttl);
   }
@@ -176,14 +169,15 @@ export class SummaryStore {
     await mapLimit(cold, COLD_READS, async (i) => {
       const ref = refs[i]!;
       const key = summaryObjectKey(ref);
-      let blob = this.cache.get(key);
+      const cached = this.cache.get(key);
+      let blob = cached && this.now() - cached.at < this.opts.cacheSeconds * 1000 ? cached.blob : null;
       if (!blob) {
-        const read = await this.readObject(key);
-        if (!read) return;
-        blob = read;
-        this.cache.set(key, blob);
+        blob = await this.readObject(key);
+        if (!blob) return;
+        this.cache.set(key, { blob, at: this.now() });
         const ttl = this.hotTtl(ref.createdAt);
-        if (ttl > 0) await this.hot.set(summaryKey(ref), blob, ttl).catch(() => {});
+        // Only where Redis has none, so a summary read just before an update never replaces the update's.
+        if (ttl > 0) await this.hot.setIfAbsent(summaryKey(ref), blob, ttl).catch(() => {});
       }
       blobs[i] = blob;
     });

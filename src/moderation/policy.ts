@@ -1,10 +1,13 @@
 import type { AuthUser } from '../auth/apiKey.js';
+import type { Config } from '../config.js';
 import type { Db } from '../db/index.js';
 import { unprocessable } from '../http/errors.js';
-import { SERVER_LIST, WordScanner } from './words.js';
+import { msg } from '../language.js';
+import { routeOf, trustOf, type TrustPlugin, type TrustRoute } from './trust.js';
+import { WordScanner } from './words.js';
 
-/** Why a post didn't get a hashtag: a moderator removed it from the content, the publisher is muted on it, or its blocked words. */
-export type RemovalReason = 'removed' | 'muted' | 'blocked_word';
+/** Why a post didn't get a hashtag: the publisher is muted on it, a moderator removed it from this content, or its blocked words. */
+type RemovalReason = 'muted' | 'removed' | 'blocked_word';
 export interface RemovedTag {
   tag: string;
   reason: RemovalReason;
@@ -17,6 +20,13 @@ export async function moderates(db: Db, user: AuthUser, tag: string): Promise<bo
   return row !== undefined;
 }
 
+/**
+ * Whether `user` works through the server's moderation queue: reads it and the content that waits
+ * in it, and accepts or rejects that content. And through its report queue: accepts or deletes the
+ * content users reported. A server moderator, or an admin.
+ */
+export const moderatesServer = (user: AuthUser): boolean => user.admin || user.moderator;
+
 /** Makes a user an admin, or not; null if there's no such user. A userId wins over a username that happens to look like one. */
 export async function setAdmin(db: Db, user: string, admin: boolean): Promise<{ userId: string; username: string } | null> {
   const select = db.selectFrom('users').select(['id', 'username']);
@@ -26,32 +36,73 @@ export async function setAdmin(db: Db, user: string, admin: boolean): Promise<{ 
   return { userId: row.id, username: row.username };
 }
 
-export interface PostRules {
-  /**
-   * Fed the post's text and filename, if it has them, to find its blocked words; null when no list
-   * applies to the post, so nothing needs reading.
-   */
-  scanner: WordScanner | null;
-  /**
-   * The hashtags the post gets, and those it doesn't with why. Throws 422 if it can't be published: it
-   * has a word of the server's list, or no hashtag left.
-   */
-  apply(): { tags: string[]; removedTags: RemovedTag[] };
+/** What moderation of a post or a comment works with: the database, the settings, and the trust plugins. */
+export interface ModerationDeps {
+  db: Db;
+  config: Config;
+  trustPlugins: TrustPlugin[];
+  now?: () => number;
 }
 
 /**
- * Moderation of a new post or version by `userId` with `tags`; `contentId` for a new version of existing
- * content. The server's blocked words refuse the post. A hashtag a moderator removed from the content,
- * one its publisher is muted on, and one whose blocked words it has, are dropped. Hashtags are scanned
- * for blocked words too.
+ * Moderation of a new comment by `userId` on the post `contentId`. It goes through the gate a post
+ * does: the same trust plugins give it a score, each told it is a comment (`commentOn`), and the
+ * same thresholds say where the score sends it (see routeOf). Throws 422 for a comment whose score
+ * has it deleted: nothing of it is stored.
+ *
+ * That is all of it. A comment has no hashtags, so what a hashtag's moderators keep (its blocked
+ * words, its mutes) doesn't reach the comments on posts under it: they have no say over comments.
  */
-export async function postRules(db: Db, post: { userId: string; tags: string[]; contentId?: string }): Promise<PostRules> {
-  const { userId, tags, contentId } = post;
-  const [words, mutes, removals] = await Promise.all([
-    db.selectFrom('blocked_words').select(['tag', 'word']).where('tag', 'in', [SERVER_LIST, ...tags]).execute(),
+export async function moderateComment(
+  { db, config, trustPlugins, now = Date.now }: ModerationDeps,
+  comment: { userId: string; contentId: string; text: string },
+): Promise<{ trustScore: number; route: Exclude<TrustRoute, 'delete'> }> {
+  const trust = await trustOf(trustPlugins, { userId: comment.userId, commentOn: comment.contentId, tags: [], texts: [comment.text] }, { db, config, now });
+  const route = routeOf(trust.score, config.trust);
+  if (route === 'delete') throw unprocessable(trust.reason ?? msg('comment.not_trusted'));
+  return { trustScore: trust.score, route };
+}
+
+export interface Moderated {
+  /** The hashtags the post gets. */
+  tags: string[];
+  /** Those it doesn't, with why. */
+  removedTags: RemovedTag[];
+  /** How far the server trusts the post (see trustOf). Kept only with a post that waits in the moderation queue. */
+  trustScore: number;
+  /** Where the score sends the post: to the moderation queue, or straight to the feeds. */
+  route: Exclude<TrustRoute, 'delete'>;
+}
+
+/**
+ * Moderation of a new post, or of an update of `contentId`, by `userId` with `tags`. `texts` is what
+ * there is of it to read: its text or caption, link, and filename.
+ *
+ * The post is given a trust score by the trust plugins, each of which may lower it (see trustOf),
+ * and the score says where the post goes (see routeOf; `config.trust` holds the thresholds). Throws
+ * 422 for a post whose score has it deleted: nothing of it is stored.
+ *
+ * Returns the hashtags the post gets, and those it doesn't with why: one its publisher is muted on,
+ * one a moderator removed from this content, and one whose blocked words it has. Hashtags are
+ * scanned for blocked words too. Throws 422 if no hashtag is left.
+ */
+export async function moderatePost(
+  { db, config, trustPlugins, now = Date.now }: ModerationDeps,
+  post: { userId: string; contentId?: string; tags: string[]; texts: (string | null | undefined)[] },
+): Promise<Moderated> {
+  const { userId, contentId, tags } = post;
+  const texts = post.texts.filter((text): text is string => !!text);
+  const [trust, words, mutes, removals] = await Promise.all([
+    trustOf(trustPlugins, { userId, contentId, tags, texts }, { db, config, now }),
+    tags.length ? db.selectFrom('blocked_words').select(['tag', 'word']).where('tag', 'in', tags).execute() : [],
     tags.length ? db.selectFrom('tag_mutes').select('tag').where('user_id', '=', userId).where('tag', 'in', tags).execute() : [],
-    contentId ? db.selectFrom('removed_tags').select('tag').where('content_id', '=', contentId).execute() : [],
+    contentId && tags.length
+      ? db.selectFrom('tag_moderation').select('tag').where('content_id', '=', contentId).where('decision', '=', 'removed').where('tag', 'in', tags).execute()
+      : [],
   ]);
+  const route = routeOf(trust.score, config.trust);
+  if (route === 'delete') throw unprocessable(trust.reason ?? msg('moderation.not_trusted'));
+
   const lists = new Map<string, string[]>();
   for (const { tag, word } of words) {
     const list = lists.get(tag);
@@ -60,21 +111,16 @@ export async function postRules(db: Db, post: { userId: string; tags: string[]; 
   }
   const muted = new Set(mutes.map((r) => r.tag));
   const removed = new Set(removals.map((r) => r.tag));
+  // With no hashtag's list that applies to the post, nothing needs reading.
   const scanner = lists.size ? new WordScanner(lists) : null;
+  for (const text of [...texts, ...tags]) scanner?.scan(text);
 
-  return {
-    scanner,
-    apply() {
-      for (const tag of tags) scanner?.scan(tag);
-      if (scanner?.matched.has(SERVER_LIST)) throw unprocessable("the post contains a word or phrase this server doesn't allow, so it wasn't published");
-      const removedTags: RemovedTag[] = [];
-      const kept = tags.filter((tag) => {
-        const reason = removed.has(tag) ? 'removed' : muted.has(tag) ? 'muted' : scanner?.matched.has(tag) ? 'blocked_word' : null;
-        if (reason) removedTags.push({ tag, reason });
-        return !reason;
-      });
-      if (!kept.length) throw unprocessable("none of the post's hashtags is allowed on it, and a post needs one, so it wasn't published", { removedTags });
-      return { tags: kept, removedTags };
-    },
-  };
+  const removedTags: RemovedTag[] = [];
+  const kept = tags.filter((tag) => {
+    const reason = muted.has(tag) ? 'muted' : removed.has(tag) ? 'removed' : scanner?.matched.has(tag) ? 'blocked_word' : null;
+    if (reason) removedTags.push({ tag, reason });
+    return !reason;
+  });
+  if (!kept.length) throw unprocessable(msg('moderation.no_tags_left'), { removedTags });
+  return { tags: kept, removedTags, trustScore: trust.score, route };
 }

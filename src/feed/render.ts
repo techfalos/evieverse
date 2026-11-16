@@ -1,12 +1,12 @@
 import type { Publisher, PublisherStore, Summary, SummaryStore } from '../storage/index.js';
 import { toFeedRecord, type FeedRecord } from '../tagfeed/layout.js';
 import type { Candidate } from '../tagfeed/reader.js';
+import { iso } from '../time.js';
 import type { FeedPlan } from './plan.js';
 
-const iso = (ms: number) => new Date(ms).toISOString();
-const refKey = (c: { contentId: string; version: number }) => `${c.contentId}:${c.version}`;
+const refKey = (c: { contentId: string }) => c.contentId;
 
-export interface FeedBodies {
+interface FeedBodies {
   summaries: Map<string, Summary>;
   publishers: Map<string, Publisher>;
 }
@@ -30,15 +30,17 @@ export async function loadBodies(picked: Candidate[], summaries: SummaryStore, p
 
 /**
  * Streams the feed JSON in plan order. A record whose summary is gone (erased after the plan was
- * made) is left out, and not counted.
+ * made) is left out, and not counted. `tags` are the hashtags the plan was made over, and `related`
+ * those of them the feed added to the ones it was asked for; undefined if it wasn't asked to add any.
  */
-export function* renderFeed(plan: FeedPlan, tags: string[], bodies: FeedBodies, nextCursor: string | null): Generator<Buffer> {
+export function* renderFeed(plan: FeedPlan, tags: string[], bodies: FeedBodies, nextCursor: string | null, related?: string[]): Generator<Buffer> {
   const counts = plan.slices.map((s) => s.picks.reduce((n, list) => n + list.filter((c) => bodies.summaries.has(refKey(c))).length, 0));
   const head = {
     window: { from: iso(plan.window.from), to: iso(plan.window.to) },
     count: counts.reduce((a, b) => a + b, 0),
     truncated: plan.truncated,
     nextCursor,
+    ...(related && { related }),
   };
   yield Buffer.from(`${JSON.stringify(head).slice(0, -1)},"days":[`);
 
@@ -59,7 +61,7 @@ export function* renderFeed(plan: FeedPlan, tags: string[], bodies: FeedBodies, 
       const records: string[] = [];
       for (const c of slice.picks[t]!) {
         const s = bodies.summaries.get(refKey(c));
-        if (s) records.push(JSON.stringify(toFeedRecord(s, c.likes, bodies.publishers.get(s.userId)!)));
+        if (s) records.push(JSON.stringify(toFeedRecord(s, c.likes, bodies.publishers.get(s.userId)!, c.moderated)));
       }
       if (!records.length) continue;
       yield Buffer.from(`${firstTag ? '' : ','}${JSON.stringify(tags[t])}:[${records.join(',')}]`);

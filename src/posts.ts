@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Origin, Preview } from './storage/contentStore.js';
+import type { Preview } from './storage/contentStore.js';
 
 /**
  * What a post is. An image, video or audio post is a file with an optional caption; a text post is its
@@ -30,32 +30,43 @@ export function mediaType(mimeType: string): MediaType | null {
   return type === 'image' || type === 'video' || type === 'audio' ? type : null;
 }
 
-/** Text that content stored before post types was previewed by, which still reads as a text post. */
-const isPlainText = (mimeType: string) => mimeType === TEXT_MIME || mimeType === 'text/markdown';
+/** Where a piece of content's bytes are read. */
+export const mediaUrl = (publicBaseUrl: string, contentId: string) => `${publicBaseUrl}/content/${contentId}/raw`;
 
-export const mediaUrl = (publicBaseUrl: string, contentId: string, version: number) =>
-  `${publicBaseUrl}/content/${contentId}/raw?version=${version}`;
-
-/** Where a version's bytes are read: here, or for federated content, on its origin server. */
-export const bytesUrl = (publicBaseUrl: string, v: { contentId: string; version: number; origin?: Origin }) =>
-  v.origin ? mediaUrl(v.origin.server, v.origin.contentId, v.origin.version) : mediaUrl(publicBaseUrl, v.contentId, v.version);
+/** A preview as it's stored: an image's, video's or audio's URL is left out, or there but not used. */
+export type StoredPreview =
+  | { kind: 'text'; text: string }
+  | { kind: MediaType; text?: string; url?: string }
+  | { kind: 'link'; url: string };
 
 /**
- * A stored preview (in a meta file, a summary or a federated record) as feeds show it. An image's,
- * video's or audio's URL is always `bytesUrl`, where its bytes are read. Content stored before post
- * types has a "media" preview, or a text preview of a document: an image, video or audio file reads as
- * that type, plain text as a text post, and any other file (HTML, PDF, JSON, ...) as a link to its bytes.
+ * A stored preview (in a meta file or a summary) as feeds show it. An image's, video's or audio's URL
+ * is always `bytesUrl`, where its bytes are read.
  */
-export function readPreview(stored: { kind: string; text?: string; url?: string }, mimeType: string, bytesUrl: string): Preview {
-  const media = mediaType(mimeType);
-  if (media) return { kind: media, url: bytesUrl, ...(stored.kind === media && stored.text ? { text: stored.text } : {}) };
-  if (stored.kind === 'link' && mimeType === LINK_MIME && stored.url) return { kind: 'link', url: stored.url };
-  if (stored.kind === 'text' && isPlainText(mimeType)) return { kind: 'text', text: stored.text ?? '' };
-  return { kind: 'link', url: bytesUrl };
+export function readPreview(stored: StoredPreview, bytesUrl: string): Preview {
+  if (stored.kind === 'text') return { kind: 'text', text: stored.text };
+  if (stored.kind === 'link') return { kind: 'link', url: stored.url };
+  return { kind: stored.kind, url: bytesUrl, ...(stored.text ? { text: stored.text } : {}) };
 }
 
-/** The preview of the version a meta file describes, its links to the bytes built for that version. */
-export const previewOf = (
-  meta: { contentId: string; version: number; mimeType: string; preview: { kind: string; text?: string; url?: string }; origin?: Origin },
-  publicBaseUrl: string,
-) => readPreview(meta.preview, meta.mimeType, bytesUrl(publicBaseUrl, meta));
+/** The preview of the content a meta file describes, its link to the bytes built for this server. */
+export const previewOf = (meta: { contentId: string; preview: StoredPreview }, publicBaseUrl: string) =>
+  readPreview(meta.preview, mediaUrl(publicBaseUrl, meta.contentId));
+
+/** The first `maxWords` words of `text`, cut to `maxChars` characters, which bounds text written without spaces. */
+function firstWords(text: string, maxWords: number, maxChars: number): string {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  let out = words.slice(0, maxWords).join(' ');
+  let cut = words.length > maxWords;
+  if (out.length > maxChars) {
+    // Not between the halves of a surrogate pair.
+    const code = out.charCodeAt(maxChars - 1);
+    out = out.slice(0, code >= 0xd800 && code <= 0xdbff ? maxChars - 1 : maxChars).trimEnd();
+    cut = true;
+  }
+  return cut ? `${out} …` : out;
+}
+
+/** Cuts a text post's text or a caption to the length of this server's previews. */
+export const previewCutter = (feed: { previewWords: number; previewChars: number }) => (text: string) =>
+  firstWords(text, feed.previewWords, feed.previewChars);

@@ -1,15 +1,40 @@
-# theuniverse on AWS:
-#   CloudFront (HTTPS, default *.cloudfront.net certificate) -> ALB -> ECS Fargate API tasks
-#   feed index and hot summaries in ElastiCache (Valkey), content and summaries on S3,
-#   metadata in RDS PostgreSQL, one ECS compactor task.
+# Evieverse on AWS:
+#   CloudFront (HTTPS, default *.cloudfront.net certificate) -> API Gateway HTTP API -> one Lambda
+#   function per route group (feed, content, store, api), all running the one container image.
+#   The compactor is one process that is always up: a Fargate service of one task. The feed index
+#   and hot summaries are in ElastiCache (Valkey), content and summaries on S3, metadata in RDS
+#   PostgreSQL behind RDS Proxy.
 
 locals {
   root        = abspath("${path.module}/../../..")
-  source_hash = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json"]) : filesha1("${local.root}/${f}")]))
+  source_hash = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json", "scripts/build-cli.mjs"]) : filesha1("${local.root}/${f}")]))
   image       = var.image != "" ? var.image : "${aws_ecr_repository.app.repository_url}:${substr(local.source_hash, 0, 12)}"
   url         = "https://${aws_cloudfront_distribution.app.domain_name}"
   azs         = slice(data.aws_availability_zones.available.names, 0, 2)
   secret_keys = concat(["DATABASE_URL", "REDIS_URL"], nonsensitive(keys(var.secrets)))
+
+  # Which function serves which requests. This follows the route groups in src/functions/groups.ts:
+  # change the two together. Anything not listed goes to the api function.
+  routes = {
+    "GET /feed"              = "feed"
+    "HEAD /feed"             = "feed"
+    "GET /feed/{proxy+}"     = "feed"
+    "HEAD /feed/{proxy+}"    = "feed"
+    "GET /content/{proxy+}"  = "content"
+    "HEAD /content/{proxy+}" = "content"
+    "POST /uploads"          = "store"
+    "POST /store"            = "store"
+    "$default"               = "api"
+  }
+
+  # API Gateway gives a function 30 seconds at most, so the route groups get no longer.
+  functions = {
+    feed    = { memory = var.function_memory, timeout = 30 }
+    content = { memory = var.function_memory, timeout = 30 }
+    store   = { memory = var.store_function_memory, timeout = 30 }
+    api     = { memory = var.function_memory, timeout = 30 }
+  }
+  route_groups = toset(distinct(values(local.routes)))
 }
 
 data "aws_availability_zones" "available" {
@@ -26,15 +51,29 @@ resource "aws_ecr_repository" "app" {
   }
 }
 
+resource "aws_ecr_repository_policy" "lambda" {
+  repository = aws_ecr_repository.app.name
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "LambdaPull"
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"]
+    }]
+  })
+}
+
 resource "terraform_data" "image" {
   count            = var.image == "" ? 1 : 0
   triggers_replace = [local.image]
   provisioner "local-exec" {
     working_dir = local.root
-    command     = <<-EOT
+    # --provenance=false: Lambda takes a plain image manifest, not an index with attestations.
+    command = <<-EOT
       set -e
       aws ecr get-login-password --region ${var.region} | docker login --username AWS --password-stdin ${split("/", aws_ecr_repository.app.repository_url)[0]}
-      docker build --platform linux/amd64 -t ${local.image} .
+      docker build --platform linux/amd64 --provenance=false -t ${local.image} .
       docker push ${local.image}
     EOT
   }
@@ -53,8 +92,9 @@ resource "aws_internet_gateway" "main" {
   vpc_id = aws_vpc.main.id
 }
 
-# Tasks run in public subnets with public IPs (no NAT gateway needed to reach ECR and AI APIs);
-# their security group only admits traffic from the load balancer.
+# The public subnets hold only the NAT gateway. Functions run in the private subnets, next to Redis
+# and the database: a function in a VPC has no public address, so it reaches the internet (AI APIs)
+# through the NAT gateway and S3 through the gateway endpoint, which costs nothing.
 resource "aws_subnet" "public" {
   count                   = 2
   vpc_id                  = aws_vpc.main.id
@@ -86,37 +126,46 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
-data "aws_ec2_managed_prefix_list" "cloudfront" {
-  name = "com.amazonaws.global.cloudfront.origin-facing"
+resource "aws_eip" "nat" {
+  domain = "vpc"
+  tags   = { Name = "${var.name}-nat" }
 }
 
-resource "aws_security_group" "alb" {
-  name   = "${var.name}-alb"
+# One NAT gateway, in the first zone: if that zone fails, functions lose the internet (not Redis,
+# the database or S3) until it returns. A second gateway and route table would remove that.
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public[0].id
+  tags          = { Name = var.name }
+  depends_on    = [aws_internet_gateway.main]
+}
+
+resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
-  ingress {
-    description     = "HTTP from CloudFront only"
-    from_port       = 80
-    to_port         = 80
-    protocol        = "tcp"
-    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront.id]
-  }
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
   }
 }
 
+resource "aws_route_table_association" "private" {
+  count          = 2
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.private.id]
+}
+
+# The functions, the compactor and the one-off rebuild task. Nothing connects to them: API Gateway
+# invokes functions through the Lambda service.
 resource "aws_security_group" "app" {
   name   = "${var.name}-app"
   vpc_id = aws_vpc.main.id
-  ingress {
-    from_port       = 3000
-    to_port         = 3000
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-  }
   egress {
     from_port   = 0
     to_port     = 0
@@ -136,6 +185,24 @@ resource "aws_security_group" "redis" {
   }
 }
 
+resource "aws_security_group" "proxy" {
+  name   = "${var.name}-db-proxy"
+  vpc_id = aws_vpc.main.id
+  ingress {
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.app.id]
+  }
+  egress {
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.main.cidr_block]
+  }
+}
+
+# From the proxy for the functions, and straight from the migrate function, the compactor and the rebuild task.
 resource "aws_security_group" "db" {
   name   = "${var.name}-db"
   vpc_id = aws_vpc.main.id
@@ -143,7 +210,7 @@ resource "aws_security_group" "db" {
     from_port       = 5432
     to_port         = 5432
     protocol        = "tcp"
-    security_groups = [aws_security_group.app.id]
+    security_groups = [aws_security_group.app.id, aws_security_group.proxy.id]
   }
 }
 
@@ -163,6 +230,36 @@ resource "aws_s3_bucket_public_access_block" "content" {
 }
 
 # Summaries share the content bucket, under summaries/<UTC day>/; the compactor deletes days past retention.
+
+# Browsers send files straight to the bucket, with the link POST /uploads signs.
+resource "aws_s3_bucket_cors_configuration" "content" {
+  bucket = aws_s3_bucket.content.id
+  cors_rule {
+    allowed_methods = ["PUT"]
+    allowed_origins = var.upload_origins
+    allowed_headers = ["*"]
+    expose_headers  = ["ETag"]
+    max_age_seconds = 3600
+  }
+}
+
+# POST /store moves an upload into content/ and removes it; one nobody stored goes after a day.
+resource "aws_s3_bucket_lifecycle_configuration" "content" {
+  bucket = aws_s3_bucket.content.id
+  rule {
+    id     = "expire-unstored-uploads"
+    status = "Enabled"
+    filter {
+      prefix = "uploads/"
+    }
+    expiration {
+      days = 1
+    }
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 1
+    }
+  }
+}
 
 # ---------------------------------------------------------------- redis
 
@@ -228,8 +325,8 @@ resource "aws_db_instance" "main" {
   allocated_storage         = 20
   max_allocated_storage     = 200
   storage_encrypted         = true
-  db_name                   = "theuniverse"
-  username                  = "theuniverse"
+  db_name                   = "evieverse"
+  username                  = "evieverse"
   password                  = random_password.db.result
   db_subnet_group_name      = aws_db_subnet_group.main.name
   vpc_security_group_ids    = [aws_security_group.db.id]
@@ -240,6 +337,15 @@ resource "aws_db_instance" "main" {
   final_snapshot_identifier = var.force_destroy ? null : "${var.name}-final"
 }
 
+locals {
+  redis_url = "rediss://:${random_password.redis.result}@${aws_elasticache_replication_group.redis.primary_endpoint_address}:6379"
+  # RDS enforces TLS; its CA is not in Node's trust store, so the connection is encrypted but unverified (in-VPC).
+  database_url = "postgres://evieverse:${random_password.db.result}@${aws_db_instance.main.address}:5432/evieverse?sslmode=no-verify"
+  # The proxy's certificate comes from ACM, which Node trusts, so this connection is verified.
+  proxy_database_url = "postgres://evieverse:${random_password.db.result}@${aws_db_proxy.main.endpoint}:5432/evieverse?sslmode=verify-full"
+}
+
+# Read by the compactor and the one-off rebuild task (the functions get these as environment variables, see below).
 resource "aws_secretsmanager_secret" "app" {
   name_prefix             = "${var.name}-"
   recovery_window_in_days = 0
@@ -247,11 +353,110 @@ resource "aws_secretsmanager_secret" "app" {
 
 resource "aws_secretsmanager_secret_version" "app" {
   secret_id = aws_secretsmanager_secret.app.id
-  # RDS enforces TLS; its CA is not in Node's trust store, so the connection is encrypted but unverified (in-VPC).
   secret_string = jsonencode(merge(var.secrets, {
-    DATABASE_URL = "postgres://theuniverse:${random_password.db.result}@${aws_db_instance.main.address}:5432/theuniverse?sslmode=no-verify"
-    REDIS_URL    = "rediss://:${random_password.redis.result}@${aws_elasticache_replication_group.redis.primary_endpoint_address}:6379"
+    DATABASE_URL = local.database_url
+    REDIS_URL    = local.redis_url
   }))
+}
+
+# ---------------------------------------------------------------- database proxy
+
+# Every warm function instance keeps connections open, and a burst of traffic starts many
+# instances at once. The proxy shares a small number of database connections among them all.
+resource "aws_secretsmanager_secret" "db" {
+  name_prefix             = "${var.name}-db-"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "db" {
+  secret_id     = aws_secretsmanager_secret.db.id
+  secret_string = jsonencode({ username = "evieverse", password = random_password.db.result })
+}
+
+data "aws_iam_policy_document" "proxy_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["rds.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "proxy" {
+  name_prefix        = "${var.name}-proxy-"
+  assume_role_policy = data.aws_iam_policy_document.proxy_assume.json
+}
+
+resource "aws_iam_role_policy" "proxy" {
+  role = aws_iam_role.proxy.id
+  policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = [{ Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = aws_secretsmanager_secret.db.arn }]
+  })
+}
+
+resource "aws_db_proxy" "main" {
+  name                   = var.name
+  engine_family          = "POSTGRESQL"
+  role_arn               = aws_iam_role.proxy.arn
+  vpc_subnet_ids         = aws_subnet.private[*].id
+  vpc_security_group_ids = [aws_security_group.proxy.id]
+  require_tls            = true
+  idle_client_timeout    = 300
+  auth {
+    auth_scheme = "SECRETS"
+    iam_auth    = "DISABLED"
+    secret_arn  = aws_secretsmanager_secret.db.arn
+  }
+  depends_on = [aws_secretsmanager_secret_version.db, aws_iam_role_policy.proxy]
+}
+
+resource "aws_db_proxy_default_target_group" "main" {
+  db_proxy_name = aws_db_proxy.main.name
+  connection_pool_config {
+    # The rest stay free for the migrate function, the compactor, the rebuild task and an administrator.
+    max_connections_percent   = 75
+    connection_borrow_timeout = 10
+  }
+}
+
+resource "aws_db_proxy_target" "main" {
+  db_proxy_name          = aws_db_proxy.main.name
+  target_group_name      = aws_db_proxy_default_target_group.main.name
+  db_instance_identifier = aws_db_instance.main.identifier
+}
+
+# ---------------------------------------------------------------- settings
+
+locals {
+  env = merge({
+    DB_DIALECT         = "postgres"
+    CONTENT_SCHEME     = "s3"
+    CONTENT_OPTIONS    = jsonencode({ bucket = aws_s3_bucket.content.id, region = var.region })
+    PUBLIC_BASE_URL    = local.url
+    COMPACT_IN_PROCESS = "false"
+    STORAGE_TMP_PATH   = "/tmp/evieverse"
+    # /store checks a file sent with an upload link by reading it back from the bucket, inside API
+    # Gateway's 30 seconds. An estimate of what fits, not a measurement: raise it after timing your own.
+    MAX_UPLOAD_BYTES = "268435456"
+  }, var.environment)
+
+  # A Lambda function reads its settings from its configuration only, so the two URLs and
+  # `var.secrets` are environment variables there: encrypted at rest, but readable by anyone allowed
+  # lambda:GetFunctionConfiguration on these functions.
+  function_env = merge(local.env, {
+    REDIS_URL = local.redis_url
+    # The address CloudFront saw is the last one in X-Forwarded-For once the gateway's own is dropped.
+    TRUST_PROXY          = "1"
+    FUNCTION_EDGE_SECRET = random_password.edge.result
+  }, var.secrets)
+}
+
+# CloudFront sends this to the gateway, whose own address is public; functions refuse requests without it.
+resource "random_password" "edge" {
+  length  = 40
+  special = false
 }
 
 # ---------------------------------------------------------------- IAM
@@ -264,6 +469,45 @@ data "aws_iam_policy_document" "ecs_assume" {
       identifiers = ["ecs-tasks.amazonaws.com"]
     }
   }
+}
+
+data "aws_iam_policy_document" "lambda_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["lambda.amazonaws.com"]
+    }
+  }
+}
+
+data "aws_iam_policy_document" "content" {
+  statement {
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.content.arn]
+  }
+  statement {
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = ["${aws_s3_bucket.content.arn}/*"]
+  }
+}
+
+# The functions' own credentials: OpenDAL picks them up from the environment Lambda sets, and signs
+# upload and download links with them.
+resource "aws_iam_role" "function" {
+  name_prefix        = "${var.name}-fn-"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
+}
+
+# Logs, and the network interfaces a function in a VPC needs.
+resource "aws_iam_role_policy_attachment" "function_vpc" {
+  role       = aws_iam_role.function.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
+resource "aws_iam_role_policy" "function" {
+  role   = aws_iam_role.function.id
+  policy = data.aws_iam_policy_document.content.json
 }
 
 resource "aws_iam_role" "execution" {
@@ -284,25 +528,173 @@ resource "aws_iam_role_policy" "execution_secrets" {
   })
 }
 
-# The app's own credentials: OpenDAL picks up the ECS task role automatically.
+# The compactor's and the rebuild task's own credentials: OpenDAL picks up the ECS task role automatically.
 resource "aws_iam_role" "task" {
   name_prefix        = "${var.name}-task-"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
 }
 
 resource "aws_iam_role_policy" "task" {
-  role = aws_iam_role.task.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      { Effect = "Allow", Action = ["s3:ListBucket"], Resource = aws_s3_bucket.content.arn },
-      { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource = "${aws_s3_bucket.content.arn}/*" },
-    ]
-  })
+  role   = aws_iam_role.task.id
+  policy = data.aws_iam_policy_document.content.json
 }
 
-# ---------------------------------------------------------------- ECS
+# ---------------------------------------------------------------- admin account
 
+# The server's first admin, and its API key in the server's own format (src/auth/apiKey.ts). The
+# migrate function below creates the account from the key's hash (src/moderation/bootstrap.ts), so
+# the key itself is only in the state and in the profile file. To replace the key:
+#   terraform apply -replace=random_password.admin_key
+resource "random_uuid" "admin" {}
+
+resource "random_id" "admin_key_prefix" {
+  byte_length = 6
+}
+
+# 43 characters of the 64 that base64url uses, which is what the server's keys end in.
+resource "random_password" "admin_key" {
+  length           = 43
+  override_special = "-_"
+}
+
+locals {
+  # random_uuid gives 32 random hex digits in a UUID's shape, where the server's ids are version 4
+  # UUIDs and its API takes nothing else. So the two digits that make it one are set here: the
+  # version (4) and the variant (8, 9, a or b).
+  admin_user_id = join("", [
+    substr(random_uuid.admin.result, 0, 14), "4", substr(random_uuid.admin.result, 15, 4),
+    element(["8", "9", "a", "b"], parseint(substr(random_uuid.admin.result, 19, 1), 16) % 4),
+    substr(random_uuid.admin.result, 20, 16),
+  ])
+  admin_api_key = sensitive("tu_${random_id.admin_key_prefix.hex}_${random_password.admin_key.result}")
+  bootstrap_admin = jsonencode({
+    userId   = local.admin_user_id
+    username = var.admin_username
+    keyHash  = nonsensitive(sha256(local.admin_api_key))
+  })
+  admin_profile_path = pathexpand("~/.evieverse/profiles/${var.name}.json")
+}
+
+# The admin's profile for the CLI, on the machine that applies: `evieverse --profile ${var.name} whoami`.
+resource "local_sensitive_file" "admin_profile" {
+  count                = var.install_admin_profile ? 1 : 0
+  filename             = local.admin_profile_path
+  file_permission      = "0600"
+  directory_permission = "0700"
+  content = jsonencode({
+    server   = local.url
+    userId   = local.admin_user_id
+    username = var.admin_username
+    apiKey   = local.admin_api_key
+  })
+  depends_on = [aws_lambda_invocation.migrate]
+}
+
+# ---------------------------------------------------------------- functions
+
+resource "aws_cloudwatch_log_group" "function" {
+  for_each          = toset(concat(keys(local.functions), ["migrate"]))
+  name              = "/aws/lambda/${var.name}-${each.value}"
+  retention_in_days = 30
+}
+
+# Brings the schema up to date, and sets up the admin account. Functions never migrate when they
+# start (many start at once), so each apply that changes the image or the admin account runs this
+# first, straight against the database.
+resource "aws_lambda_function" "migrate" {
+  function_name = "${var.name}-migrate"
+  role          = aws_iam_role.function.arn
+  package_type  = "Image"
+  image_uri     = local.image
+  architectures = ["x86_64"]
+  memory_size   = 512
+  timeout       = 300
+
+  image_config {
+    entry_point       = ["node"]
+    command           = ["dist/functions/lambda.js"]
+    working_directory = "/app"
+  }
+  vpc_config {
+    subnet_ids         = aws_subnet.private[*].id
+    security_group_ids = [aws_security_group.app.id]
+  }
+  environment {
+    variables = {
+      FUNCTION_GROUP  = "migrate"
+      DB_DIALECT      = "postgres"
+      DATABASE_URL    = local.database_url
+      BOOTSTRAP_ADMIN = local.bootstrap_admin
+    }
+  }
+  depends_on = [
+    terraform_data.image,
+    aws_ecr_repository_policy.lambda,
+    aws_cloudwatch_log_group.function,
+    aws_iam_role_policy_attachment.function_vpc,
+  ]
+}
+
+resource "aws_lambda_invocation" "migrate" {
+  function_name = aws_lambda_function.migrate.function_name
+  input         = jsonencode({ image = local.image })
+  triggers      = { image = local.image, admin = local.bootstrap_admin }
+  depends_on    = [aws_db_instance.main]
+
+  lifecycle {
+    precondition {
+      condition     = can(regex("^tu_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$", local.admin_api_key))
+      error_message = "The admin API key isn't in the format the server issues and accepts (KEY_PATTERN in src/auth/apiKey.ts)."
+    }
+    precondition {
+      condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", local.admin_user_id))
+      error_message = "The admin account's id isn't a version 4 UUID, which is what the server's user ids are."
+    }
+  }
+}
+
+resource "aws_lambda_function" "fn" {
+  for_each      = local.functions
+  function_name = "${var.name}-${each.key}"
+  role          = aws_iam_role.function.arn
+  package_type  = "Image"
+  image_uri     = local.image
+  architectures = ["x86_64"]
+  memory_size   = each.value.memory
+  timeout       = each.value.timeout
+
+  image_config {
+    entry_point       = ["node"]
+    command           = ["dist/functions/lambda.js"]
+    working_directory = "/app"
+  }
+  vpc_config {
+    subnet_ids         = aws_subnet.private[*].id
+    security_group_ids = [aws_security_group.app.id]
+  }
+  environment {
+    variables = merge(local.function_env, {
+      FUNCTION_GROUP = each.key
+      DATABASE_URL   = local.proxy_database_url
+    })
+  }
+  depends_on = [
+    aws_lambda_invocation.migrate,
+    aws_db_proxy_target.main,
+    aws_route_table_association.private,
+    aws_vpc_endpoint.s3,
+    aws_cloudwatch_log_group.function,
+    aws_iam_role_policy_attachment.function_vpc,
+    aws_iam_role_policy.function,
+  ]
+}
+
+# ---------------------------------------------------------------- compactor
+
+# The compactor is one process that stays up: pass after pass over the feed index, never two at
+# once, and never more than one in COMPACT_INTERVAL_SECONDS (5 unless `environment` says otherwise).
+# A function can't be that: it runs when it is called, and a schedule calls once a minute at most.
+# So it is a Fargate service of one task, which ECS starts again whenever it stops.
 resource "aws_cloudwatch_log_group" "app" {
   name              = "/ecs/${var.name}"
   retention_in_days = 30
@@ -317,16 +709,10 @@ resource "aws_ecs_cluster" "main" {
 }
 
 locals {
-  env = merge({
-    DB_DIALECT         = "postgres"
-    CONTENT_SCHEME     = "s3"
-    CONTENT_OPTIONS    = jsonencode({ bucket = aws_s3_bucket.content.id, region = var.region })
-    PUBLIC_BASE_URL    = local.url
-    COMPACT_IN_PROCESS = "false"
-    STORAGE_TMP_PATH   = "/tmp/theuniverse"
-  }, var.environment)
-
-  container = {
+  # The compactor's container, and the rebuild task's: the same image and settings, another command.
+  # Both go straight to the database, not through the proxy: each is one process with a few connections.
+  compactor_container = {
+    name        = "compactor"
     image       = local.image
     essential   = true
     environment = [for k, v in local.env : { name = k, value = v }]
@@ -342,27 +728,58 @@ locals {
   }
 }
 
-resource "aws_ecs_task_definition" "app" {
-  family                   = "${var.name}-app"
+resource "aws_ecs_task_definition" "compactor" {
+  family                   = "${var.name}-compactor"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = var.app_cpu
-  memory                   = var.app_memory
+  cpu                      = var.compactor_cpu
+  memory                   = var.compactor_memory
   execution_role_arn       = aws_iam_role.execution.arn
   task_role_arn            = aws_iam_role.task.arn
   runtime_platform {
     operating_system_family = "LINUX"
     cpu_architecture        = "X86_64"
   }
-  container_definitions = jsonencode([merge(local.container, {
-    name         = "app"
-    portMappings = [{ containerPort = 3000, protocol = "tcp" }]
+  container_definitions = jsonencode([merge(local.compactor_container, {
+    command = ["node", "dist/compact/main.js"]
+    # SIGTERM lets the pass that is running finish; then ECS stops the task.
+    stopTimeout = 120
   })])
   depends_on = [terraform_data.image]
 }
 
-resource "aws_ecs_task_definition" "compactor" {
-  family                   = "${var.name}-compactor"
+resource "aws_ecs_service" "compactor" {
+  name            = "${var.name}-compactor"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.compactor.arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+  # A deploy stops the task that is running before it starts the new one, so there is one compactor
+  # at a time. Should there ever be two (ECS replacing a task it lost sight of), their passes still
+  # don't overlap: each takes the compactor's lease in the database, and a pass that finds it held is skipped.
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 100
+  network_configuration {
+    subnets          = aws_subnet.private[*].id
+    security_groups  = [aws_security_group.app.id]
+    assign_public_ip = false
+  }
+  depends_on = [
+    aws_lambda_invocation.migrate,
+    aws_route_table_association.private,
+    aws_vpc_endpoint.s3,
+    aws_secretsmanager_secret_version.app,
+    aws_iam_role_policy_attachment.execution,
+    aws_iam_role_policy.execution_secrets,
+    aws_iam_role_policy.task,
+  ]
+}
+
+# `--rebuild` rebuilds the whole feed index from the database and the bucket, after Redis lost data.
+# It is a task of its own, started by hand (see deploy/README.md): no service runs it. It can run
+# beside the compactor: the lease makes each wait for the other's pass.
+resource "aws_ecs_task_definition" "rebuild" {
+  family                   = "${var.name}-rebuild"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = 512
@@ -373,79 +790,48 @@ resource "aws_ecs_task_definition" "compactor" {
     operating_system_family = "LINUX"
     cpu_architecture        = "X86_64"
   }
-  container_definitions = jsonencode([merge(local.container, {
-    name    = "compactor"
-    command = ["node", "dist/compact/main.js"]
+  container_definitions = jsonencode([merge(local.compactor_container, {
+    command = ["node", "dist/compact/main.js", "--once", "--rebuild"]
   })])
   depends_on = [terraform_data.image]
 }
 
-resource "aws_lb" "main" {
-  name               = var.name
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.alb.id]
-  subnets            = aws_subnet.public[*].id
-  idle_timeout       = 900
+# ---------------------------------------------------------------- gateway
+
+resource "aws_apigatewayv2_api" "main" {
+  name          = var.name
+  protocol_type = "HTTP"
 }
 
-resource "aws_lb_target_group" "app" {
-  name                 = var.name
-  port                 = 3000
-  protocol             = "HTTP"
-  target_type          = "ip"
-  vpc_id               = aws_vpc.main.id
-  deregistration_delay = 30
-  health_check {
-    path    = "/health"
-    matcher = "200"
-  }
+resource "aws_apigatewayv2_integration" "group" {
+  for_each               = local.route_groups
+  api_id                 = aws_apigatewayv2_api.main.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.fn[each.value].invoke_arn
+  payload_format_version = "2.0"
+  timeout_milliseconds   = 30000
 }
 
-resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.main.arn
-  port              = 80
-  protocol          = "HTTP"
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.app.arn
-  }
+resource "aws_apigatewayv2_route" "route" {
+  for_each  = local.routes
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = each.key
+  target    = "integrations/${aws_apigatewayv2_integration.group[each.value].id}"
 }
 
-resource "aws_ecs_service" "app" {
-  name                              = "${var.name}-app"
-  cluster                           = aws_ecs_cluster.main.id
-  task_definition                   = aws_ecs_task_definition.app.arn
-  desired_count                     = var.app_count
-  launch_type                       = "FARGATE"
-  health_check_grace_period_seconds = 60
-  network_configuration {
-    subnets          = aws_subnet.public[*].id
-    security_groups  = [aws_security_group.app.id]
-    assign_public_ip = true
-  }
-  load_balancer {
-    target_group_arn = aws_lb_target_group.app.arn
-    container_name   = "app"
-    container_port   = 3000
-  }
-  depends_on = [aws_lb_listener.http, aws_secretsmanager_secret_version.app]
+resource "aws_apigatewayv2_stage" "default" {
+  api_id      = aws_apigatewayv2_api.main.id
+  name        = "$default"
+  auto_deploy = true
 }
 
-# Exactly one compactor: never start a new task before the old one has stopped.
-resource "aws_ecs_service" "compactor" {
-  name                               = "${var.name}-compactor"
-  cluster                            = aws_ecs_cluster.main.id
-  task_definition                    = aws_ecs_task_definition.compactor.arn
-  desired_count                      = 1
-  launch_type                        = "FARGATE"
-  deployment_maximum_percent         = 100
-  deployment_minimum_healthy_percent = 0
-  network_configuration {
-    subnets          = aws_subnet.public[*].id
-    security_groups  = [aws_security_group.app.id]
-    assign_public_ip = true
-  }
-  depends_on = [aws_secretsmanager_secret_version.app]
+resource "aws_lambda_permission" "gateway" {
+  for_each      = local.route_groups
+  statement_id  = "AllowHttpApi"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.fn[each.value].function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.main.execution_arn}/*"
 }
 
 # ---------------------------------------------------------------- HTTPS
@@ -464,20 +850,24 @@ resource "aws_cloudfront_distribution" "app" {
   price_class = "PriceClass_100"
 
   origin {
-    domain_name = aws_lb.main.dns_name
-    origin_id   = "alb"
+    domain_name = replace(aws_apigatewayv2_api.main.api_endpoint, "https://", "")
+    origin_id   = "gateway"
+    custom_header {
+      name  = "X-Edge-Secret"
+      value = random_password.edge.result
+    }
     custom_origin_config {
       http_port                = 80
       https_port               = 443
-      origin_protocol_policy   = "http-only"
+      origin_protocol_policy   = "https-only"
       origin_ssl_protocols     = ["TLSv1.2"]
-      origin_read_timeout      = 60
+      origin_read_timeout      = 30
       origin_keepalive_timeout = 60
     }
   }
 
   default_cache_behavior {
-    target_origin_id         = "alb"
+    target_origin_id         = "gateway"
     viewer_protocol_policy   = "redirect-to-https"
     allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
     cached_methods           = ["GET", "HEAD"]

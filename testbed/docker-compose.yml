@@ -8,17 +8,14 @@
 # The page and the API share one origin: nginx serves the page and proxies /api to the app, and /s3 to
 # the object store for presigned media links. The seed runs once, before the app starts; to start over:
 #   docker compose -f testbed/docker-compose.yml down -v
-name: theuniverse-testbed
+#
+# The services shared with the other compose files are defined in ../compose.base.yml.
+name: evieverse-testbed
 
 x-app-env: &app-env
-  DB_DIALECT: postgres
-  DATABASE_URL: postgres://theuniverse:theuniverse@postgres:5432/theuniverse
-  REDIS_URL: redis://redis:6379
-  CONTENT_SCHEME: s3
-  CONTENT_OPTIONS: '{"bucket":"theuniverse","region":"us-east-1","endpoint":"http://s3:9000","access_key_id":"theuniverse","secret_access_key":"theuniverse-secret"}'
   PUBLIC_BASE_URL: http://localhost:${TESTBED_PORT:-8080}/api
   COMPACT_IN_PROCESS: 'false'
-  COMPACT_INTERVAL_SECONDS: ${COMPACT_INTERVAL_SECONDS:-60}
+  COMPACT_INTERVAL_SECONDS: ${COMPACT_INTERVAL_SECONDS:-5}
   # Every request reaches the app from nginx, so the per-IP limit on /register is effectively global.
   REGISTER_RATE_LIMIT_PER_HOUR: '1000'
   # user or server; server needs TAGGING_SERVER_TAGS too. The seed always sends its planned hashtags.
@@ -27,55 +24,29 @@ x-app-env: &app-env
 
 services:
   postgres:
-    image: postgres:17
-    environment:
-      POSTGRES_USER: theuniverse
-      POSTGRES_PASSWORD: theuniverse
-      POSTGRES_DB: theuniverse
+    extends: { file: ../compose.base.yml, service: postgres }
     ports: ['${TESTBED_POSTGRES_PORT:-15432}:5432']
     volumes: [postgres:/var/lib/postgresql/data]
-    healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U theuniverse']
-      interval: 2s
-      retries: 30
 
-  # volatile-lru only evicts keys with a TTL (hot summaries, superseded index keys), never the live index.
   redis:
-    image: valkey/valkey:8
-    command: ['valkey-server', '--maxmemory', '512mb', '--maxmemory-policy', 'volatile-lru', '--save', '60', '1']
+    extends: { file: ../compose.base.yml, service: redis }
     ports: ['${TESTBED_REDIS_PORT:-16379}:6379']
     volumes: [redis:/data]
-    healthcheck:
-      test: ['CMD', 'valkey-cli', 'ping']
-      interval: 2s
-      retries: 30
 
-  # Content bytes, meta files and summaries. MinIO no longer publishes images; RustFS is S3-compatible.
-  # Its console is at http://localhost:19001 (theuniverse / theuniverse-secret).
+  # Its console is at http://localhost:19001 (evieverse / evieverse-secret).
   s3:
-    image: rustfs/rustfs:1.0.4
-    environment:
-      RUSTFS_ACCESS_KEY: theuniverse
-      RUSTFS_SECRET_KEY: theuniverse-secret
-      RUSTFS_CONSOLE_ENABLE: 'true'
+    extends: { file: ../compose.base.yml, service: s3 }
     ports: ['${TESTBED_S3_CONSOLE_PORT:-19001}:9001']
     volumes: [s3:/data]
 
   s3-init:
-    image: amazon/aws-cli:latest
+    extends: { file: ../compose.base.yml, service: s3-init }
     depends_on: [s3]
-    environment:
-      AWS_ACCESS_KEY_ID: theuniverse
-      AWS_SECRET_ACCESS_KEY: theuniverse-secret
-      AWS_DEFAULT_REGION: us-east-1
-    entrypoint:
-      - sh
-      - -c
-      - until aws --endpoint-url http://s3:9000 s3api head-bucket --bucket theuniverse 2>/dev/null || aws --endpoint-url http://s3:9000 s3 mb s3://theuniverse; do sleep 1; done
 
   # Registers users and stores posts and likes through the app's own routes, on a clock set back in time,
   # then rebuilds the feed index. Skips itself once the database has users.
   seed:
+    extends: { file: ../compose.base.yml, service: app-s3 }
     build:
       context: ..
       dockerfile: testbed/seed/Dockerfile
@@ -88,23 +59,20 @@ services:
       SEED_POSTS: ${SEED_POSTS:-2400}
       SEED_READERS: ${SEED_READERS:-220}
       SEED_DAYS: ${SEED_DAYS:-45}
+    healthcheck:
+      disable: true
     volumes: [seed:/out]
 
   app:
-    build: ..
-    image: theuniverse-testbed-app
+    extends: { file: ../compose.base.yml, service: app-s3 }
+    image: evieverse-testbed-app
     depends_on:
       seed: { condition: service_completed_successfully }
     environment: *app-env
-    healthcheck:
-      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
-      interval: 3s
-      retries: 30
 
   compactor:
-    build: ..
-    image: theuniverse-testbed-app
-    command: ['node', 'dist/compact/main.js']
+    extends: { file: ../compose.base.yml, service: compactor }
+    image: evieverse-testbed-app
     depends_on:
       seed: { condition: service_completed_successfully }
     environment: *app-env

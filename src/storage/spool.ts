@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,7 +7,8 @@ import { Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
 export class UploadTooLargeError extends Error {
-  constructor(limit: number) {
+  /** `limit`: the most bytes an upload may be, which the response names in the request's language (http/errors.ts). */
+  constructor(public readonly limit: number) {
     super(`Upload exceeds the maximum size of ${limit} bytes`);
   }
 }
@@ -15,26 +16,23 @@ export class UploadTooLargeError extends Error {
 export interface SpooledFile {
   path: string;
   size: number;
-  sha256: string;
   cleanup: () => Promise<void>;
 }
 
-/** Streams an upload to a local temp file while hashing it, enforcing a size limit. */
+/** Streams an upload to a local temp file, enforcing a size limit. */
 export async function spoolToTemp(
   body: Readable,
-  tmpDir: string = join(tmpdir(), 'theuniverse'),
+  tmpDir: string = join(tmpdir(), 'evieverse'),
   maxBytes = Number.MAX_SAFE_INTEGER,
 ): Promise<SpooledFile> {
   await mkdir(tmpDir, { recursive: true });
   const path = join(tmpDir, `upload-${randomUUID()}`);
   const cleanup = () => rm(path, { force: true });
-  const hash = createHash('sha256');
   let size = 0;
   const meter = new Transform({
     transform(chunk: Buffer, _enc, cb) {
       size += chunk.length;
       if (size > maxBytes) return cb(new UploadTooLargeError(maxBytes));
-      hash.update(chunk);
       cb(null, chunk);
     },
   });
@@ -50,5 +48,5 @@ export async function spoolToTemp(
     await cleanup();
     throw new UploadTooLargeError(maxBytes);
   }
-  return { path, size, sha256: hash.digest('hex'), cleanup };
+  return { path, size, cleanup };
 }

@@ -1,5 +1,6 @@
-import { compareRecent, utcDay, type DayRef } from '../tagfeed/layout.js';
+import { compareRecent, type DayRef } from '../tagfeed/layout.js';
 import type { Candidate, OpenTag, TagFeedReader } from '../tagfeed/reader.js';
+import { utcDay } from '../time.js';
 
 export interface FollowingOptions {
   /** Most records in the page. */

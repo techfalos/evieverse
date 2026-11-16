@@ -1,9 +1,11 @@
-import type { Db, DbDialect } from './db/index.js';
+import { sql } from 'kysely';
+import { updateOnConflict, type Db, type DbDialect } from './db/index.js';
+import { msg, type Message } from './language.js';
 
 /** A tag is a single hashtag word: lowercase letters, digits and underscores. */
-export const TAG_PATTERN = /^[a-z0-9_]{1,64}$/;
+const TAG_PATTERN = /^[a-z0-9_]{1,64}$/;
 
-/** The most hashtags a version can have. */
+/** The most hashtags a post can have. */
 export const MAX_TAGS = 10;
 
 /** "#Central-Mumbai" -> "centralmumbai"; returns null if nothing usable is left. */
@@ -18,32 +20,26 @@ export function normalizeTag(input: string): string | null {
   return TAG_PATTERN.test(tag) ? tag : null;
 }
 
-export function normalizeTags(inputs: string[], max = MAX_TAGS): string[] {
-  const out = new Set<string>();
-  for (const input of inputs) {
-    const tag = normalizeTag(input);
-    if (tag) out.add(tag);
-    if (out.size >= max) break;
-  }
-  return [...out];
-}
-
 /**
  * Hashtags a person chose: a list, or one string of them separated by commas or spaces ("news, #Mumbai").
- * Unlike normalizeTags, it refuses what it can't use instead of dropping it, so nobody's tag silently goes missing.
+ * It refuses what it can't use instead of dropping it, so nobody's tag silently goes missing.
  */
-export function parseTagList(input: string | string[]): { tags: string[] } | { error: string } {
+export function parseTagList(input: string | string[]): { tags: string[] } | { error: Message } {
   const words = typeof input === 'string' ? input.split(/[\s,]+/) : input;
   const tags = new Set<string>();
   for (const word of words) {
     if (!word.trim()) continue;
     const tag = normalizeTag(word);
-    if (!tag) return { error: `"${word}" is not a usable hashtag: hashtags are letters, digits and underscores` };
+    if (!tag) return { error: msg('tags.unusable', { word }) };
     tags.add(tag);
   }
-  if (tags.size > MAX_TAGS) return { error: `at most ${MAX_TAGS} hashtags are allowed, got ${tags.size}` };
+  if (tags.size > MAX_TAGS) return { error: msg('tags.too_many', { max: MAX_TAGS, got: tags.size }) };
   return { tags: [...tags] };
 }
+
+/** The hashtags a post gets: the server's own in server tagging mode, else the ones chosen for it. */
+export const postTags = (tagging: { mode: 'server' | 'user'; serverTags: string[] }, chosen: string[]) =>
+  tagging.mode === 'server' ? tagging.serverTags : chosen;
 
 export function sameTags(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((t) => b.includes(t));
@@ -54,9 +50,26 @@ export async function touchTags(db: Db, dialect: DbDialect, tags: string[], now:
   // Sorted, so concurrent transactions lock shared tag rows in the same order and can't deadlock.
   for (const name of [...tags].sort()) {
     const insert = db.insertInto('tags').values({ name, created_at: now, last_appended_at: now });
-    await (dialect === 'mysql'
-      ? insert.onDuplicateKeyUpdate({ last_appended_at: now })
-      : insert.onConflict((oc) => oc.column('name').doUpdateSet({ last_appended_at: now }))
-    ).execute();
+    await updateOnConflict(insert, dialect, 'name', { last_appended_at: now }).execute();
   }
+}
+
+/**
+ * Counts a write's hashtags in `tag_pairs`, which is what related hashtags are worked out from:
+ * one more post for each hashtag in `added`, and one more for each pair made of one of them and
+ * another of the post's `tags`. `added` is every hashtag of new content, and for an update those
+ * the content didn't have. One statement, so it holds its rows' locks only for as long as it runs.
+ */
+export async function countTagPairs(db: Db, dialect: DbDialect, tags: string[], added: string[], now: number): Promise<void> {
+  const pairs = new Set<string>();
+  for (const a of added) for (const b of tags) pairs.add(a < b ? `${a} ${b}` : `${b} ${a}`);
+  if (!pairs.size) return;
+  // Sorted, so concurrent statements lock shared rows in the same order and can't deadlock.
+  const rows = [...pairs].sort().map((pair) => {
+    const [tag_a, tag_b] = pair.split(' ') as [string, string];
+    return { tag_a, tag_b, posts: 1, updated_at: now };
+  });
+  // The row's own count, named by its table: Postgres takes a bare `posts` to be ambiguous here.
+  const counted = { posts: sql<number>`${sql.ref('tag_pairs.posts')} + 1`, updated_at: now };
+  await updateOnConflict(db.insertInto('tag_pairs').values(rows), dialect, ['tag_a', 'tag_b'], counted).execute();
 }

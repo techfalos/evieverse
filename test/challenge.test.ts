@@ -4,9 +4,8 @@ import { inflateSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { challengeKey, leadingZeroBits, type Challenge } from '../src/challenge/challenges.js';
 import { ALPHABET, ANSWER_LENGTH, challengeText, HEIGHT, renderChallenge, WIDTH } from '../src/challenge/image.js';
-import { createTestContext, hashtags, TARGETS, type TestContext } from './helpers.js';
-
-type User = { userId: string; apiKey: string };
+import { setAdmin } from '../src/moderation/policy.js';
+import { as, createTestContext, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 /** The pixels of an 8-bit grayscale PNG. */
 function decodePng(png: Buffer) {
@@ -58,7 +57,7 @@ for (const target of TARGETS) {
       });
       const putFile = ctx.content.putFile.bind(ctx.content);
       vi.spyOn(ctx.content, 'putFile').mockImplementation(async (...args) => {
-        const text = await readFile(args[2], 'utf8');
+        const text = await readFile(args[1], 'utf8');
         written.push(text);
         await hold;
         if (text.startsWith('fail')) throw new Error('storage unavailable');
@@ -71,13 +70,12 @@ for (const target of TARGETS) {
     });
 
     const register = (payload: Record<string, unknown>) => ctx.app.inject({ method: 'POST', url: '/register', payload });
-    const storeText = (user: User, text: string, extra: Record<string, unknown> = {}) =>
-      ctx.app.inject({ method: 'POST', url: '/store', payload: { ...user, type: 'text', text, tags: hashtags(text), ...extra } });
+    const { storeText } = requests(() => ctx);
     const newChallenge = (scope: string) => ctx.app.inject({ method: 'POST', url: '/register', payload: { username: scope } }).then((r) => r.json().challenge as Challenge);
     const gone = async (c: Challenge) => (await ctx.hot.get(challengeKey(c.id))) === null;
 
     it('answers /register with a challenge, and registers once the same request solves it', async () => {
-      const payload = { username: 'alice', publisherUrl: 'https://alice.example' };
+      const payload = { username: 'alice' };
       const first = await register(payload);
       expect(first.statusCode).toBe(428);
       const { error, challenge } = first.json() as { error: string; challenge: Challenge };
@@ -155,6 +153,52 @@ for (const target of TARGETS) {
       expect((await ctx.db.selectFrom('users').select('username').execute()).map((u) => u.username)).toEqual(['alice']);
     });
 
+    it('registers a user for an admin without a challenge, and for no other user', async () => {
+      const usernames = async () => (await ctx.db.selectFrom('users').select('username').execute()).map((u) => u.username).sort();
+      /** A user's credentials alone, as the fields of a request. */
+      const by = ({ userId, apiKey }: User) => ({ userId, apiKey });
+      const root = await ctx.register('root');
+      await setAdmin(ctx.db, 'root', true);
+
+      // The admin's credentials as headers, or as fields of the request.
+      const byHeaders = await ctx.app.inject({ method: 'POST', url: '/register', payload: { username: 'alice' }, headers: as(root) });
+      expect(byHeaders.statusCode, byHeaders.body).toBe(201);
+      const alice = byHeaders.json() as User;
+      expect(alice).toMatchObject({ username: 'alice', apiKey: expect.stringMatching(/^tu_/) });
+      expect(alice.userId).not.toBe(root.userId);
+      const byFields = await register({ username: 'bob', ...by(root) });
+      expect([byFields.statusCode, byFields.json().username]).toEqual([201, 'bob']);
+      // The account is the new user's own, with their own key, and no admin's.
+      const me = await ctx.app.inject({ method: 'GET', url: '/whoami', headers: as(alice) });
+      expect(me.json()).toMatchObject({ userId: alice.userId, username: 'alice', admin: false });
+      // What a registration is refused for still holds.
+      expect((await register({ username: 'alice', ...by(root) })).statusCode).toBe(409);
+
+      // A user who isn't an admin solves a challenge, as anyone does.
+      const asked = await register({ username: 'carol', ...by(alice) });
+      expect([asked.statusCode, asked.json().error]).toEqual([428, 'solve the challenge to register']);
+      const solved = await register({ username: 'carol', ...by(alice), ...(await ctx.solve(asked.json().challenge)) });
+      expect(solved.statusCode, solved.body).toBe(201);
+
+      // A request that names a user is held to their key: a wrong one, or none, is refused, not challenged.
+      const wrongKey = await register({ username: 'dave', userId: root.userId, apiKey: alice.apiKey });
+      expect([wrongKey.statusCode, wrongKey.json()]).toEqual([401, { error: 'Invalid userId or apiKey' }]);
+      const noKey = await ctx.app.inject({ method: 'POST', url: '/register', payload: { username: 'dave' }, headers: { 'x-user-id': root.userId } });
+      expect([noKey.statusCode, noKey.json()]).toEqual([401, { error: 'userId and apiKey are required' }]);
+      // A key without a user names nobody, as a gateway's own Authorization header doesn't: the request is anyone's.
+      for (const headers of [{ authorization: `Bearer ${root.apiKey}` }, { authorization: 'Bearer the-gateways-own-token' }]) {
+        expect((await ctx.app.inject({ method: 'POST', url: '/register', payload: { username: 'dave' }, headers })).statusCode).toBe(428);
+      }
+      // Behind such a gateway, the admin's key arrives as X-Forwarded-Authorization.
+      const forwarded = { ...as(root), authorization: 'Bearer the-gateways-own-token', 'x-forwarded-authorization': `Bearer ${root.apiKey}` };
+      expect((await ctx.app.inject({ method: 'POST', url: '/register', payload: { username: 'erin' }, headers: forwarded })).statusCode).toBe(201);
+
+      // It goes by the role as it is now.
+      await setAdmin(ctx.db, 'root', false);
+      expect((await register({ username: 'dave', ...by(root) })).statusCode).toBe(428);
+      expect(await usernames()).toEqual(['alice', 'bob', 'carol', 'erin', 'root']);
+    });
+
     it('lets a post through at once, and answers one less than a minute later with a challenge before anything is stored', async () => {
       const alice = await ctx.register('alice');
       expect((await storeText(alice, 'first #news')).statusCode).toBe(201);
@@ -178,7 +222,7 @@ for (const target of TARGETS) {
       ctx.clock.now += 59_000;
       expect((await storeText(alice, 'second, edited #news', { contentId })).statusCode).toBe(428);
       ctx.clock.now += 60_000;
-      expect((await storeText(alice, 'second, edited #news', { contentId })).json()).toMatchObject({ version: 2 });
+      expect((await storeText(alice, 'second, edited #news', { contentId })).json()).toMatchObject({ contentId, preview: { kind: 'text', text: 'second, edited #news' } });
 
       // Each user has their own minute, and their own challenges.
       const bob = await ctx.register('bob');
@@ -286,32 +330,6 @@ for (const target of TARGETS) {
       expect((await storeSolving(alice, 'six #news')).steps).toHaveLength(8);
     });
 
-    const entry = (contentId: string, text: string) => ({
-      contentId,
-      version: 1,
-      mimeType: 'text/plain',
-      preview: { kind: 'text', text },
-      tags: ['news'],
-      createdAt: new Date(ctx.clock.now).toISOString(),
-    });
-    /** Posts as alice, federated here from another server. */
-    const federated = (user: User, body: Record<string, unknown>) =>
-      ctx.app.inject({ method: 'POST', url: '/federated', payload: { username: 'alice', apiKey: user.apiKey, origin: 'https://a.example', ...body } });
-
-    it('counts posts federated here, in the same minute as /store', async () => {
-      const alice = await ctx.register('alice');
-      const first = randomUUID();
-      expect((await federated(alice, { entry: entry(first, 'one') })).statusCode).toBe(201);
-      ctx.clock.now += 1000;
-      const refused = await federated(alice, { entry: entry(randomUUID(), 'two') });
-      expect(refused.statusCode).toBe(428);
-      expect(refused.json().error).toBe('you posted or were challenged less than 60 seconds ago; solve the challenge to post');
-      // The same version again isn't a post.
-      expect((await federated(alice, { entry: entry(first, 'one') })).json()).toMatchObject({ unchanged: true });
-      expect((await federated(alice, { entry: entry(randomUUID(), 'two'), ...(await ctx.solve(refused.json().challenge)) })).statusCode).toBe(201);
-      expect((await storeText(alice, 'three #news')).statusCode).toBe(428);
-    });
-
     it('refuses a post past three in a minute outright, before any challenge, until the oldest is a minute old', async () => {
       ctx.config.postRateLimitPerMinute = 3;
       const alice = await ctx.register('alice');
@@ -336,7 +354,7 @@ for (const target of TARGETS) {
       expect((await storeText(alice, 'five #news')).json().error).toBe('you can post at most once a minute; try again in 60 seconds');
     });
 
-    it('counts only posts that go through, from /store and /federated, and lets only as many of concurrent posts through', async () => {
+    it('counts only posts that go through, and lets only as many of concurrent posts through', async () => {
       ctx.config.postRateLimitPerMinute = 3;
       ctx.config.challenge.postWindowSeconds = 0;
       const alice = await ctx.register('alice');
@@ -351,10 +369,9 @@ for (const target of TARGETS) {
 
       // 'one' leaves the minute.
       ctx.clock.now += 30_000;
-      expect((await federated(alice, { entry: entry(randomUUID(), 'e') })).statusCode).toBe(201);
-      const refused = await federated(alice, { entry: entry(randomUUID(), 'f') });
+      expect((await storeText(alice, 'e #news')).statusCode).toBe(201);
+      const refused = await storeText(alice, 'f #news');
       expect([refused.statusCode, refused.json().retryAfterSeconds]).toEqual([429, 30]);
-      expect((await storeText(alice, 'g #news')).statusCode).toBe(429);
     });
   });
 }

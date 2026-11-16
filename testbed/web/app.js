@@ -1,23 +1,29 @@
-// theuniverse testbed: reads /feed in two modes and exercises /store, /like, DELETE /content and /register.
+// Evieverse testbed: reads /feed with either algorithm and exercises /store, /like, DELETE /content and /register.
 // Everything goes through /api, which nginx proxies to the app on this page's origin.
 
 const API = '/api';
 const LATEST_TAG_COUNT = 12;
 
+/** The windows a feed can be asked for, in hours, as index.html offers them. */
+const HOURS = [1, 2, 4, 8, 12, 24, 48, 72, 168, 336, 504, 720, 1440, 2160];
+
+const ALGORITHMS = {
+  popular:
+    "algorithm=popular puts each day's most liked posts first, giving each day and each hashtag a share of the page. " +
+    "In the newest slice, each tag's 2nd pick and every 4th after it is a fresh post with no likes yet.",
+  chronological: 'algorithm=chronological puts the newest posts first, whatever their likes or their hashtag.',
+};
+
 const TABS = {
   user: {
-    mode: 'balanced',
+    algorithm: 'popular',
     hours: 72,
-    blurb:
-      "What a reader consumes: mode=balanced splits each day's posts into the most liked, middle and least liked thirds, " +
-      "which take turns. The hashtags default to the acting user's interests.",
+    blurb: "What a reader consumes. The hashtags default to the acting user's interests.",
   },
   latest: {
-    mode: 'popular',
+    algorithm: 'chronological',
     hours: 24,
-    blurb:
-      "The latest and greatest: mode=popular puts each day's most liked posts first. In the newest slice, each tag's 2nd pick " +
-      'and every 4th after it is a fresh post with no likes yet. The hashtags default to the most recently active ones.',
+    blurb: 'The latest posts. The hashtags default to the most recently active ones.',
   },
 };
 
@@ -30,6 +36,9 @@ const state = {
   /** Hashtags typed per tab; null means the tab's defaults. */
   tags: { user: null, latest: null },
   hours: { user: TABS.user.hours, latest: TABS.latest.hours },
+  algorithm: { user: TABS.user.algorithm, latest: TABS.latest.algorithm },
+  /** Whether the feed adds the hashtags related to the ones asked for (addRelated), per tab. */
+  related: { user: false, latest: false },
   /** The aiGenerated filter per tab: '' (all), 'true' or 'false'. */
   ai: { user: '', latest: '' },
   recentTags: [],
@@ -264,7 +273,6 @@ function setActor(userId, { reload = true } = {}) {
   const a = state.actor;
   $('#actor-info').replaceChildren(
     h('div', {}, `${a.role} · `, h('a', { href: `${API}/users/${a.userId}`, target: '_blank' }, a.userId)),
-    h('div', {}, 'publisher URL: ', a.publisherUrl ?? '(none: needed to post)'),
     h('div', { class: 'chips' }, (a.interests ?? []).length ? a.interests.map((t) => h('span', { class: 'chip' }, `#${t}`)) : 'no interests'),
   );
   if (isSample($('#content').value)) fillSample();
@@ -280,8 +288,9 @@ function defaultTags(tab) {
 
 const currentTags = () => state.tags[state.tab] ?? defaultTags(state.tab);
 
-function feedUrl(tags, hours, mode, ai, cursor) {
-  const params = new URLSearchParams({ tags: tags.join(','), hours: String(hours), mode });
+function feedUrl(tags, hours, algorithm, related, ai, cursor) {
+  const params = new URLSearchParams({ tags: tags.join(','), hours: String(hours), algorithm });
+  if (related) params.set('addRelated', 'true');
   if (ai) params.set('aiGenerated', ai);
   if (cursor) params.set('cursor', cursor);
   return `${API}/feed?${params}`.replace(/%2C/g, ',');
@@ -289,9 +298,11 @@ function feedUrl(tags, hours, mode, ai, cursor) {
 
 function syncControls() {
   document.querySelectorAll('.tabs [data-tab]').forEach((a) => a.setAttribute('aria-selected', String(a.dataset.tab === state.tab)));
-  $('#blurb').textContent = TABS[state.tab].blurb;
+  $('#blurb').textContent = `${TABS[state.tab].blurb} ${ALGORITHMS[state.algorithm[state.tab]]}`;
   $('#tags').value = currentTags().join(', ');
   $('#hours').value = String(state.hours[state.tab]);
+  $('#algorithm').value = state.algorithm[state.tab];
+  $('#related').checked = state.related[state.tab];
   $('#ai').value = state.ai[state.tab];
   const active = new Set(currentTags());
   $('#suggest').replaceChildren(
@@ -310,15 +321,16 @@ function toggleTag(tag) {
 async function loadFeed({ more = false } = {}) {
   syncControls();
   const tags = currentTags();
-  const { mode } = TABS[state.tab];
+  const algorithm = state.algorithm[state.tab];
+  const related = state.related[state.tab];
   const hours = state.hours[state.tab];
   const ai = state.ai[state.tab];
   if (!tags.length) {
     $('#feed').replaceChildren(h('p', { class: 'empty' }, 'Pick at least one hashtag.'));
     return;
   }
-  const url = feedUrl(tags, hours, mode, ai, more ? state.cursor : null);
-  const firstPage = feedUrl(tags, hours, mode, ai);
+  const url = feedUrl(tags, hours, algorithm, related, ai, more ? state.cursor : null);
+  const firstPage = feedUrl(tags, hours, algorithm, related, ai);
   $('#api-url').href = url;
   $('#api-url').textContent = location.origin + (more ? url : firstPage);
   const key = `${state.tab}|${firstPage}`;
@@ -345,7 +357,7 @@ async function loadFeed({ more = false } = {}) {
   state.pages.push({ ...res, tags });
   state.cursor = res.data.nextCursor;
   renderStats();
-  renderPage(res.data, tags, state.pages.length);
+  renderPage(res.data, tags, state.pages.length, algorithm);
   $('#raw pre').textContent = JSON.stringify(res.data, null, 2);
   $('#more').hidden = !state.cursor;
   revealHighlight();
@@ -358,25 +370,35 @@ function renderStats() {
     h('span', {}, `${records} records`),
     h('span', {}, `${state.pages.length} page${state.pages.length > 1 ? 's' : ''}`),
     h('span', {}, `truncated: ${last.data.truncated ? 'yes' : 'no'}`),
+    last.data.related ? h('span', {}, `related: ${last.data.related.map((t) => `#${t}`).join(' ') || 'none yet'}`) : null,
     h('span', {}, `last page ${Math.round(last.ms)} ms, ${(last.bytes / 1024).toFixed(0)} KB`),
   );
 }
 
-function renderPage(data, tags, page) {
+function renderPage(data, asked, page, algorithm) {
   const frag = document.createDocumentFragment();
   if (page > 1) frag.append(h('div', { class: 'page-break' }, `page ${page}`));
   if (!data.count) {
     const which = { true: ' created with AI', false: ' not created with AI' }[state.ai[state.tab]] ?? '';
     frag.append(h('p', { class: 'empty' }, `No posts${which} for these hashtags in this window.`));
   }
+  // With addRelated, the feed is also of the hashtags related to the ones asked for.
+  const related = new Set(data.related ?? []);
+  const tags = [...asked, ...related];
+  const label = (t) => `#${t}${related.has(t) ? ' (related)' : ''}`;
   data.days.forEach((day, i) => {
     const lists = tags.map((t) => day.tags[t] ?? []);
     const n = lists.reduce((s, l) => s + l.length, 0);
     if (!n) return;
-    // The planner gives tags equal turns within a slice; interleaving shows that order.
-    const picks = [];
-    for (let k = 0; k < Math.max(...lists.map((l) => l.length)); k++) {
-      lists.forEach((l, j) => l[k] && picks.push({ rec: l[k], via: tags[j] }));
+    let picks = [];
+    if (algorithm === 'chronological') {
+      // Each tag's list is newest first; merged by creation time, they are the feed's order.
+      picks = lists.flatMap((l, j) => l.map((rec) => ({ rec, via: tags[j] }))).sort((a, b) => Date.parse(b.rec.createdAt) - Date.parse(a.rec.createdAt));
+    } else {
+      // The planner gives tags equal turns within a slice; interleaving shows that order.
+      for (let k = 0; k < Math.max(...lists.map((l) => l.length)); k++) {
+        lists.forEach((l, j) => l[k] && picks.push({ rec: l[k], via: tags[j] }));
+      }
     }
     frag.append(
       h(
@@ -388,9 +410,9 @@ function renderPage(data, tags, page) {
           h('strong', {}, `Slice ${i + 1}${day.extended ? ' (extended)' : ''}`),
           h('span', {}, `${when(day.from)} → ${when(day.to)}`),
           h('span', {}, `${day.count} / ${day.allocated} posts`),
-          h('span', { class: 'chips' }, tags.map((t, j) => (lists[j].length ? h('span', { class: 'chip' }, `#${t} ${lists[j].length}`) : null))),
+          h('span', { class: 'chips' }, tags.map((t, j) => (lists[j].length ? h('span', { class: 'chip' }, `${label(t)} ${lists[j].length}`) : null))),
         ),
-        picks.map(({ rec, via }) => card(rec, via)),
+        picks.map(({ rec, via }) => card(rec, label(via))),
       ),
     );
   });
@@ -424,12 +446,11 @@ function card(rec, via) {
       'div',
       { class: 'meta' },
       h('strong', {}, rec.publisher.username || '(unknown)'),
-      rec.publisher.publisherUrl ? h('a', { href: rec.publisher.publisherUrl, target: '_blank', class: 'muted' }, hostOf(rec.publisher.publisherUrl)) : null,
       h('span', { class: 'muted', title: rec.createdAt }, ago(rec.createdAt)),
-      rec.version > 1 ? h('span', { class: 'badge', title: `updated ${rec.updatedAt}` }, `v${rec.version}`) : null,
+      rec.updatedAt !== rec.createdAt ? h('span', { class: 'badge', title: `updated ${rec.updatedAt}` }, 'edited') : null,
       rec.aiGenerated ? h('span', { class: 'badge ai', title: 'The publisher says this was created with AI.' }, 'created with AI') : null,
       rec.likes === 0 ? h('span', { class: 'badge fresh' }, 'no likes yet') : null,
-      h('span', { class: 'via' }, `via #${via}`),
+      h('span', { class: 'via' }, `via ${via}`),
     ),
     preview(rec),
     h('div', { class: 'chips' }, rec.tags.map((t) => h('button', { type: 'button', class: 'chip', onclick: () => toggleTag(t) }, `#${t}`))),
@@ -505,7 +526,7 @@ async function edit(rec) {
       $('#content').value = p.text ?? '';
     }
   }
-  if (isMedia(p.kind)) toast(`Choose the ${rec.mimeType} file again: a new version sends its file, and must keep its content type.`);
+  if (isMedia(p.kind)) toast(`Choose the ${rec.mimeType} file again: an update sends its file, and must keep its content type.`);
   $('#post-panel').scrollIntoView({ behavior: 'smooth' });
 }
 
@@ -573,7 +594,7 @@ async function post(e) {
     const { data, ms } = await withChallenges((solution) => api('POST', '/store', body(solution)));
     out.className = 'result';
     out.textContent = `${Math.round(ms)} ms\n${JSON.stringify(data, null, 2)}`;
-    if (data.unchanged) toast('Unchanged: the same post as the current version (and the same hashtags, where the server uses yours).');
+    if (data.unchanged) toast('Unchanged: the same post as the one stored (and the same hashtags, where the server uses yours).');
     else {
       state.highlight = { contentId: data.contentId, tags: data.tags };
       $('#content-id').value = '';
@@ -594,14 +615,13 @@ async function post(e) {
 
 async function register(e) {
   e.preventDefault();
-  const fields = { username: $('#reg-username').value.trim(), publisherUrl: $('#reg-url').value.trim() };
+  const fields = { username: $('#reg-username').value.trim() };
   try {
     const { data } = await withChallenges((solution) => api('POST', '/register', { ...fields, ...solution }, { auth: false }));
     const user = {
       userId: data.userId,
       apiKey: data.apiKey,
       username: data.username,
-      publisherUrl: data.publisherUrl,
       interests: parseTags($('#reg-interests').value),
       seededAt: state.seededAt,
     };
@@ -618,14 +638,18 @@ async function register(e) {
 
 // ---- routing -----------------------------------------------------------------------------------
 
-/** #user or #latest, optionally with ?tags=a,b&hours=48&ai=true|false&as=<username or userId>. */
+/** #user or #latest, optionally with ?tags=a,b&hours=48&algorithm=popular|chronological&related=true|false&ai=true|false&as=<username or userId>. */
 function readHash() {
   const [tab, query = ''] = location.hash.slice(1).split('?');
   state.tab = tab in TABS ? tab : 'user';
   const params = new URLSearchParams(query);
   if (params.get('tags')) state.tags[state.tab] = parseTags(params.get('tags'));
   const hours = Number(params.get('hours'));
-  if (hours >= 1 && hours <= 168) state.hours[state.tab] = hours;
+  if (HOURS.includes(hours)) state.hours[state.tab] = hours;
+  const algorithm = params.get('algorithm');
+  if (algorithm in ALGORITHMS) state.algorithm[state.tab] = algorithm;
+  const related = params.get('related');
+  if (related === 'true' || related === 'false') state.related[state.tab] = related === 'true';
   const ai = params.get('ai');
   if (ai === 'true' || ai === 'false') state.ai[state.tab] = ai;
   const as = params.get('as');
@@ -656,14 +680,19 @@ async function init() {
     const tags = parseTags($('#tags').value);
     state.tags[state.tab] = tags.join() === defaultTags(state.tab).join() ? null : tags;
     state.hours[state.tab] = Number($('#hours').value);
+    state.algorithm[state.tab] = $('#algorithm').value;
+    state.related[state.tab] = $('#related').checked;
     state.ai[state.tab] = $('#ai').value;
     loadFeed();
   });
-  $('#hours').addEventListener('change', () => $('#feed-form').requestSubmit());
-  $('#ai').addEventListener('change', () => $('#feed-form').requestSubmit());
+  for (const control of ['#hours', '#algorithm', '#related', '#ai']) {
+    $(control).addEventListener('change', () => $('#feed-form').requestSubmit());
+  }
   $('#reset-tags').addEventListener('click', () => {
     state.tags[state.tab] = null;
     state.hours[state.tab] = TABS[state.tab].hours;
+    state.algorithm[state.tab] = TABS[state.tab].algorithm;
+    state.related[state.tab] = false;
     state.ai[state.tab] = '';
     loadFeed();
   });

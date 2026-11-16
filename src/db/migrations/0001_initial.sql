@@ -6,115 +6,89 @@
 -- Conventions:
 --   * Every id is a UUID string; users are only ever referenced by users.id, never by username.
 --   * Every *_at column is UTC epoch milliseconds (BIGINT).
---   * Content bytes live in the content store at content/<id>/<version>; summaries live in the
---     per-hashtag tag files of the tag store. The feed never reads this database.
+--   * Content bytes live in the content store at content/<id>, beside a meta file; summaries live in
+--     the summary store, and the feed index in Redis. The feed never reads this database.
 
 -- Publishers and readers. Relations always use id; username is unique but used only for display.
--- updated_at tells the compactor to rewrite the user's records in the tag files.
+-- updated_at: when the user registered or last changed their username, which tells the compactor to
+-- rewrite their publisher credit in Redis. What a user posted lately, which the post challenges and
+-- the limit on posts a minute go by, is kept in Redis, not here.
 --
--- last_post_at: when the user last posted, through /store or /federated. A post less than
--- CHALLENGE_POST_WINDOW_SECONDS after it must solve a challenge first. A post claims the window with
--- a conditional update, so of several concurrent posts only one passes without a challenge, and a
--- post that fails sets it back to null. Null: no post that counts.
+-- admin: 1 for the server's admins. Admins set it for each other (/admins), a deployment for its
+-- first one (BOOTSTRAP_ADMIN), and the operator with `npm run admin`. An admin can delete any
+-- content, appoint server moderators, tag moderators and admins, and keep the server's blocked
+-- words, and can do whatever a server moderator can, and whatever a tag moderator can on every
+-- hashtag.
 --
--- post_streak: how many posts in a row the user made with challenges, since a minute went by without
--- a post or a challenge (last_post_at). The next post needs more challenges the longer the run: 1, 1,
--- 2, 4, 8, … A post claims its place with a conditional update on it, so only one post passes at each
--- count.
+-- moderator: 1 for the server's moderators, whom admins appoint (/moderators). A server moderator
+-- works through the moderation queue (see moderation_queue): reads it and the content that waits in
+-- it, and accepts or rejects that content. And through the report queue (see reports): accepts or
+-- deletes the content users reported. Nothing else an admin can do comes with it. The two roles
+-- are set apart: an admin needs no 1 here, and losing the admin role leaves this as it is.
 --
--- recent_posts: when the user's posts in the last minute were, as epoch milliseconds separated by
--- spaces, oldest first. A post past POST_RATE_LIMIT_PER_MINUTE of them is refused. Posts add
--- themselves with a compare-and-set on the whole list, so concurrent posts can't get past the limit
--- together.
+-- language: the code of the language the server answers the user in, which is the name of a file
+-- of src/languages (en, pt-BR). The user registers in it, and can change it (PATCH /users/:userId).
+-- NULL for an account the operator set up, which is answered in the server's default language
+-- (DEFAULT_LANGUAGE), as is a user whose language the server no longer has a file for.
 --
--- following_changed_at: when the user last followed or unfollowed someone. Setting it is the first
--- statement of every follow and unfollow, which locks the user's row: a user's follows then take
--- turns, and the limit on how many users they follow holds. The compactor rewrites the Redis copy of
--- the follows of users whose follows changed since its last run. Null: never changed.
---
--- admin: 1 for the server's admins, which its operator sets with `npm run admin`. An admin can delete
--- any content, appoint tag moderators and keep the server's blocked words, and can do whatever a tag
--- moderator can on every hashtag.
+-- messages: 1 for a user who takes part in messages between users, which is every user until they
+-- turn it off (PATCH /users/:userId): 0 for one who is sent none, and sends none. The server's
+-- notices reach their inbox either way (see inbox).
 CREATE TABLE users (
-  id                    varchar(36)   NOT NULL,
-  username              varchar(64)   NOT NULL,
-  publisher_url         varchar(2048),
-  created_at            bigint        NOT NULL,
-  updated_at            bigint        NOT NULL,
-  last_post_at          bigint,
-  post_streak           integer       NOT NULL DEFAULT 0,
-  recent_posts          text,
-  following_changed_at  bigint,
-  admin                 smallint      NOT NULL DEFAULT 0,
+  id          varchar(36)  NOT NULL,
+  username    varchar(64)  NOT NULL,
+  created_at  bigint       NOT NULL,
+  updated_at  bigint       NOT NULL,
+  admin       smallint     NOT NULL DEFAULT 0,
+  moderator   smallint     NOT NULL DEFAULT 0,
+  language    varchar(35),
+  messages    smallint     NOT NULL DEFAULT 1,
   CONSTRAINT users_pk PRIMARY KEY (id),
   CONSTRAINT users_username_uq UNIQUE (username)
 );
 CREATE INDEX users_updated_idx ON users (updated_at);
-CREATE INDEX users_following_changed_idx ON users (following_changed_at);
 
--- API keys are stored as sha256 hashes; key_prefix narrows the lookup.
+-- API keys are stored as sha256 hashes, and looked up by them.
 CREATE TABLE api_keys (
   id          varchar(36)  NOT NULL,
   user_id     varchar(36)  NOT NULL,
-  key_prefix  varchar(32)  NOT NULL,
   key_hash    varchar(128) NOT NULL,
   created_at  bigint       NOT NULL,
   revoked_at  bigint,
   CONSTRAINT api_keys_pk PRIMARY KEY (id),
   CONSTRAINT api_keys_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
-CREATE INDEX api_keys_user_prefix_idx ON api_keys (user_id, key_prefix);
+CREATE INDEX api_keys_user_hash_idx ON api_keys (user_id, key_hash);
 
--- One row per piece of content. The current bytes are at content/<id>/<version> in the content store.
+-- One row per piece of content. Its bytes are at content/<id> in the content store. The meta file
+-- beside them holds what describes them (content type, size, text, hashtags, and when they were last
+-- written), so none of that is kept here. Content has one version: an update overwrites the bytes and
+-- the meta file, and the last write wins.
 --
--- reserved_version: the highest version number handed out for the content, committed or not. /store
--- reserves a new number for an update before it writes any bytes, so no two writes ever share a
--- content/<id>/<version> key, and a failed write removes only its own. Versions can therefore skip
--- numbers. The commit still requires the version the update started from, so of two concurrent
--- updates only one commits.
---
--- ai_generated: whether the publisher declared the current version as created with AI: 1 if so, else
--- 0. /store sets it on every version, and an update that doesn't say keeps the previous version's
--- value. The flag also goes into the version's meta file, its summary and its feed index entries,
--- which is where feeds read and filter it from.
+-- ai_generated: whether the publisher declared the content as created with AI: 1 if so, else 0. /store
+-- sets it on every write, and an update that doesn't say keeps the value. The flag also goes into the
+-- meta file, the summary and the feed index entries, which is where feeds read and filter it from.
 --
 -- delete_requested_at: DELETE /content/:id only sets it. The content stays in the database and in the
--- tag files until a compactor run removes its records from every hashtag's files. That run then
+-- feed index until a compactor run removes its entries from every hashtag's day indexes. That run then
 -- deletes the row (the rows referencing it cascade) and the bytes, so the feed never shows content
--- the database no longer has. Once set, new versions and likes are refused.
---
--- origin_server, origin_content_id, origin_version: content federated from another server. POST
--- /federated indexes a feed record the origin server sent, without its bytes, which stay on that
--- server. origin_server is its base URL, and origin_content_id and origin_version name the content
--- there; all three are null for content stored here. Each user has at most one row per origin
--- content, which later versions update. A unique index treats nulls as distinct on every supported
--- database, so local content never conflicts.
+-- the database no longer has. Once set, updates and likes are refused.
 CREATE TABLE content (
   id                   varchar(36)  NOT NULL,
   user_id              varchar(36)  NOT NULL,
-  version              integer      NOT NULL,
-  reserved_version     integer      NOT NULL DEFAULT 0,
-  filename             varchar(512),
-  mime_type            varchar(255) NOT NULL,
-  size                 bigint       NOT NULL,
-  sha256               varchar(64)  NOT NULL,
   ai_generated         smallint     NOT NULL DEFAULT 0,
   like_count           integer      NOT NULL DEFAULT 0,
   created_at           bigint       NOT NULL,
-  updated_at           bigint       NOT NULL,
   delete_requested_at  bigint,
-  origin_server        varchar(255),
-  origin_content_id    varchar(36),
-  origin_version       integer,
   CONSTRAINT content_pk PRIMARY KEY (id),
   CONSTRAINT content_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 CREATE INDEX content_user_idx ON content (user_id);
 CREATE INDEX content_delete_requested_idx ON content (delete_requested_at);
-CREATE UNIQUE INDEX content_origin_uq ON content (user_id, origin_server, origin_content_id);
 
--- Flat hashtags. Which content carries a tag is recorded only in that tag's file in the tag store.
--- last_appended_at / compacted_at let the compactor find tags with unmerged tail files.
+-- Flat hashtags, and each publisher's own index ("@<userId>"). Which content carries a tag is recorded
+-- only in the content's meta file and in the tag's index in Redis. last_appended_at / compacted_at
+-- let the compactor find tags with unmerged tails.
 CREATE TABLE tags (
   name              varchar(64) NOT NULL,
   created_at        bigint      NOT NULL,
@@ -123,6 +97,27 @@ CREATE TABLE tags (
   CONSTRAINT tags_pk PRIMARY KEY (name)
 );
 CREATE INDEX tags_last_appended_idx ON tags (last_appended_at);
+
+-- How often hashtags are on the same post, which is what makes two of them related: a feed asked for
+-- one hashtag can add the posts of those that tend to come with it (addRelated). /store adds one to
+-- a row for every pair of hashtags a post has (tag_a < tag_b), and to one row per hashtag
+-- (tag_a = tag_b), which counts the posts that carry it and so says what share of them a pair is. A
+-- new post counts all of its hashtags, and an update the ones it adds. Counts only go up: they
+-- build up as posts are written, and nothing is taken off for a post that is deleted, or that
+-- loses a hashtag.
+--
+-- Feeds never read this table. The compactor works out each hashtag's related hashtags from it and
+-- keeps them in Redis, for the hashtags whose rows changed since its last run, which updated_at
+-- and its index find.
+CREATE TABLE tag_pairs (
+  tag_a       varchar(64) NOT NULL,
+  tag_b       varchar(64) NOT NULL,
+  posts       integer     NOT NULL DEFAULT 0,
+  updated_at  bigint      NOT NULL,
+  CONSTRAINT tag_pairs_pk PRIMARY KEY (tag_a, tag_b)
+);
+CREATE INDEX tag_pairs_b_idx ON tag_pairs (tag_b);
+CREATE INDEX tag_pairs_updated_idx ON tag_pairs (updated_at);
 
 -- One permanent like per user per content item; content.like_count is the running total.
 CREATE TABLE likes (
@@ -138,7 +133,8 @@ CREATE INDEX likes_created_idx ON likes (created_at);
 
 -- Who follows whom. Following feeds show the posts of the users someone follows, read from each
 -- publisher's own index in Redis, and the follows themselves are copied to Redis too, so those feeds
--- never read this table.
+-- never read this table. The compactor rewrites the Redis copy for users who followed someone since
+-- its last run, which it finds by created_at.
 CREATE TABLE follows (
   follower_id  varchar(36) NOT NULL,
   followee_id  varchar(36) NOT NULL,
@@ -148,37 +144,28 @@ CREATE TABLE follows (
   CONSTRAINT follows_followee_fk FOREIGN KEY (followee_id) REFERENCES users (id) ON DELETE CASCADE
 );
 CREATE INDEX follows_followee_idx ON follows (followee_id, created_at);
+CREATE INDEX follows_created_idx ON follows (created_at);
 
--- A content version whose records may not be in its hashtags' tail files yet. /store inserts the
--- row in the transaction that writes the version, appends to the tails only after that commits,
--- then deletes the row. Rows left behind (a failed append, a crashed node) are completed by the
--- compactor from the database and the version's meta file.
+-- A hashtag's tail (or a publisher's own index's) that may not hold a write's line for a piece of
+-- content yet: its entry, or for a hashtag an update dropped, the tombstone that hides it there. /store
+-- inserts the rows in the transaction that commits the write, appends to the tails only after that,
+-- then deletes the rows whose append succeeded. For rows left behind (a failed append, a crashed node)
+-- the compactor rebuilds the content's entry in that tag from the database and the meta file, which
+-- drops it where the content no longer carries the tag.
 CREATE TABLE pending_appends (
   content_id  varchar(36) NOT NULL,
-  version     integer     NOT NULL,
+  tag         varchar(64) NOT NULL,
   created_at  bigint      NOT NULL,
-  CONSTRAINT pending_appends_pk PRIMARY KEY (content_id, version),
+  CONSTRAINT pending_appends_pk PRIMARY KEY (content_id, tag),
   CONSTRAINT pending_appends_content_fk FOREIGN KEY (content_id) REFERENCES content (id) ON DELETE CASCADE
 );
 CREATE INDEX pending_appends_created_idx ON pending_appends (created_at);
 
--- A content version replaced by a newer one, waiting to be erased. /store inserts the row in the
--- transaction that commits the newer version. The compactor rebuilds the old version's hashtags
--- without it, then erases its bytes and meta file and deletes the row. Readers stop showing the old
--- version at once, through the tombstones /store appends to its hashtags.
-CREATE TABLE superseded_versions (
-  content_id  varchar(36) NOT NULL,
-  version     integer     NOT NULL,
-  created_at  bigint      NOT NULL,
-  CONSTRAINT superseded_versions_pk PRIMARY KEY (content_id, version),
-  CONSTRAINT superseded_versions_content_fk FOREIGN KEY (content_id) REFERENCES content (id) ON DELETE CASCADE
-);
-CREATE INDEX superseded_versions_created_idx ON superseded_versions (created_at);
-
--- Moderation is decided when a version is written, so feeds never read the next four tables.
+-- Moderation is decided when content is written, and what moderators decide afterwards is copied into
+-- the feed index, so feeds never read the next six tables.
 --
--- tag_moderators: who moderates which hashtag. A moderator can remove the hashtag from content, mute
--- users on it and keep its blocked words.
+-- tag_moderators: who moderates which hashtag. A moderator can approve content under the hashtag or
+-- remove the hashtag from it, mute users on it and keep its blocked words.
 CREATE TABLE tag_moderators (
   tag         varchar(64) NOT NULL,
   user_id     varchar(36) NOT NULL,
@@ -188,7 +175,7 @@ CREATE TABLE tag_moderators (
 );
 CREATE INDEX tag_moderators_user_idx ON tag_moderators (user_id);
 
--- tag_mutes: users muted on a hashtag. Their new posts and versions don't get it.
+-- tag_mutes: users muted on a hashtag. Their new posts and updates don't get it.
 CREATE TABLE tag_mutes (
   user_id     varchar(36) NOT NULL,
   tag         varchar(64) NOT NULL,
@@ -199,8 +186,9 @@ CREATE TABLE tag_mutes (
 CREATE INDEX tag_mutes_tag_idx ON tag_mutes (tag, created_at);
 
 -- blocked_words: words and phrases, normalised (lowercase, without accents, words separated by single
--- spaces). The list of tag '*' is the server's: a post containing one of them isn't published. Any
--- other tag's list only drops that hashtag from a post containing one of them.
+-- spaces). The list of tag '*' is the server's: a post containing one of them gets a trust score of
+-- 0, which by default has it refused. Any other tag's list only drops that hashtag from a post
+-- containing one of them.
 CREATE TABLE blocked_words (
   tag         varchar(64)  NOT NULL,
   word        varchar(100) NOT NULL,
@@ -208,20 +196,179 @@ CREATE TABLE blocked_words (
   CONSTRAINT blocked_words_pk PRIMARY KEY (tag, word)
 );
 
--- removed_tags: hashtags a moderator removed from content. Its later versions don't get them back.
-CREATE TABLE removed_tags (
-  content_id  varchar(36) NOT NULL,
-  tag         varchar(64) NOT NULL,
-  created_at  bigint      NOT NULL,
-  CONSTRAINT removed_tags_pk PRIMARY KEY (content_id, tag),
-  CONSTRAINT removed_tags_content_fk FOREIGN KEY (content_id) REFERENCES content (id) ON DELETE CASCADE
+-- moderation_queue: the posts that wait for a server moderator or an admin, whatever their hashtags.
+-- /store gives every post and update a trust score (0-100), which only routes it: a low score has it
+-- refused, a high one published, and one in between puts it here (TRUST_SCORE_DELETE_BELOW,
+-- TRUST_SCORE_ALLOW_FROM). Content with a row is stored like any other but is in no feed index, and
+-- only its publisher, server moderators and admins can read it. A server moderator or an admin
+-- accepts it, which deletes the row and publishes the content, or rejects it, which sets the content
+-- for deletion (the row then goes with it). An update that scores high enough deletes the row and
+-- publishes the content too.
+--
+-- trust_score: the score of the content's last write. This is the only place a trust score is kept.
+-- created_at: when the content joined the queue; an update that keeps it there leaves it as it is.
+CREATE TABLE moderation_queue (
+  content_id   varchar(36) NOT NULL,
+  trust_score  smallint    NOT NULL,
+  created_at   bigint      NOT NULL,
+  CONSTRAINT moderation_queue_pk PRIMARY KEY (content_id),
+  CONSTRAINT moderation_queue_content_fk FOREIGN KEY (content_id) REFERENCES content (id) ON DELETE CASCADE
 );
+CREATE INDEX moderation_queue_created_idx ON moderation_queue (created_at);
 
--- Keeps compactor runs from overlapping, whether they come from a scheduled job that outlasts its
--- interval or from several nodes. A run takes the lease by setting holder and expires_at once the
--- lease has expired (a run that finds it held skips), renews it as it goes, and checks it before
--- every write that publishes a head or deletes anything. Without it, a slower run could publish a
--- head built before a deletion over the head of a newer run that had already deleted the content.
+-- tag_moderation: what a hashtag's moderators decided about a piece of content under it. Every post
+-- is published under its hashtags unmoderated, and is in each hashtag's moderation queue (the
+-- hashtag's feed, filtered to unmoderated posts) until one of its moderators decides. No row: nobody
+-- has yet.
+--
+-- decision: 'approved' flags the content's entry in the hashtag's index as moderated, which takes it
+-- out of the queue; an update of the content deletes the row, so it is unmoderated again. 'removed'
+-- takes the hashtag off the content, and stays: later updates don't get the hashtag back.
+-- moderator_id: who decided; NULL once that user is gone.
+-- applied_at: NULL until a compactor run has applied the decision: rebuilt the content's entry in
+-- the hashtag's day index and, for 'removed', written the content's meta file and summary again
+-- without the hashtag (or set the content for deletion, if it was its last). Until then a line in the
+-- hashtag's tail shows the decision to readers.
+CREATE TABLE tag_moderation (
+  content_id    varchar(36) NOT NULL,
+  tag           varchar(64) NOT NULL,
+  decision      varchar(16) NOT NULL,
+  moderator_id  varchar(36),
+  decided_at    bigint      NOT NULL,
+  applied_at    bigint,
+  CONSTRAINT tag_moderation_pk PRIMARY KEY (content_id, tag),
+  CONSTRAINT tag_moderation_content_fk FOREIGN KEY (content_id) REFERENCES content (id) ON DELETE CASCADE,
+  CONSTRAINT tag_moderation_moderator_fk FOREIGN KEY (moderator_id) REFERENCES users (id) ON DELETE SET NULL
+);
+CREATE INDEX tag_moderation_applied_idx ON tag_moderation (applied_at);
+CREATE INDEX tag_moderation_moderator_idx ON tag_moderation (moderator_id);
+
+-- reports: who reported which content to the server's moderators, one row per user per piece of
+-- content (POST /report). The report queue is the content with a report nobody has decided on
+-- (accepted_at IS NULL), which waits for a server moderator or an admin, longest reported first. They
+-- accept the content, which stamps those rows, or delete it, which sets it for deletion (the rows
+-- then go with it). A reported post stays published while it waits. Feeds never read this table.
+--
+-- reason: what the user said is wrong with the content, if anything.
+-- created_at: when it was reported. The earliest of a post's undecided reports orders the queue.
+-- accepted_at: when the content was accepted in spite of the report; NULL while it waits. The row
+-- stays for as long as the content does, so a user reports a post once: one whose report was
+-- answered can't put the post back in the queue, though another user's report does.
+CREATE TABLE reports (
+  content_id   varchar(36)  NOT NULL,
+  user_id      varchar(36)  NOT NULL,
+  reason       varchar(500),
+  created_at   bigint       NOT NULL,
+  accepted_at  bigint,
+  CONSTRAINT reports_pk PRIMARY KEY (content_id, user_id),
+  CONSTRAINT reports_content_fk FOREIGN KEY (content_id) REFERENCES content (id) ON DELETE CASCADE,
+  CONSTRAINT reports_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+CREATE INDEX reports_user_idx ON reports (user_id);
+CREATE INDEX reports_open_idx ON reports (accepted_at, content_id, created_at);
+
+-- Comments on posts are not in this database: each is an object in the content store, at
+-- comments/<post id>/<comment id>.json, and a post's are listed from there (and from Redis, which
+-- caches them). Whether a post takes comments is in its meta file. The next two tables hold only the
+-- comments that wait for a server moderator or an admin, so that they wait in the same two queues
+-- as posts do. A comment that is written, read and never held or reported never has a row.
+--
+-- comment_queue: the comments that wait in the moderation queue, beside the posts of
+-- moderation_queue. A comment gets a trust score as a post does, by the same plugins and the same
+-- thresholds: a low score has it refused, a high one published, and one in between puts it here.
+-- Its object is then at comments/<post id>/held/<comment id>.json, where no reader lists it, and
+-- only its author, server moderators and admins can read it. Accepting it deletes the row and moves
+-- the object in among the post's comments; rejecting it deletes both.
+--
+-- content_id: the post the comment is on. The row goes with the post.
+-- trust_score: the comment's score. This is the only place it is kept.
+-- created_at: when the comment was written, which is when it joined the queue.
+CREATE TABLE comment_queue (
+  comment_id   varchar(36) NOT NULL,
+  content_id   varchar(36) NOT NULL,
+  trust_score  smallint    NOT NULL,
+  created_at   bigint      NOT NULL,
+  CONSTRAINT comment_queue_pk PRIMARY KEY (comment_id),
+  CONSTRAINT comment_queue_content_fk FOREIGN KEY (content_id) REFERENCES content (id) ON DELETE CASCADE
+);
+CREATE INDEX comment_queue_created_idx ON comment_queue (created_at);
+CREATE INDEX comment_queue_content_idx ON comment_queue (content_id);
+
+-- comment_reports: who reported which comment, one row per user per comment (POST /report with a
+-- commentId). It is to comments what reports is to posts, and the report queue is both: the comments
+-- with a report nobody has decided on wait there among the posts, longest reported first. A server
+-- moderator or an admin accepts the comment, which stamps those rows, or deletes it, which deletes
+-- them with it. A reported comment stays published while it waits.
+--
+-- content_id: the post the comment is on. The rows go with the post.
+-- reason, created_at, accepted_at: as in reports.
+CREATE TABLE comment_reports (
+  comment_id   varchar(36)  NOT NULL,
+  user_id      varchar(36)  NOT NULL,
+  content_id   varchar(36)  NOT NULL,
+  reason       varchar(500),
+  created_at   bigint       NOT NULL,
+  accepted_at  bigint,
+  CONSTRAINT comment_reports_pk PRIMARY KEY (comment_id, user_id),
+  CONSTRAINT comment_reports_content_fk FOREIGN KEY (content_id) REFERENCES content (id) ON DELETE CASCADE,
+  CONSTRAINT comment_reports_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+CREATE INDEX comment_reports_user_idx ON comment_reports (user_id);
+CREATE INDEX comment_reports_content_idx ON comment_reports (content_id);
+CREATE INDEX comment_reports_open_idx ON comment_reports (accepted_at, comment_id, created_at);
+
+-- inbox: what a user has been sent, which only they read (GET /users/:userId/inbox), newest first:
+-- the messages other users wrote them, and the server's notices of what moderation did to their
+-- posts and of their mutes on hashtags. Feeds never read it.
+--
+-- kind: 'message' for a message, whose sender is sender_id and whose text is body. Any other kind is
+-- a notice, named after what happened (post_rejected, tag_removed, tag_muted and so on: src/inbox.ts).
+-- A notice holds no wording: it is said in its reader's language when the inbox is read, from its
+-- kind and tag. Its body is the start of the post it is about, which may be gone by the time it is
+-- read, and that is also why content_id is no foreign key.
+-- sender_id: who wrote a message. NULL on a notice, and once that user is gone.
+-- read_at: NULL until the user marks the row as read.
+--
+-- The compactor deletes the rows older than INBOX_RETENTION_DAYS, once a day, which created_at's
+-- own index finds.
+CREATE TABLE inbox (
+  id          varchar(36)   NOT NULL,
+  user_id     varchar(36)   NOT NULL,
+  kind        varchar(32)   NOT NULL,
+  sender_id   varchar(36),
+  content_id  varchar(36),
+  tag         varchar(64),
+  body        varchar(2000),
+  created_at  bigint        NOT NULL,
+  read_at     bigint,
+  CONSTRAINT inbox_pk PRIMARY KEY (id),
+  CONSTRAINT inbox_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  CONSTRAINT inbox_sender_fk FOREIGN KEY (sender_id) REFERENCES users (id) ON DELETE SET NULL
+);
+CREATE INDEX inbox_user_idx ON inbox (user_id, created_at);
+CREATE INDEX inbox_sender_idx ON inbox (sender_id);
+CREATE INDEX inbox_created_idx ON inbox (created_at);
+
+-- user_blocks: whom a user blocks. No message goes between user_id and blocked_id, either way
+-- (POST /messages looks for both rows by the primary key). It is about messages only: follows and
+-- feeds go on as they were.
+CREATE TABLE user_blocks (
+  user_id     varchar(36) NOT NULL,
+  blocked_id  varchar(36) NOT NULL,
+  created_at  bigint      NOT NULL,
+  CONSTRAINT user_blocks_pk PRIMARY KEY (user_id, blocked_id),
+  CONSTRAINT user_blocks_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  CONSTRAINT user_blocks_blocked_fk FOREIGN KEY (blocked_id) REFERENCES users (id) ON DELETE CASCADE
+);
+CREATE INDEX user_blocks_user_idx ON user_blocks (user_id, created_at);
+CREATE INDEX user_blocks_blocked_idx ON user_blocks (blocked_id);
+
+-- Keeps compactor runs from overlapping, whether they come from two copies of the compactor process
+-- (a deploy replacing one, a rebuild started by hand) or from several nodes. A run takes the lease by
+-- setting holder and expires_at once the lease has expired (a run that finds it held skips), renews
+-- it as it goes, and checks it before every write that publishes a head or deletes anything. Without
+-- it, a slower run could publish a head built before a deletion over the head of a newer run that
+-- had already deleted the content.
 CREATE TABLE compactor_lease (
   id          varchar(32) NOT NULL,
   holder      varchar(36),

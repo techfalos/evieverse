@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { DAY, FEED_MODES, HOUR, planFeed, type FeedPlan, type PlanOptions } from '../src/feed/plan.js';
+import { FEED_ALGORITHMS, planFeed, type FeedPlan, type PlanOptions } from '../src/feed/plan.js';
 import type { Candidate } from '../src/tagfeed/reader.js';
+import { DAY, HOUR } from '../src/time.js';
 
 const NOW = Date.UTC(2026, 10, 6, 12);
 
@@ -12,10 +13,10 @@ function item(tags: string[], ageMs: number, likes = 0, aiGenerated = false): It
   seq++;
   return {
     contentId: `c-${String(seq).padStart(6, '0')}`,
-    version: 1,
     createdAt: NOW - ageMs,
     likes,
     aiGenerated,
+    moderated: false,
     tags,
   };
 }
@@ -119,7 +120,7 @@ describe('planFeed', () => {
     expect(ids(planFeed([fileOrder], opts(o)))).toEqual(ids(planFeed([[...items].reverse()], opts(o))));
   });
 
-  it.each(FEED_MODES)('paginates multi-tag feeds with cursor positions, without repeats or gaps (%s)', (mode) => {
+  it.each(FEED_ALGORITHMS)('paginates multi-tag feeds with cursor positions, without repeats or gaps (%s)', (algorithm) => {
     const items = [0, 1, 2, 10].flatMap((day) =>
       Array.from({ length: 30 }, (_, i) => item(i % 3 === 0 ? ['news', 'sports'] : i % 3 === 1 ? ['news'] : ['sports', 'tech'], day * DAY + (i + 1) * 60_000, i % 7)),
     );
@@ -127,7 +128,7 @@ describe('planFeed', () => {
     const seen: string[] = [];
     let positions: Record<number, number[]> | undefined;
     for (let page = 0; page < 50; page++) {
-      const p = plan(items, tags, { mode, hours: 72, limit: 30, positions });
+      const p = plan(items, tags, { algorithm, hours: 72, limit: 30, positions });
       seen.push(...ids(p));
       if (!p.truncated) break;
       positions = p.positions;
@@ -136,14 +137,14 @@ describe('planFeed', () => {
     expect(seen.length).toBe(items.length);
   });
 
-  it.each(FEED_MODES)('skips hidden records, and a hidden record passed on an earlier page does not hide its new version in another tag (%s)', (mode) => {
-    const moved = { ...item(['sports'], 23 * HOUR), version: 2 };
-    const replaced: Item = { ...moved, version: 1, tags: ['news'], hidden: true };
+  it.each(FEED_ALGORITHMS)('skips hidden records, and a hidden record passed on an earlier page does not hide the same content in another tag (%s)', (algorithm) => {
+    const moved = item(['sports'], 23 * HOUR);
+    const replaced: Item = { ...moved, tags: ['news'], hidden: true };
     const items = [item(['news'], HOUR), replaced, ...Array.from({ length: 20 }, (_, i) => item(['sports'], (i + 1) * 60_000)), moved];
     const picked: Candidate[] = [];
     let positions: Record<number, number[]> | undefined;
     for (let page = 0; page < 20; page++) {
-      const p = plan(items, ['news', 'sports'], { mode, limit: 5, positions });
+      const p = plan(items, ['news', 'sports'], { algorithm, limit: 5, positions });
       picked.push(...p.slices.flatMap((s) => s.picks.flat()));
       if (!p.truncated) break;
       positions = p.positions;
@@ -213,29 +214,57 @@ describe('planFeed fresh injection', () => {
   });
 });
 
-describe('planFeed balanced mode', () => {
-  const likes = (p: FeedPlan) => p.slices.flatMap((s) => s.picks.flatMap((l) => l.map((c) => c.likes)));
+describe('planFeed chronological algorithm', () => {
+  const chronological = (items: Item[], tags: string[], o: Partial<PlanOptions> = {}) => plan(items, tags, { algorithm: 'chronological', ...o });
+  /** A page's records in the order a client shows them: the tags' lists merged, newest first. */
+  const merged = (p: FeedPlan) => p.slices.flatMap((s) => s.picks.flat().sort((a, b) => b.createdAt - a.createdAt));
+  const newestFirst = (items: Item[]) => [...items].sort((a, b) => b.createdAt - a.createdAt).map((i) => i.contentId);
 
-  it('takes turns between the most liked, middle and least liked thirds of a day', () => {
-    const items = Array.from({ length: 9 }, (_, i) => item(['news'], (i + 1) * 60_000, i + 1));
-    expect(likes(plan(items, ['news']))).toEqual([9, 8, 7, 6, 5, 4, 3, 2, 1]);
-    expect(likes(plan(items, ['news'], { mode: 'balanced' }))).toEqual([9, 6, 3, 8, 5, 2, 7, 4, 1]);
+  it('orders a tag by creation time, newest first, whatever the likes', () => {
+    const items = [item(['news'], 3 * HOUR, 50), item(['news'], HOUR, 1), item(['news'], 2 * HOUR, 10)];
+    expect(plan(items, ['news']).slices[0]!.picks[0]!.map((c) => c.likes)).toEqual([50, 10, 1]);
+    expect(chronological(items, ['news']).slices[0]!.picks[0]!.map((c) => c.likes)).toEqual([1, 10, 50]);
   });
 
-  it('gives each third an equal share when the page fits only part of the day', () => {
-    const items = Array.from({ length: 90 }, (_, i) => item(['news'], (i + 1) * 60_000, i + 1));
-    const picked = likes(plan(items, ['news'], { mode: 'balanced', limit: 30 }));
-    expect(picked).toHaveLength(30);
-    expect([picked.filter((l) => l > 60).length, picked.filter((l) => l > 30 && l <= 60).length, picked.filter((l) => l <= 30).length]).toEqual([10, 10, 10]);
+  it('fills the page with the newest records of the window, not a share per day', () => {
+    const items = [0, 1, 2].flatMap((day) => Array.from({ length: 200 }, (_, i) => item(['news'], day * DAY + (i + 1) * 60_000, i % 9)));
+    const p = chronological(items, ['news'], { hours: 72 });
+    expect(p.slices.map((s) => s.used)).toEqual([100]);
+    expect(ids(p)).toEqual(newestFirst(items).slice(0, 100));
+    expect(p.truncated).toBe(true);
   });
 
-  it('splits each UTC day of a slice into its own thirds, newest day first', () => {
-    // The 24h slice back from 12:00 UTC holds this morning and yesterday afternoon.
-    const today = Array.from({ length: 6 }, (_, i) => item(['news'], (i + 1) * HOUR, i + 1));
-    const yesterday = Array.from({ length: 6 }, (_, i) => item(['news'], (13 + i) * HOUR, 101 + i));
-    const p = plan([...today, ...yesterday], ['news'], { mode: 'balanced' });
-    expect(p.slices).toHaveLength(1);
-    expect(likes(p)).toEqual([6, 4, 2, 5, 3, 1, 106, 104, 102, 105, 103, 101]);
+  it('takes the newest records of the tags together, not a share per tag', () => {
+    // Every sports post is newer than any news post.
+    const items = [
+      ...Array.from({ length: 30 }, (_, i) => item(['news'], 2 * HOUR + i * 60_000, 100)),
+      ...Array.from({ length: 30 }, (_, i) => item(['sports'], (i + 1) * 60_000)),
+    ];
+    const [news, sports] = chronological(items, ['news', 'sports'], { limit: 40 }).slices[0]!.picks;
+    expect(sports).toHaveLength(30);
+    expect(news!.map((c) => c.contentId)).toEqual(items.slice(0, 10).map((i) => i.contentId));
+  });
+
+  it('reaches older days, and past the window, only once the newer ones are used up', () => {
+    const items = [0, 1, 5].flatMap((day) => Array.from({ length: 10 }, (_, i) => item(['news'], day * DAY + (i + 1) * 60_000)));
+    const p = chronological(items, ['news'], { hours: 48, limit: 25 });
+    expect(p.slices.map((s) => [s.used, s.extended])).toEqual([[10, false], [10, false], [5, true]]);
+    expect(ids(p)).toEqual(newestFirst(items).slice(0, 25));
+  });
+
+  it('pages through every record once, in order of creation', () => {
+    const items = [0, 1, 2, 10].flatMap((day) =>
+      Array.from({ length: 30 }, (_, i) => item(i % 3 === 0 ? ['news', 'sports'] : i % 3 === 1 ? ['news'] : ['sports', 'tech'], day * DAY + (i + 1) * 60_000, i % 7)),
+    );
+    const seen: string[] = [];
+    let positions: Record<number, number[]> | undefined;
+    for (let page = 0; page < 50; page++) {
+      const p = chronological(items, ['news', 'sports', 'tech'], { hours: 72, limit: 25, positions });
+      seen.push(...merged(p).map((c) => c.contentId));
+      if (!p.truncated) break;
+      positions = p.positions;
+    }
+    expect(seen).toEqual(newestFirst(items));
   });
 
   it('has no fresh slots', () => {
@@ -246,7 +275,7 @@ describe('planFeed balanced mode', () => {
     const fresh = { every: 4, maxLikes: 0, pool: 200, seed: 1 };
     const run = (o: Partial<PlanOptions>) => ids(plan(items, ['news'], { limit: 12, ...o }));
     expect(run({ fresh })).not.toEqual(run({}));
-    expect(run({ mode: 'balanced', fresh })).toEqual(run({ mode: 'balanced' }));
+    expect(run({ algorithm: 'chronological', fresh })).toEqual(run({ algorithm: 'chronological' }));
   });
 });
 
@@ -267,7 +296,7 @@ describe('planFeed AI filter', () => {
     }
   });
 
-  it.each(FEED_MODES)('paginates the filtered lists without repeats or gaps (%s)', (mode) => {
+  it.each(FEED_ALGORITHMS)('paginates the filtered lists without repeats or gaps (%s)', (algorithm) => {
     const all = items();
     for (const aiGenerated of [true, false]) {
       const seen: string[] = [];
@@ -275,7 +304,7 @@ describe('planFeed AI filter', () => {
       let freshPositions: number[] | undefined;
       for (let page = 0; page < 50; page++) {
         const fresh = { every: 4, maxLikes: 0, pool: 200, seed: 3, positions: freshPositions };
-        const p = plan(all, tags, { mode, hours: 72, limit: 15, aiGenerated, positions, fresh });
+        const p = plan(all, tags, { algorithm, hours: 72, limit: 15, aiGenerated, positions, fresh });
         seen.push(...ids(p));
         if (!p.truncated) break;
         positions = p.positions;
@@ -283,6 +312,31 @@ describe('planFeed AI filter', () => {
       }
       expect(new Set(seen).size).toBe(seen.length);
       expect(seen.sort()).toEqual(all.filter((i) => i.aiGenerated === aiGenerated).map((i) => i.contentId).sort());
+    }
+  });
+
+  it('returns only the records matching moderated, which is a moderation queue when false, alone or with aiGenerated', () => {
+    // Every other record is approved, under each of its hashtags.
+    const all = items().map((i, n) => ({ ...i, moderated: n % 2 === 0 }));
+    const unfiltered = ids(plan(all, ['news'], { hours: 72 }));
+    for (const moderated of [true, false]) {
+      const wanted = new Set(all.filter((i) => i.moderated === moderated).map((i) => i.contentId));
+      expect(wanted.size).toBeGreaterThan(0);
+      expect(ids(plan(all, ['news'], { hours: 72, moderated }))).toEqual(unfiltered.filter((id) => wanted.has(id)));
+      const both = new Set(all.filter((i) => i.moderated === moderated && i.aiGenerated).map((i) => i.contentId));
+      expect(ids(plan(all, ['news'], { hours: 72, moderated, aiGenerated: true }))).toEqual(unfiltered.filter((id) => both.has(id)));
+
+      // Page by page, the filtered lists are what the positions index.
+      const seen: string[] = [];
+      let positions: Record<number, number[]> | undefined;
+      for (let page = 0; page < 50; page++) {
+        const p = plan(all, tags, { hours: 72, limit: 15, moderated, positions });
+        seen.push(...ids(p));
+        if (!p.truncated) break;
+        positions = p.positions;
+      }
+      expect(new Set(seen).size).toBe(seen.length);
+      expect(seen.sort()).toEqual([...wanted].sort());
     }
   });
 });

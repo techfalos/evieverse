@@ -1,21 +1,20 @@
 import { loadConfig } from '../config.js';
-import { createDb } from '../db/index.js';
-import { migrateToLatest } from '../db/migrator.js';
+import { openDb } from '../db/index.js';
 import { setAdmin } from './policy.js';
 
 /**
- * Who the server's admins are, which only its operator decides: `npm run admin -- grant <username or
- * userId>`, `npm run admin -- revoke <username or userId>`, and `npm run admin -- list`. In a container:
- * `node dist/moderation/admin.js grant alice`.
+ * Who the server's admins are, as its operator sets them, straight in the database: `npm run admin --
+ * grant <username or userId>`, `npm run admin -- revoke <username or userId>`, and `npm run admin --
+ * list`. In a container: `node dist/moderation/admin.js grant alice`. It needs no API key, so it makes
+ * a server's first admin and is the way back in without one; admins otherwise use /admins, or the
+ * CLI the server ships (src/cli).
  */
 const [command, user] = process.argv.slice(2);
 const usage = 'usage: npm run admin -- grant <username or userId> | revoke <username or userId> | list';
 
-const config = loadConfig();
-const db = await createDb(config.db);
+const db = await openDb(loadConfig().db);
 let failed = false;
 try {
-  await migrateToLatest(db);
   if (command === 'list') {
     const admins = await db.selectFrom('users').select(['id', 'username']).where('admin', '=', 1).orderBy('username').execute();
     for (const a of admins) console.log(`${a.id}  ${a.username}`);

@@ -5,7 +5,7 @@ import { sql, type Kysely } from 'kysely';
 import { Migrator, type Migration, type MigrationProvider } from 'kysely/migration';
 
 /** SQL migrations live next to this file as `<name>.sql` (shipped to dist/ by the build). */
-export const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), 'migrations');
+const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), 'migrations');
 
 /** Splits a SQL script into statements. Migration files must not put ';' inside strings or comments. */
 export function splitStatements(script: string): string[] {
