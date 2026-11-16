@@ -1,3 +1,5 @@
+import { readFile, stat } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { ApiError, apiClient, BUILD, CliError, serverUrl, VERSION, type Api } from './client.js';
 import { DEFAULT_PROFILE, listProfiles, readProfile, removeProfile, writeProfile, type Profile } from './profiles.js';
 import { installRelease, latestRelease } from './update.js';
@@ -124,16 +126,66 @@ function oneLine(text: string | undefined): string {
 const snippet = ({ preview }: PostRecord): string =>
   oneLine(preview.kind === 'text' ? preview.text : preview.kind === 'link' ? preview.url : [`[${preview.kind}]`, preview.text].filter(Boolean).join(' '));
 
-/** A comment on a post, as the server gives it. */
+/**
+ * A comment on a post, as the server gives it; or what is left in the place of one that has
+ * replies and isn't there to read: no author, no text, and a `status` that says why.
+ */
 interface CommentRecord {
   commentId: string;
   /** The post it is on. */
   contentId: string;
-  author: { userId: string; username: string };
+  /** The comment it replies to; null for a comment on the post itself. */
+  parentId: string | null;
+  /** Null on what stands in a comment's place. */
+  author: { userId: string; username: string } | null;
+  /** Empty for one that is only its image or video. */
   text: string;
+  /** The image or video it came with, and where its bytes are read; null for one that is only text. */
+  media: { kind: 'image' | 'video'; url: string; mimeType: string; size: number } | null;
+  likes: number;
+  /** How many comments reply to it. */
+  replies: number;
   createdAt: string;
-  /** "pending_review" on one that waits in the moderation queue. */
+  /** When its author last edited it; null for one that never was. */
+  editedAt: string | null;
+  /** "pending_review" on one that waits in the moderation queue; "deleted" on what a deleted comment that has replies leaves. */
   status?: string;
+}
+
+const counted = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * What a comment is, on one line: the kind of file it came with, if it came with one, and its
+ * text. Of one that isn't there to read, why: it was deleted, or waits for the server's moderators.
+ */
+const commentLine = ({ author, media, text, status }: CommentRecord): string =>
+  author === null ? (status === 'deleted' ? '[deleted]' : '[waits for moderators]') : oneLine([media && `[${media.kind}]`, text].filter(Boolean).join(' '));
+
+/** A comment's row in a list of comments: its id (to reply to it, or to list its replies), who wrote it and when, its likes and replies, and what it says. */
+const commentRow = (c: CommentRecord): string[] => [
+  c.commentId,
+  c.author?.username ?? '',
+  c.createdAt,
+  counted(c.likes, 'like', 'likes'),
+  counted(c.replies, 'reply', 'replies'),
+  `${commentLine(c)}${c.editedAt ? ' (edited)' : ''}`,
+];
+
+/** The largest file `comments add --file` sends: it goes inside the request, which a server takes 32 MB of, a third of that being what base64 adds. */
+const MAX_INLINE_FILE_BYTES = 20 * 1024 * 1024;
+
+/** A file to send inside a request, as the server takes one inline: its bytes in base64, and its name, which says what type it is. */
+async function inlineFile(file: string): Promise<{ content: string; contentEncoding: 'base64'; filename: string }> {
+  let bytes: Buffer;
+  try {
+    const { size } = await stat(file);
+    if (size > MAX_INLINE_FILE_BYTES) throw new CliError(`${file} is larger than the ${MAX_INLINE_FILE_BYTES / 1024 / 1024} MB this command can send`, 2);
+    bytes = await readFile(file);
+  } catch (err) {
+    if (err instanceof CliError) throw err;
+    throw new CliError(`could not read ${file}: ${(err as Error).message}`, 2);
+  }
+  return { content: bytes.toString('base64'), contentEncoding: 'base64', filename: basename(file) };
 }
 
 /** What waits in the moderation queue or the report queue: a post, or a comment on one. */
@@ -146,7 +198,7 @@ type QueueItem = ({ kind: 'post' } & PostRecord) | ({ kind: 'comment' } & Commen
  */
 const queueRow = (item: QueueItem, facts: string[]): string[] =>
   item.kind === 'comment'
-    ? ['comment', item.commentId, item.author.username, ...facts, `on ${item.contentId}`, oneLine(item.text)]
+    ? ['comment', item.commentId, item.author?.username ?? '', ...facts, `on ${item.contentId}`, commentLine(item)]
     : ['post', item.contentId, item.publisher.username, ...facts, hashtags(item.tags), snippet(item)];
 
 /** The option that makes a command about a post one about a comment on it. */
@@ -185,6 +237,38 @@ function confirmed({ values }: Args, what: string): void {
 
 const deletedText = (d: AccountDeleted) =>
   d.status === 'deleted' ? `Deleted account ${d.userId}.` : `Deleted account ${d.userId}: its posts are being removed, and the account goes with the last of them.`;
+
+/** One of the server's rules, as it gives them: `position` is its place in the list, from 1. */
+interface RuleRecord {
+  ruleId: string;
+  position: number;
+  text: string;
+}
+
+/** What a server says of the code it runs, beside its rules: its operator's statement. */
+interface ModificationDisclosure {
+  /** Whether it runs a modified version of Evieverse, and not a release. */
+  modified: boolean;
+  /** The release it runs, or the one its modified version is based on. */
+  release: string;
+  /** Where its source code can be obtained, which a modified version says. */
+  sourceUrl: string | null;
+}
+
+const disclosed = ({ modified, release, sourceUrl }: ModificationDisclosure): string =>
+  [
+    modified
+      ? `Modification disclosure: this server runs a modified version of Evieverse, based on release ${release}.`
+      : `Modification disclosure: this server runs Evieverse ${release}, unmodified.`,
+    ...(sourceUrl ? [`Its source code: ${sourceUrl}`] : []),
+  ].join('\n');
+
+/** The body of a request that adds or changes a rule: the text it was given, and the place, each only if named. */
+function ruleBody({ values }: Args, text?: string): { text?: string; position?: number } {
+  const { position } = values;
+  if (typeof position === 'string' && !/^[1-9]\d*$/.test(position)) throw new CliError('--position is a place in the list of rules, counted from 1', 2);
+  return { ...(text !== undefined && { text }), ...(typeof position === 'string' && { position: Number(position) }) };
+}
 
 const reportCount = (reports: number) => `${reports} ${reports === 1 ? 'report' : 'reports'}`;
 
@@ -415,37 +499,72 @@ export const COMMANDS: Command[] = [
       return d.alreadyReported ? `You had already reported ${what}.` : `Reported ${what} to the server's moderators.`;
     },
   }),
-  endpoint<{ contentId: string; count: number; comments: CommentRecord[]; nextCursor: string | null }>({
+  endpoint<{ contentId: string; commentId?: string; count: number; comments: CommentRecord[]; nextCursor: string | null }>({
     name: 'comments list',
     positionals: ['contentId'],
-    options: { ...PAGE_OPTIONS, newest: { type: 'boolean' } },
-    flags: `[--newest] ${PAGE_FLAGS}`,
+    options: { ...PAGE_OPTIONS, newest: { type: 'boolean' }, 'replies-to': { type: 'string' } },
+    flags: `[--replies-to <commentId>] [--newest] ${PAGE_FLAGS}`,
     role: 'anyone',
-    summary: "Lists a post's comments, oldest first, or with --newest, newest first.",
-    request: (args) => ({
-      method: 'GET',
-      path: `${path`/content/${args.positionals[0]!}/comments`}${pageQuery(args, new URLSearchParams(args.values.newest === true ? { order: 'newest' } : {}))}`,
-    }),
+    summary:
+      "Lists the comments on a post, or with --replies-to, the replies to one of them, oldest first, or with --newest, newest first. Each row says how many likes and replies the comment has. A comment that has replies and was deleted, or waits for the server's moderators, is listed as that.",
+    request: (args) => {
+      const parentId = args.values['replies-to'];
+      const contentId = args.positionals[0]!;
+      const list = typeof parentId === 'string' ? path`/content/${contentId}/comments/${parentId}/replies` : path`/content/${contentId}/comments`;
+      return { method: 'GET', path: `${list}${pageQuery(args, new URLSearchParams(args.values.newest === true ? { order: 'newest' } : {}))}` };
+    },
     text: (d) =>
-      (d.comments.length ? table(d.comments.map((c) => [c.commentId, c.author.username, c.createdAt, oneLine(c.text)])) : `${d.contentId} has no comments.`) +
+      (d.comments.length ? table(d.comments.map(commentRow)) : d.commentId === undefined ? `${d.contentId} has no comments.` : `Comment ${d.commentId} has no replies.`) +
       more(d.nextCursor),
   }),
-  endpoint<CommentRecord>({
+  {
     name: 'comments add',
     positionals: ['contentId', 'text'],
+    options: { file: { type: 'string' }, 'reply-to': { type: 'string' } },
+    flags: '[--file <path>] [--reply-to <commentId>]',
     role: 'anyone',
-    summary: "Comments on a post that takes comments; quote the text. One the server holds back waits for its moderators, as a post does.",
-    request: ({ positionals: [contentId, text] }) => ({ method: 'POST', path: path`/content/${contentId!}/comments`, body: { text } }),
+    summary:
+      'Comments on a post that takes comments, or with --reply-to, replies to a comment on it; quote the text. With --file, the comment comes with an image or a video, and its text can be "". One the server holds back waits for its moderators, as a post does.',
+    async run(ctx, { positionals: [contentId, text], values }) {
+      const body = {
+        text,
+        ...(typeof values['reply-to'] === 'string' && { parentId: values['reply-to'] }),
+        ...(typeof values.file === 'string' && (await inlineFile(values.file))),
+      };
+      const d = await (await ctx.api()).request<CommentRecord>('POST', path`/content/${contentId!}/comments`, body);
+      const what = d.parentId === null ? `comment on ${d.contentId}` : `reply to comment ${d.parentId}`;
+      const done = d.parentId === null ? `Commented on ${d.contentId}` : `Replied to comment ${d.parentId}`;
+      const withFile = d.media ? ` with ${d.media.kind === 'image' ? 'an image' : 'a video'}` : '';
+      return { data: d, text: d.status === 'pending_review' ? `Your ${what} waits for the server's moderators: ${d.commentId}` : `${done}${withFile}: ${d.commentId}` };
+    },
+  },
+  endpoint<{ contentId: string; commentId: string; unchanged?: boolean; status?: string }>({
+    name: 'comments edit',
+    positionals: ['contentId', 'commentId', 'text'],
+    role: 'anyone',
+    summary:
+      "Gives a comment of yours another text; quote it. The comment keeps its replies and its likes. An edit the server holds back takes the comment off the post until its moderators accept it; its replies stay.",
+    request: ({ positionals: [contentId, commentId, text] }) => ({ method: 'PATCH', path: path`/content/${contentId!}/comments/${commentId!}`, body: { text } }),
     text: (d) =>
-      d.status === 'pending_review'
-        ? `Your comment on ${d.contentId} waits for the server's moderators: ${d.commentId}`
-        : `Commented on ${d.contentId}: ${d.commentId}`,
+      d.unchanged
+        ? `Comment ${d.commentId} already says that.`
+        : d.status === 'pending_review'
+          ? `Edited comment ${d.commentId}: it waits for the server's moderators, and is off the post until they accept it.`
+          : `Edited comment ${d.commentId}.`,
+  }),
+  endpoint<{ contentId: string; commentId: string; likes: number; alreadyLiked: boolean }>({
+    name: 'comments like',
+    positionals: ['contentId', 'commentId'],
+    role: 'anyone',
+    summary: 'Likes a comment. You like a comment once, and a like is not taken back.',
+    request: ({ positionals: [contentId, commentId] }) => ({ method: 'POST', path: '/like', body: { contentId, commentId } }),
+    text: (d) => `${d.alreadyLiked ? `You had already liked comment ${d.commentId}` : `Liked comment ${d.commentId}`}: it has ${counted(d.likes, 'like', 'likes')}.`,
   }),
   endpoint<{ contentId: string; commentId: string }>({
     name: 'comments delete',
     positionals: ['contentId', 'commentId'],
     role: 'anyone',
-    summary: 'Deletes a comment: your own, one on your post, or any comment if you are an admin.',
+    summary: 'Deletes a comment: your own, one on your post, or any comment if you are an admin. The replies to it stay.',
     request: ({ positionals: [contentId, commentId] }) => ({ method: 'DELETE', path: path`/content/${contentId!}/comments/${commentId!}` }),
     text: (d) => `Deleted comment ${d.commentId}.`,
   }),
@@ -456,6 +575,19 @@ export const COMMANDS: Command[] = [
     summary: "Lists a hashtag's moderators.",
     request: ({ positionals: [tag] }) => ({ method: 'GET', path: path`/tags/${tag!}/moderators` }),
     text: (d) => (d.moderators.length ? table(d.moderators.map((m) => [m.userId, m.username, `since ${m.since}`])) : `#${d.tag} has no moderators.`),
+  }),
+  endpoint<{ modificationDisclosure: ModificationDisclosure; rules: RuleRecord[] }>({
+    name: 'rules list',
+    role: 'anyone',
+    summary:
+      "Lists the server's rules, in their order, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is.",
+    request: () => ({ method: 'GET', path: '/rules' }),
+    text: (d) =>
+      [
+        d.rules.length ? table(d.rules.map((r) => [String(r.position), r.ruleId, r.text.replace(/\s+/g, ' ').trim()])) : 'The server has no rules.',
+        '',
+        disclosed(d.modificationDisclosure),
+      ].join('\n'),
   }),
   own<{ unread: number; inbox: InboxItem[]; nextCursor: string | null }>({
     name: 'inbox list',
@@ -641,6 +773,21 @@ export const COMMANDS: Command[] = [
     },
     text: (d) => deletedText(d),
   }),
+  {
+    name: 'users rotate-key',
+    positionals: ['userId'],
+    role: 'admin',
+    summary:
+      "Replaces any user's API key with a new one, and prints it, which is shown this once, for you to pass on: for a user who lost their key, or whose key someone else has. Every key they had stops working. Another admin's too; your own is `key rotate`.",
+    async run(ctx, { positionals: [userId] }) {
+      // The server would replace the key the profile holds, and this command saves the new one nowhere.
+      if (userId!.toLowerCase() === (await ctx.profile()).profile.userId.toLowerCase()) {
+        throw new CliError('that is your own account: replace its key with `evieverse key rotate`, which saves the new one in the profile', 2);
+      }
+      const replaced = await (await ctx.api()).request<{ userId: string; apiKey: string }>('POST', path`/users/${userId!}/key`);
+      return { data: replaced, text: `Replaced the API key of ${replaced.userId}: the keys they had no longer work.\nTheir new API key, shown this once: ${replaced.apiKey}` };
+    },
+  },
   endpoint<{ userId: string; username: string; alreadyAdmin: boolean }>({
     name: 'admins grant',
     positionals: ['userId'],
@@ -695,6 +842,39 @@ export const COMMANDS: Command[] = [
     summary: "Ends a user's moderation of a hashtag.",
     request: ({ positionals: [tag, userId] }) => ({ method: 'DELETE', path: path`/tags/${tag!}/moderators/${userId!}` }),
     text: (d) => (d.wasModerator ? `${d.userId} no longer moderates #${d.tag}.` : `${d.userId} didn't moderate #${d.tag}.`),
+  }),
+  endpoint<RuleRecord>({
+    name: 'rules add',
+    positionals: ['text'],
+    options: { position: { type: 'string' } },
+    flags: '[--position <n>]',
+    role: 'admin',
+    summary: "Adds a rule to the server's rules; quote it. It goes at the end of the list, or with --position, at that place, counted from 1.",
+    request: (args) => ({ method: 'POST', path: '/rules', body: ruleBody(args, args.positionals[0]) }),
+    text: (d) => `Added rule ${d.position}: ${d.ruleId}`,
+  }),
+  endpoint<RuleRecord>({
+    name: 'rules update',
+    positionals: ['ruleId'],
+    options: { text: { type: 'string' }, position: { type: 'string' } },
+    flags: '[--text <text>] [--position <n>]',
+    role: 'admin',
+    summary: "Changes one of the server's rules: with --text, what it says, and with --position, its place in the list, counted from 1.",
+    request: (args) => {
+      const { text } = args.values;
+      const body = ruleBody(args, typeof text === 'string' ? text : undefined);
+      if (!Object.keys(body).length) throw new CliError('say what to change: --text <text>, --position <n>, or both', 2);
+      return { method: 'PATCH', path: path`/rules/${args.positionals[0]!}`, body };
+    },
+    text: (d) => `Updated rule ${d.ruleId}: it is rule ${d.position}.`,
+  }),
+  endpoint<{ ruleId: string; wasThere: boolean }>({
+    name: 'rules remove',
+    positionals: ['ruleId'],
+    role: 'admin',
+    summary: "Removes one of the server's rules.",
+    request: ({ positionals: [ruleId] }) => ({ method: 'DELETE', path: path`/rules/${ruleId!}` }),
+    text: (d) => (d.wasThere ? `Removed rule ${d.ruleId}.` : `${d.ruleId} isn't one of the server's rules.`),
   }),
   endpoint<{ banned: { userId: string; username: string; bannedAt: string; reason: string | null; bannedBy: { userId: string; username: string } | null }[]; nextCursor: string | null }>({
     name: 'bans list',

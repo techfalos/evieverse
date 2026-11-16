@@ -2,7 +2,7 @@
   "name": "evieverse",
   "version": "0.1.0",
   "description": "Open source social media server: image, video, audio, text and link posts, hashtags, likes, and feeds planned from a per-hashtag index in Redis.",
-  "license": "MIT",
+  "license": "Modified AGPLv3",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -22,7 +22,6 @@
   "dependencies": {
     "@fastify/cors": "^11.4.1",
     "@fastify/multipart": "^10.1.8",
-    "@fastify/rate-limit": "^11.2.2",
     "better-sqlite3": "^12.11.1",
     "fastify": "^5.12.8",
     "ioredis": "^5.11.1",

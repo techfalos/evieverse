@@ -24,6 +24,30 @@ const ConfigSchema = z.object({
    */
   defaultLanguage: z.string().trim().min(1).default(REFERENCE_LANGUAGE),
 
+  /**
+   * The modification disclosure, which GET /rules gives to anyone who asks, beside the rules: that
+   * this instance runs a modified version of Evieverse, one whose source code differs from a
+   * release, as the additional terms Evieverse is licensed under define it. Those terms have a
+   * modified version say so, and this is the supported way. It is the operator's own statement,
+   * which the server checks against nothing.
+   */
+  modified: bool(false),
+  /**
+   * Where the source code this instance runs can be obtained: an http or https address. A modified
+   * version has to say, so the server doesn't start as one without it. Unset: none is given.
+   */
+  sourceUrl: z
+    .string()
+    .trim()
+    .nullable()
+    .default(null)
+    .transform((v, ctx) => {
+      if (!v) return null;
+      if (URL.canParse(v) && ['http:', 'https:'].includes(new URL(v).protocol)) return v;
+      ctx.addIssue({ code: 'custom', message: `"${v}" is not an address such as https://example.com/evieverse-source: EVIEVERSE_SOURCE_URL is an http or https URL` });
+      return z.NEVER;
+    }),
+
   db: z.object({
     dialect: z.enum(['postgres', 'sqlite', 'mysql']).default('sqlite'),
     /** Connection URL for postgres/mysql, or a file path (or ":memory:") for sqlite. */
@@ -54,10 +78,10 @@ const ConfigSchema = z.object({
 
   /**
    * The proxies in front of the server whose X-Forwarded-For is believed, which decides the client
-   * address /register is limited by: how many of them there are, true for any, or their addresses and
-   * CIDR ranges (separated by commas or spaces). Empty: none, so the address is the connection's own.
-   * A count is only safe where the server can't be reached except through those proxies: anyone who
-   * connects directly chooses the address they are counted under.
+   * address the audit log and the request log record: how many of them there are, true for any, or
+   * their addresses and CIDR ranges (separated by commas or spaces). Empty: none, so the address is
+   * the connection's own. A count is only safe where the server can't be reached except through
+   * those proxies: anyone who connects directly chooses the address they are recorded under.
    */
   trustProxy: z
     .union([z.boolean(), z.number().int().min(0), z.string()])
@@ -158,8 +182,6 @@ const ConfigSchema = z.object({
     previewWords: int(100),
     /** ...and at most this many characters of them, which bounds text written without spaces. */
     previewChars: int(1000),
-    /** Superseded day indexes and manifests are kept this long, which is also the cursor lifetime. */
-    genRetentionMinutes: int(60),
     /**
      * How long a tag's head and related hashtags, and publisher credits, are cached by each node. A
      * node shows what the compactor published up to this long after it did.
@@ -210,10 +232,11 @@ const ConfigSchema = z.object({
     leaseSeconds: z.coerce.number().int().min(30).default(60),
   }),
 
-  /** Challenges people solve to register, and to post again soon after posting. They're kept in Redis. */
+  /**
+   * Challenges people solve to register, and to post again soon after posting. They're kept in Redis.
+   * Registering always takes one, which no setting turns off: only an admin's request is spared it.
+   */
   challenge: z.object({
-    /** /register answers with a challenge, which the same request, sent again, must solve. */
-    register: bool(true),
     /**
      * A user's post (/store) less than this long after their previous post or challenge must
      * solve a challenge, or two from the third such post in a row (0: never).
@@ -243,7 +266,6 @@ const ConfigSchema = z.object({
       message: 'TRUST_SCORE_DELETE_BELOW can be at most TRUST_SCORE_ALLOW_FROM',
     }),
 
-  registerRateLimitPerHour: int(10),
   /**
    * A user's posts (/store) in any minute past this many are refused outright, before any
    * challenge, however many challenges they'd solve (0: no limit).
@@ -256,11 +278,12 @@ const ConfigSchema = z.object({
 
   /** Comments on posts, which each post's publisher turns on for it. They are objects in the content store, with Redis as a cache over them. */
   comments: z.object({
-    /** Comments one user can send in a minute (0: no limit). */
+    /** Comments one user can send in a minute, edits of comments among them (0: no limit). */
     perMinute: z.coerce.number().int().min(0).default(10),
     /**
-     * How long Redis keeps a post's index of its comments, and each comment, before they are read
-     * from the content store again: the index from one list of the post's comments.
+     * How long Redis keeps a post's index of its comments, each comment, and each comment's number
+     * of likes, before they are read from the content store again: the index from one list of the
+     * post's comments, and the number from one list of the comment's likes.
      */
     hotHours: int(24),
   }),
@@ -272,6 +295,21 @@ const ConfigSchema = z.object({
     /** Days a message or a notice stays in an inbox; the compactor deletes older ones, once a day. */
     retentionDays: int(90),
   }),
+
+  /**
+   * Where the server shows the ads its admins keep (/monetization/ads), each with the word
+   * "Sponsored". Both are off unless turned on: a server that turns on neither shows no ad, whatever
+   * ads it has. The compactor publishes the ads where either is on, so it takes the same settings.
+   */
+  monetization: z.object({
+    /** Hashtag feeds (GET /feed) come with ads to show before the 3rd, 10th and 17th post of each page. */
+    feedAds: bool(false),
+    /** A post (GET /content/:contentId) comes with an ad to show at its end. */
+    postAds: bool(false),
+  }),
+}).refine((c) => !c.modified || c.sourceUrl !== null, {
+  path: ['sourceUrl'],
+  message: 'EVIEVERSE_MODIFIED needs EVIEVERSE_SOURCE_URL: where the source code of this modified version can be obtained',
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -306,6 +344,8 @@ const ENV_MAP: Record<string, string> = {
   PORT: 'port',
   LOG_LEVEL: 'logLevel',
   DEFAULT_LANGUAGE: 'defaultLanguage',
+  EVIEVERSE_MODIFIED: 'modified',
+  EVIEVERSE_SOURCE_URL: 'sourceUrl',
   DB_DIALECT: 'db.dialect',
   DATABASE_URL: 'db.url',
   DB_POOL_SIZE: 'db.poolSize',
@@ -343,7 +383,6 @@ const ENV_MAP: Record<string, string> = {
   FEED_RELATED_TAGS: 'feed.relatedTags',
   FEED_RELATED_MIN_POSTS: 'feed.relatedMinPosts',
   FEED_RELATED_MIN_PERCENT: 'feed.relatedMinPercent',
-  FEED_GEN_RETENTION_MINUTES: 'feed.genRetentionMinutes',
   FEED_HEAD_CACHE_MS: 'feed.headCacheMs',
   FEED_INDEX_CACHE_SIZE: 'feed.indexCacheSize',
   FEED_AUTHOR_CACHE_SIZE: 'feed.authorIndexCacheSize',
@@ -356,14 +395,12 @@ const ENV_MAP: Record<string, string> = {
   COMPACT_GRACE_SECONDS: 'compact.graceSeconds',
   COMPACT_CONCURRENCY: 'compact.concurrency',
   COMPACT_LEASE_SECONDS: 'compact.leaseSeconds',
-  CHALLENGE_REGISTER: 'challenge.register',
   CHALLENGE_POST_WINDOW_SECONDS: 'challenge.postWindowSeconds',
   CHALLENGE_TTL_SECONDS: 'challenge.ttlSeconds',
   CHALLENGE_POW_BITS: 'challenge.powBits',
   CHALLENGE_MIN_SOLVE_MS: 'challenge.minSolveMs',
   TRUST_SCORE_DELETE_BELOW: 'trust.deleteBelow',
   TRUST_SCORE_ALLOW_FROM: 'trust.allowFrom',
-  REGISTER_RATE_LIMIT_PER_HOUR: 'registerRateLimitPerHour',
   POST_RATE_LIMIT_PER_MINUTE: 'postRateLimitPerMinute',
   MAX_FOLLOWING: 'maxFollowing',
   REPORTS_PER_HOUR: 'reportsPerHour',
@@ -371,6 +408,8 @@ const ENV_MAP: Record<string, string> = {
   COMMENTS_HOT_HOURS: 'comments.hotHours',
   INBOX_MESSAGES_PER_MINUTE: 'inbox.messagesPerMinute',
   INBOX_RETENTION_DAYS: 'inbox.retentionDays',
+  MONETIZATION_FEED_ADS: 'monetization.feedAds',
+  MONETIZATION_POST_ADS: 'monetization.postAds',
 };
 
 const EMPTY_SECTIONS: Json = {
@@ -385,6 +424,7 @@ const EMPTY_SECTIONS: Json = {
   trust: {},
   comments: {},
   inbox: {},
+  monetization: {},
 };
 
 function parseJson(v: unknown) {

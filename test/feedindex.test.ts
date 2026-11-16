@@ -15,6 +15,7 @@ import {
   type Head,
   type Manifest,
 } from '../src/tagfeed/layout.js';
+import { TagFeedReader } from '../src/tagfeed/reader.js';
 import { DAY, HOUR, utcDay } from '../src/time.js';
 import { createTestContext, queued, requests, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
 
@@ -178,28 +179,33 @@ for (const target of TARGETS) {
     });
 
     it('lets readers holding an old head keep reading while compaction swaps the head, then lets the superseded keys expire', async () => {
-      ctx = await createTestContext(target, { feed: { genRetentionMinutes: 10 } });
+      ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const a = await store(alice, 'a #news');
       await ctx.compact();
       const oldHead = await readHead('news');
       const oldManifest = await readManifest('news');
+      // A node that read the head just before the run that replaces it, and has read nothing else of the index.
+      const node = new TagFeedReader(ctx.hot, { headCacheMs: HOUR, indexCacheSize: 10 }, () => ctx.clock.now);
+      expect(await node.head('news')).toEqual(oldHead);
       const b = await store(alice, 'b #news');
       await ctx.compact();
       const newHead = await readHead('news');
       expect(newHead.manifest).not.toBe(oldHead.manifest);
       const current = await readManifest('news');
 
-      // A reader that loaded the old head still sees a consistent view: the index as it was then.
-      const view = await ctx.feedReader.view('news', oldHead.manifest);
-      expect(view.candidates.map((c) => c.contentId)).toEqual([a]);
+      // It still reads a consistent view: the index as it was then.
+      expect((await node.view('news')).candidates.map((c) => c.contentId)).toEqual([a]);
 
       const superseded = [manifestKey('news', oldHead.manifest!), ...oldManifest.days.map((d) => dayKey('news', d.gen))];
       const live = [manifestKey('news', newHead.manifest!), ...current.days.map((d) => dayKey('news', d.gen))];
       expect(await ctx.hot.exists(superseded)).toEqual([true, true]);
-      // Redis expires keys by its own clock, so only the in-process store can be moved past the retention period.
+      // Kept a minute past the time a node caches a head (none, in tests). Redis expires keys by its
+      // own clock, so only the in-process store can be moved past it.
       if (target.hot === 'memory') {
-        await ctx.compact(11 * 60_000);
+        ctx.clock.now += 59_000;
+        expect(await ctx.hot.exists(superseded)).toEqual([true, true]);
+        await ctx.compact(60_000);
         expect(await ctx.hot.exists(superseded)).toEqual([false, false]);
         expect(await ctx.hot.exists(live)).toEqual([true, true]);
       }
@@ -417,7 +423,7 @@ for (const target of TARGETS) {
       expect(await items('news')).toEqual([]);
     });
 
-    it('leaves deleted content out of later pages of a feed session, which read the index of its first page, without skipping or repeating other records', async () => {
+    it('leaves deleted content out of later pages of a feed session, without skipping or repeating other records', async () => {
       ctx = await createTestContext(target, { feed: { pageSize: 5 } });
       const alice = await ctx.register('alice');
       const ids: string[] = [];
@@ -432,8 +438,9 @@ for (const target of TARGETS) {
       const shown = allIds(first)[0]!;
       const unseen = ids.find((id) => !allIds(first).includes(id))!;
       for (const id of [shown, unseen]) await del(alice, id);
-      // The run that deletes them erases their summaries, which is what the session's pages leave them out by.
+      // The run that deletes them takes them out of the index, which the session's later pages read as it is by then.
       expect((await ctx.compactor.runOnce()).deleted.sort()).toEqual([shown, unseen].sort());
+      expect(await indexIds('news')).toHaveLength(10);
 
       const seen = await restOf('tags=news', first);
       expect(new Set(seen).size).toBe(seen.length);
@@ -454,13 +461,17 @@ for (const target of TARGETS) {
       const sports = (await getFeed('tags=sports')).json() as Feed;
       const moved = ids.find((id) => !allIds(news).includes(id))!;
       expect((await update(alice, moved, 'moved #sports')).statusCode).toBe(200);
-      // With the index rebuilt or not: the sessions read the one their first page did, which holds the post under both.
+      // Before the run that rebuilds the index of #news, which still lists the post, and after it.
+      const before = await restOf('tags=news', news);
       await ctx.compactor.runOnce();
       expect(await indexIds('news')).not.toContain(moved);
 
-      const inNews = await restOf('tags=news', news);
-      expect(inNews.sort()).toEqual(ids.filter((id) => id !== moved).sort());
+      for (const inNews of [before, await restOf('tags=news', news)]) {
+        expect(new Set(inNews).size).toBe(inNews.length);
+        expect(inNews.sort()).toEqual(ids.filter((id) => id !== moved).sort());
+      }
       const inSports = await restOf('tags=sports', sports);
+      expect(new Set(inSports).size).toBe(inSports.length);
       expect(inSports.sort()).toEqual([...ids].sort());
     });
 
@@ -696,7 +707,7 @@ for (const target of TARGETS) {
     });
 
     it('compacts the indexes of a run together, in round trips to Redis that do not grow with the publishers who posted', async () => {
-      ctx = await createTestContext(target, { registerRateLimitPerHour: 100 });
+      ctx = await createTestContext(target);
       const users: User[] = [];
       for (let i = 0; i < 12; i++) users.push(await ctx.register(`user${i}`));
       const first: string[] = [];
@@ -862,7 +873,7 @@ for (const target of TARGETS) {
       expect(allIds((await getFeed('tags=news')).json())).toEqual([...ids].reverse().slice(0, 4));
     });
 
-    it('pages multi-tag feeds with a cursor pinned to the indexes of the first page, across a compaction', async () => {
+    it('pages multi-tag feeds across compactions, each page reading the indexes as they are by then', async () => {
       ctx = await createTestContext(target, { feed: { pageSize: 8 } });
       const alice = await ctx.register('alice');
       const ids: string[] = [];
@@ -885,10 +896,14 @@ for (const target of TARGETS) {
         expect(res.statusCode, res.body).toBe(200);
         const f = res.json() as Feed;
         seen.push(...allIds(f));
-        if (page === 1) {
-          // Records stored and compacted mid-pagination don't disturb the pinned pages.
+        if (page === 1 || page === 3) {
+          // A post stored mid-session is newer than the session's window, and the index that holds it
+          // replaces the one the pages before read: the pages after carry on where those stopped.
+          const head = await readHead('news');
+          ctx.clock.now += 1000;
           await store(alice, 'late arrival #news');
           await ctx.compact();
+          expect((await readHead('news')).manifest).not.toBe(head.manifest);
         }
         cursor = f.nextCursor;
         if (!cursor) break;
@@ -897,7 +912,54 @@ for (const target of TARGETS) {
       expect(seen.sort()).toEqual([...ids].sort());
     });
 
-    it('leaves out of a feed session a post that reaches the index after its first page, however old its timestamp', async () => {
+    it('carries a feed session on however long ago it began, once the indexes its first page read are gone', async () => {
+      ctx = await createTestContext(target, { feed: { pageSize: 2 } });
+      const alice = await ctx.register('alice');
+      const ids: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        ids.push(await store(alice, `post ${i} #news`));
+        ctx.clock.now += 1000;
+      }
+      await ctx.compact();
+      const first = (await getFeed('tags=news')).json() as Feed;
+      expect(first.nextCursor).toBeTruthy();
+      const read = [manifestKey('news', (await readHead('news')).manifest!), ...(await readManifest('news')).days.map((d) => dayKey('news', d.gen))];
+
+      // Hours later, the index has been rebuilt since, and what the first page read of it has expired.
+      ctx.clock.now += 5 * HOUR;
+      const newer = await store(alice, 'newer #news');
+      await ctx.compact();
+      await ctx.compact(2 * 60_000);
+      if (target.hot === 'memory') expect(await ctx.hot.exists(read)).toEqual([false, false]);
+
+      // The session's window is still the one its first page had.
+      const seen = await restOf('tags=news', first);
+      expect(seen).toEqual([...ids].reverse());
+      expect(allIds((await getFeed('tags=news')).json())).toContain(newer);
+    });
+
+    it('answers 410 for a cursor of an earlier release, and 400 for one that is not a cursor', async () => {
+      ctx = await createTestContext(target, { feed: { pageSize: 2 } });
+      const alice = await ctx.register('alice');
+      for (let i = 0; i < 3; i++) await store(alice, `post ${i} #news`);
+      await ctx.compact();
+      const first = (await getFeed('tags=news')).json() as Feed;
+      const state = JSON.parse(Buffer.from(first.nextCursor!, 'base64url').toString('utf8')) as { v: number; p: unknown[] };
+      const cursor = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+      const status = async (value: unknown) => (await getFeed(`tags=news&cursor=${cursor(value)}`)).statusCode;
+
+      expect(await status(state)).toBe(200);
+      expect(await status({ ...state, v: state.v - 1 })).toBe(410);
+      expect(await status({ ...state, v: state.v + 1 })).toBe(400);
+      // One that names a place in no list, in a list the feed doesn't have, or nothing a place could be.
+      expect(await status({ ...state, p: [] })).toBe(400);
+      expect(await status({ ...state, p: [...state.p, null] })).toBe(400);
+      expect(await status({ ...state, p: [[0, 'yesterday', 'x']] })).toBe(400);
+      expect(await status({ ...state, f: [-1] })).toBe(400);
+      expect((await getFeed('tags=news&cursor=nonsense')).statusCode).toBe(400);
+    });
+
+    it('leaves out of a feed session a post that reaches the index after the page it would have been on, and shows it to the next', async () => {
       ctx = await createTestContext(target, { feed: { pageSize: 3 } });
       const alice = await ctx.register('alice');
       const ids: string[] = [];
@@ -918,9 +980,35 @@ for (const target of TARGETS) {
       await ctx.compactor.runOnce();
       expect(await indexIds('news')).toContain(lateId);
 
+      // It is the newest of the window, which is where the session began.
       const seen = await restOf('tags=news', first);
       expect(new Set(seen).size).toBe(seen.length);
       expect(seen.sort()).toEqual([...ids].sort());
+      expect(allIds((await getFeed('tags=news')).json())[0]).toBe(lateId);
+    });
+
+    it('never repeats a post in a feed session as likes reorder the index between its pages, and misses one they take ahead of it', async () => {
+      ctx = await createTestContext(target, { feed: { pageSize: 4, freshEvery: 0 } });
+      const [alice, bob, carol] = [await ctx.register('alice'), await ctx.register('bob'), await ctx.register('carol')];
+      const ids: string[] = [];
+      for (let i = 0; i < 12; i++) {
+        ids.push(await store(alice, `post ${i} #news`));
+        ctx.clock.now += 1000;
+      }
+      // The newest six have a like each, so they come first.
+      for (const id of ids.slice(6)) await like(bob, id);
+      await ctx.compact();
+      const first = (await getFeed('tags=news')).json() as Feed;
+      expect(allIds(first)).toEqual([ids[11], ids[10], ids[9], ids[8]]);
+
+      // Liked since: one the session has shown, one it would have shown next but one, and its last.
+      for (const id of [ids[11]!, ids[6]!, ids[0]!]) await like(carol, id);
+      await ctx.compact();
+      expect(allIds((await getFeed('tags=news&limit=3')).json())).toEqual([ids[11], ids[6], ids[10]]);
+
+      // The second is now ahead of where the session has got to. The last moved up among the posts to come.
+      const seen = await restOf('tags=news', first);
+      expect(seen).toEqual([ids[11], ids[10], ids[9], ids[8], ids[7], ids[0], ids[5], ids[4], ids[3], ids[2], ids[1]]);
     });
 
     it('injects new unliked content between liked content read from a day index', async () => {
@@ -986,20 +1074,9 @@ for (const target of TARGETS) {
 
       // What the killed run wrote expires, like what the last run replaced; what a head names never does.
       // (Only the in-process store keeps the test's time.)
-      if (target.hot === 'memory') ctx.clock.now += 2 * HOUR + ctx.config.feed.genRetentionMinutes * 60_000;
+      if (target.hot === 'memory') ctx.clock.now += 2 * HOUR;
       const gone = target.hot !== 'memory';
       expect(await ctx.hot.exists([...written, ...published, ...current])).toEqual([gone, gone, gone, gone, true, true]);
-    });
-
-    it('rejects cursors older than the retention period', async () => {
-      ctx = await createTestContext(target, { feed: { pageSize: 2, genRetentionMinutes: 5 } });
-      const alice = await ctx.register('alice');
-      for (let i = 0; i < 5; i++) await store(alice, `post ${i} #news`);
-      await ctx.compact();
-      const first = (await getFeed('tags=news')).json() as Feed;
-      expect(first.nextCursor).toBeTruthy();
-      ctx.clock.now += 6 * 60_000;
-      expect((await getFeed(`tags=news&cursor=${first.nextCursor}`)).statusCode).toBe(410);
     });
   });
 }

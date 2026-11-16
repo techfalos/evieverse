@@ -3,6 +3,7 @@ import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { Operator } from 'opendal';
 import type { Config } from '../config.js';
+import { commentMediaKey } from './commentStore.js';
 import { createOperator, isNotFound } from './opendal.js';
 import { UploadTooLargeError } from './spool.js';
 
@@ -48,6 +49,19 @@ const metaKey = (contentId: string) => `content/${contentId}.meta.json`;
  */
 export const uploadKey = (userId: string, uploadId: string) => `uploads/${userId}/${uploadId}`;
 
+/** Where the image of an image ad is kept (src/monetization.ts): apart from posts, as an ad is no post. */
+export const adImageKey = (adId: string) => `ads/${adId}`;
+
+/**
+ * Whose bytes a file in the store is: a post's, named by the post's id, those of the image or
+ * video a comment came with, named by the comment and the post it is on, or the image of an ad,
+ * named by the ad. They are written, read and linked to the same way; only where they are kept
+ * differs.
+ */
+export type BytesOwner = string | { postId: string; commentId: string } | { adId: string };
+const bytesKey = (of: BytesOwner) =>
+  typeof of === 'string' ? contentKey(of) : 'adId' in of ? adImageKey(of.adId) : commentMediaKey(of.postId, of.commentId);
+
 /** How a client sends a file straight to the store: the request to make, with these headers and the file as its body. */
 export interface UploadLink {
   method: string;
@@ -61,8 +75,9 @@ export interface StoredBytes {
 }
 
 /**
- * Uploaded bytes and the meta file of each piece of content, on any Apache OpenDAL backend
- * (fs, s3, gcs, azblob, sftp, webdav, gdrive, onedrive, dropbox, hdfs, ...).
+ * Uploaded bytes and the meta file of each piece of content, the bytes of the images and videos
+ * that comments come with, and the images of ads, on any Apache OpenDAL backend (fs, s3, gcs,
+ * azblob, sftp, webdav, gdrive, onedrive, dropbox, hdfs, ...).
  */
 export class ContentStore {
   private readonly op: Operator;
@@ -75,8 +90,8 @@ export class ContentStore {
     this.signedUrlSeconds = cfg.signedUrlSeconds;
   }
 
-  async putFile(contentId: string, localPath: string, mimeType: string): Promise<void> {
-    const writer = await this.op.writer(contentKey(contentId), { contentType: mimeType });
+  async putFile(of: BytesOwner, localPath: string, mimeType: string): Promise<void> {
+    const writer = await this.op.writer(bytesKey(of), { contentType: mimeType });
     await pipeline(createReadStream(localPath), writer.createWriteStream());
   }
 
@@ -94,13 +109,13 @@ export class ContentStore {
   }
 
   /** The size of the content's bytes as the store holds them, and their content type where it keeps one (fs doesn't). */
-  async stat(contentId: string): Promise<{ size: number; contentType: string | null }> {
-    const stat = await this.op.stat(contentKey(contentId));
+  async stat(of: BytesOwner): Promise<{ size: number; contentType: string | null }> {
+    const stat = await this.op.stat(bytesKey(of));
     return { size: Number(stat.contentLength ?? 0), contentType: stat.contentType || null };
   }
 
-  async stream(contentId: string): Promise<Readable> {
-    return (await this.op.reader(contentKey(contentId))).createReadStream();
+  async stream(of: BytesOwner): Promise<Readable> {
+    return (await this.op.reader(bytesKey(of))).createReadStream();
   }
 
   async remove(contentId: string): Promise<void> {
@@ -108,6 +123,11 @@ export class ContentStore {
       this.op.delete(contentKey(contentId)).catch(() => {}),
       this.op.delete(metaKey(contentId)).catch(() => {}),
     ]);
+  }
+
+  /** Deletes the image of an ad. One that isn't there is no error: a text ad has none. */
+  async removeAdImage(adId: string): Promise<void> {
+    await this.op.delete(adImageKey(adId)).catch(() => {});
   }
 
   /**
@@ -141,18 +161,19 @@ export class ContentStore {
   }
 
   /**
-   * Makes an upload a piece of content's bytes, over the ones it had, and returns their size as
-   * stored. Copied within the backend where it can and the upload was sent with the content's type,
-   * else through this process. Throws UploadTooLargeError if the bytes are more than `maxBytes`.
+   * Makes an upload a piece of content's bytes, over the ones it had, or the image or video of a
+   * comment, and returns their size as stored. Copied within the backend where it can and the
+   * upload was sent with the content's type, else through this process. Throws UploadTooLargeError
+   * if the bytes are more than `maxBytes`.
    *
    * Whoever holds the upload link can replace the upload until the link expires, so its size is
    * checked again here, before anything is written, and once more on the copy, where no client can
    * write. A copy that turns out too large is deleted: only a client that swapped its upload for a
    * larger one in that moment gets there, and what it loses is the bytes of its own post.
    */
-  async adoptUpload(userId: string, uploadId: string, contentId: string, mimeType: string, maxBytes: number): Promise<StoredBytes> {
+  async adoptUpload(userId: string, uploadId: string, of: BytesOwner, mimeType: string, maxBytes: number): Promise<StoredBytes> {
     const from = uploadKey(userId, uploadId);
-    const to = contentKey(contentId);
+    const to = bytesKey(of);
     const upload = await this.op.stat(from);
     if (Number(upload.contentLength ?? 0) > maxBytes) throw new UploadTooLargeError(maxBytes);
     const sent = upload.contentType || null;
@@ -223,14 +244,14 @@ export class ContentStore {
   }
 
   /** A short-lived direct download URL, or null when the backend can't presign (fs, sftp, webdav, ...). */
-  async signedUrl(contentId: string): Promise<string | null> {
+  async signedUrl(of: BytesOwner): Promise<string | null> {
     if (!this.presignSupported) return null;
     if (!this.op.capability().presignRead) {
       this.presignSupported = false;
       return null;
     }
     try {
-      return (await this.op.presignRead(contentKey(contentId), this.signedUrlSeconds)).url;
+      return (await this.op.presignRead(bytesKey(of), this.signedUrlSeconds)).url;
     } catch {
       this.presignSupported = false;
       return null;

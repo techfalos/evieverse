@@ -1,5 +1,3 @@
-import { HttpError } from '../http/errors.js';
-import { msg } from '../language.js';
 import type { HotStore } from '../storage/index.js';
 import { Lru, TtlCache } from '../util.js';
 import { dayKey, manifestKey, unpackDay, type DayRef, type Head, type IndexEntry, type Manifest } from './layout.js';
@@ -17,13 +15,8 @@ export interface Candidate {
 
 const toCandidate = ({ contentId, createdAt, likes, aiGenerated, moderated }: IndexEntry): Candidate => ({ contentId, createdAt, likes, aiGenerated, moderated });
 
-/** The manifest a view was read from; null for a tag that had none, which read as empty. */
-export type Pin = string | null;
-
 export interface TagView {
   tag: string;
-  /** What later pages of a feed session read, so they see exactly what this view saw. */
-  pin: Pin;
   /** Every day index's entries in index order (newest day first). */
   candidates: Candidate[];
 }
@@ -31,9 +24,6 @@ export interface TagView {
 /** A tag's head and manifest, read; `TagFeedReader.loadDays` loads the day indexes it needs. */
 export interface OpenTag {
   tag: string;
-  pin: Pin;
-  /** Read from a cursor's pin, so a missing key means the cursor expired. */
-  pinned: boolean;
   /** Every UTC day's index the manifest names, newest first. */
   days: DayRef[];
 }
@@ -41,12 +31,12 @@ export interface OpenTag {
 /** Day indexes kept per cached tag (a tag holds up to one per retained day). */
 const DAYS_PER_TAG = 100;
 
-export const cursorExpired = () => new HttpError(410, msg('cursor.expired'));
-
 /**
  * Read side of the feed index. Uses only Redis: no database access. Everything it reads but the
  * head is immutable, and held in memory: a tag's manifest and day indexes are read once, and again
- * only when the compactor has swapped the head to new ones, which is when a write shows.
+ * only when the compactor has swapped the head to new ones, which is when a write shows. Every
+ * request reads the index its tag's head names at that moment: a feed's later pages read the index
+ * as it is by then, not the one its first page read.
  */
 export class TagFeedReader {
   private readonly heads: TtlCache<Head>;
@@ -98,27 +88,24 @@ export class TagFeedReader {
     );
   }
 
-  /**
-   * Every post of a tag in its index: the day indexes of the manifest named by the head, or by the
-   * cursor's pin, which every page of a feed session then reads alike.
-   */
-  async view(tag: string, pin?: Pin): Promise<TagView> {
-    const open = await this.open(tag, pin);
-    return { tag, pin: open.pin, candidates: await this.loadDays(open, open.days) };
+  /** Every post of a tag in its index: the day indexes of the manifest its head names. */
+  async view(tag: string): Promise<TagView> {
+    const open = await this.open(tag);
+    return { tag, candidates: await this.loadDays(open, open.days) };
   }
 
-  /** The tag's head (or the cursor's pin) and its manifest, without loading any day index. */
-  async open(tag: string, pin?: Pin): Promise<OpenTag> {
-    const id = pin !== undefined ? pin : (await this.head(tag)).manifest;
+  /** The tag's head and its manifest, without loading any day index. */
+  async open(tag: string): Promise<OpenTag> {
+    const id = (await this.head(tag)).manifest;
     const manifest = id ? await this.manifest(tag, id) : null;
-    if (id && !manifest) throw pin !== undefined ? cursorExpired() : new Error(`manifest ${id} of #${tag} is missing`);
-    return { tag, pin: id, pinned: pin !== undefined, days: manifest?.days ?? [] };
+    if (id && !manifest) throw new Error(`manifest ${id} of #${tag} is missing`);
+    return { tag, days: manifest?.days ?? [] };
   }
 
   /** The entries of some of an open tag's day indexes, in index order. */
   async loadDays(open: OpenTag, refs: DayRef[]): Promise<Candidate[]> {
     const days = await this.dayEntries(open.tag, refs);
-    if (days.includes(null)) throw open.pinned ? cursorExpired() : new Error(`a day index of #${open.tag} is missing`);
+    if (days.includes(null)) throw new Error(`a day index of #${open.tag} is missing`);
     return days.flatMap((entries) => entries!);
   }
 }

@@ -14,9 +14,10 @@ import { run, UPDATED } from '../src/cli/main.js';
 import { writeProfile } from '../src/cli/profiles.js';
 import { bootstrapAdmin, ensureAdmin, type BootstrapAdmin } from '../src/moderation/bootstrap.js';
 import { setAdmin } from '../src/moderation/policy.js';
+import { RELEASE } from '../src/release.js';
 import { loadCliRelease, type CliRelease } from '../src/routes/cli.js';
 import { DAY } from '../src/time.js';
-import { as, createTestContext, post, storeText, TARGETS, type TestContext, type User } from './helpers.js';
+import { as, createTestContext, PNG, post, storeText, TARGETS, type TestContext, type User } from './helpers.js';
 
 const exec = promisify(execFile);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -412,8 +413,66 @@ describe('the CLI', () => {
     expect(await cli(['content', 'delete', NO_USER])).toMatchObject({ code: 1, err: 'evieverse: content not found' });
   });
 
+  it("keeps the server's rules as an admin, and lists them, with its modification disclosure, as anyone", async () => {
+    const SOURCE = 'https://git.example.com/our-evieverse';
+    await setup({ modified: true, sourceUrl: SOURCE });
+    const root = await ctx.register('root');
+    await setAdmin(ctx.db, 'root', true);
+    const alice = await ctx.register('alice');
+    await profile('root', root);
+    await profile('alice', alice);
+    const by = (name: string, ...args: string[]) => ran(...args, '--profile', name);
+    const refused = (name: string, ...args: string[]) => cli([...args, '--profile', name]);
+    const MODIFIED = `Modification disclosure: this server runs a modified version of Evieverse, based on release ${RELEASE}.\nIts source code: ${SOURCE}`;
+    const ruleId = (out: string) => out.split(': ')[1]!;
+
+    expect(await by('alice', 'rules', 'list')).toBe(`The server has no rules.\n\n${MODIFIED}`);
+    const kind = ruleId(await by('root', 'rules', 'add', 'Be kind.'));
+    expect(kind).toMatch(/^[0-9a-f-]{36}$/);
+    const spam = await by('root', 'rules', 'add', 'No spam.\nNot even a little.');
+    expect(spam).toBe(`Added rule 2: ${ruleId(spam)}`);
+    const first = ruleId(await by('root', 'rules', 'add', 'Read these first.', '--position', '1'));
+    expect(await by('alice', 'rules', 'list')).toBe(
+      `1  ${first}  Read these first.\n2  ${kind}  Be kind.\n3  ${ruleId(spam)}  No spam. Not even a little.\n\n${MODIFIED}`,
+    );
+    expect(await json('rules', 'list', '--profile', 'alice')).toMatchObject({
+      modificationDisclosure: { modified: true, release: RELEASE, sourceUrl: SOURCE },
+      rules: [{ ruleId: first, position: 1 }, { ruleId: kind, position: 2, text: 'Be kind.' }, { ruleId: ruleId(spam), position: 3, text: 'No spam.\nNot even a little.' }],
+    });
+
+    expect(await by('root', 'rules', 'update', kind, '--text', 'Be kind to each other.')).toBe(`Updated rule ${kind}: it is rule 2.`);
+    expect(await by('root', 'rules', 'update', kind, '--position', '1')).toBe(`Updated rule ${kind}: it is rule 1.`);
+    expect(await json('rules', 'update', first, '--text', 'Read these.', '--position', '9', '--profile', 'root')).toMatchObject({ ruleId: first, position: 3, text: 'Read these.' });
+    expect(await by('root', 'rules', 'remove', ruleId(spam))).toBe(`Removed rule ${ruleId(spam)}.`);
+    expect(await by('root', 'rules', 'remove', ruleId(spam))).toBe(`${ruleId(spam)} isn't one of the server's rules.`);
+    expect(await by('alice', 'rules', 'list')).toBe(`1  ${kind}  Be kind to each other.\n2  ${first}  Read these.\n\n${MODIFIED}`);
+
+    // What the command can tell is wrong, it says before the server is asked; the rest is the server's to refuse.
+    expect(await refused('root', 'rules', 'update', kind)).toMatchObject({ code: 2, err: 'evieverse: say what to change: --text <text>, --position <n>, or both' });
+    expect(await refused('root', 'rules', 'add', 'Another.', '--position', '0')).toMatchObject({ code: 2, err: 'evieverse: --position is a place in the list of rules, counted from 1' });
+    expect(await refused('root', 'rules', 'update', kind, '--position', 'first')).toMatchObject({ code: 2 });
+    expect(await refused('root', 'rules', 'add')).toMatchObject({ code: 2, err: 'evieverse: usage: evieverse rules add <text> [--position <n>]' });
+    expect(await refused('root', 'rules')).toMatchObject({ code: 2, err: 'evieverse: `rules` is followed by one of: list, add, update, remove' });
+    expect(await refused('root', 'rules', 'update', NO_USER, '--text', 'Nothing.')).toMatchObject({ code: 1, err: 'evieverse: rule not found' });
+    for (const args of [['rules', 'add', 'Anything goes.'], ['rules', 'update', kind, '--text', 'Anything goes.'], ['rules', 'remove', kind]]) {
+      expect(await refused('alice', ...args)).toMatchObject({ code: 1, err: 'evieverse: only an admin can do this' });
+    }
+
+    const help = (await refused('alice', 'help')).out;
+    expect(help).toMatch(/^  \+ rules list /m);
+    expect(help).toMatch(/^  - rules add <text> \[--position <n>\] /m);
+    expect(help).toMatch(/^  - rules update <ruleId> \[--text <text>\] \[--position <n>\] /m);
+    expect(help).toMatch(/^  - rules remove <ruleId> /m);
+
+    // A server whose operator says nothing of the kind runs a release, and names no source.
+    await ctx.close();
+    ctx = await createTestContext(TARGETS[0]!);
+    await profile('alice', await ctx.register('alice'));
+    expect(await by('alice', 'rules', 'list')).toBe(`The server has no rules.\n\nModification disclosure: this server runs Evieverse ${RELEASE}, unmodified.`);
+  });
+
   it('registers a user as an admin, without the challenge anyone else is asked to solve', async () => {
-    await setup({ challenge: { register: true } });
+    await setup();
     const root = await ctx.register('root');
     await setAdmin(ctx.db, 'root', true);
     const alice = await ctx.register('alice');
@@ -443,6 +502,55 @@ describe('the CLI', () => {
       err: 'evieverse: only an admin registers a user with the CLI: the server asks anyone else to solve a challenge, which takes a client that shows its image',
     });
     expect(await ctx.db.selectFrom('users').select('username').orderBy('username').execute()).toEqual(['Carol Jones', 'alice', 'bob', 'root'].map((username) => ({ username })));
+  });
+
+  it("replaces another user's key as an admin, and prints the new one for them to pass on", async () => {
+    await setup();
+    const root = await ctx.register('root');
+    await setAdmin(ctx.db, 'root', true);
+    const second = await ctx.register('second');
+    await setAdmin(ctx.db, 'second', true);
+    const alice = await ctx.register('alice');
+    const bob = await ctx.register('bob');
+    const file = await profile('root', root);
+    await profile('bob', bob);
+    const by = (name: string, ...args: string[]) => ran(...args, '--profile', name);
+    const refused = (name: string, ...args: string[]) => cli([...args, '--profile', name]);
+    const whoami = async (u: User) => (await ctx.app.inject({ method: 'GET', url: '/whoami', headers: as(u) })).statusCode;
+    const printed = (userId: string) => new RegExp(`^Replaced the API key of ${userId}: the keys they had no longer work\\.\\nTheir new API key, shown this once: (tu_\\S+)$`);
+
+    // The key that comes back is the user's, and the only one of theirs that works.
+    const [, apiKey] = printed(alice.userId).exec(await by('root', 'users', 'rotate-key', alice.userId))!;
+    expect([await whoami(alice), await whoami({ userId: alice.userId, apiKey: apiKey! })]).toEqual([401, 200]);
+    // --json is the server's answer, key and all, for a script to read.
+    const again = await json('users', 'rotate-key', alice.userId, '--profile', 'root');
+    expect(again).toEqual({
+      userId: alice.userId,
+      apiKey: expect.stringMatching(/^tu_/),
+      note: 'Pass this apiKey on to the user now; it cannot be retrieved again. Every key they had no longer works.',
+    });
+    expect([await whoami({ userId: alice.userId, apiKey: apiKey! }), await whoami(again)]).toEqual([401, 200]);
+    // Another admin's, too.
+    const [, seconds] = printed(second.userId).exec(await by('root', 'users', 'rotate-key', second.userId))!;
+    expect([await whoami(second), await whoami({ userId: second.userId, apiKey: seconds! })]).toEqual([401, 200]);
+
+    // The admin's own key is `key rotate`'s to replace, which saves it: here it would be replaced and kept nowhere.
+    for (const own of [root.userId, root.userId.toUpperCase()]) {
+      expect(await refused('root', 'users', 'rotate-key', own)).toMatchObject({
+        code: 2,
+        out: '',
+        err: 'evieverse: that is your own account: replace its key with `evieverse key rotate`, which saves the new one in the profile',
+      });
+    }
+    // The profile is as it was through all of it, and its key works.
+    expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ server: SERVER, ...root });
+    expect(await whoami(root)).toBe(200);
+
+    expect(await refused('bob', 'users', 'rotate-key', again.userId)).toMatchObject({ code: 1, out: '', err: "evieverse: you can only replace your own API key, unless you're an admin" });
+    expect(await whoami(again)).toBe(200);
+    expect(await refused('root', 'users', 'rotate-key', NO_USER)).toMatchObject({ code: 1, err: 'evieverse: user not found' });
+    expect(await refused('root', 'users', 'rotate-key')).toMatchObject({ code: 2, err: 'evieverse: usage: evieverse users rotate-key <userId>' });
+    expect(await refused('root', 'users')).toMatchObject({ code: 2, err: 'evieverse: `users` is followed by one of: delete, rotate-key' });
   });
 
   it("works through a hashtag's moderation queue, and the server's", async () => {
@@ -608,15 +716,63 @@ describe('the CLI', () => {
     ctx.clock.now += 1000;
     const second = (await json('comments', 'add', contentId, 'A second thought', '--profile', 'carol')).commentId;
     expect((await by('bob', 'comments', 'list', contentId)).split('\n')).toEqual([
-      expect.stringMatching(new RegExp(`^${first}  bob    2026-\\S+  A first thought$`)),
-      expect.stringMatching(new RegExp(`^${second}  carol  2026-\\S+  A second thought$`)),
+      expect.stringMatching(new RegExp(`^${first}  bob    2026-\\S+  0 likes  0 replies  A first thought$`)),
+      expect.stringMatching(new RegExp(`^${second}  carol  2026-\\S+  0 likes  0 replies  A second thought$`)),
     ]);
     expect(await by('bob', 'comments', 'list', contentId, '--newest', '--limit', '1')).toMatch(
-      new RegExp(`^${second}  carol  2026-\\S+  A second thought\\nThere are more: --cursor ${second}$`),
+      new RegExp(`^${second}  carol  2026-\\S+  0 likes  0 replies  A second thought\\nThere are more: --cursor ${second}$`),
     );
     expect(await by('bob', 'comments', 'list', contentId, '--newest', '--limit', '1', '--cursor', second)).toMatch(new RegExp(`^${first}  bob  `));
     expect(await json('comments', 'list', contentId, '--profile', 'bob')).toMatchObject({ contentId, count: 2, nextCursor: null });
-    expect(await refused('bob', 'comments', 'add', contentId)).toMatchObject({ code: 2, err: 'evieverse: usage: evieverse comments add <contentId> <text>' });
+    expect(await refused('bob', 'comments', 'add', contentId)).toMatchObject({
+      code: 2,
+      err: 'evieverse: usage: evieverse comments add <contentId> <text> [--file <path>] [--reply-to <commentId>]',
+    });
+
+    // A comment is replied to, liked, and edited by its author. Its replies are a list of their own.
+    expect(await by('carol', 'comments', 'list', contentId, '--replies-to', first)).toBe(`Comment ${first} has no replies.`);
+    const replied = await by('carol', 'comments', 'add', contentId, 'Go on', '--reply-to', first);
+    expect(replied).toMatch(new RegExp(`^Replied to comment ${first}: \\S{36}$`));
+    const answer = replied.slice(-36);
+    expect(await refused('carol', 'comments', 'add', contentId, 'Hello', '--reply-to', NO_USER)).toMatchObject({ code: 1, err: 'evieverse: comment not found' });
+    expect(await by('carol', 'comments', 'like', contentId, first)).toBe(`Liked comment ${first}: it has 1 like.`);
+    expect(await by('carol', 'comments', 'like', contentId, first)).toBe(`You had already liked comment ${first}: it has 1 like.`);
+    expect(await by('alice', 'comments', 'like', contentId, first)).toBe(`Liked comment ${first}: it has 2 likes.`);
+    expect(await refused('bob', 'comments', 'edit', contentId, answer, 'Go away')).toMatchObject({ code: 1, err: "evieverse: only the comment's author can edit this comment" });
+    expect(await by('carol', 'comments', 'edit', contentId, answer, 'Do go on')).toBe(`Edited comment ${answer}.`);
+    expect(await by('carol', 'comments', 'edit', contentId, answer, 'Do go on')).toBe(`Comment ${answer} already says that.`);
+    expect((await by('bob', 'comments', 'list', contentId)).split('\n')).toEqual([
+      expect.stringMatching(new RegExp(`^${first}  bob    2026-\\S+  2 likes  1 reply    A first thought$`)),
+      expect.stringMatching(new RegExp(`^${second}  carol  2026-\\S+  0 likes  0 replies  A second thought$`)),
+    ]);
+    expect(await by('bob', 'comments', 'list', contentId, '--replies-to', first)).toMatch(new RegExp(`^${answer}  carol  2026-\\S+  0 likes  0 replies  Do go on \\(edited\\)$`));
+    expect(await json('comments', 'list', contentId, '--replies-to', first, '--profile', 'bob')).toMatchObject({ contentId, commentId: first, count: 1, nextCursor: null });
+    expect(await json('comments', 'list', contentId, '--profile', 'bob')).toMatchObject({ contentId, count: 3 });
+    // Its author deletes the reply, and the comment has none again.
+    expect(await by('carol', 'comments', 'delete', contentId, answer)).toBe(`Deleted comment ${answer}.`);
+    expect(await by('bob', 'comments', 'list', contentId, '--replies-to', first)).toBe(`Comment ${first} has no replies.`);
+
+    // A comment comes with an image or a video, with a text or without one, and a list says which do.
+    const picture = join(home, 'pixel.png');
+    await writeFile(picture, PNG);
+    const pictured = await by('carol', 'comments', 'add', contentId, 'Look', '--file', picture, '--reply-to', first);
+    expect(pictured).toMatch(new RegExp(`^Replied to comment ${first} with an image: \\S{36}$`));
+    ctx.clock.now += 1000;
+    const wordless = await json('comments', 'add', contentId, '', '--file', picture, '--reply-to', first, '--profile', 'carol');
+    expect(wordless).toMatchObject({ text: '', media: { kind: 'image', mimeType: 'image/png', size: PNG.length } });
+    expect((await by('bob', 'comments', 'list', contentId, '--replies-to', first)).split('\n')).toEqual([
+      expect.stringMatching(new RegExp(`^${pictured.slice(-36)}  carol  2026-\\S+  0 likes  0 replies  \\[image\\] Look$`)),
+      expect.stringMatching(new RegExp(`^${wordless.commentId}  carol  2026-\\S+  0 likes  0 replies  \\[image\\]$`)),
+    ]);
+    expect(await refused('carol', 'comments', 'add', contentId, 'Look', '--file', join(home, 'nothing.png'))).toMatchObject({
+      code: 2,
+      err: expect.stringMatching(/^evieverse: could not read .*nothing\.png: /),
+    });
+    const notes = join(home, 'notes.txt');
+    await writeFile(notes, 'Some words');
+    expect(await refused('carol', 'comments', 'add', contentId, 'Read', '--file', notes)).toMatchObject({ code: 1, err: 'evieverse: comments take image/* and video/* files, got text/plain' });
+    expect(await refused('carol', 'comments', 'add', contentId, '')).toMatchObject({ code: 1, err: 'evieverse: a comment needs a text, an image or a video' });
+    for (const id of [pictured.slice(-36), wordless.commentId]) await by('carol', 'comments', 'delete', contentId, id);
 
     // One the server holds back waits in the moderation queue, among the posts, for a server moderator or an admin.
     ctx.clock.now += 1000;
@@ -667,8 +823,13 @@ describe('the CLI', () => {
       err: "evieverse: only the comment's author, the post's publisher or an admin can delete this comment",
     });
     expect(await by('alice', 'comments', 'delete', contentId, held)).toBe(`Deleted comment ${held}.`);
+    // The replies to it stay, listed under what is left of it, until they are deleted too.
+    const staying = (await json('comments', 'add', contentId, 'Still here', '--reply-to', first, '--profile', 'carol')).commentId;
     expect(await by('bob', 'comments', 'delete', contentId, first)).toBe(`Deleted comment ${first}.`);
     expect(await refused('bob', 'comments', 'delete', contentId, first)).toMatchObject({ code: 1, err: 'evieverse: comment not found' });
+    expect(await by('bob', 'comments', 'list', contentId)).toMatch(new RegExp(`^${first} {4}2026-\\S+  0 likes  1 reply  \\[deleted\\]$`));
+    expect(await by('bob', 'comments', 'list', contentId, '--replies-to', first)).toMatch(new RegExp(`^${staying}  carol  2026-\\S+  0 likes  0 replies  Still here$`));
+    expect(await by('carol', 'comments', 'delete', contentId, staying)).toBe(`Deleted comment ${staying}.`);
     expect(await by('bob', 'comments', 'list', contentId)).toBe(`${contentId} has no comments.`);
   });
 

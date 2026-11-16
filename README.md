@@ -1,15 +1,21 @@
-# Evieverse: An Open Source Serverless Social Media Framework
+# Evieverse: An Open Source Cloud-Based Social Media Framework
 
 ## Mission
 
 Provide an open source alternative to traditional social media that allows for:
 
-1. Full user control over how content is delivered.
-2. Syndicated publishing to multiple instances of Evieverse.
-3. A pay-as-you-go architecture that scales effortlessly.
-4. Effortless infrastructure-as-code cloud deployment and setup.
-5. Seamless integration into existing clients.
+1. Transparent content delivery while delivering engaging content.
+2. AI usage disclosure for content and the ability to filter-out content with declared AI usage.
+3. Ability to use many different clients on the same server, including a client you build yourself.
+4. Optional privacy for user follows and followers.
+5. Monetization options.
+6. Built-in robot detection and rate limiting.
+7. Plugin-based content trust analysis for auto-moderation.
+8. Support for multiple languages (English is default)
+9. Pay-as-you-go architecture that scales effortlessly.
+10. Easy infrastructure-as-code cloud deployment, setup, database migrations, and updates.
 
+Evieverse is designed with the idea that clients will enable users to connect to multiple different Evieverse servers. Content is not federated from server-to-server, but from client to servers they have subscribed to.
 
 | To                                               | Read                                           |
 | ------------------------------------------------ | ---------------------------------------------- |
@@ -17,9 +23,9 @@ Provide an open source alternative to traditional social media that allows for:
 | Configure an instance, and deploy a change       | [docs/CONFIG.md](docs/CONFIG.md)               |
 | Administer or moderate an instance               | [docs/CLI.md](docs/CLI.md)                     |
 | Build a client, or call the API                  | [docs/API.md](docs/API.md)                     |
-| Understand how it works inside                   | [docs/APP.md](docs/APP.md)                     |
 | Add a language the server answers in             | [docs/LANGUAGES.md](docs/LANGUAGES.md)         |
 | Write a trust plugin, to score posts             | [docs/TRUST_PLUGINS.md](docs/TRUST_PLUGINS.md) |
+| Understand how it works inside                   | [docs/APP.md](docs/APP.md)                     |
 
 
 ## Getting started
@@ -143,7 +149,8 @@ To keep bots from flooding an instance, a user who posts again within a minute f
 
 A post takes comments if its publisher turns them on, which they do post by post, and can change later. They're off unless the publisher says.
 
-- A comment is text, of up to 2,000 characters. Comments are flat: there are no replies to a comment. A comment can be deleted, but not edited.
+- A comment is text, of up to 2,000 characters, an image or a video
+- Comments are stored in a tree form on each post
 - Anyone can read a post's comments, oldest or newest first, and any user can add one, up to 10 a minute by default.
 - **Comments are moderated as posts are.** Each gets a trust score from the same checks, and by the same thresholds is published, held in the moderation queue or rejected outright. Held comments wait in the same queue as held posts, for a server moderator or an admin.
 - **Comments can be reported,** and then wait in the same report queue as reported posts.
@@ -205,7 +212,6 @@ The server listens on `http://localhost:3000`. Other ways to run it:
 
 Things to know:
 
-- **Registering.** `CHALLENGE_REGISTER=false npm run dev` turns the registration challenge off for everyone, so one request creates an account: `curl -X POST localhost:3000/register -H 'Content-Type: application/json' -d '{"username":"alice"}'`. With it on, only [an admin's request](#user-registration-and-api-keys) skips it.
 - **The CLI.** A server run from source ships no CLI. `npm run build && npm start` builds and ships it, and `curl -fsSL http://localhost:3000/cli/install.sh | sh` then installs it.
 - **Redis.** Without `REDIS_URL`, the feed index lives inside the process, and the server rebuilds it from the database and the content store each time it starts. To keep it across restarts, point `REDIS_URL` at a local Redis or Valkey (`docker compose up -d redis`, then `REDIS_URL=redis://127.0.0.1:6379`).
 - **Browsers.** The API in Docker (`docker-compose.server.yml`) accepts browser requests from any origin. Set `CORS_ORIGINS` (e.g. `CORS_ORIGINS=http://localhost:5173`) to allow only your frontend's.
@@ -228,7 +234,7 @@ From then on, admins make more with the CLI (`evieverse admins grant <userId>`).
 
 ### Configuration
 
-Every setting is an environment variable, and each has a default, so an instance runs with none set. [CONFIG.md](docs/CONFIG.md) lists every setting, and says how to deploy a changed one. [`.env.example`](.env.example) is the same list as a file to copy to `.env`.
+Every setting is an environment variable, and each has a default, so an instance runs with none set. [CONFIG.md](docs/CONFIG.md) lists every setting, and says how to deploy a changed one. `[.env.example](.env.example)` is the same list as a file to copy to `.env`.
 
 Two things are files in the source rather than settings: the languages the server answers in ([LANGUAGES.md](docs/LANGUAGES.md)) and the trust plugins that score posts ([TRUST_PLUGINS.md](docs/TRUST_PLUGINS.md)).
 
@@ -246,6 +252,17 @@ Each test against Redis uses its own key prefix and deletes its keys afterwards,
 
 What the server doesn't do, or doesn't do yet, is listed in [APP.md](docs/APP.md#14-known-limits).
 
+## AI-Usage Disclosure
+
+AI tools, including Generative AI tools, were used in the planning, development, and analysis of Evieverse
+
 ## License
 
-MIT.
+See [[LICENSE.md](LICENSE.md)]
+
+## Implementations
+
+Open a PR to see your implementation here!
+
+## Code Owners
+Evelynn McDermott <contact@techfalos.com>

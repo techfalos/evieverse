@@ -9,8 +9,10 @@ import { inboxRoutes } from '../routes/inbox.js';
 import { languageRoutes } from '../routes/languages.js';
 import { likeRoutes } from '../routes/like.js';
 import { moderationRoutes } from '../routes/moderation.js';
+import { monetizationRoutes } from '../routes/monetization.js';
 import { registerRoutes } from '../routes/register.js';
 import { reportRoutes } from '../routes/reports.js';
+import { rulesRoutes } from '../routes/rules.js';
 import { storeRoutes } from '../routes/store.js';
 import { tagRoutes } from '../routes/tags.js';
 import { uploadRoutes } from '../routes/uploads.js';
@@ -35,18 +37,21 @@ interface WithoutDatabase {
  *   feed     GET /feed                                        Redis and the summary store only
  *   content  GET /content/:id, /content/:id/raw,              one database read each, and the content store
  *            /content/:id/comments, /content/:id/comments/:id (and Redis, for comments)
+ *            and /content/:id/comments/:id/replies, /raw
  *   store    POST /uploads, /store                            writes posts
- *   api      everything else: register and users, languages, likes, follows and the following feed
- *            (GET /feed/following, which asks the database who may read it), inboxes, messages and
- *            blocks, tagging and tags, moderation, reports, DELETE /content/:id, writing and deleting
- *            comments, and the CLI's download (/cli)
+ *   api      everything else: register and users, languages, likes (of posts and of comments),
+ *            follows and the following feed (GET /feed/following, which asks the database who may
+ *            read it), inboxes, messages and blocks, tagging and tags, moderation, reports, the
+ *            server's rules and its modification disclosure (/rules),
+ *            DELETE /content/:id, writing, editing and deleting comments, the server's ads and
+ *            their images (/monetization/ads), and the CLI's download (/cli)
  */
 export const GROUPS = {
   feed: {
     database: false,
     // Only what hashtag feeds read is passed on: they never touch the database.
-    register: (app, { config, feedReader, summaries, publishers, relatedTags, now }) =>
-      feedRoutes(app, { config, feedReader, summaries, publishers, relatedTags, now }),
+    register: (app, { config, feedReader, summaries, publishers, relatedTags, ads, now }) =>
+      feedRoutes(app, { config, feedReader, summaries, publishers, relatedTags, ads, now }),
   },
   content: {
     database: true,
@@ -74,7 +79,9 @@ export const GROUPS = {
       deletionRoutes(app, deps);
       commentWriteRoutes(app, deps);
       moderationRoutes(app, deps);
+      monetizationRoutes(app, deps);
       reportRoutes(app, deps);
+      rulesRoutes(app, deps);
       tagRoutes(app, deps);
       cliRoutes(app, deps);
     },

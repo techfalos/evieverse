@@ -174,9 +174,11 @@ export class Challenges {
     return { issued, failed: null };
   }
 
-  /** Returns if `solution` solves a registration challenge; otherwise throws 428 with a new one. */
+  /**
+   * Returns if `solution` solves a registration challenge; otherwise throws 428 with a new one. No
+   * setting turns this off: the route spares an admin's request the call, and nobody else's.
+   */
   async register(solution: ChallengeSolution): Promise<void> {
-    if (!this.settings.register) return;
     const failed = solution.challengeId === undefined ? undefined : (await this.check('register', solution)).failed;
     if (failed === null) return;
     throw challengeRequired(failed ? msg('challenge.solve_new', { reason: failed }) : msg('challenge.register'), await this.issue('register'));

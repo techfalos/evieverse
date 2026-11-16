@@ -1,3 +1,4 @@
+import type { FeedAd } from '../monetization.js';
 import type { Publisher, PublisherStore, Summary, SummaryStore } from '../storage/index.js';
 import { toFeedRecord, type FeedRecord } from '../tagfeed/layout.js';
 import type { Candidate } from '../tagfeed/reader.js';
@@ -50,20 +51,33 @@ function shown(bodies: FeedBodies, c: Candidate, tag: string): Summary | undefin
  * it with (see `shown`) is left out, and not counted. `tags` are the hashtags the plan was made
  * over, and `related` those of them the feed added to the ones it was asked for; undefined if it
  * wasn't asked to add any.
+ *
+ * `ads` gives the page's ads (src/monetization.ts), for the number of records the page shows: an
+ * ad goes before a record of the page, which is only known here. Undefined where the server shows
+ * no ads in feeds, and the response then has no `ads`.
  */
-export function* renderFeed(plan: FeedPlan, tags: string[], bodies: FeedBodies, nextCursor: string | null, related?: string[]): Generator<Buffer> {
+export function* renderFeed(
+  plan: FeedPlan,
+  tags: string[],
+  bodies: FeedBodies,
+  nextCursor: string | null,
+  related?: string[],
+  ads?: (count: number) => FeedAd[],
+): Generator<Buffer> {
   const records = tags.map((tag, t) =>
     plan.picks[t]!.flatMap((c) => {
       const s = shown(bodies, c, tag);
       return s ? [JSON.stringify(toFeedRecord(s, c.likes, bodies.publishers.get(s.userId)!, c.moderated))] : [];
     }),
   );
+  const count = records.reduce((n, list) => n + list.length, 0);
   const head = {
     window: { from: iso(plan.window.from), to: iso(plan.window.to) },
-    count: records.reduce((n, list) => n + list.length, 0),
+    count,
     truncated: plan.truncated,
     nextCursor,
     ...(related && { related }),
+    ...(ads && { ads: ads(count) }),
   };
   yield Buffer.from(`${JSON.stringify(head).slice(0, -1)},"tags":{`);
 

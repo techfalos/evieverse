@@ -13,6 +13,7 @@ import { loadConfig, type Config } from '../src/config.js';
 import { createDb, type Db } from '../src/db/index.js';
 import { bootstrap } from '../src/deps.js';
 import type { Languages } from '../src/language.js';
+import type { HotStore } from '../src/storage/index.js';
 import type { TrustPlugin } from '../src/moderation/trust.js';
 import type { CliRelease } from '../src/routes/cli.js';
 
@@ -36,7 +37,9 @@ export const TARGETS: TestTarget[] = [
 ];
 
 export const TABLES = [
+  'monetization',
   'inbox',
+  'server_rules',
   'user_blocks',
   'comment_reports',
   'comment_queue',
@@ -72,6 +75,19 @@ export function proofOfWork({ prefix, bits }: Challenge['proofOfWork']): string 
   }
 }
 
+/**
+ * What a person and their client send back for a challenge: its characters, read here from `hot`,
+ * where the server keeps them, and the proof of work.
+ */
+export async function solution(hot: Pick<HotStore, 'get'>, challenge: Challenge) {
+  const issued = await hot.get(challengeKey(challenge.id));
+  return {
+    challengeId: challenge.id,
+    challengeAnswer: (JSON.parse(issued!.toString('utf8')) as { answer: string }).answer,
+    challengeNonce: proofOfWork(challenge.proofOfWork),
+  };
+}
+
 /** The #hashtags written in a post's text, which tests send as its tags. */
 export const hashtags = (text: string) => [...text.matchAll(/#(\w+)/g)].map((m) => m[1]!);
 
@@ -80,8 +96,10 @@ export const queued = async (ctx: { db: Db }) =>
   (await ctx.db.selectFrom('feed_queue').select(['content_id', 'tag']).execute()).map((r) => `${r.content_id} ${r.tag}`).sort();
 
 /**
- * Challenges are off unless `challenge` turns them on, with a proof of work quick enough for tests, and
- * so are the limits on posts and on comments a minute.
+ * Registering takes a challenge, as on any server, which `register` and `registration` solve. Its
+ * proof of work is quick enough for tests, and an answer is accepted at once, so solving one leaves
+ * the clock where it was, unless `challenge` says otherwise. The post window is off unless `challenge`
+ * turns it on, and so are the limits on posts and on comments a minute.
  */
 export async function createTestContext(
   target: TestTarget,
@@ -94,7 +112,6 @@ export async function createTestContext(
     tagging?: Partial<Config['tagging']>;
     /** The trust scores that have a post refused, queued or published; the server's defaults unless given. */
     trust?: Partial<Config['trust']>;
-    registerRateLimitPerHour?: number;
     postRateLimitPerMinute?: number;
     maxFollowing?: number;
     /** The posts a user can report in an hour; the server's default unless given. */
@@ -103,6 +120,12 @@ export async function createTestContext(
     inbox?: Partial<Config['inbox']>;
     /** The limit on comments a minute, which tests have none of unless they say, and how long Redis keeps comments. */
     comments?: Partial<Config['comments']>;
+    /** Where the server shows its ads: in hashtag feeds, at the end of posts. Nowhere unless given. */
+    monetization?: Partial<Config['monetization']>;
+    /** The modification disclosure GET /rules gives: that the server runs a modified version, which needs `sourceUrl`. A release, unless given. */
+    modified?: boolean;
+    /** Where the server says its source code can be obtained. Nowhere, unless given. */
+    sourceUrl?: string;
     corsOrigins?: string | string[];
     compact?: Partial<Config['compact']>;
     /** Replaces the content store, which is otherwise a directory of the test's own. */
@@ -135,15 +158,17 @@ export async function createTestContext(
       },
       ...(opts.audit && { audit: { scheme: 'fs', options: { root: join(dir, 'audit') } } }),
       feed: { headCacheMs: 0, ...opts.feed },
-      challenge: { register: false, postWindowSeconds: 0, powBits: 8, ...opts.challenge },
+      challenge: { postWindowSeconds: 0, powBits: 8, minSolveMs: 0, ...opts.challenge },
       ...(opts.tagging && { tagging: opts.tagging }),
       ...(opts.trust && { trust: opts.trust }),
-      ...(opts.registerRateLimitPerHour && { registerRateLimitPerHour: opts.registerRateLimitPerHour }),
       postRateLimitPerMinute: opts.postRateLimitPerMinute ?? 0,
       ...(opts.maxFollowing && { maxFollowing: opts.maxFollowing }),
       ...(opts.reportsPerHour !== undefined && { reportsPerHour: opts.reportsPerHour }),
       ...(opts.inbox && { inbox: opts.inbox }),
       comments: { perMinute: 0, ...opts.comments },
+      ...(opts.monetization && { monetization: opts.monetization }),
+      ...(opts.modified !== undefined && { modified: opts.modified }),
+      ...(opts.sourceUrl !== undefined && { sourceUrl: opts.sourceUrl }),
       ...(opts.corsOrigins && { corsOrigins: opts.corsOrigins }),
       ...(opts.compact && { compact: opts.compact }),
       ...(opts.trustProxy !== undefined && { trustProxy: opts.trustProxy }),
@@ -168,13 +193,19 @@ export async function createTestContext(
    * work. The clock moves on by `thinkMs` first, the shortest time an answer is accepted after by default.
    */
   async function solve(challenge: Challenge, thinkMs = config.challenge.minSolveMs) {
-    const issued = await deps.hot.get(challengeKey(challenge.id));
+    const solved = await solution(deps.hot, challenge);
     clock.now += thinkMs;
-    return {
-      challengeId: challenge.id,
-      challengeAnswer: (JSON.parse(issued!.toString('utf8')) as { answer: string }).answer,
-      challengeNonce: proofOfWork(challenge.proofOfWork),
-    };
+    return solved;
+  }
+
+  /**
+   * POST /register as a person sends it: again with the challenge solved, when the request is
+   * answered with one. Returns the last response, whatever it is.
+   */
+  async function registration(payload: Record<string, unknown>, headers: Record<string, string> = {}) {
+    const asked = await app.inject({ method: 'POST', url: '/register', payload, headers });
+    if (asked.statusCode !== 428) return asked;
+    return app.inject({ method: 'POST', url: '/register', payload: { ...payload, ...(await solve(asked.json().challenge)) }, headers });
   }
 
   return {
@@ -194,13 +225,11 @@ export async function createTestContext(
       return compactor.runOnce();
     },
     solve,
-    /** Registers a user, solving the challenge if there is one. */
+    registration,
+    /** Registers a user, solving the challenge the server asks for. */
     async register(username: string) {
-      const payload = { username };
-      let res = await app.inject({ method: 'POST', url: '/register', payload });
-      if (res.statusCode === 428) {
-        res = await app.inject({ method: 'POST', url: '/register', payload: { ...payload, ...(await solve(res.json().challenge)) } });
-      }
+      const res = await registration({ username });
+      expect(res.statusCode, res.body).toBe(201);
       return res.json() as { userId: string; apiKey: string };
     },
     async close() {
@@ -278,9 +307,14 @@ export type Feed = {
   nextCursor: string | null;
   /** With addRelated: the related hashtags the feed added to the ones asked for. */
   related?: string[];
+  /** Where the server shows ads in feeds: the page's ads, each with the record of the page it goes before, counted from 1. */
+  ads?: FeedAdItem[];
   /** Each hashtag's records, in the feed's order; a hashtag with none is left out. */
   tags: Record<string, FeedItem[]>;
 };
+
+/** An ad of a feed's page, as far as tests read it. */
+export type FeedAdItem = { adId: string; label: string; kind: 'text' | 'image'; imageUrl?: string; text?: string; url?: string; position: number };
 
 type App = Pick<TestContext, 'app'>;
 

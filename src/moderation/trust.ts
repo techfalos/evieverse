@@ -30,7 +30,7 @@ export interface TrustPost {
   commentOn?: string;
   /** The hashtags it was sent with, normalised, before moderation drops any. A comment has none. */
   tags: string[];
-  /** What there is of it to read: its text or caption or link, and its filename. A comment's text. */
+  /** What there is of it to read: its text or caption or link, and its filename. A comment's text, and the name of its image or video. */
   texts: string[];
 }
 

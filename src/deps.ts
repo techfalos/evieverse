@@ -3,7 +3,7 @@ import { loadConfig, type Config } from './config.js';
 import { openDb, type Db } from './db/index.js';
 import type { TrustPlugin } from './moderation/trust.js';
 import type { CliRelease } from './routes/cli.js';
-import { CommentStore, ContentStore, createHotStore, FollowStore, PublisherStore, RelatedTagStore, SummaryStore, type HotStore } from './storage/index.js';
+import { AdStore, CommentStore, ContentStore, createHotStore, FollowStore, PublisherStore, RelatedTagStore, SummaryStore, type HotStore } from './storage/index.js';
 import { TagFeedReader } from './tagfeed/reader.js';
 import { HOUR } from './time.js';
 import type { ContentWriter } from './write.js';
@@ -20,6 +20,8 @@ export interface StoreDeps {
   follows: FollowStore;
   /** Each hashtag's related hashtags, which feeds asked to add them read, in Redis. */
   relatedTags: RelatedTagStore;
+  /** The ads feeds and posts show, where the server shows any (src/monetization.ts), in Redis. */
+  ads: AdStore;
   feedReader: TagFeedReader;
   /** Reads publishers' own indexes for following feeds, with caches of its own so they don't push out hashtags'. */
   authorReader: TagFeedReader;
@@ -59,9 +61,10 @@ export function createStores(config: Config, now: () => number = Date.now, hot: 
   const publishers = new PublisherStore(hot, { cacheMs: config.feed.headCacheMs }, now);
   const follows = new FollowStore(hot);
   const relatedTags = new RelatedTagStore(hot, { cacheMs: config.feed.headCacheMs }, now);
+  const ads = new AdStore(hot, { cacheMs: config.feed.headCacheMs }, now);
   const feedReader = new TagFeedReader(hot, { headCacheMs: config.feed.headCacheMs, indexCacheSize: config.feed.indexCacheSize }, now);
   const authorReader = new TagFeedReader(hot, { headCacheMs: config.feed.headCacheMs, indexCacheSize: config.feed.authorIndexCacheSize }, now);
-  return { content, comments, hot, summaries, publishers, follows, relatedTags, feedReader, authorReader };
+  return { content, comments, hot, summaries, publishers, follows, relatedTags, ads, feedReader, authorReader };
 }
 
 /**

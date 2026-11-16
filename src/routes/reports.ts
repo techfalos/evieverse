@@ -243,8 +243,9 @@ export function reportRoutes(app: FastifyInstance, deps: AppDeps) {
   });
 
   /**
-   * Deletes a reported comment, at once and for good, and its reports with it. Server moderators
-   * and admins. Only what is in the report queue: any other comment is its author's, the post's
+   * Deletes a reported comment, at once and for good, and its reports with it; the comments that
+   * reply to it stay, as when any comment is deleted (see removeComment). Server moderators and
+   * admins. Only what is in the report queue: any other comment is its author's, the post's
    * publisher's or an admin's to delete. Its author is told.
    */
   app.post('/moderation/reports/:contentId/comments/:commentId/delete', async (req) => {

@@ -1,6 +1,5 @@
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
-import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyServerOptions } from 'fastify';
 import { createAuditLog, registerAudit, type AuditLog } from './audit.js';
 import { Challenges } from './challenge/challenges.js';
@@ -8,10 +7,9 @@ import type { Db } from './db/index.js';
 import type { RouteDeps, StoreDeps } from './deps.js';
 import { requireEdgeSecret } from './functions/edge.js';
 import { GROUP_NAMES, GROUPS, type GroupName } from './functions/groups.js';
-import { HttpError, registerErrorHandler } from './http/errors.js';
+import { registerErrorHandler } from './http/errors.js';
 import { registerLanguages } from './http/language.js';
-import { rateLimitStore } from './http/rateLimitStore.js';
-import { loadLanguages, msg, type Languages } from './language.js';
+import { loadLanguages, type Languages } from './language.js';
 import { loadTrustPlugins, type TrustPlugin } from './moderation/trust.js';
 import { loadCliRelease, requireCliBuild, type CliRelease } from './routes/cli.js';
 import { contentWriter } from './write.js';
@@ -67,16 +65,10 @@ export async function buildApp(
       origin: corsOrigins.includes('*') ? '*' : corsOrigins,
       // The plugin allows only GET, HEAD and POST unless told otherwise.
       methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'],
-      exposedHeaders: ['retry-after', 'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset', 'content-disposition'],
+      exposedHeaders: ['retry-after', 'content-disposition'],
       maxAge: 600,
     });
   }
-  await app.register(rateLimit, {
-    global: false,
-    store: rateLimitStore(deps.hot),
-    // The plugin's own words are English only. It sets Retry-After itself.
-    errorResponseBuilder: (_req, { statusCode, ttl }) => new HttpError(statusCode, msg('error.rate_limited', { count: Math.max(1, Math.ceil(ttl / 60_000)) })),
-  });
   await app.register(multipart, {
     limits: {
       fileSize: deps.config.storage.maxUploadBytes,

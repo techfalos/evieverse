@@ -54,19 +54,22 @@ export interface ModerationDeps {
 }
 
 /**
- * Moderation of a new comment by `userId` on the post `contentId`. It goes through the gate a post
- * does: the same trust plugins give it a score, each told it is a comment (`commentOn`), and the
- * same thresholds say where the score sends it (see routeOf). Throws 422 for a comment whose score
- * has it deleted: nothing of it is stored.
+ * Moderation of a new comment by `userId` on the post `contentId`, or of an edit of one. It goes
+ * through the gate a post does: the same trust plugins give it a score, each told it is a comment
+ * (`commentOn`), and the same thresholds say where the score sends it (see routeOf). What there
+ * is of it to read is its text, and the name of the image or video it comes with (`filename`), as
+ * a post's caption and filename are. Throws 422 for a comment whose score has it deleted: nothing
+ * of it is stored.
  *
  * That is all of it. A comment has no hashtags, so what a hashtag's moderators keep (its blocked
  * words, its mutes) doesn't reach the comments on posts under it: they have no say over comments.
  */
 export async function moderateComment(
   { db, config, trustPlugins, now = Date.now }: ModerationDeps,
-  comment: { userId: string; contentId: string; text: string },
+  comment: { userId: string; contentId: string; text: string; filename?: string | null },
 ): Promise<{ trustScore: number; route: Exclude<TrustRoute, 'delete'> }> {
-  const trust = await trustOf(trustPlugins, { userId: comment.userId, commentOn: comment.contentId, tags: [], texts: [comment.text] }, { db, config, now });
+  const texts = [comment.text, comment.filename].filter((text): text is string => !!text);
+  const trust = await trustOf(trustPlugins, { userId: comment.userId, commentOn: comment.contentId, tags: [], texts }, { db, config, now });
   const route = routeOf(trust.score, config.trust);
   if (route === 'delete') throw unprocessable(trust.reason ?? msg('comment.not_trusted'));
   return { trustScore: trust.score, route };

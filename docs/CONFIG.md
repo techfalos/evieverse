@@ -31,7 +31,7 @@ Each setting in the tables has a *Format*:
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
 | **text**       | Plain text.                                                                                                                            | `LOG_LEVEL=debug`                                                |
 | **number**     | A whole number. Where the description says "0: none", "0: off" or "0: no limit", 0 is allowed; otherwise a setting must be at least 1. | `PORT=8080`                                                      |
-| **true/false** | `true`, `1` or `yes` for true. Anything else is false.                                                                                 | `CHALLENGE_REGISTER=false`                                       |
+| **true/false** | `true`, `1` or `yes` for true. Anything else is false.                                                                                 | `DB_MIGRATE_ON_START=false`                                       |
 | **choice**     | One of the words the description lists.                                                                                                | `TAGGING_MODE=server`                                            |
 | **list**       | Items separated by commas, spaces, or both.                                                                                            | `CORS_ORIGINS=https://app.example.com,http://localhost:5173`     |
 | **JSON**       | A JSON object on one line, in single quotes in a shell or `.env` file, so the shell leaves the double quotes alone.                    | `CONTENT_OPTIONS='{"bucket":"tu-content","region":"us-east-1"}'` |
@@ -58,7 +58,6 @@ CONTENT_OPTIONS: '{"bucket":"tu-content","region":"us-east-1"}'
 environment = {
   CORS_ORIGINS               = "https://app.example.com,http://localhost:5173"
   POST_RATE_LIMIT_PER_MINUTE = "5"
-  CHALLENGE_REGISTER         = "false"
 }
 secrets = {
   SUMMARY_OPTIONS = "{\"bucket\":\"summaries\",\"access_key_id\":\"...\",\"secret_access_key\":\"...\"}"
@@ -70,7 +69,6 @@ In `evieverse.config.json` the values are real JSON types: a list is an array, a
 ```json
 {
   "corsOrigins": ["https://app.example.com", "http://localhost:5173"],
-  "challenge": { "register": false },
   "feed": { "pageSize": 25 },
   "storage": { "content": { "scheme": "s3", "options": { "bucket": "tu-content", "region": "us-east-1" } } }
 }
@@ -92,6 +90,8 @@ In the file, `TRUST_PROXY` (`trustProxy`) is a number, `true` or a string, so a 
 | `CORS_ORIGINS`     | `corsOrigins`     | list                    | empty                   | Origins whose pages may call the API from a browser, such as `https://app.example.com http://localhost:5173`, or `*` for any. Each must be a scheme, host and port only. Empty: none, so only pages on the API's own origin can.                                                                                                                                                                                                                                                                              |
 | `TRUST_PROXY`      | `trustProxy`      | number, `true`, or list | empty                   | The proxies in front of the server whose `X-Forwarded-For` is believed, which decides the client address that per-address limits count by. A number is how many proxies there are (`1` behind one load balancer), `true` is any, and a list is their addresses and CIDR ranges (`10.0.0.0/8,127.0.0.1`). Empty: none, so the address is the connection's own. Give a number only where nothing can reach the server except through those proxies, or anyone connecting directly can choose their own address. |
 | `DEFAULT_LANGUAGE` | `defaultLanguage` | text                    | `en`                    | The code of the language the server answers in when a request asks for none it has, and users register in when they choose none. It must be a file of `[src/languages](../src/languages)`, or the server doesn't start ([Languages](LANGUAGES.md)).                                                                                                                                                                                                                                                       |
+| `EVIEVERSE_MODIFIED` | `modified`      | true/false              | `false`                 | The modification disclosure: `true` if this instance runs a modified version of Evieverse, one whose source code differs from a release, as Evieverse's [additional license terms](../LICENSE.md) define it. Those terms have a modified version say so, and setting this is the supported way. [`GET /rules`](API.md#get-rules) gives it to anyone, with the release the code is based on. It's your own statement: the server checks it against nothing. |
+| `EVIEVERSE_SOURCE_URL` | `sourceUrl`   | text (a URL)            | empty                   | Where the source code this instance runs can be obtained: an `http` or `https` address, which `GET /rules` gives with the disclosure. A modified version has to give one, so a server with `EVIEVERSE_MODIFIED=true` and no address doesn't start. Empty: none is given. |
 | `EVIEVERSE_CONFIG` |                   | text (a path)           | `evieverse.config.json` | The JSON file of settings. Environment only: a file can't name itself.                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 
@@ -185,8 +185,7 @@ The server only writes records. Moving them to cold storage is the bucket's own 
 | `FEED_RELATED_TAGS`          | `feed.relatedTags`          | number | `3`     | A feed asked to add related hashtags adds at most this many for each hashtag asked for, the most related first (0: none).                                                       |
 | `FEED_RELATED_MIN_POSTS`     | `feed.relatedMinPosts`      | number | `5`     | A hashtag is related to another once at least this many posts carry both...                                                                                                     |
 | `FEED_RELATED_MIN_PERCENT`   | `feed.relatedMinPercent`    | number | `20`    | ...and those are at least this percent, 0 to 100, of the posts that carry the other.                                                                                            |
-| `FEED_GEN_RETENTION_MINUTES` | `feed.genRetentionMinutes`  | number | `60`    | Superseded day indexes and manifests are kept this long. It's also how long a feed's cursor works.                                                                              |
-| `FEED_HEAD_CACHE_MS`         | `feed.headCacheMs`          | number | `1000`  | How long each node caches a hashtag's head, its related hashtags and publisher credits (0: no cache).                                                                           |
+| `FEED_HEAD_CACHE_MS`         | `feed.headCacheMs`          | number | `1000`  | How long each node caches a hashtag's head, its related hashtags and publisher credits (0: no cache). The index keys a compactor run replaces are kept this long and a minute. |
 | `FEED_INDEX_CACHE_SIZE`      | `feed.indexCacheSize`       | number | `500`   | Hashtags whose manifest and day indexes each node keeps in memory.                                                                                                              |
 | `FEED_AUTHOR_CACHE_SIZE`     | `feed.authorIndexCacheSize` | number | `5000`  | The same for publishers' own indexes, which following feeds read: one per user followed.                                                                                        |
 
@@ -208,7 +207,6 @@ The server only writes records. Moving them to cold storage is the bucket's own 
 
 | Variable                        | File key                      | Format     | Default | What it does                                                                                                                                                                                                                     |
 | ------------------------------- | ----------------------------- | ---------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CHALLENGE_REGISTER`            | `challenge.register`          | true/false | `true`  | Whether `/register` needs a challenge. An admin's request never does.                                                                                                                                                            |
 | `CHALLENGE_POST_WINDOW_SECONDS` | `challenge.postWindowSeconds` | number     | `60`    | A post less than this long after the user's previous post or challenge must solve a challenge, or two from the third such post in a row (0: never).                                                                              |
 | `CHALLENGE_TTL_SECONDS`         | `challenge.ttlSeconds`        | number     | `120`   | How long a challenge can be solved for.                                                                                                                                                                                          |
 | `CHALLENGE_POW_BITS`            | `challenge.powBits`           | number     | `18`    | Zero bits the proof of work's SHA-256 must start with, 0 to 32. Each doubles the client's work (0: none).                                                                                                                        |

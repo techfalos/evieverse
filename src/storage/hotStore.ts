@@ -29,6 +29,12 @@ export interface HotStore {
    */
   incr(key: string, ttlMs: number): Promise<{ count: number; ttlMs: number }>;
   /**
+   * Adds one to a counter that is there, which keeps its expiry, and returns the count. A counter
+   * that isn't there is left missing, and null returned: a count somebody cached is kept up, and
+   * one nobody cached isn't begun at 1. Atomic.
+   */
+  bump(key: string): Promise<number | null>;
+  /**
    * Sets a key to `next` (or deletes it, if null), but only if it holds `expected` (null: if it is
    * missing), and returns whether it did. Atomic, so of concurrent callers that read the same value
    * only one changes it. `ttlMs` is as for `set`.
@@ -96,6 +102,13 @@ if left < 0 then
   left = tonumber(ARGV[1])
 end
 return {count, left}`;
+
+/** INCR of a key that is there, which keeps its expiry. A missing key is left missing: false, which a client reads as null. */
+const BUMP = `
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return false
+end
+return redis.call('INCR', KEYS[1])`;
 
 /**
  * Compare-and-set. ARGV: whether a value is expected ('1') and the value; whether one is set ('1') and
@@ -200,6 +213,10 @@ export class RedisHotStore implements HotStore {
     // One key, so the script runs wherever the key lives, behind a proxy or in a cluster.
     const [count, left] = (await this.redis.eval(COUNT, 1, this.k(key), ttl(ttlMs))) as [number, number];
     return { count, ttlMs: left };
+  }
+
+  async bump(key: string) {
+    return (await this.redis.eval(BUMP, 1, this.k(key))) as number | null;
   }
 
   async swap(key: string, expected: string | null, next: string | null, ttlMs?: number) {
@@ -329,6 +346,15 @@ export class MemoryHotStore implements HotStore {
     const exp = this.live(key)?.exp ?? this.now() + ttl(ttlMs);
     this.map.set(key, { v: Buffer.from(String(count)), exp });
     return { count, ttlMs: exp - this.now() };
+  }
+
+  async bump(key: string) {
+    const e = this.live(key);
+    if (!e) return null;
+    if (!Buffer.isBuffer(e.v)) throw new Error(`WRONGTYPE ${key}`);
+    const count = Number(e.v) + 1;
+    e.v = Buffer.from(String(count));
+    return count;
   }
 
   async swap(key: string, expected: string | null, next: string | null, ttlMs?: number) {

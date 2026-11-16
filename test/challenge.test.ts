@@ -4,6 +4,7 @@ import { inflateSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { challengeKey, leadingZeroBits, type Challenge } from '../src/challenge/challenges.js';
 import { ALPHABET, ANSWER_LENGTH, challengeText, HEIGHT, renderChallenge, WIDTH } from '../src/challenge/image.js';
+import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { as, createTestContext, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
@@ -51,10 +52,8 @@ for (const target of TARGETS) {
     beforeEach(async () => {
       written = [];
       hold = null;
-      ctx = await createTestContext(target, {
-        challenge: { register: true, postWindowSeconds: 60 },
-        registerRateLimitPerHour: 1000,
-      });
+      // As a server has them: a post window of a minute, and no answer accepted within 2 seconds.
+      ctx = await createTestContext(target, { challenge: { postWindowSeconds: 60, minSolveMs: 2000 } });
       const putFile = ctx.content.putFile.bind(ctx.content);
       vi.spyOn(ctx.content, 'putFile').mockImplementation(async (...args) => {
         const text = await readFile(args[1], 'utf8');
@@ -151,6 +150,17 @@ for (const target of TARGETS) {
       const postChallenge = (await storeText(alice, 'second #news')).json().challenge as Challenge;
       expect(await attempt(await ctx.solve(postChallenge))).toBe('the challenge was issued for another request; solve the new challenge');
       expect((await ctx.db.selectFrom('users').select('username').execute()).map((u) => u.username)).toEqual(['alice']);
+    });
+
+    it('has no setting that spares a registration its challenge', async () => {
+      // What once turned it off, in the environment or in a config file, is no setting now, and changes nothing.
+      const off = loadConfig({ challenge: { register: false } }, { EVIEVERSE_CONFIG: '/nonexistent.json' });
+      expect(off.challenge).toEqual({ postWindowSeconds: 60, ttlSeconds: 120, powBits: 18, minSolveMs: 2000 });
+
+      await ctx.close();
+      ctx = await createTestContext(target, { challenge: { register: false } as object });
+      expect((await register({ username: 'alice' })).statusCode).toBe(428);
+      expect(await ctx.db.selectFrom('users').selectAll().execute()).toEqual([]);
     });
 
     it('registers a user for an admin without a challenge, and for no other user', async () => {

@@ -1,5 +1,6 @@
-export { CommentStore, type Comment, type CommentPageQuery } from './commentStore.js';
-export { ContentStore, type ContentMeta, type Preview, type StoredBytes, type UploadLink } from './contentStore.js';
+export { AdStore } from './adStore.js';
+export { CommentStore, type Comment, type CommentMedia, type CommentPageQuery } from './commentStore.js';
+export { ContentStore, type BytesOwner, type ContentMeta, type Preview, type StoredBytes, type UploadLink } from './contentStore.js';
 export { FollowStore } from './followStore.js';
 export { createHotStore, MemoryHotStore, type HotStore } from './hotStore.js';
 export { PublisherStore, type Publisher } from './publisherStore.js';

@@ -27,7 +27,7 @@ for (const target of TARGETS) {
     const ids = (f: Feed, tag: string) => (f.tags[tag] ?? []).map((i) => i.contentId);
 
     it('identifies users by UUID and keeps usernames unique', async () => {
-      const a = await ctx.app.inject({ method: 'POST', url: '/register', payload: { username: 'alice' } });
+      const a = await ctx.registration({ username: 'alice' });
       expect(a.statusCode).toBe(201);
       expect(a.json()).toEqual({ userId: expect.any(String), username: 'alice', language: 'en', apiKey: expect.stringMatching(/^tu_/), note: expect.any(String) });
       const dup = await ctx.app.inject({ method: 'POST', url: '/register', payload: { username: 'alice' } });

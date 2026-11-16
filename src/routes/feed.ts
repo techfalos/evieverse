@@ -11,13 +11,15 @@ import { relatedTo } from '../feed/related.js';
 import { followingRecords, loadBodies, planned, renderFeed } from '../feed/render.js';
 import { requireShownFollows } from '../follows.js';
 import { badRequest } from '../http/errors.js';
+import { say } from '../http/language.js';
 import { invalidCursor } from '../http/listCursor.js';
 import { HASHTAG } from '../http/schemas.js';
 import { messageKey, msg } from '../language.js';
-import type { PublisherStore, RelatedTagStore, SummaryStore } from '../storage/index.js';
+import { adRecord, eligibleAds, orderAds, placeAds, type FeedAd } from '../monetization.js';
+import type { AdStore, PublisherStore, RelatedTagStore, SummaryStore } from '../storage/index.js';
 import { normalizeTag } from '../tags.js';
 import { authorIndex } from '../tagfeed/layout.js';
-import { cursorExpired, type TagFeedReader } from '../tagfeed/reader.js';
+import type { TagFeedReader } from '../tagfeed/reader.js';
 import { DAY } from '../time.js';
 
 /** The most hashtags a feed reads: the ones asked for and, with addRelated, the ones related to them. */
@@ -72,17 +74,18 @@ function pageLimit(config: Config, requested: number | undefined): number {
   return limit;
 }
 
-/** Only the feed index, summaries, publisher credits and related hashtags are passed in: hashtag feeds never touch the database. */
+/** Only the feed index, summaries, publisher credits, related hashtags and ads are passed in: hashtag feeds never touch the database. */
 export interface FeedDeps {
   config: Config;
   feedReader: TagFeedReader;
   summaries: SummaryStore;
   publishers: PublisherStore;
   relatedTags: RelatedTagStore;
+  ads: AdStore;
   now?: () => number;
 }
 
-export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries, publishers, relatedTags, now = Date.now }: FeedDeps) {
+export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries, publishers, relatedTags, ads, now = Date.now }: FeedDeps) {
   /**
    * retrieve_feed. Each record says whether a moderator of the hashtag it is listed under has approved
    * it there (`moderated`), and `moderated=false` leaves only those none has: the hashtag's
@@ -91,6 +94,12 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries
    * With `addRelated`, the feed is planned over the hashtags asked for and then the ones related to
    * them, as if all had been asked for: the related ones are read from Redis, where the compactor
    * keeps them (RelatedTagStore), and the response names them in `related`.
+   *
+   * Where the server shows ads in feeds (MONETIZATION_FEED_ADS), every page comes with `ads`: an
+   * ad to show before the 3rd, the 10th and the 17th of the page's records, as far as the page has
+   * them (see AD_POSITIONS). They are chosen from the ads the compactor published to Redis
+   * (AdStore) that are being shown now and that appear all the time or are targeted at one of the
+   * hashtags the feed reads, the related ones among them. The records are the same with or without.
    */
   app.get('/feed', async (req, reply) => {
     const q = Query.parse(req.query);
@@ -117,9 +126,8 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries
     }
     // A cursor is the client's to hold, so what it names is held to what a first page could have read.
     if (cursor?.related && tagList.length + cursor.related.length > MAX_TAGS) throw invalidCursor();
-    const t = now();
-    if (cursor && t - cursor.anchor > config.feed.genRetentionMinutes * 60_000) throw cursorExpired();
-    const anchor = cursor?.anchor ?? t;
+    // The window ends where the first page's did, so a session never reaches posts newer than its first page.
+    const anchor = cursor?.anchor ?? now();
     const seed = cursor?.seed ?? randomInt(2 ** 31);
     const { freshEvery, freshMaxLikes, freshPool } = config.feed;
 
@@ -128,9 +136,10 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries
       ? undefined
       : (cursor?.related ?? relatedTo(tagList, await Promise.all(tagList.map((tag) => relatedTags.get(tag))), MAX_TAGS));
     const feedTags = related ? [...tagList, ...related] : tagList;
+    if (cursor && cursor.after.length !== feedTags.length) throw invalidCursor();
 
-    // A tag the cursor has no pin for is read as it is now: only a cursor that was tampered with lacks one.
-    const views = await Promise.all(feedTags.map((tag) => feedReader.view(tag, cursor?.pins[tag])));
+    // Every page reads the indexes as they are now. The cursor says where in each tag's list the page before stopped.
+    const views = await Promise.all(feedTags.map((tag) => feedReader.view(tag)));
     const plan = planFeed(
       views.map((v) => v.candidates),
       {
@@ -140,11 +149,10 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries
         hours: q.hours,
         anchor,
         limit,
-        positions: cursor?.positions,
-        fresh: { every: freshEvery, maxLikes: freshMaxLikes, pool: freshPool, seed, positions: cursor?.freshPositions },
+        after: cursor?.after,
+        fresh: { every: freshEvery, maxLikes: freshMaxLikes, pool: freshPool, seed, after: cursor?.freshAfter },
       },
     );
-    const pins = Object.fromEntries(views.map((v) => [v.tag, v.pin]));
     const nextCursor = plan.truncated
       ? encodeCursor({
           anchor,
@@ -154,16 +162,22 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries
           algorithm: q.algorithm,
           aiGenerated: q.aiGenerated,
           moderated: q.moderated,
-          pins,
-          positions: plan.positions,
+          after: plan.after,
           seed,
-          freshPositions: plan.freshPositions,
+          freshAfter: plan.freshAfter,
         })
       : null;
     const bodies = await loadBodies(planned(plan), summaries, publishers);
 
+    // The ads this page chooses from, in the page's own order of them (see orderAds): the session's
+    // seed and the cursor the page was asked with tell it from every other page.
+    const pageAds = config.monetization.feedAds ? orderAds(eligibleAds(await ads.get(), feedTags, now()), `${seed} ${q.cursor ?? ''}`) : undefined;
+    const label = say(req, msg('ad.sponsored'));
+    const placed =
+      pageAds && ((count: number): FeedAd[] => placeAds(pageAds, count).map(({ ad, position }) => ({ ...adRecord(ad, label, config.publicBaseUrl), position })));
+
     reply.type('application/json; charset=utf-8');
-    return reply.send(Readable.from(renderFeed(plan, feedTags, bodies, nextCursor, related)));
+    return reply.send(Readable.from(renderFeed(plan, feedTags, bodies, nextCursor, related, placed)));
   });
 }
 

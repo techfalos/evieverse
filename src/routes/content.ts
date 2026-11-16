@@ -1,29 +1,33 @@
-import type { FastifyInstance } from 'fastify';
+import { randomInt } from 'node:crypto';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
 import { contentNotFound, loadReadable, publisherOf, requireMeta, takesComments } from '../content.js';
 import { setForDeletion } from '../deletion.js';
 import type { AppDeps } from '../deps.js';
 import { forbidden } from '../http/errors.js';
+import { say } from '../http/language.js';
 import { Credentials } from '../http/schemas.js';
 import { notify } from '../inbox.js';
 import { msg } from '../language.js';
+import { adRecord, eligibleAds, type PublishedAd } from '../monetization.js';
 import { previewOf } from '../posts.js';
 import { iso } from '../time.js';
 
 const Params = z.object({ contentId: z.string().uuid() });
 
 /**
- * Sent with a post's bytes, which are a user's, when this server streams them. A browser takes
- * them for the content type they are sent with and never guesses another from the bytes (a video
- * or audio file's type is its sender's word), and a page opened on them runs no script, sends no
- * form, and loads nothing but the file itself.
+ * Sent with a post's bytes, which are a user's, when this server streams them, and with those of
+ * the image or video of a comment (routes/comments.ts). A browser takes them for the content type
+ * they are sent with and never guesses another from the bytes (a video or audio file's type is
+ * its sender's word), and a page opened on them runs no script, sends no form, and loads nothing
+ * but the file itself.
  *
  * The page is also put in an origin of its own, not the API's, except a video's or audio's: the
  * player a browser builds around one fetches the file again, which Chrome refuses a page that
  * isn't in the file's origin. It runs no script there either.
  */
-function rawHeaders(contentType: string) {
+export function rawHeaders(contentType: string) {
   const sandbox = /^(video|audio)\//.test(contentType) ? 'sandbox allow-same-origin' : 'sandbox';
   return {
     'x-content-type-options': 'nosniff',
@@ -32,17 +36,36 @@ function rawHeaders(contentType: string) {
 }
 
 /** Reading content. Its deletion is a route of its own (deletionRoutes), so the two can be served apart. */
-export function contentRoutes(app: FastifyInstance, { db, config, content }: AppDeps) {
+export function contentRoutes(app: FastifyInstance, { db, config, content, ads, now = Date.now }: AppDeps) {
+  /**
+   * The ad to show at the end of a post that carries `tags`, where the server shows ads there
+   * (MONETIZATION_POST_ADS): any one of the ads the compactor published to Redis (AdStore) that
+   * are being shown now and that appear all the time or are targeted at one of the post's
+   * hashtags. None where there is none, and none if they can't be read: the post is still read.
+   */
+  async function postAd(req: FastifyRequest, tags: string[]): Promise<PublishedAd | undefined> {
+    if (!config.monetization.postAds) return undefined;
+    try {
+      const eligible = eligibleAds(await ads.get(), tags, now());
+      return eligible.length ? eligible[randomInt(eligible.length)] : undefined;
+    } catch (err) {
+      req.log.error({ err }, 'could not read the ads; the post goes out without one');
+      return undefined;
+    }
+  }
+
   /**
    * retrieve_content: the publisher's credit (their userId and username) first, then the preview, the
    * whole text or caption, and hashtags. `status: "pending_review"` on content that waits in the
-   * moderation queue. Who may read it is in loadReadable.
+   * moderation queue. Who may read it is in loadReadable. `ad`, last, is the ad to show at the
+   * end of the post (see postAd); content that waits in the moderation queue has none.
    */
   app.get('/content/:contentId', async (req) => {
     const { contentId } = Params.parse(req.params);
     const row = await loadReadable(db, req, contentId);
     // The row says whose the content is and how liked; what it is, is in the meta file beside its bytes.
     const meta = await requireMeta(content, contentId);
+    const ad = row.queued ? undefined : await postAd(req, meta.tags);
     return {
       publisher: publisherOf(row),
       contentId: row.id,
@@ -58,6 +81,7 @@ export function contentRoutes(app: FastifyInstance, { db, config, content }: App
       contentUrl: `/content/${row.id}/raw`,
       createdAt: iso(row.created_at),
       updatedAt: iso(meta.updatedAt),
+      ...(ad && { ad: adRecord(ad, say(req, msg('ad.sponsored')), config.publicBaseUrl) }),
     };
   });
 

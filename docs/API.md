@@ -16,7 +16,7 @@ Names in capitals, such as `FEED_PAGE_SIZE`, are an instance's settings ([`.env.
 | [`POST /register`](#post-register) | Anyone | Creates an account and returns its API key, once a [challenge](#challenges) is solved. An admin's request needs none. |
 | [`GET /users/:userId`](#get-usersuserid-and-patch-usersuserid) | Anyone | A user's public profile and roles. |
 | [`PATCH /users/:userId`](#get-usersuserid-and-patch-usersuserid) | The user | Changes the user's username, their language, whether they take part in messages between users, or whether they show whom they follow and who follows them. |
-| [`POST /users/:userId/key`](#post-usersuseridkey) | The user | Replaces the user's API key with a new one, and revokes the old one. |
+| [`POST /users/:userId/key`](#post-usersuseridkey) | The user, or an admin | Replaces the user's API key with a new one, and revokes the old one. |
 | [`DELETE /users/:userId`](#delete-usersuserid) | The user, or an admin | Deletes an account, and the posts it published. |
 | [`GET /whoami`](#get-whoami) | Any user | The account a key belongs to, its roles, whether it's banned, its language and its settings. |
 | [`GET /languages`](#get-languages) | Anyone | The languages the instance answers in. |
@@ -46,6 +46,10 @@ Names in capitals, such as `FEED_PAGE_SIZE`, are an instance's settings ([`.env.
 | [`GET /feed/following`](#get-feedfollowing) | The user, or anyone if the user shows whom they follow | The posts of the users a user follows. |
 | [`GET /tagging`](#get-tagging) | Anyone | Which hashtags a post can have: any, or the ones the instance lists. |
 | [`GET /tags`](#get-tags) | Anyone | Lists the hashtags posts have used, most recently active first. |
+| [`GET /rules`](#get-rules) | Anyone | The server's rules, and its modification disclosure: whether it runs a release of Evieverse or a modified version. |
+| [`POST /rules`](#keeping-the-rules) | Admins | Adds a rule. |
+| [`PATCH /rules/:ruleId`](#keeping-the-rules) | Admins | Changes a rule's text, or its place among the others. |
+| [`DELETE /rules/:ruleId`](#keeping-the-rules) | Admins | Removes a rule. |
 | [The moderation endpoints](#moderation-endpoints) | Mostly admins and moderators | Roles, bans, blocked words, mutes, the two kinds of moderation queue, and the report queue. |
 | [`GET /cli` and the files under it](#the-cli-download) | Anyone | The CLI the instance ships. |
 | `GET /health` | Anyone | `{ "ok": true }`, for a load balancer to check. |
@@ -66,7 +70,7 @@ Write endpoints authenticate with `userId` and `apiKey`, which [`POST /register`
 curl localhost:3000/whoami -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID"
 ```
 
-An account has one key at a time: the one it was registered with, until its owner replaces it ([`POST /users/:userId/key`](#post-usersuseridkey)), which revokes the old key. Replacing a key takes the key, so a lost one can't be recovered.
+An account has one key at a time: the one it was registered with, until its owner or an admin replaces it ([`POST /users/:userId/key`](#post-usersuseridkey)), which revokes the old key.
 
 ### Errors
 
@@ -79,7 +83,7 @@ Errors are JSON, `{ error, details? }`. A request that doesn't validate gets `40
 | `403` | The key is right, but its account may not do this: it doesn't own what it's changing, or doesn't have the role. Also a [follow list](#following) or a [following feed](#get-feedfollowing) its user doesn't show, asked for by anyone else, with a key or without. |
 | `404` | There's no such user, content or comment. Content set for deletion, or held in the [moderation queue](#the-moderation-queue), counts as not there, and so do the comments of a post that doesn't take them. |
 | `409` | The request conflicts with what's there: a username that's taken, an update of content set for deletion, a follow past the limit. |
-| `410` | A feed's cursor has expired: start the feed over. |
+| `410` | A feed's cursor was issued by an earlier release of the server: start the feed over. |
 | `413` | The file is larger than the instance accepts. |
 | `422` | [Moderation](#moderation) refused the post, or the comment. |
 | `426` | For the CLI only: the instance ships another build of it ([CLI.md](CLI.md#updates)). |
@@ -623,7 +627,7 @@ How the feed is assembled:
 2. **Page size:** a page holds at most `limit` posts (50 by default).
 3. **Order:** each tag's posts are ordered by likes (most first), then recency.
 4. **Turns:** the requested tags take turns, so each gets an equal share of the page. A tag that runs out lets the others continue. Content carrying several requested tags appears once.
-5. **Fresh content:** so that new posts on busy tags aren't buried under liked ones (and can earn likes at all), the 2nd pick per tag, and then every `FEED_FRESH_EVERY`th (default 4), is new content with at most `FEED_FRESH_MAX_LIKES` likes (default 0). It's sampled from that tag's `FEED_FRESH_POOL` newest such records in the window (default 200), shuffled with a seed chosen per feed session, so different viewers see different new posts. A fresh slot is skipped once the likes order has already reached unliked content. `FEED_FRESH_EVERY=0` turns this off.
+5. **Fresh content:** so that new posts on busy tags aren't buried under liked ones (and can earn likes at all), the 2nd pick per tag, and then every `FEED_FRESH_EVERY`th (default 4), is new content with at most `FEED_FRESH_MAX_LIKES` likes (default 0). It's sampled from that tag's `FEED_FRESH_POOL` newest such records in the window (default 200), in an order that goes by a seed chosen per feed session, so different viewers see different new posts. A fresh slot is skipped once the likes order has already reached unliked content. `FEED_FRESH_EVERY=0` turns this off.
 
 **Chronological** feeds work the same way, in order of time instead of likes. Each tag's posts are ordered newest first (step 3), and instead of the tags taking turns (step 4), the next post comes from whichever hashtag's is the newest. So the page is the newest `limit` posts of the hashtags together, and the next page carries on from there. There are no fresh slots (step 5), which exist to lift new posts out of a likes order.
 
@@ -648,7 +652,13 @@ Each record is `{ contentId, publisher: { userId, username }, mimeType, aiGenera
 - `preview` follows the post's type, as [previews](#previews) lists.
 - `publisher` is the user's current credit, so a renamed user shows under their new name everywhere at once.
 
-**Pagination:** the cursor pins the exact day indexes the first page read, plus the algorithm, the related hashtags the first page added, the `aiGenerated` and `moderated` filters and the fresh-content seed, so later pages never repeat or skip records, even while new content arrives, moderators approve it or the compactor runs. Content that was deleted or held since, or that lost the hashtag it was listed under, is left out. Later pages must ask for the same `tags`, `hours`, `algorithm`, `addRelated`, `aiGenerated` and `moderated`, otherwise `400`. Cursors last `FEED_GEN_RETENTION_MINUTES` (default 60). After that, or for a cursor issued by an earlier release, the server returns `410` and the client should start over.
+**Pagination:** the cursor says where the feed has got to: the last record it returned under each hashtag, with the end of the window, the algorithm, the related hashtags the first page added, the `aiGenerated` and `moderated` filters and the fresh-content seed. The next page reads the hashtags' indexes as they are by then, and carries on after those records. So:
+- Every page is of the first page's window. Posts newer than the first page show when the reader starts over.
+- A post isn't returned twice, and what was deleted, held or taken out of a hashtag since the page before is left out, without anything else shifting. There are two exceptions, which a client that shows one list can settle by dropping a `contentId` it already has: a post returned in a fresh slot and liked afterwards, and, in a `popular` feed of several hashtags, a post that lost the hashtag it was returned under and still carries another.
+- What the compactor has applied since the page before shows: new like counts, and what moderators approved or removed.
+- A session can miss a post that came to be ahead of where it had got to: one liked past that point between two pages of a `popular` feed, or one that reached the index late. It's there when the reader starts over.
+- Later pages must ask for the same `tags`, `hours`, `algorithm`, `addRelated`, `aiGenerated` and `moderated`, otherwise `400`.
+- A cursor doesn't expire. One issued by an earlier release of the server gets `410`, and the client should start over; one that isn't valid gets `400`.
 
 ### Related hashtags
 
@@ -695,6 +705,51 @@ Lists the hashtags posts have used, most recently active first: `{ tags: [{ tag,
 ```bash
 curl "localhost:3000/tags?prefix=mum"
 ```
+
+## Rules
+
+### `GET /rules`
+
+Gives the server's rules, and its modification disclosure. It needs no key, so a client can show both to someone before they register.
+
+```bash
+curl localhost:3000/rules
+```
+
+```json
+{
+  "modificationDisclosure": { "modified": true, "release": "0.1.0", "sourceUrl": "https://git.example.com/our-evieverse" },
+  "rules": [
+    { "ruleId": "0b7c0f5e-…", "position": 1, "text": "Be kind.", "createdAt": "2026-11-15T14:02:00.000Z", "updatedAt": "2026-11-15T14:02:00.000Z" },
+    { "ruleId": "5e1a9d42-…", "position": 2, "text": "No spam.", "createdAt": "2026-11-15T14:03:00.000Z", "updatedAt": "2026-11-15T14:03:00.000Z" }
+  ]
+}
+```
+
+| field | notes |
+| --- | --- |
+| `modificationDisclosure.modified` | `true` if the server's operator states that it runs a modified version of Evieverse: one whose source code differs from a release, as the [additional license terms](../LICENSE.md) define it. `false`: it runs a release. It's the operator's statement (`EVIEVERSE_MODIFIED`), which the server checks against nothing, and no request changes it. |
+| `modificationDisclosure.release` | The release of Evieverse the server runs, or for a modified version, the release it's based on, such as `0.1.0`. |
+| `modificationDisclosure.sourceUrl` | Where the server's source code can be obtained: an `http` or `https` address (`EVIEVERSE_SOURCE_URL`). A modified version always gives one. Otherwise `null`, unless the operator set one. |
+| `rules` | Every rule, in the order the admins gave them. It's the whole list: there are no pages, and a server has at most 100. `[]` where there are none. |
+| `ruleId` | The rule's id, which the admin endpoints take. |
+| `position` | The rule's place in the list, counted from 1. |
+| `text` | The rule, as its admin wrote it: at most 2,000 characters. |
+| `createdAt`, `updatedAt` | When the rule was added, and when its text or its place was last changed. A rule that moved only because another was added, moved or removed keeps its `updatedAt`. |
+
+The server gives the rules and does nothing else with them: no post is checked against a rule. What it enforces is under [Moderation](#moderation).
+
+### Keeping the rules
+
+Admins add, change and remove rules. These authenticate as the other write endpoints do; anyone else gets `403`.
+
+| Endpoint | What it does |
+| --- | --- |
+| `POST /rules` | `{ "text": "...", "position": 2 }` adds a rule: `201` with the rule, as `GET /rules` gives it. `text` is 1 to 2,000 characters, once the spaces around it are removed. `position` is optional: without it the rule goes at the end, and with it, at that place, moving the rules from there on down by one. A position past the end is the end. A server that already has 100 rules gets `409`. |
+| `PATCH /rules/:ruleId` | `{ "text": "...", "position": 1 }`, either or both: changes the rule's text, moves it to that place, or both, and returns the rule. With neither, `400`. A rule that's already what the request asks for is left as it is. |
+| `DELETE /rules/:ruleId` | Removes the rule: `{ ruleId, wasThere }`. The rules after it move up by one. |
+
+A rule that doesn't exist gets `404` from `PATCH`, and `wasThere: false` from `DELETE`. A `ruleId` that isn't an id, an empty or too long `text`, or a `position` that isn't a whole number from 1 gets `400`.
 
 ## Moderation
 
@@ -826,7 +881,7 @@ Both are recorded at once, and show in the hashtag's feeds after the compactor's
 
 Moderation is per hashtag: a post under `#news` and `#mumbai` waits in both queues, and approving it under one leaves it in the other's. A feed of several hashtags with `moderated=false` returns the posts not approved under at least one of the hashtags asked for.
 
-Work through a queue from its first page. Later pages of a [feed session](#get-feed) show what was moderated when the session started, so a post approved since then is still on them.
+Later pages of a [feed session](#get-feed) are of the queue as it is by then: a post approved or removed since the page before, once the compactor has run, isn't on them.
 
 ### Blocked words
 

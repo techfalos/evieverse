@@ -50,7 +50,7 @@ declare module 'fastify' {
 const REDACTED = ['apiKey'];
 
 /** The fields of a response worth keeping in the record: the ids of what the request made or changed. */
-const RESULT_IDS = ['contentId', 'commentId', 'messageId', 'uploadId', 'userId'];
+const RESULT_IDS = ['contentId', 'commentId', 'messageId', 'uploadId', 'userId', 'adId', 'ruleId'];
 
 /** The methods that change something. The rest read (a route that reads and is not a GET is a bug in the route). */
 const WRITES = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);

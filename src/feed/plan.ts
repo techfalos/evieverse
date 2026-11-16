@@ -21,8 +21,8 @@ export interface PlanOptions {
   anchor: number;
   /** Most records in the page. */
   limit: number;
-  /** How far into each requested tag's ordered list earlier pages consumed. */
-  positions?: number[];
+  /** Where earlier pages stopped in each requested tag's ordered list; none for a first page, or a tag they took nothing from. */
+  after?: (Boundary | null)[];
   /** Fresh-content injection; omitted, `every: 0` or the chronological algorithm disables it. */
   fresh?: FreshOptions;
   /** Only records created with AI (true) or without (false); omitted, both. */
@@ -36,12 +36,25 @@ export interface FreshOptions {
   every: number;
   /** Records with at most this many likes are eligible. */
   maxLikes: number;
-  /** Only the newest `pool` eligible records per tag are eligible; they're shuffled by `seed`. */
+  /** Only the newest `pool` eligible records per tag are eligible; `seed` decides the order they're picked in. */
   pool: number;
   /** Per feed session (kept in the cursor), so different viewers see different fresh records. */
   seed: number;
-  /** How far into each tag's fresh pool earlier pages consumed. */
-  positions?: number[];
+  /** Where earlier pages stopped in each tag's fresh pool: the key (see freshKey) of the last record they took from it. */
+  after?: (number | null)[];
+}
+
+/**
+ * Where a page stopped in a tag's ordered list: the last record it took from it, or passed over as
+ * already shown. The next page starts after it in the algorithm's order, whatever the list then
+ * holds. A record's likes only grow and its creation time never changes, so a record never moves
+ * from ahead of a boundary to behind it: what was shown isn't shown again. One that moves ahead of
+ * it meanwhile (liked, or indexed late) is missed.
+ */
+export interface Boundary {
+  likes: number;
+  createdAt: number;
+  contentId: string;
 }
 
 export interface FeedPlan {
@@ -50,36 +63,51 @@ export interface FeedPlan {
   picks: Candidate[][];
   /** Whether the window holds records no page has returned yet. */
   truncated: boolean;
-  /** How far into each requested tag's ordered list the feed has consumed. */
-  positions: number[];
-  /** Per tag, how far into its fresh pool the feed has consumed (empty when disabled). */
-  freshPositions: number[];
+  /** Where the feed has got to in each requested tag's ordered list; null for a tag nothing was taken from yet. */
+  after: (Boundary | null)[];
+  /** The same in each tag's fresh pool (empty when disabled). */
+  freshAfter: (number | null)[];
 }
 
-/** Small deterministic PRNG (mulberry32), so the same seed reproduces the same shuffle on every page. */
-function rng(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+const byId = (a: { contentId: string }, b: { contentId: string }) => (a.contentId < b.contentId ? -1 : a.contentId > b.contentId ? 1 : 0);
+
+/**
+ * A record's place in a session's fresh pools: a 32-bit hash of its id and the session's seed
+ * (FNV-1a, then murmur3's final mix). It depends on nothing else, so the records of a pool keep
+ * their order from page to page whichever others join or leave it, and each seed has its own order.
+ */
+function freshKey(seed: number, contentId: string): number {
+  let h = (0x811c9dc5 ^ seed) >>> 0;
+  for (let i = 0; i < contentId.length; i++) h = Math.imul(h ^ contentId.charCodeAt(i), 0x01000193);
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 16;
+  return h >>> 0;
 }
 
-/** The newest `pool` records with few likes, newest first, then shuffled by the session seed. */
-function freshPool(list: Candidate[], fresh: FreshOptions, t: number): Candidate[] {
+/** The newest `pool` records with few likes, in the order of their keys for this session. */
+function freshPool(list: Candidate[], fresh: FreshOptions): { records: Candidate[]; keys: number[] } {
   const pool = list
     .filter((c) => c.likes <= fresh.maxLikes)
-    .sort((a, b) => b.createdAt - a.createdAt || (a.contentId < b.contentId ? -1 : a.contentId > b.contentId ? 1 : 0))
-    .slice(0, fresh.pool);
-  const random = rng(fresh.seed ^ Math.imul(t + 1, 0x9e3779b9));
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(random() * (i + 1));
-    [pool[i], pool[j]] = [pool[j]!, pool[i]!];
+    .sort((a, b) => b.createdAt - a.createdAt || byId(a, b))
+    .slice(0, fresh.pool)
+    .map((c) => ({ c, key: freshKey(fresh.seed, c.contentId) }))
+    .sort((a, b) => a.key - b.key || byId(a.c, b.c));
+  return { records: pool.map((p) => p.c), keys: pool.map((p) => p.key) };
+}
+
+/** How many values at the start of `sorted` are `passed`, which holds for all of them up to some point and for none after it. */
+function countPassed<T>(sorted: T[], passed: (v: T) => boolean): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (passed(sorted[mid]!)) lo = mid + 1;
+    else hi = mid;
   }
-  return pool;
+  return lo;
 }
 
 /**
@@ -95,9 +123,9 @@ function freshPool(list: Candidate[], fresh: FreshOptions, t: number): Candidate
  * ordered by likes (most first), then recency, and the tags take turns picking one record each, so
  * every tag gets an equal share of the page; a tag that runs out lets the others continue.
  *
- * Fresh injection (popular only): every `fresh.every`th pick per tag comes from a seeded shuffle of
- * the window's newest low-like records, so new content is seen (and can earn likes) even on busy
- * tags.
+ * Fresh injection (popular only): every `fresh.every`th pick per tag comes from the window's newest
+ * low-like records, in an order of the session's own, so new content is seen (and can earn likes)
+ * even on busy tags.
  *
  * The chronological algorithm works the same way, in order of time instead: each tag's records are
  * ordered by creation time alone, and a pick goes to whichever tag's next record is the newest
@@ -105,9 +133,13 @@ function freshPool(list: Candidate[], fresh: FreshOptions, t: number): Candidate
  * and the next page carries on from there. It has no fresh slots, which exist to lift new records
  * out of a likes order.
  *
- * Either order depends only on the records, so cursor positions stay valid. With `aiGenerated` or
- * `moderated` set, every other record is left out before any of this, so the positions index the
- * filtered lists and later pages must use the same filters.
+ * A later page is planned over the lists as they are by then, not as the page before read them. It
+ * starts each tag's list after the record the page before stopped at (`after`), and its fresh pool
+ * after the key it stopped at: whatever is at or ahead of those counts as shown. So a record that
+ * was shown isn't shown again while it stays where it was listed, and one that has left the lists
+ * since is simply not there. What a session can miss is a record that came to be ahead of where it
+ * had got to. With `aiGenerated` or `moderated` set, every other record is left out before any of
+ * this.
  */
 export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
   const { anchor } = opts;
@@ -132,17 +164,25 @@ export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
 
   /** Content earlier pages returned, and this one has picked: it isn't returned again under another tag, or from another list. */
   const seen = new Set<string>();
-  const consumed = (from: Candidate[][], saved: number[] | undefined) =>
-    from.map((list, t) => {
-      const upTo = Math.min(saved?.[t] ?? 0, list.length);
-      for (const c of list.slice(0, upTo)) seen.add(c.contentId);
-      return upTo;
-    });
-  const pos = consumed(lists, opts.positions);
+  /** Marks the first `upTo` records of a list as shown by earlier pages. */
+  const shown = (list: Candidate[], upTo: number) => {
+    for (let i = 0; i < upTo; i++) seen.add(list[i]!.contentId);
+    return upTo;
+  };
+  const pos = lists.map((list, t) => {
+    const after = opts.after?.[t];
+    return after ? shown(list, countPassed(list, (c) => order(c, after) <= 0)) : 0;
+  });
+  const start = [...pos];
 
   const fresh = !chronological && opts.fresh && opts.fresh.every > 0 ? opts.fresh : null;
-  const pools = fresh ? lists.map((list, t) => freshPool(list, fresh, t)) : [];
-  const freshPos = consumed(pools, fresh?.positions);
+  const freshPools = fresh ? lists.map((list) => freshPool(list, fresh)) : [];
+  const pools = freshPools.map((p) => p.records);
+  const freshPos = freshPools.map(({ records, keys }, t) => {
+    const after = fresh?.after?.[t];
+    return after == null ? 0 : shown(records, countPassed(keys, (key) => key <= after));
+  });
+  const freshStart = [...freshPos];
   /** This page's picks per tag so far, which decide where its fresh slots are. */
   const picked: number[] = Array(T).fill(0);
 
@@ -197,11 +237,15 @@ export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
     rr = (t + 1) % T;
   }
 
+  // Every tag's place is moved past what was shown under another, so the next page starts each list after that too.
+  const more = lists.map((_, t) => peek(t) !== undefined);
+  // A list the page took nothing from keeps the place it had, even if nothing is left ahead of it.
+  const boundary = ({ likes, createdAt, contentId }: Candidate): Boundary => ({ likes, createdAt, contentId });
   return {
     window: { from: windowStart, to: anchor },
     picks,
-    truncated: lists.some((_, t) => peek(t) !== undefined),
-    positions: [...pos],
-    freshPositions: [...freshPos],
+    truncated: more.includes(true),
+    after: lists.map((list, t) => (pos[t]! > start[t]! ? boundary(list[pos[t]! - 1]!) : (opts.after?.[t] ?? null))),
+    freshAfter: freshPools.map(({ keys }, t) => (freshPos[t]! > freshStart[t]! ? keys[freshPos[t]! - 1]! : (fresh?.after?.[t] ?? null))),
   };
 }

@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate, type AuthUser } from '../auth/apiKey.js';
+import { commentRemoval, publishComment, removeCommentRows } from '../comments.js';
 import { loadContent } from '../content.js';
 import { addOnce, ignoreConflicts } from '../db/index.js';
 import { setForDeletion } from '../deletion.js';
@@ -519,27 +520,37 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     });
 
   /**
-   * Accepts a comment from the moderation queue: it is published among its post's comments (see
-   * CommentStore.publish), where it was sent, not where it was accepted. Server moderators and
-   * admins. Its author is told.
+   * Accepts a comment from the moderation queue: it is published among its post's comments, or
+   * among the replies to the comment it replies to (see CommentStore.publish), where it was sent,
+   * not where it was accepted. A comment that an edit took back to the queue is published as
+   * edited, with the replies and the likes it had. Server moderators and admins. Its author is told.
+   *
+   * A reply to a comment that was deleted while the reply waited is published like any other,
+   * under the placeholder the comment left. Only a reply whose comment left nothing at all isn't
+   * (see publishComment): it is removed, and the request is refused (404).
    */
   app.post('/moderation/queue/:contentId/comments/:commentId/accept', async (req) => {
     const { contentId, commentId } = CommentParams.parse(req.params);
     const moderator = await asServerModerator(req, Credentials.parse(req.body ?? {}));
     await loadContent(db, contentId);
-    const comment = await decide(contentId, commentId, () => comments.publish(contentId, commentId));
+    // Where comments wait, or where published ones are: an accept that published it and then failed to take its row out, or an edit that has put its row in and not yet taken it back.
+    const comment = (await comments.getHeld(contentId, commentId)) ?? (await comments.get(contentId, commentId));
+    const published = await decide(contentId, commentId, async () => comment !== null && (await publishComment(deps, comment)));
     // A row whose comment the store doesn't have: it is out of the queue, and there is nothing to publish.
     if (!comment) throw notFound(msg('comment.not_found'));
+    if (!published) throw notFound(msg('comment.reply_to_gone'));
     req.log.info({ contentId, commentId, moderator: moderator.id }, 'accepted a comment from the moderation queue');
     await notify(deps, { userId: comment.userId, kind: 'comment_accepted', contentId, comment: comment.text, by: moderator.id }, req.log);
     return { contentId, commentId, status: 'published' };
   });
 
   /**
-   * Rejects a comment in the moderation queue: it is deleted, at once and for good. Server
-   * moderators and admins. Only what waits in the queue: a published comment is its author's, the
-   * post's publisher's or an admin's to delete, unless it was reported (see routes/reports.ts).
-   * Its author is told.
+   * Rejects a comment in the moderation queue: it is deleted, at once and for good, as any comment
+   * is (see removeComment): that comment, and none of the comments that reply to it, which a
+   * comment that an edit took back to the queue may have. They stay, under a placeholder that
+   * says the comment was deleted. Server moderators and admins. Only what waits in the queue: a published comment is its
+   * author's, the post's publisher's or an admin's to delete, unless it was reported (see
+   * routes/reports.ts). Its author is told.
    */
   app.post('/moderation/queue/:contentId/comments/:commentId/reject', async (req) => {
     const { contentId, commentId } = CommentParams.parse(req.params);
@@ -547,7 +558,12 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     await loadContent(db, contentId);
     // Read before it is removed, for the notice that quotes it.
     const comment = await comments.getHeld(contentId, commentId);
-    await decide(contentId, commentId, () => comments.remove(contentId, commentId));
+    // Planned before the transaction, and finished after it: both read the database on their own.
+    const removal = await commentRemoval(deps, contentId, commentId);
+    await decide(contentId, commentId, removal.remove);
+    // What else the queues had of it: the reports of it, made while it was published.
+    await removeCommentRows(db, contentId, commentId);
+    await removal.finish();
     req.log.info({ contentId, commentId, moderator: moderator.id }, 'rejected a comment from the moderation queue');
     if (comment) await notify(deps, { userId: comment.userId, kind: 'comment_rejected', contentId, comment: comment.text, by: moderator.id }, req.log);
     return { contentId, commentId, status: 'deleted' };

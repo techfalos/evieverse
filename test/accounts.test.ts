@@ -32,7 +32,7 @@ for (const target of TARGETS) {
     };
     const remove = (by: User | null, userId: string) => req(by, 'DELETE', `/users/${userId}`);
     const userRow = (userId: string) => ctx.db.selectFrom('users').select(['id', 'deleted_at']).where('id', '=', userId).executeTakeFirst();
-    const register = (username: string) => req(null, 'POST', '/register', { username });
+    const register = (username: string) => ctx.registration({ username });
     const inbox = async (u: User) => ok(await req(u, 'GET', `/users/${u.userId}/inbox`)).inbox as { kind: string; from?: { userId: string; username: string } | null; text: string }[];
 
     it('lets a user delete their own account, which is gone at once when it has no posts', async () => {

@@ -50,7 +50,7 @@ variable "request_timeout" {
 }
 
 variable "trust_proxy" {
-  description = "How many proxies in front of a service add to X-Forwarded-For (the gateway, then Cloud Run's front end). The address counted for per-address limits is read that many entries from the end. Check it after the first apply: see docs/DEPLOY.md."
+  description = "How many proxies in front of a service add to X-Forwarded-For (the gateway, then Cloud Run's front end). The client address that the audit log and the request log record is read that many entries from the end. Check it after the first apply: see docs/DEPLOY.md."
   type        = number
   default     = 2
 }

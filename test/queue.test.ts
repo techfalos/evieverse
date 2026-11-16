@@ -1,9 +1,13 @@
+import { readdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
+import { newCommentId } from '../src/comments.js';
 import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { routeOf } from '../src/moderation/trust.js';
-import { as, createTestContext, queued, requests, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
+import { commentIndexKey, commentKey } from '../src/storage/commentStore.js';
+import { as, createTestContext, multipart, PNG, queued, requests, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
 
 const NO_CONTENT = '00000000-0000-4000-8000-000000000000';
 const REFUSED = "the post contains a word or phrase this server doesn't allow, so it wasn't published";
@@ -37,7 +41,7 @@ for (const target of TARGETS) {
     afterEach(() => ctx.close());
 
     const { storeText: store, feed, feedItems: feedOf, like } = requests(() => ctx);
-    const req = (u: User | null, method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: Record<string, unknown>) =>
+    const req = (u: User | null, method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', url: string, payload?: Record<string, unknown>) =>
       ctx.app.inject({ method, url, headers: u ? as(u) : {}, ...(payload && { payload }) });
     const ok = (res: LightMyRequestResponse, status = 201) => {
       expect(res.statusCode, res.body).toBe(status);
@@ -328,7 +332,19 @@ for (const target of TARGETS) {
       const queuedAt = now();
       const text = 'Buy SPAM here';
       const held = ok(await comment(bob, contentId, text), 202);
-      expect(held).toEqual({ commentId: expect.any(String), contentId, author: { userId: bob.userId, username: 'bob' }, text, createdAt: queuedAt, status: 'pending_review' });
+      expect(held).toEqual({
+        commentId: expect.any(String),
+        contentId,
+        parentId: null,
+        author: { userId: bob.userId, username: 'bob' },
+        text,
+        media: null,
+        likes: 0,
+        replies: 0,
+        createdAt: queuedAt,
+        editedAt: null,
+        status: 'pending_review',
+      });
       const { commentId } = held;
 
       // It is stored, with its score, and not among the post's comments.
@@ -352,7 +368,8 @@ for (const target of TARGETS) {
       const third = ok(await comment(carol, contentId, 'Spam again'), 202).commentId;
       ctx.clock.now += 1000;
       const laterPost = ok(await store(bob, 'Spam of my own #news'), 202).contentId;
-      const record = { kind: 'comment', commentId, contentId, author: { userId: bob.userId, username: 'bob' }, text, createdAt: queuedAt, trustScore: 0, queuedAt };
+      const { status: _pending, ...waits } = held;
+      const record = { kind: 'comment', ...waits, trustScore: 0, queuedAt };
       const whole = [['post', heldPost], ['comment', commentId], ['comment', second], ['comment', third], ['post', laterPost]];
       for (const u of [mod, root]) {
         const queued = await queue(u);
@@ -381,7 +398,7 @@ for (const target of TARGETS) {
       const after = ok(await comment(bob, contentId, 'Sent after it'));
       ctx.clock.now += 1000;
       expect(ok(await decideOn(mod, contentId, commentId, 'accept'), 200)).toEqual({ contentId, commentId, status: 'published' });
-      const { status: _status, ...published } = held;
+      const published = waits;
       expect(await listed(contentId)).toEqual({ contentId, count: 3, comments: [first, published, after], nextCursor: null });
       expect(ok(await one(null, contentId, commentId), 200)).toEqual(published);
       expect(await ctx.comments.getHeld(contentId, commentId)).toBeNull();
@@ -421,6 +438,234 @@ for (const target of TARGETS) {
       expect(await ctx.comments.count(contentId)).toBe(0);
     });
 
+    it('holds an edit of a comment as it holds a comment, which takes a published one off the post until it is accepted and leaves its replies there, and holds a reply', async () => {
+      ctx = await createTestContext(target, { trust: { deleteBelow: 0 } });
+      const root = await admin();
+      const mod = await ctx.register('mod');
+      ok(await req(root, 'PUT', `/moderators/${mod.userId}`));
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const carol = await ctx.register('carol');
+      ok(await req(root, 'POST', '/moderation/blocked-words', { words: ['spam'] }), 200);
+      const NO_COMMENT = 'comment not found';
+      const COMMENT_NOT_QUEUED = 'the comment is not in the moderation queue';
+      const { contentId } = ok(await store(alice, 'Talk to me #news', { comments: true }));
+      const comment = (u: User, text: string, parentId?: string) => req(u, 'POST', `/content/${contentId}/comments`, { text, ...(parentId && { parentId }) });
+      const edit = (u: User, commentId: string, text: string) => req(u, 'PATCH', `/content/${contentId}/comments/${commentId}`, { text });
+      const listed = async () => ok(await req(null, 'GET', `/content/${contentId}/comments`), 200);
+      const repliesTo = (commentId: string) => req(null, 'GET', `/content/${contentId}/comments/${commentId}/replies`);
+      const one = (u: User | null, commentId: string) => req(u, 'GET', `/content/${contentId}/comments/${commentId}`);
+      const decideOn = (u: User, commentId: string, decision: 'accept' | 'reject') => req(u, 'POST', `/moderation/queue/${contentId}/comments/${commentId}/${decision}`);
+      const refusal = (res: LightMyRequestResponse) => [res.statusCode, res.json().error];
+      const rows = () => ctx.db.selectFrom('comment_queue').select(['comment_id', 'trust_score', 'created_at']).orderBy('created_at').execute();
+      const inbox = async (u: User) => ok(await req(u, 'GET', `/users/${u.userId}/inbox`), 200).inbox.map((m: Record<string, unknown>) => [m.kind, m.excerpt]);
+
+      const top = ok(await comment(bob, 'An honest comment'));
+      const { commentId } = top;
+      ctx.clock.now += 1000;
+      const answer = ok(await comment(carol, 'An honest reply', commentId));
+      ok(await req(carol, 'POST', '/like', { contentId, commentId }));
+
+      // An edit the server holds takes the comment back to the queue: it is off the post, and nothing else is.
+      // What is left in its place says that it waits, and nothing of it, and its replies stay under that.
+      ctx.clock.now += 1000;
+      const queuedAt = ctx.clock.now;
+      const held = ok(await edit(bob, commentId, 'Buy spam'), 202);
+      expect(held).toEqual({ ...top, text: 'Buy spam', likes: 1, replies: 1, editedAt: now(), status: 'pending_review' });
+      expect(await rows()).toEqual([{ comment_id: commentId, trust_score: 0, created_at: queuedAt }]);
+      const place = { ...top, author: null, text: '', replies: 1, status: 'pending_review' };
+      expect(await listed()).toEqual({ contentId, count: 2, comments: [place], nextCursor: null });
+      expect(await ctx.comments.get(contentId, commentId)).toBeNull();
+      expect(await ctx.comments.getHeld(contentId, commentId)).toMatchObject({ commentId, text: 'Buy spam' });
+      for (const u of [null, alice, carol]) expect(ok(await one(u, commentId), 200)).toEqual(place);
+      expect(ok(await repliesTo(commentId), 200)).toEqual({ contentId, commentId, count: 1, comments: [answer], nextCursor: null });
+      expect(ok(await one(null, answer.commentId), 200)).toEqual(answer);
+      for (const u of [bob, mod, root]) expect(ok(await one(u, commentId), 200)).toEqual(held);
+      // Redis without any of it reads the same from the store.
+      await ctx.hot.del([commentIndexKey(contentId), commentKey(commentId)]);
+      expect(await listed()).toEqual({ contentId, count: 2, comments: [place], nextCursor: null });
+      // While it waits it is nobody's to reply to, to like or to report.
+      expect(refusal(await comment(carol, 'Hello?', commentId))).toEqual([404, NO_COMMENT]);
+      for (const url of ['/like', '/report']) expect(refusal(await req(carol, 'POST', url, { contentId, commentId }))).toEqual([404, NO_COMMENT]);
+      const { status: _held, ...record } = held;
+      expect((await queue(mod)).queue).toEqual([{ kind: 'comment', ...record, trustScore: 0, queuedAt: now() }]);
+      // Nor is it anyone's to edit but its author's: to those who can't read it, it isn't there.
+      expect(refusal(await edit(carol, commentId, 'Mine now'))).toEqual([404, NO_COMMENT]);
+      expect(refusal(await edit(mod, commentId, 'Mine now'))).toEqual([403, "only the comment's author can edit this comment"]);
+
+      // Its author edits it where it waits: it keeps its place in the queue, and the text it has is no edit.
+      ctx.clock.now += 1000;
+      expect(ok(await edit(bob, commentId, 'Buy spam'), 200)).toEqual({ contentId, commentId, unchanged: true, status: 'pending_review' });
+      const again = ok(await edit(bob, commentId, 'Buy more spam'), 202);
+      expect(again).toEqual({ ...held, text: 'Buy more spam', editedAt: now() });
+      expect(await rows()).toEqual([{ comment_id: commentId, trust_score: 0, created_at: queuedAt }]);
+
+      // Accepted, it is back where it was, as edited, with the replies and the likes it had.
+      ctx.clock.now += 1000;
+      expect(ok(await decideOn(mod, commentId, 'accept'), 200)).toEqual({ contentId, commentId, status: 'published' });
+      const { status: _again, ...back } = again;
+      expect(await listed()).toEqual({ contentId, count: 2, comments: [back], nextCursor: null });
+      expect(ok(await repliesTo(commentId), 200)).toMatchObject({ count: 1, comments: [answer] });
+      expect(await ctx.comments.getHeld(contentId, commentId)).toBeNull();
+      expect(await rows()).toEqual([]);
+      expect(await inbox(bob)).toEqual([['comment_accepted', 'Buy more spam']]);
+
+      // Rejected, it is deleted as any comment is: that comment, with its likes and the reports of it, and no
+      // reply to it. They stay, under what is left in its place, which now says it was deleted. Its author is told.
+      ctx.clock.now += 1000;
+      ok(await req(alice, 'POST', '/report', { contentId, commentId: answer.commentId }));
+      ok(await req(carol, 'POST', '/report', { contentId, commentId }));
+      ok(await edit(bob, commentId, 'Spam it is'), 202);
+      expect(ok(await decideOn(root, commentId, 'reject'), 200)).toEqual({ contentId, commentId, status: 'deleted' });
+      const gone = { ...place, status: 'deleted' };
+      for (const u of [null, bob, mod]) expect(ok(await one(u, commentId), 200)).toEqual(gone);
+      expect(await listed()).toEqual({ contentId, count: 2, comments: [gone], nextCursor: null });
+      expect(ok(await repliesTo(commentId), 200)).toEqual({ contentId, commentId, count: 1, comments: [answer], nextCursor: null });
+      expect(await ctx.comments.getHeld(contentId, commentId)).toBeNull();
+      expect(await ctx.comments.likes(contentId, [commentId])).toEqual([0]);
+      expect(await rows()).toEqual([]);
+      expect((await ctx.db.selectFrom('comment_reports').select('comment_id').execute()).map((r) => r.comment_id)).toEqual([answer.commentId]);
+      expect((await inbox(bob))[0]).toEqual(['comment_rejected', 'Spam it is']);
+      expect(await inbox(carol)).toEqual([]);
+      // It is nobody's to edit, to reply to or to decide on any more.
+      expect(refusal(await edit(bob, commentId, 'Honest again'))).toEqual([404, NO_COMMENT]);
+      expect(refusal(await comment(carol, 'Hello?', commentId))).toEqual([404, NO_COMMENT]);
+      expect(refusal(await decideOn(root, commentId, 'accept'))).toEqual([404, COMMENT_NOT_QUEUED]);
+      // Once its last reply is deleted, nothing is left of it either.
+      ok(await req(carol, 'DELETE', `/content/${contentId}/comments/${answer.commentId}`), 200);
+      expect(await listed()).toEqual({ contentId, count: 0, comments: [], nextCursor: null });
+      expect(refusal(await one(bob, commentId))).toEqual([404, NO_COMMENT]);
+      expect(await ctx.db.selectFrom('comment_reports').selectAll().execute()).toEqual([]);
+
+      // A comment that waits leaves the queue, published, once its author edits it into one the server publishes.
+      ctx.clock.now += 1000;
+      const waiting = ok(await comment(bob, 'Free spam'), 202);
+      ctx.clock.now += 1000;
+      const cleaned = ok(await edit(bob, waiting.commentId, 'Free advice'), 200);
+      const { status: _waiting, ...sent } = waiting;
+      expect(cleaned).toEqual({ ...sent, text: 'Free advice', editedAt: now() });
+      expect(await rows()).toEqual([]);
+      expect(await ctx.comments.getHeld(contentId, waiting.commentId)).toBeNull();
+      expect(await listed()).toEqual({ contentId, count: 1, comments: [cleaned], nextCursor: null });
+      expect(refusal(await decideOn(mod, waiting.commentId, 'accept'))).toEqual([404, COMMENT_NOT_QUEUED]);
+      // Nobody decided on it, so nobody tells its author.
+      expect(await inbox(bob)).toHaveLength(2);
+
+      // A reply is held as a comment is, and is published where it was sent: under the comment it replies to.
+      ctx.clock.now += 1000;
+      const reply = ok(await comment(carol, 'A spam reply', cleaned.commentId), 202);
+      expect(reply).toMatchObject({ parentId: cleaned.commentId, status: 'pending_review' });
+      expect(ok(await one(null, cleaned.commentId), 200)).toMatchObject({ replies: 0 });
+      expect(ok(await one(mod, reply.commentId), 200)).toEqual(reply);
+      ok(await decideOn(mod, reply.commentId, 'accept'), 200);
+      const { status: _reply, ...publishedReply } = reply;
+      expect(ok(await repliesTo(cleaned.commentId), 200)).toEqual({ contentId, commentId: cleaned.commentId, count: 1, comments: [publishedReply], nextCursor: null });
+      expect(await listed()).toMatchObject({ count: 2, comments: [{ commentId: cleaned.commentId, replies: 1 }] });
+
+      // A reply that waits stays in the queue when the comment it replies to is deleted, as its other replies stay
+      // on the post: a reply that waits is enough for the comment to leave its place behind.
+      ctx.clock.now += 1000;
+      ok(await req(carol, 'DELETE', `/content/${contentId}/comments/${reply.commentId}`), 200);
+      const orphan = ok(await comment(carol, 'More spam', cleaned.commentId), 202).commentId;
+      const second = ok(await comment(carol, 'Still more spam', cleaned.commentId), 202).commentId;
+      const elsewhere = ok(await comment(carol, 'Spam of its own'), 202).commentId;
+      const waits = [{ commentId: orphan, parentId: cleaned.commentId }, { commentId: second, parentId: cleaned.commentId }, { commentId: elsewhere, parentId: null }];
+      expect((await queue(mod)).queue).toMatchObject(waits);
+      ok(await req(bob, 'DELETE', `/content/${contentId}/comments/${cleaned.commentId}`), 200);
+      expect((await queue(mod)).queue).toMatchObject(waits);
+      const left = { ...cleaned, author: null, text: '', replies: 0, editedAt: null, status: 'deleted' };
+      expect(await listed()).toEqual({ contentId, count: 1, comments: [left], nextCursor: null });
+      // Rejected, a reply that waits goes alone too, and what is left of the comment stays for the one that still waits.
+      ok(await decideOn(mod, second, 'reject'), 200);
+      expect(await listed()).toEqual({ contentId, count: 1, comments: [left], nextCursor: null });
+      // Accepted, a reply is published under what is left of the comment it replies to.
+      ok(await decideOn(mod, orphan, 'accept'), 200);
+      expect(ok(await repliesTo(cleaned.commentId), 200)).toMatchObject({ count: 1, comments: [{ commentId: orphan, text: 'More spam' }] });
+      expect(await listed()).toEqual({ contentId, count: 2, comments: [{ ...left, replies: 1 }], nextCursor: null });
+      ok(await decideOn(mod, elsewhere, 'reject'), 200);
+      // The last reply deleted, nothing is left of either.
+      ok(await req(carol, 'DELETE', `/content/${contentId}/comments/${orphan}`), 200);
+      expect(await listed()).toEqual({ contentId, count: 0, comments: [], nextCursor: null });
+      expect(refusal(await one(null, cleaned.commentId))).toEqual([404, NO_COMMENT]);
+
+      // One that was sent as its comment was being deleted, each before the other was there to see, has nowhere to go: accepting it removes it.
+      const stray = { commentId: newCommentId(ctx.clock.now), contentId, parentId: cleaned.commentId, userId: carol.userId, text: 'Spam to nobody', createdAt: ctx.clock.now };
+      await ctx.comments.put(stray, { held: true });
+      await ctx.db.insertInto('comment_queue').values({ comment_id: stray.commentId, content_id: contentId, trust_score: 0, created_at: ctx.clock.now }).execute();
+      expect((await queue(mod)).queue).toMatchObject([{ commentId: stray.commentId, parentId: cleaned.commentId }]);
+      expect(refusal(await decideOn(mod, stray.commentId, 'accept'))).toEqual([404, 'the comment it replies to is gone, so this comment was deleted']);
+      expect(await ctx.comments.getHeld(contentId, stray.commentId)).toBeNull();
+      expect(await rows()).toEqual([]);
+      expect(await listed()).toEqual({ contentId, count: 0, comments: [], nextCursor: null });
+    });
+
+    it('holds a comment that comes with an image or a video as any other, its file with it, which only those who read the comment read', async () => {
+      ctx = await createTestContext(target, { trust: { deleteBelow: 0 } });
+      const root = await admin();
+      const mod = await ctx.register('mod');
+      ok(await req(root, 'PUT', `/moderators/${mod.userId}`));
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const carol = await ctx.register('carol');
+      ok(await req(root, 'POST', '/moderation/blocked-words', { words: ['spam'] }), 200);
+      const { contentId } = ok(await store(alice, 'Show me #news', { comments: true }));
+      const attach = (u: User, fields: Record<string, string>, name = 'pixel.png') => {
+        const form = multipart(fields, { name, type: 'image/png', data: PNG });
+        return ctx.app.inject({ method: 'POST', url: `/content/${contentId}/comments`, payload: form.payload, headers: { ...form.headers, ...as(u) } });
+      };
+      const edit = (u: User, commentId: string, text: string) => req(u, 'PATCH', `/content/${contentId}/comments/${commentId}`, { text });
+      const one = (u: User | null, commentId: string) => req(u, 'GET', `/content/${contentId}/comments/${commentId}`);
+      const rawOf = (u: User | null, commentId: string) => req(u, 'GET', `/content/${contentId}/comments/${commentId}/raw`);
+      const decideOn = (u: User, commentId: string, decision: 'accept' | 'reject') => req(u, 'POST', `/moderation/queue/${contentId}/comments/${commentId}/${decision}`);
+      const listed = async () => ok(await req(null, 'GET', `/content/${contentId}/comments`), 200);
+      /** The comments whose image or video the content store holds. */
+      const filed = async () => (await readdir(join(ctx.dir, 'content', 'comments', contentId, 'media')).catch(() => [])).sort();
+      const readers = [bob, mod, root];
+      const others = [null, alice, carol];
+      const reads = async (commentId: string, who: (User | null)[]) => Promise.all(who.map(async (u) => (await rawOf(u, commentId)).statusCode));
+
+      // Held for its text: the file is stored with it, and read by whoever reads the comment, and nobody else.
+      const held = ok(await attach(bob, { text: 'Buy spam' }), 202);
+      const { commentId } = held;
+      const media = { kind: 'image', url: `/content/${contentId}/comments/${commentId}/raw`, mimeType: 'image/png', size: PNG.length };
+      expect(held).toMatchObject({ text: 'Buy spam', media, status: 'pending_review' });
+      expect(await filed()).toEqual([commentId]);
+      expect(await reads(commentId, others)).toEqual([404, 404, 404]);
+      expect(await reads(commentId, readers)).toEqual([200, 200, 200]);
+      expect((await rawOf(mod, commentId)).rawPayload.equals(PNG)).toBe(true);
+      const { status: _held, ...record } = held;
+      expect((await queue(mod)).queue).toEqual([{ kind: 'comment', ...record, trustScore: 0, queuedAt: now() }]);
+
+      // A file's name is read as a post's is: one with nothing else to it is held for that.
+      ctx.clock.now += 1000;
+      const named = ok(await attach(carol, {}, 'spam.png'), 202);
+      expect(named).toMatchObject({ text: '', media: { kind: 'image' }, status: 'pending_review' });
+      expect(ok(await attach(carol, {}, 'ham.png'))).not.toHaveProperty('status');
+
+      // Accepted, the comment is published with the file it came with, where the file already was.
+      ctx.clock.now += 1000;
+      ok(await decideOn(mod, commentId, 'accept'), 200);
+      expect(ok(await one(null, commentId), 200)).toEqual(record);
+      expect(await reads(commentId, [...others, ...readers])).toEqual([200, 200, 200, 200, 200, 200]);
+      expect((await listed()).comments).toMatchObject([{ commentId, media }, { text: '', media: { kind: 'image' } }]);
+
+      // Rejected, it is deleted, and its file with it.
+      ok(await decideOn(root, named.commentId, 'reject'), 200);
+      expect(await filed()).toHaveLength(2);
+      expect((await rawOf(carol, named.commentId)).statusCode).toBe(404);
+
+      // An edit the server holds takes the comment off the post, and its file with it, until it is accepted.
+      ctx.clock.now += 1000;
+      ok(await edit(bob, commentId, 'Buy more spam'), 202);
+      expect(await reads(commentId, others)).toEqual([404, 404, 404]);
+      expect(await reads(commentId, readers)).toEqual([200, 200, 200]);
+      expect(await filed()).toHaveLength(2);
+      ok(await decideOn(mod, commentId, 'reject'), 200);
+      expect(await filed()).toHaveLength(1);
+      expect(await reads(commentId, readers)).toEqual([404, 404, 404]);
+      expect(await ctx.db.selectFrom('comment_queue').selectAll().execute()).toEqual([]);
+    });
+
     it('refuses a comment that scores under the lower threshold, storing nothing, and leaves a hashtag out of it', async () => {
       ctx = await createTestContext(target);
       const root = await admin();
@@ -444,6 +689,11 @@ for (const target of TARGETS) {
       expect((await queue(root)).queue).toEqual([]);
       const kept = ok(await comment(bob, contentId, 'Take my course'));
       expect(ok(await req(null, 'GET', `/content/${contentId}/comments`), 200)).toMatchObject({ count: 1, comments: [kept] });
+      // An edit that scores under the threshold is refused too, and leaves the comment as it was.
+      const edit = await req(bob, 'PATCH', `/content/${contentId}/comments/${kept.commentId}`, { text: 'Take my spam' });
+      expect([edit.statusCode, edit.json()]).toEqual([422, { error: "the comment contains a word or phrase this server doesn't allow, so it wasn't published" }]);
+      expect(ok(await req(null, 'GET', `/content/${contentId}/comments/${kept.commentId}`), 200)).toEqual(kept);
+      expect(await ctx.db.selectFrom('comment_queue').selectAll().execute()).toEqual([]);
       // Nor is a comment theirs to delete, or to decide on.
       expect((await req(mod, 'DELETE', `/content/${contentId}/comments/${kept.commentId}`)).statusCode).toBe(403);
       expect((await req(mod, 'GET', '/moderation/queue')).statusCode).toBe(403);
@@ -622,7 +872,7 @@ for (const target of TARGETS) {
       expect((await feedOf('weather')).map((i) => [i.contentId, i.tags, i.moderated])).toEqual([[c, ['weather'], false]]);
     });
 
-    it("keeps a feed session's view of what was moderated when it started, and ties a cursor to its filter", async () => {
+    it('shows a feed session under way what moderators decided since its first page, and ties a cursor to its filter', async () => {
       ctx = await createTestContext(target, { feed: { pageSize: 2 } });
       const root = await admin();
       const alice = await ctx.register('alice');
@@ -637,21 +887,26 @@ for (const target of TARGETS) {
       await ctx.compactor.runOnce();
 
       const first = await feed('tags=news&moderated=false');
-      expect(first.count).toBe(2);
+      expect(ids(records(first, 'news'))).toEqual([posted[4], posted[3]]);
       expect(first.nextCursor).toBeTruthy();
-      for (const id of posted) ok(await req(root, 'PUT', `/content/${id}/tags/news`));
+      // One post the session has shown is approved, and one it hasn't reached.
+      for (const id of [posted[3]!, posted[2]!]) ok(await req(root, 'PUT', `/content/${id}/tags/news`));
       await ctx.compact();
 
-      // A session that starts now finds the queue empty; the one under way reads on as it began.
-      expect(await feed('tags=news&moderated=false')).toMatchObject({ count: 0, nextCursor: null });
-      const seen = records(first, 'news');
-      for (let cursor = first.nextCursor; cursor; ) {
-        const page = await feed(`tags=news&moderated=false&cursor=${cursor}`);
-        seen.push(...records(page, 'news'));
-        cursor = page.nextCursor;
-      }
-      expect(ids(seen).sort()).toEqual([...posted].sort());
+      // The queue is what is left to decide, to the session under way as to one that starts now.
+      const rest = async () => {
+        const seen: Feed['tags'][string] = [];
+        for (let cursor = first.nextCursor; cursor; ) {
+          const page = await feed(`tags=news&moderated=false&cursor=${cursor}`);
+          seen.push(...records(page, 'news'));
+          cursor = page.nextCursor;
+        }
+        return seen;
+      };
+      const seen = await rest();
+      expect(ids(seen)).toEqual([posted[1], posted[0]]);
       expect(seen.every((i) => i.moderated === false)).toBe(true);
+      expect(ids(records(await feed('tags=news&moderated=false&limit=10'), 'news'))).toEqual([posted[4], posted[1], posted[0]]);
 
       for (const other of ['', '&moderated=true']) {
         const res = await ctx.app.inject({ method: 'GET', url: `/feed?tags=news${other}&cursor=${first.nextCursor}` });
@@ -659,7 +914,11 @@ for (const target of TARGETS) {
       }
       expect((await ctx.app.inject({ method: 'GET', url: '/feed?tags=news&moderated=maybe' })).statusCode).toBe(400);
 
+      // Once everything is decided, the session's next page is the end of an empty queue.
+      for (const id of [posted[4]!, posted[1]!, posted[0]!]) ok(await req(root, 'PUT', `/content/${id}/tags/news`));
       await ctx.compact();
+      expect(await rest()).toEqual([]);
+      expect(await feed(`tags=news&moderated=false&cursor=${first.nextCursor}`)).toMatchObject({ count: 0, truncated: false, nextCursor: null });
       expect((await feed('tags=news&moderated=false')).count).toBe(0);
       expect(Object.keys(await flagsOf('news', '&moderated=true&limit=5')).sort()).toEqual([...posted].sort());
     });

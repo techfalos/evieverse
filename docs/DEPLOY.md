@@ -1,37 +1,37 @@
 # Deploying Evieverse with Terraform
 
-Each directory under `deploy/terraform/` is a self-contained root module that builds the image from this repo, provisions everything the server needs, and prints the HTTPS URL when it finishes.
+Each directory under `deploy/terraform/` is a self-contained root module that builds the image from this repo, provisions everything the instance needs, and prints the HTTPS URL when it finishes.
 
-The modules run the server as functions: the routes are split into four groups, each group runs on its own and scales with its own traffic (down to nothing, where the cloud allows), and one address in front sends each request to its group. The compactor isn't a function: it's one container that's always running, beside them. Everything runs the same container image.
 
-| Cloud | Functions | One address in front | Compactor | Redis (feed index, hot summaries) | Content and summaries | Database |
-|-------|-----------|----------------------|-----------|-----------------------------------|-----------------------|----------|
-| AWS | Lambda (container image), one per group | CloudFront (`*.cloudfront.net`) in front of an API Gateway HTTP API | ECS Fargate service of one task | ElastiCache for Valkey 8, with a replica | S3 | RDS PostgreSQL 16 behind RDS Proxy |
-| GCP | Cloud Run services, one per group | API Gateway (`*.gateway.dev`) | Cloud Run worker pool of one instance | Memorystore for Redis 7.2, Standard tier | GCS | Cloud SQL PostgreSQL 16 |
-| Azure | Container Apps, one per group | Front Door (`*.azurefd.net`) | Container App of one replica, with no ingress | Azure Managed Redis, highly available | Blob Storage | PostgreSQL Flexible Server 16 |
+| Cloud | Functions                               | One address in front                                                | Compactor                                     | Redis (feed index, hot summaries)        | Content and summaries | Database                           |
+| ----- | --------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------- | ---------------------------------------- | --------------------- | ---------------------------------- |
+| AWS   | Lambda (container image), one per group | CloudFront (`*.cloudfront.net`) in front of an API Gateway HTTP API | ECS Fargate service of one task               | ElastiCache for Valkey 8, with a replica | S3                    | RDS PostgreSQL 16 behind RDS Proxy |
+| GCP   | Cloud Run services, one per group       | API Gateway (`*.gateway.dev`)                                       | Cloud Run worker pool of one instance         | Memorystore for Redis 7.2, Standard tier | GCS                   | Cloud SQL PostgreSQL 16            |
+| Azure | Container Apps, one per group           | Front Door (`*.azurefd.net`)                                        | Container App of one replica, with no ingress | Azure Managed Redis, highly available    | Blob Storage          | PostgreSQL Flexible Server 16      |
+
 
 Summaries share the content bucket, under `summaries/`, and so do comments, under `comments/`: one small object each, which is the only place a published comment is kept.
 
-They are containers on every cloud, not zip packages, because the storage library's native code needs a newer C library (glibc 2.38) than the clouds' stock Node 22 function runtimes have. On Google Cloud and Azure that means the services that scale containers with traffic (Cloud Run, Container Apps) rather than Cloud Run functions or Azure Functions.
-
 ## Route groups
 
-| Group | Requests | Uses |
-|-------|----------|------|
-| `feed` | `GET /feed` | Redis and the bucket only: no database connection |
-| `content` | `GET /content/:id`, `GET /content/:id/raw`, and reading a post's comments: `GET /content/:id/comments`, `GET /content/:id/comments/:commentId` | Database, bucket, and Redis for comments |
-| `store` | `POST /uploads`, `POST /store` | Database, Redis, bucket |
-| `api` | Everything else: `/register`, `/users`, `/whoami`, `/languages`, `/like`, `/report`, follows and the following feed (`GET /feed/following`, which asks the database who may read it), moderation, `/admins`, `/moderators`, `/banned`, `DELETE /users/:id` (deleting an account), `/tagging`, `/tags`, `DELETE /content/:id`, writing and deleting comments (`POST /content/:id/comments`, `DELETE /content/:id/comments/:commentId`), `/cli`, `/health` | Database, Redis, bucket |
 
-The groups are defined in [`src/functions/groups.ts`](../src/functions/groups.ts), and each module's routing table (`local.routes`, or `local.groups` on Azure) follows it. A route added to a group other than `api` needs a line there too; anything a table doesn't list goes to `api`. Comments needed no line: every module already sends `GET` under `/content/` to the content group and every other method there to `api`, which is where their reads and writes belong. The following feed is the other way round: it sits under `/feed` but belongs to `api`, so each table sends only `/feed` itself to the feed group. A deployment made before that needs the module applied again, which changes the image and the routing together; with the new image behind the old routing, `GET /feed/following` gets `404` from the feed group.
+| Group     | Requests                                                                                                                                       | Uses                                              |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| `feed`    | `GET /feed`                                                                                                                                    | Redis and the bucket only: no database connection |
+| `content` | `GET /content/:id`, `GET /content/:id/raw`, and reading a post's comments: `GET /content/:id/comments`, `GET /content/:id/comments/:commentId` | Database, bucket, and Redis for comments          |
+| `store`   | `POST /uploads`, `POST /store`                                                                                                                 | Database, Redis, bucket                           |
+| `api`     | Everything else                                                                                                                                | Database, Redis, bucket                           |
+
+
+
 
 ## Prerequisites
 
 - Terraform 1.5 or newer.
 - Docker for AWS and GCP (the image is built locally and pushed). Azure builds remotely with `az acr build`, so Docker isn't needed there.
-- The cloud's CLI, signed in: `aws configure` / `gcloud auth login && gcloud auth application-default login` / `az login`. Terraform also uses `gcloud` and `az` to run the database migrations.
+- The cloud's CLI: `aws configure` / `gcloud auth login && gcloud auth application-default login`  or  `az login`. Terraform also uses `gcloud` and `az` to run the database migrations.
 
-To skip the build, set `image` to an image you've already pushed. On AWS it must be in an ECR repository of the same account and region, since Lambda runs images from nowhere else.
+To skip the build, set `image` to an image you've already pushed. On AWS it must be in an ECR repository of the same account and region.
 
 ## Deploy
 
@@ -52,11 +52,15 @@ terraform init
 terraform apply -var subscription_id=00000000-0000-0000-0000-000000000000 -var location=eastus
 ```
 
-At the end of `apply`, Terraform prints `url` (for example `https://d1234abcd.cloudfront.net`) and `try_it`, which shows ready-to-paste `curl` commands and how to install the CLI and use it as the deployment's [admin](#the-admin-account). To see them again later, run `terraform output url`.
+At the end of `apply`, Terraform prints the instance `url` (for example `https://d1234abcd.cloudfront.net`) and `try_it`, which shows ready-to-paste `curl` commands and how to install the CLI and use it as the deployment's [admin](#the-admin-account). To see them again later, run `terraform output url`.
 
-Functions don't migrate the database when they start, as many can start at once. Instead, every `apply` that changes the image or the admin account first runs the migrations (a Lambda function on AWS, a job on GCP and Azure), waits for them, and only then updates the functions and the compactor. If the migrations fail, the `apply` stops there with the old functions still serving.
+**Database Migrations**
 
-Settings are passed through `environment`, and credentials (such as those in `SUMMARY_OPTIONS`, for summaries kept outside the content bucket) through `secrets`. On GCP and Azure, secrets go to Secret Manager and Container Apps secrets, never into plain environment variables. On AWS, a Lambda function can only take them as environment variables, which are encrypted at rest but shown to anyone allowed to read the function's configuration (`lambda:GetFunctionConfiguration`); the database and Redis URLs are there too. The compactor's task reads them from Secrets Manager.
+Every `apply` first runs the migrations (powered by a Lambda function on AWS, a job on GCP and Azure), waits for them, and only then updates the functions and the compactor. If the migrations fail, the `apply` stops there with the old functions still serving.
+
+**Settings**
+
+Settings are passed through `environment`, and credentials through `secrets`. On GCP and Azure, secrets go to Secret Manager and Container Apps secrets, never into plain environment variables. On AWS, a Lambda function can only take them as environment variables, which are encrypted at rest but shown to anyone allowed to read the function's configuration (`lambda:GetFunctionConfiguration`). The compactor's task reads them from Secrets Manager.
 
 ```hcl
 # terraform.tfvars (git-ignored)
@@ -64,11 +68,11 @@ environment = { TAGGING_MODE = "server", TAGGING_SERVER_TAGS = "news" }
 secrets     = { SUMMARY_OPTIONS = "{\"bucket\":\"summaries\",\"access_key_id\":\"...\",\"secret_access_key\":\"...\"}" }
 ```
 
-[CONFIG.md](CONFIG.md) lists every setting, and says what an `apply` does when you change one.
+[CONFIG.md](CONFIG.md) lists all settings.
 
 ## The admin account
 
-Every deployment gets an [admin](API.md#moderation) account, so there's someone to moderate it, appoint moderators and make more admins from the first minute. Each module does the same:
+Initial deployment creates an [admin](API.md#moderation) account:
 
 1. **Terraform makes the account's id and API key,** in the format the server issues keys in. The key is random, and exists in two places only: the Terraform state, and the profile file below.
 2. **The migration step creates the account.** It's given the key's SHA-256, not the key (`BOOTSTRAP_ADMIN`), and after the migrations it creates the user if it isn't there, makes it an admin, and makes that key its only one. It runs again whenever the image or the account's values change, and changes nothing when they haven't.
@@ -83,25 +87,31 @@ evieverse --profile evieverse admins grant <userId>            # make your own a
 
 With no other profile on the machine, `--profile` can be left out.
 
-| Variable | Default | |
-|----------|---------|---|
-| `admin_username` | `admin` | The account's username when it's created. It fails the apply if another user has it. To rename the account later, use `PATCH /users/:userId`: changing this variable doesn't. |
-| `install_admin_profile` | `true` | Write the profile file. Set it to `false` where applies run unattended (CI), and read the key with `terraform output -raw admin_api_key`. |
 
-| Output | |
-|--------|---|
-| `admin_user_id` | The account's `userId`. |
+| Variable                | Default |                                                                                                                                                                               |
+| ----------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `admin_username`        | `admin` | The account's username when it's created. It fails the apply if another user has it. To rename the account later, use `PATCH /users/:userId`: changing this variable doesn't. |
+| `install_admin_profile` | `true`  | Write the profile file. Set it to `false` where applies run unattended (CI), and read the key with `terraform output -raw admin_api_key`.                                     |
+
+
+
+| Output          |                                                                 |
+| --------------- | --------------------------------------------------------------- |
+| `admin_user_id` | The account's `userId`.                                         |
 | `admin_api_key` | Its API key (sensitive): `terraform output -raw admin_api_key`. |
-| `admin_profile` | The profile file the apply wrote, if it did. |
+| `admin_profile` | The profile file the apply wrote, if it did.                    |
+
 
 Things to know:
 
 - **On another machine,** sign in with the outputs: `EVIEVERSE_API_KEY="$(terraform output -raw admin_api_key)" evieverse login "$(terraform output -raw url)" "$(terraform output -raw admin_user_id)"`. A machine that applies an existing deployment gets the profile file written too.
 - **The key is in the Terraform state,** in plain text, like the database password and the other secrets these modules create. Keep the state where only the deployment's operators can read it (an encrypted remote backend, rather than a file in the repo).
 - **To replace the key,** run `terraform apply -replace=random_password.admin_key`. The migration step gives the account the new key and revokes the old one, and the profile file is rewritten.
-- **Don't replace it through the API** ([`POST /users/:userId/key`](API.md#post-usersuseridkey), or `evieverse key rotate`). The deployment doesn't learn of a key made there: the next apply that runs the migration step revokes it and makes the deployment's key work again, which undoes the replacement if that key had leaked.
+- **Don't replace it through the API** (`[POST /users/:userId/key](API.md#post-usersuseridkey)`, or `evieverse key rotate`). The deployment doesn't learn of a key made there: the next apply that runs the migration step revokes it and makes the deployment's key work again, which undoes the replacement if that key had leaked.
 - **The account is a break-glass one.** Make your own account an admin with it, and use that from day to day. It can't be locked out by the API: the server refuses to revoke or delete its only admin, and if this account's role is revoked while others remain, the next apply that runs the migration step restores it. An admin can't ban it either. If its account is deleted while others remain, the migration step fails until the compactor has purged the account (which frees its username), and then creates it again.
-- **`terraform destroy`** removes the profile file with the deployment.
+- `terraform destroy` removes the profile file with the deployment.
+
+
 
 ## Upgrading from the container deployment
 
@@ -117,17 +127,19 @@ Run `terraform plan` first and read what it will destroy.
 
 A request to a function can't carry a large file. The limits on a file sent in the request to `/store`:
 
-| Cloud | Largest file in a request | Why |
-|-------|---------------------------|-----|
-| AWS | About 4 MB | Lambda takes 6 MB per request, and files arrive base64-encoded |
-| GCP | 32 MiB | Cloud Run's and API Gateway's limit on a request body |
-| Azure | None set by Container Apps; not tested through Front Door | |
 
-Larger files go straight to the bucket: the client asks [`POST /uploads`](API.md#post-uploads) for a link, sends the file to it, and posts it with `/store` by its `uploadId`. Every module sets the bucket up for that:
+| Cloud | Largest file in a request                                 | Why                                                            |
+| ----- | --------------------------------------------------------- | -------------------------------------------------------------- |
+| AWS   | About 4 MB                                                | Lambda takes 6 MB per request, and files arrive base64-encoded |
+| GCP   | 32 MiB                                                    | Cloud Run's and API Gateway's limit on a request body          |
+| Azure | None set by Container Apps; not tested through Front Door |                                                                |
+
+
+Larger files go straight to the bucket: the client asks `[POST /uploads](API.md#post-uploads)` for a link, sends the file to it, and posts it with `/store` by its `uploadId`. Every module sets the bucket up for that:
 
 - **CORS:** pages on `upload_origins` (any origin by default) may send files to the bucket from a browser. The link is the permission; this only tells browsers which pages may use one.
 - **Expiry:** an upload nobody posts is deleted after a day (`uploads/` in the bucket).
-- **`MAX_UPLOAD_BYTES`** is the largest file `/store` accepts either way. To post an upload, `/store` copies it within the bucket, inside the request's time limit: 30 seconds on AWS, `request_timeout` on GCP (300) and Azure (240). AWS is set to 256 MiB and GCP to 1 GiB. Those are estimates of what fits, not measurements; time a large upload on your own deployment before raising them through `environment`. Azure keeps the server's default (5 GiB), which is more than fits in its timeout.
+- `MAX_UPLOAD_BYTES` is the largest file `/store` accepts either way. To post an upload, `/store` copies it within the bucket, inside the request's time limit: 30 seconds on AWS, `request_timeout` on GCP (300) and Azure (240). AWS is set to 256 MiB and GCP to 1 GiB. Those are estimates of what fits, not measurements; time a large upload on your own deployment before raising them through `environment`. Azure keeps the server's default (5 GiB), which is more than fits in its timeout.
 
 On GCP, signing a link needs a private key, and Cloud Run's own credentials don't have one. The module therefore creates a service account that can only read and write the content bucket, and a key for it, which the functions use for the bucket (`direct_uploads`, on by default). The key doesn't expire, and is kept in Secret Manager and in the Terraform state. Organisations that forbid service account keys need `direct_uploads = false`: `/uploads` then answers `501`, and files are limited to 32 MiB.
 
@@ -137,11 +149,13 @@ Every request that adds, updates or deletes something (a `POST`, `PUT`, `PATCH` 
 
 Each module creates a bucket of its own for it, which moves what it holds to the cloud's cold storage, and gives the functions the right to add to it and nothing else: not to read, overwrite or delete a record.
 
-| Cloud | Where | Cold storage | Written by |
-|-------|-------|--------------|------------|
-| AWS | S3 bucket `<name>-audit-…` | Glacier Deep Archive | Lambda functions (`s3:PutObject` only) |
-| GCP | GCS bucket `<project>-<name>-audit` | Archive storage class | Cloud Run services (`storage.objectCreator` only) |
-| Azure | Container `audit` of the storage account | Archive tier | Container Apps (the account key, as for content) |
+
+| Cloud | Where                                    | Cold storage          | Written by                                        |
+| ----- | ---------------------------------------- | --------------------- | ------------------------------------------------- |
+| AWS   | S3 bucket `<name>-audit-…`               | Glacier Deep Archive  | Lambda functions (`s3:PutObject` only)            |
+| GCP   | GCS bucket `<project>-<name>-audit`      | Archive storage class | Cloud Run services (`storage.objectCreator` only) |
+| Azure | Container `audit` of the storage account | Archive tier          | Container Apps (the account key, as for content)  |
+
 
 Records stay as they were written for `audit_archive_after_days` (30 by default; the same variable on every cloud), then the bucket's lifecycle rule moves them. A record is one small object, so on AWS and Azure the archive tiers' per-object charges and minimum storage durations (180 days) are worth a look at your volume. Reading an archived record takes hours to restore. Nothing deletes records. The bucket is named in the `audit_bucket` output (`audit_container` on Azure).
 
@@ -161,11 +175,13 @@ On GCP and Azure the number of proxies (`trust_proxy`, 2) wasn't checked against
 
 The compactor is one container that's always up, and makes pass after pass over the feed index. It isn't a function and nothing calls it: it has no address, and reaches Redis, the database and the bucket from inside the network, as the functions do.
 
-| Cloud | What runs it | Kept at one by |
-|-------|--------------|----------------|
-| AWS | An ECS Fargate service in the private subnets | `desired_count = 1`; a deploy stops the running task before it starts the new one |
-| GCP | A Cloud Run worker pool, which is Cloud Run for work that takes no requests | Manual scaling, one instance |
-| Azure | A Container App with no ingress | `min_replicas = max_replicas = 1`, single revision mode |
+
+| Cloud | What runs it                                                                | Kept at one by                                                                    |
+| ----- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| AWS   | An ECS Fargate service in the private subnets                               | `desired_count = 1`; a deploy stops the running task before it starts the new one |
+| GCP   | A Cloud Run worker pool, which is Cloud Run for work that takes no requests | Manual scaling, one instance                                                      |
+| Azure | A Container App with no ingress                                             | `min_replicas = max_replicas = 1`, single revision mode                           |
+
 
 How it's paced:
 
@@ -195,6 +211,8 @@ Measured for this change, with the limits of each measurement:
 - **Cold starts:** on AWS Lambda in `us-east-1`, a new instance took 1.0 to 1.6 seconds to start at 1,024 MB (the feed function; 1.1 to 2.3 for the store function), almost all of it loading the server's code, then answered in 30 to 60 ms. More memory made little difference. This was measured outside a VPC with no Redis or database to connect to, so a real cold start adds those connections. Cloud Run and Container Apps weren't measured; Container Apps starting from zero also pulls the image, which usually takes much longer.
 - **Cost:** functions swap the cost of containers that run all the time for a cost per request, plus the address in front. From list prices, with the database, Redis, bucket and data transfer left out as they don't change: AWS costs about $55 a month before any traffic (NAT gateway $33, RDS Proxy $22) and about $1.45 per million requests after (API Gateway $1.00, Lambda $0.45), which is less than two always-on containers and a load balancer up to roughly 40 million requests a month and more beyond. On GCP the functions themselves are cheap, but API Gateway is $3.00 per million calls after the first 2 million. On Azure, Front Door adds $35 a month and $0.90 per million requests, and four apps that each stay up for five minutes after a request cost more than one container until there's enough traffic to need several. For a busy server, compare a load balancer with path rules (GCP), or setting `min_replicas` and sizing by hand (Azure).
 
+
+
 ## Redis
 
 Every module sets the eviction policy to `volatile-lru`. Only keys with a TTL (hot summaries, comments, challenges and superseded index keys) are ever evicted, so a full Redis costs object-store reads, never the index.
@@ -222,6 +240,7 @@ It runs beside the compactor. If the compactor is mid-pass, the rebuild waits fo
 ## Notes per cloud
 
 **AWS**
+
 - CloudFront supplies HTTPS with its default certificate, and is the only way in: the functions refuse requests that don't carry the secret header it adds.
 - API Gateway gives a function 30 seconds, so a post whose AI analysis takes longer gets a 503. This limit can't be raised on an HTTP API.
 - The functions run in the VPC's private subnets, next to Redis and the database. They reach the internet (AI services) through one NAT gateway, and S3 through a gateway endpoint, which is free. If the NAT gateway's availability zone fails, the functions lose the internet until it's back, but not Redis, the database or S3.
@@ -231,6 +250,7 @@ It runs beside the compactor. If the compactor is mid-pass, the rebuild waits fo
 - `force_destroy = true` lets `terraform destroy` delete the content bucket and the database without a final snapshot.
 
 **GCP**
+
 - API Gateway runs in fewer regions than Cloud Run. If yours isn't one of them, set `gateway_region` to the nearest that is.
 - The gateway signs in to the services with its own `Authorization` header, and passes the client's on as `X-Forwarded-Authorization`, which the server reads first. Clients send `Authorization: Bearer <apiKey>` as usual.
 - Cloud Run and API Gateway limit request bodies to 32 MiB; larger files use [upload links](#uploads).
@@ -238,6 +258,7 @@ It runs beside the compactor. If the compactor is mid-pass, the rebuild waits fo
 - `deletion_protection = false` is required before `terraform destroy` can delete Cloud SQL and the content bucket.
 
 **Azure**
+
 - Front Door Standard supplies HTTPS and the one address. It waits `request_timeout` seconds (240 at most) for an app to answer.
 - Front Door sends requests by path only, so a rule on `/content/*` sends everything but `GET`, `HEAD` and `OPTIONS` to the api group, which is where `DELETE /content/:id` belongs, and writing and deleting comments.
 - A group at zero replicas takes its next request only after a replica has started, which includes pulling the image. Set `min_replicas = 1` if that wait matters more than the cost.
@@ -245,43 +266,53 @@ It runs beside the compactor. If the compactor is mid-pass, the rebuild waits fo
 - The storage account key and the Redis access key reach the containers only as Container Apps secrets. Upload and download links are signed with the storage account key.
 - PostgreSQL accepts connections only from Azure services (the `0.0.0.0` firewall rule), and TLS is required.
 
+
+
 ## Setting it up yourself
 
 Without these modules, the server runs on any of each cloud's services below, as long-running API nodes with one compactor (`node dist/server.js`, `node dist/compact/main.js`), or as functions (`node dist/functions/http.js` for containers that scale with traffic, `node dist/functions/lambda.js` on Lambda, with `FUNCTION_GROUP` naming the group). The rules that apply on every cloud, and the ones functions add, are in [APP.md](APP.md#13-deployment-topology).
 
 **AWS**
 
-| Piece | Recommended | Alternatives |
-| --- | --- | --- |
-| Content and summaries | S3: `CONTENT_SCHEME=s3`, `CONTENT_OPTIONS='{"bucket":"tu-content","region":"us-east-1"}'` | |
-| Redis | **ElastiCache for Valkey or Redis OSS**, cluster mode disabled, with a replica: `REDIS_URL=rediss://:<auth token>@<primary endpoint>:6379` | Valkey or Redis on EC2 |
-| API | EC2 Auto Scaling or ECS Fargate behind an ALB | EKS |
-| Compactor | An ECS service of one task running `node dist/compact/main.js` | The same on EC2 or EKS, as one copy |
-| Database | RDS PostgreSQL or MySQL | Aurora |
+
+| Piece                 | Recommended                                                                                                                                | Alternatives                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
+| Content and summaries | S3: `CONTENT_SCHEME=s3`, `CONTENT_OPTIONS='{"bucket":"tu-content","region":"us-east-1"}'`                                                  |                                     |
+| Redis                 | **ElastiCache for Valkey or Redis OSS**, cluster mode disabled, with a replica: `REDIS_URL=rediss://:<auth token>@<primary endpoint>:6379` | Valkey or Redis on EC2              |
+| API                   | EC2 Auto Scaling or ECS Fargate behind an ALB                                                                                              | EKS                                 |
+| Compactor             | An ECS service of one task running `node dist/compact/main.js`                                                                             | The same on EC2 or EKS, as one copy |
+| Database              | RDS PostgreSQL or MySQL                                                                                                                    | Aurora                              |
+
 
 ElastiCache Serverless and MemoryDB only run in cluster mode, so they aren't supported.
 
 **Google Cloud**
 
-| Piece | Recommended | Alternatives |
-| --- | --- | --- |
-| Content and summaries | Cloud Storage: `CONTENT_SCHEME=gcs`, `CONTENT_OPTIONS='{"bucket":"tu-content","credential_path":"/secrets/gcs.json"}'` | |
-| Redis | **Memorystore for Redis**, Standard tier, with AUTH: `REDIS_URL=redis://:<auth string>@<host>:6379` | Valkey or Redis on Compute Engine |
-| API | Cloud Run with direct VPC egress, a Managed Instance Group, or GKE, behind a Cloud Load Balancer | |
-| Compactor | A Cloud Run worker pool of one instance running `node dist/compact/main.js` | A GKE Deployment of one replica, or a Compute Engine VM |
-| Database | Cloud SQL for PostgreSQL or MySQL | AlloyDB |
+
+| Piece                 | Recommended                                                                                                            | Alternatives                                            |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| Content and summaries | Cloud Storage: `CONTENT_SCHEME=gcs`, `CONTENT_OPTIONS='{"bucket":"tu-content","credential_path":"/secrets/gcs.json"}'` |                                                         |
+| Redis                 | **Memorystore for Redis**, Standard tier, with AUTH: `REDIS_URL=redis://:<auth string>@<host>:6379`                    | Valkey or Redis on Compute Engine                       |
+| API                   | Cloud Run with direct VPC egress, a Managed Instance Group, or GKE, behind a Cloud Load Balancer                       |                                                         |
+| Compactor             | A Cloud Run worker pool of one instance running `node dist/compact/main.js`                                            | A GKE Deployment of one replica, or a Compute Engine VM |
+| Database              | Cloud SQL for PostgreSQL or MySQL                                                                                      | AlloyDB                                                 |
+
 
 Memorystore for Redis Cluster runs in cluster mode, so it isn't supported.
 
 **Azure**
 
-| Piece | Recommended | Alternatives |
-| --- | --- | --- |
-| Content and summaries | Blob Storage: `CONTENT_SCHEME=azblob`, `CONTENT_OPTIONS='{"container":"content","endpoint":"https://acct.blob.core.windows.net","account_name":"acct","account_key":"..."}'` | |
-| Redis | **Azure Managed Redis** with the Enterprise cluster policy: `REDIS_URL=rediss://:<access key>@<host>:10000` | Azure Cache for Redis, without clustering |
-| API | VM Scale Sets, AKS, or Container Apps behind Front Door or an Application Gateway | |
-| Compactor | A Container App of one replica, with no ingress, running `node dist/compact/main.js` | An AKS Deployment of one replica |
-| Database | Azure Database for PostgreSQL or MySQL Flexible Server | |
+
+| Piece                 | Recommended                                                                                                                                                                  | Alternatives                              |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| Content and summaries | Blob Storage: `CONTENT_SCHEME=azblob`, `CONTENT_OPTIONS='{"container":"content","endpoint":"https://acct.blob.core.windows.net","account_name":"acct","account_key":"..."}'` |                                           |
+| Redis                 | **Azure Managed Redis** with the Enterprise cluster policy: `REDIS_URL=rediss://:<access key>@<host>:10000`                                                                  | Azure Cache for Redis, without clustering |
+| API                   | VM Scale Sets, AKS, or Container Apps behind Front Door or an Application Gateway                                                                                            |                                           |
+| Compactor             | A Container App of one replica, with no ingress, running `node dist/compact/main.js`                                                                                         | An AKS Deployment of one replica          |
+| Database              | Azure Database for PostgreSQL or MySQL Flexible Server                                                                                                                       |                                           |
+
+
+
 
 ## Custom domains
 

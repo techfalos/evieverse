@@ -97,6 +97,7 @@ A command exits with:
 | `comments add <contentId> <text>`                                        | Comments on a post that takes comments (quote the text). A comment the server holds back waits for its moderators, as a post does, and the command says so.                                              |
 | `comments delete <contentId> <commentId>`                                | Deletes a comment: your own, one on your post, or any comment if you're an admin.                                                                                                                        |
 | `moderators list <tag>`                                                  | A hashtag's moderators.                                                                                                                                                                                  |
+| `rules list`                                                             | The server's [rules](API.md#rules), in their order, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is.         |
 | `inbox list [--unread] [--limit <n>] [--cursor <cursor>]`                | Your [inbox](API.md#inbox), newest first: the messages users sent you, and the notices of what moderators did to your posts and comments and of your mutes. With `--unread`, only what you haven't read. |
 | `inbox read [--message <messageId>]`                                     | Marks everything in your inbox as read, or with `--message`, one message or notice.                                                                                                                      |
 | `inbox delete <messageId>`                                               | Deletes a message or a notice from your inbox.                                                                                                                                                           |
@@ -164,6 +165,10 @@ Both queue and reports contain posts and comments. Each line starts with `post` 
 | `server-moderators remove <userId>`       | Ends a user's time as a server moderator.                                                                                                                                                                                                                                       |
 | `moderators add <tag> <userId>`           | Appoints a moderator of a hashtag.                                                                                                                                                                                                                                              |
 | `moderators remove <tag> <userId>`        | Ends a user's moderation of a hashtag.                                                                                                                                                                                                                                          |
+| `rules add <text> [--position <n>]`       | Adds a rule (quote the text). It goes at the end of the list, or with `--position`, at that place, counted from 1.                                                                                                                                                              |
+| `rules update <ruleId> [--text <text>] [--position <n>]` | Changes a rule: with `--text`, what it says, and with `--position`, its place in the list.                                                                                                                                                                       |
+| `rules remove <ruleId>`                   | Removes a rule.                                                                                                                                                                                                                                                                 |
+| `users rotate-key <userId>`             | Rotates a user's key.                                                                                                                    |
 | `users delete <userId> --yes`             | Deletes any user's account, for good: their key stops working and their posts are deleted. Not the only admin's account. It does nothing without `--yes`.                                                                                                                      |
 
 
@@ -176,6 +181,22 @@ Register a user, and make them an admin:
 ```bash
 evieverse register alice                                 # as an admin: prints alice's userId and API key
 evieverse admins grant 56243052-…
+```
+
+Set the server's rules, and read them as anyone would:
+
+```bash
+evieverse rules add "Be kind."                           # as an admin: prints the rule's id
+evieverse rules add "Read these first." --position 1
+evieverse rules update 0b7c0f5e-… --text "Be kind to each other."
+evieverse rules list
+```
+
+```
+1  9a41c3d0-…  Read these first.
+2  0b7c0f5e-…  Be kind to each other.
+
+Modification disclosure: this server runs Evieverse 0.1.0, unmodified.
 ```
 
 Appoint a moderator of `#news`, who then blocks a word and a phrase there:

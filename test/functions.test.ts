@@ -14,6 +14,7 @@ import { createFunction, functionConfig, type FunctionResponse, type RouteFuncti
 import { EDGE_SECRET_HEADER, httpApiHandler, runLambda, toRequest, toResult, type HttpApiEvent } from '../src/functions/lambdaRuntime.js';
 import { loadLanguages, type Message } from '../src/language.js';
 import { MemoryHotStore } from '../src/storage/index.js';
+import { readAudit, solution } from './helpers.js';
 
 /**
  * The route groups as separate functions over one database file, one content directory and one hot
@@ -33,7 +34,8 @@ async function deployment() {
         tmpPath: join(dir, 'tmp'),
       },
       feed: { headCacheMs: 0 },
-      challenge: { register: false, postWindowSeconds: 0 },
+      // A proof of work quick enough for tests, and an answer accepted at once: the clock stands still here.
+      challenge: { postWindowSeconds: 0, powBits: 8, minSolveMs: 0 },
       postRateLimitPerMinute: 0,
     },
     {},
@@ -59,14 +61,22 @@ async function deployment() {
     });
     return { status: res.statusCode, json: () => JSON.parse(res.body.toString('utf8')) };
   };
+  /** Registers as a person does: the request again, with the challenge it was answered with solved. */
+  const register = async (username: string) => {
+    const asked = await call('api', 'POST', '/register', { username });
+    if (asked.status !== 428) return asked;
+    return call('api', 'POST', '/register', { username, ...(await solution(hot, asked.json().challenge)) });
+  };
   return {
     dir,
     config,
     clock,
+    hot,
     fns,
     compact,
     migrate,
     call,
+    register,
     async close() {
       for (const fn of Object.values(fns)) await fn.close();
       await (await beside)?.close();
@@ -98,7 +108,7 @@ describe('functions', () => {
     d = await deployment();
     await d.migrate();
 
-    const registered = await d.call('api', 'POST', '/register', { username: 'alice' });
+    const registered = await d.register('alice');
     expect(registered.status).toBe(201);
     const alice = registered.json() as { userId: string; apiKey: string };
     const stored = await d.call('store', 'POST', '/store', { ...alice, type: 'text', text: 'hello from a function #news', tags: ['news'] });
@@ -128,6 +138,10 @@ describe('functions', () => {
       ['api', 'DELETE', `/content/${contentId}`],
       ['api', 'GET', `/users/${alice.userId}`],
       ['api', 'GET', '/tagging'],
+      // The rules are read by anyone, and from the database, which the feed function has none of.
+      ['api', 'GET', '/rules'],
+      // The server's ads are its admins', and so the api function's, though feeds and posts show them.
+      ['api', 'GET', '/monetization/ads'],
     ];
     for (const [owner, method, url] of routes) {
       for (const group of GROUP_NAMES) {
@@ -237,14 +251,17 @@ describe('Lambda adapter', () => {
     expect(JSON.parse(large.body)).toEqual({ error: 'the response is too large for a function to return' });
   });
 
-  it('counts a request by the address the gateway saw, and refuses one that did not come through the edge', async () => {
+  it('takes a request’s address to be the one the gateway saw, and refuses one that did not come through the edge', async () => {
     const d = await deployment();
     try {
       await d.migrate();
-      const config = loadConfig({ ...d.config, trustProxy: 1, registerRateLimitPerHour: 1 }, {});
-      const fn = createFunction('api', config, { server: { logger: false } });
+      // The audit log is where the address a request is taken to come from is written down.
+      const audit = join(d.dir, 'audit');
+      const config = loadConfig({ ...d.config, trustProxy: 1, audit: { scheme: 'fs', options: { root: audit } } }, {});
+      // Over the deployment's hot store, where the challenges it asks for are read from to be solved.
+      const fn = createFunction('api', config, { hot: d.hot, server: { logger: false } });
       const handler = httpApiHandler(fn, { edgeSecret: 's3cret' });
-      const register = (username: string, client: string, headers: Record<string, string> = { [EDGE_SECRET_HEADER]: 's3cret' }) =>
+      const send = (body: object, client: string, headers: Record<string, string>) =>
         handler(
           event({
             rawPath: '/register',
@@ -252,16 +269,26 @@ describe('Lambda adapter', () => {
             // As the gateway sends it: what the client claimed, then the client as the edge saw it, then the edge.
             headers: { 'content-type': 'application/json', 'x-forwarded-for': `10.9.9.9, ${client}, 198.51.100.7`, ...headers },
             requestContext: { http: { method: 'POST', sourceIp: '198.51.100.7' } },
-            body: JSON.stringify({ username }),
+            body: JSON.stringify(body),
           }),
         );
+      /** Registers as a person does: the request again, from the same address, with the challenge it was answered with solved. */
+      const register = async (username: string, client: string, headers: Record<string, string> = { [EDGE_SECRET_HEADER]: 's3cret' }) => {
+        const asked = await send({ username }, client, headers);
+        if (asked.statusCode !== 428) return asked;
+        return send({ username, ...(await solution(d.hot, JSON.parse(asked.body).challenge)) }, client, headers);
+      };
       try {
         expect((await register('alice', '203.0.113.1')).statusCode).toBe(201);
-        expect((await register('bob', '203.0.113.1')).statusCode).toBe(429);
         expect((await register('carol', '203.0.113.2')).statusCode).toBe(201);
         expect((await register('dave', '203.0.113.3', {})).statusCode).toBe(403);
         expect((await register('erin', '203.0.113.3', { [EDGE_SECRET_HEADER]: 'guess' })).statusCode).toBe(403);
         expect((await handler({ Records: [] })).statusCode).toBe(400);
+        const records = await readAudit(d);
+        expect(Object.fromEntries(records.map((r) => [(r.body as { username: string }).username, r.ip]))).toEqual({
+          alice: '203.0.113.1',
+          carol: '203.0.113.2',
+        });
       } finally {
         await fn.close();
       }

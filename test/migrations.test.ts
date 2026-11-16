@@ -30,7 +30,9 @@ describe('SQL migrations', () => {
         'inbox',
         'likes',
         'moderation_queue',
+        'monetization',
         'reports',
+        'server_rules',
         'tag_moderation',
         'tag_moderators',
         'tag_mutes',
@@ -59,6 +61,7 @@ describe('SQL migrations', () => {
       ]);
       expect(await columns('inbox')).toEqual(['body', 'content_id', 'created_at', 'id', 'kind', 'read_at', 'sender_id', 'tag', 'user_id']);
       expect(await columns('user_blocks')).toEqual(['blocked_id', 'created_at', 'user_id']);
+      expect(await columns('server_rules')).toEqual(['body', 'created_at', 'id', 'sort_order', 'updated_at']);
       expect(await columns('content')).toEqual(['ai_generated', 'created_at', 'delete_requested_at', 'id', 'like_count', 'user_id']);
       expect(await columns('api_keys')).toEqual(['created_at', 'id', 'key_hash', 'revoked_at', 'user_id']);
       expect(await columns('feed_queue')).toEqual(['committed', 'content_id', 'created_at', 'tag', 'token']);
@@ -69,6 +72,19 @@ describe('SQL migrations', () => {
       expect(await columns('reports')).toEqual(['accepted_at', 'content_id', 'created_at', 'reason', 'user_id']);
       expect(await columns('comment_queue')).toEqual(['comment_id', 'content_id', 'created_at', 'trust_score']);
       expect(await columns('comment_reports')).toEqual(['accepted_at', 'comment_id', 'content_id', 'created_at', 'reason', 'user_id']);
+      expect(await columns('monetization')).toEqual([
+        'created_at',
+        'created_by',
+        'ends_at',
+        'id',
+        'image_type',
+        'kind',
+        'starts_at',
+        'tags',
+        'text',
+        'updated_at',
+        'url',
+      ]);
 
       await sql`INSERT INTO users (id, username, created_at, updated_at) VALUES ('u1', 'alice', 0, 0)`.execute(db);
       await expect(sql`INSERT INTO users (id, username, created_at, updated_at) VALUES ('u2', 'alice', 0, 0)`.execute(db)).rejects.toThrow(/UNIQUE/);

@@ -16,12 +16,18 @@ x-app-env: &app-env
   PUBLIC_BASE_URL: http://localhost:${TESTBED_PORT:-8080}/api
   COMPACT_IN_PROCESS: 'false'
   COMPACT_INTERVAL_SECONDS: ${COMPACT_INTERVAL_SECONDS:-5}
-  # Every request reaches the app from nginx, so the per-IP limit on /register is effectively global.
-  REGISTER_RATE_LIMIT_PER_HOUR: '1000'
   # user or server; server needs TAGGING_SERVER_TAGS too: the only hashtags posts from the page can then have.
   # The seed posts its planned hashtags either way.
   TAGGING_MODE: ${TAGGING_MODE:-user}
   TAGGING_SERVER_TAGS: ${TAGGING_SERVER_TAGS:-}
+  # The modification disclosure, which GET /rules gives beside the rules: true if this instance runs a
+  # modified version of Evieverse, which then needs the address its source code can be obtained from.
+  EVIEVERSE_MODIFIED: ${EVIEVERSE_MODIFIED:-false}
+  EVIEVERSE_SOURCE_URL: ${EVIEVERSE_SOURCE_URL:-}
+  # Ads in hashtag feeds and at the end of posts, which admins keep at /monetization/ads. Off unless set to
+  # true. The app and the compactor share them: the compactor publishes the ads the app shows.
+  MONETIZATION_FEED_ADS: ${MONETIZATION_FEED_ADS:-false}
+  MONETIZATION_POST_ADS: ${MONETIZATION_POST_ADS:-false}
 
 services:
   postgres:

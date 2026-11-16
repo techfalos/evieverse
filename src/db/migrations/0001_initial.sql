@@ -310,20 +310,24 @@ CREATE INDEX reports_open_idx ON reports (accepted_at, content_id, created_at);
 
 -- Comments on posts are not in this database: each is an object in the content store, at
 -- comments/<post id>/<comment id>.json, and a post's are listed from there (and from Redis, which
--- caches them). Whether a post takes comments is in its meta file. The next two tables hold only the
--- comments that wait for a server moderator or an admin, so that they wait in the same two queues
--- as posts do. A comment that is written, read and never held or reported never has a row.
+-- caches them). Whether a post takes comments is in its meta file. Which comment a comment replies
+-- to, and who liked it, are objects in the content store too: unlike a post's likes, a comment's
+-- have no rows. The next two tables hold only the comments that wait for a server moderator or an
+-- admin, so that they wait in the same two queues as posts do. A comment that is written, edited,
+-- liked, read and never held or reported never has a row.
 --
 -- comment_queue: the comments that wait in the moderation queue, beside the posts of
 -- moderation_queue. A comment gets a trust score as a post does, by the same plugins and the same
 -- thresholds: a low score has it refused, a high one published, and one in between puts it here.
--- Its object is then at comments/<post id>/held/<comment id>.json, where no reader lists it, and
--- only its author, server moderators and admins can read it. Accepting it deletes the row and moves
--- the object in among the post's comments; rejecting it deletes both.
+-- So does an edit of a comment, which takes a published one back here. Its object is then at
+-- comments/<post id>/held/<comment id>.json, where no reader lists it, and only its author, server
+-- moderators and admins can read it. Accepting it deletes the row and moves the object in among
+-- the post's comments; rejecting it deletes both.
 --
 -- content_id: the post the comment is on. The row goes with the post.
--- trust_score: the comment's score. This is the only place it is kept.
--- created_at: when the comment was written, which is when it joined the queue.
+-- trust_score: the comment's score, or that of its last edit. This is the only place it is kept.
+-- created_at: when the comment joined the queue: when it was written, or when the edit that sent
+--   it here was made.
 CREATE TABLE comment_queue (
   comment_id   varchar(36) NOT NULL,
   content_id   varchar(36) NOT NULL,
@@ -403,6 +407,66 @@ CREATE TABLE user_blocks (
 );
 CREATE INDEX user_blocks_user_idx ON user_blocks (user_id, created_at);
 CREATE INDEX user_blocks_blocked_idx ON user_blocks (blocked_id);
+
+-- server_rules: the server's rules, which its admins keep (POST /rules, PATCH and DELETE
+-- /rules/:ruleId) and anyone reads (GET /rules), with or without an account. Each row is one rule.
+-- They are the operator's words to the people who use the server: nothing checks a post against
+-- them, and feeds never read them. A server has at most 100.
+--
+-- sort_order: where the rule comes among the others, lowest first. Only the order of the values
+-- means anything: the position a rule is given in a response is its place in the list, counted
+-- from 1. Adding a rule at a position, or moving one, numbers the rows again; removing one leaves
+-- a gap. Two rows can hold the same value for a moment, when two admins change the list at once,
+-- and are then ordered by created_at and id.
+-- body: the rule's text, as its admin wrote it.
+-- updated_at: when the text or the place was last changed by a request about this rule; created_at
+-- until then.
+CREATE TABLE server_rules (
+  id          varchar(36)   NOT NULL,
+  sort_order  integer       NOT NULL,
+  body        varchar(2000) NOT NULL,
+  created_at  bigint        NOT NULL,
+  updated_at  bigint        NOT NULL,
+  CONSTRAINT server_rules_pk PRIMARY KEY (id)
+);
+
+-- monetization: the ads the server shows, which its admins keep (/monetization/ads) and nobody else
+-- writes. An ad is shown in hashtag feeds (MONETIZATION_FEED_ADS) and at the end of a post
+-- (MONETIZATION_POST_ADS), each only where the server turns it on, and always with the word
+-- "Sponsored". Feeds never read this table: each compactor run copies the ads that haven't ended
+-- to Redis, where feeds and posts read them, so a change here shows after the next run.
+--
+-- kind: 'text' or 'image'. A text ad is its text. An image ad is an image, whose bytes are at
+--   ads/<id> in the content store, with an optional caption in text. An ad keeps its kind.
+-- text: a text ad's text, or an image ad's caption (NULL for an image ad with none).
+-- url: where the ad leads when it is followed, if anywhere.
+-- image_type: the content type of an image ad's image, read from its bytes. NULL on a text ad.
+-- tags: NULL for an ad that appears all the time, under every hashtag. Otherwise the hashtags it
+--   is targeted at, normalised and separated by single spaces, at most 10: the ad is shown in a
+--   feed that reads one of them, and at the end of a post that carries one.
+-- starts_at, ends_at: the ad's schedule. It is shown from starts_at until ends_at, or for good
+--   where ends_at is NULL. Whoever shows an ad checks both against its own clock, so a schedule
+--   starts and ends on time whenever the compactor last ran.
+-- created_by: the admin who created the ad. NULL once that user is gone.
+-- updated_at: when the ad was created or last changed.
+CREATE TABLE monetization (
+  id          varchar(36)   NOT NULL,
+  kind        varchar(16)   NOT NULL,
+  text        varchar(500),
+  url         varchar(2048),
+  image_type  varchar(64),
+  tags        varchar(700),
+  starts_at   bigint        NOT NULL,
+  ends_at     bigint,
+  created_by  varchar(36),
+  created_at  bigint        NOT NULL,
+  updated_at  bigint        NOT NULL,
+  CONSTRAINT monetization_pk PRIMARY KEY (id),
+  CONSTRAINT monetization_created_by_fk FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE SET NULL
+);
+CREATE INDEX monetization_ends_idx ON monetization (ends_at);
+CREATE INDEX monetization_created_idx ON monetization (created_at);
+CREATE INDEX monetization_created_by_idx ON monetization (created_by);
 
 -- Keeps compactor runs from overlapping, whether they come from two copies of the compactor process
 -- (a deploy replacing one, a rebuild started by hand) or from several nodes. A run takes the lease by

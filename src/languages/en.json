@@ -5,10 +5,6 @@
     "error.internal": "Internal server error",
     "error.forbidden": "forbidden",
     "error.upload_too_large": "Upload exceeds the maximum size of {limit} bytes",
-    "error.rate_limited": {
-      "one": "Rate limit exceeded, retry in {count} minute",
-      "other": "Rate limit exceeded, retry in {count} minutes"
-    },
 
     "auth.invalid": "Invalid userId or apiKey",
     "auth.required": "userId and apiKey are required",
@@ -20,8 +16,9 @@
     "user.not_found": "user not found",
     "user.update_own_only": "you can only update your own profile",
     "user.nothing_to_update": "nothing to update: provide username, language, messages, showFollowing or showFollowers",
-    "user.key_own_only": "you can only replace your own API key",
+    "user.key_own_only": "you can only replace your own API key, unless you're an admin",
     "user.api_key_replaced_note": "Store this apiKey now; it cannot be retrieved again. The key it replaces no longer works.",
+    "user.api_key_passed_on_note": "Pass this apiKey on to the user now; it cannot be retrieved again. Every key they had no longer works.",
     "user.delete_own_only": "you can only delete your own account, unless you're an admin",
     "user.banned": "your account is banned: you can't post, comment or send messages",
 
@@ -126,6 +123,12 @@
 
     "comment.not_found": "comment not found",
     "comment.off": "this post doesn't take comments",
+    "comment.text_or_file": "a comment needs a text, an image or a video",
+    "comment.text_required": "text is required: the comment has no image or video",
+    "comment.wrong_file_type": "comments take image/* and video/* files, got {mimeType}",
+    "comment.no_media": "this comment has no image or video",
+    "comment.edit_own_only": "only the comment's author can edit this comment",
+    "comment.reply_to_gone": "the comment it replies to is gone, so this comment was deleted",
     "comment.delete_not_allowed": "only the comment's author, the post's publisher or an admin can delete this comment",
     "comment.not_trusted": "this server doesn't trust the comment enough to keep it, so it wasn't published",
     "comment.blocked_word": "the comment contains a word or phrase this server doesn't allow, so it wasn't published",
@@ -164,6 +167,21 @@
       "one": "too many reports; try again in {count} minute",
       "other": "too many reports; try again in {count} minutes"
     },
+
+    "ad.sponsored": "Sponsored",
+    "ad.not_found": "ad not found",
+    "ad.text_required": "text is required: a text ad is its text",
+    "ad.image_required": "content is required: the image of the ad",
+    "ad.no_image": "a text ad has no image",
+    "ad.image_unsupported": "ads take JPEG, PNG, GIF and WebP images, and the file is none of them",
+    "ad.kind_fixed": "an ad keeps its kind ({kind}): create another ad instead",
+    "ad.ends_before_start": "endsAt must be after startsAt",
+    "ad.nothing_to_update": "nothing to update: provide text, url, tags, startsAt, endsAt or an image",
+    "ad.limit": "the server holds at most {max} ads that haven't ended: delete one, or end one, first",
+
+    "rule.not_found": "rule not found",
+    "rule.nothing_to_update": "nothing to update: provide text or position",
+    "rule.limit": "the server can have at most {max} rules: remove one first",
 
     "cli.outdated": "this server works with version {version} (build {build}) of the CLI: update it with `evieverse update`",
     "cli.not_built": "this server wasn't built with its CLI: `npm run build` builds both",

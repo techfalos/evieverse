@@ -34,11 +34,15 @@ services:
       PUBLIC_BASE_URL: http://localhost:${SERVER_PORT:-3000}
       # Set to the frontend's origins, e.g. http://localhost:5173, to allow only those.
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
-      # Docker Desktop gives every request from the host the same source IP, so the per-IP limit on
-      # /register is effectively global.
-      REGISTER_RATE_LIMIT_PER_HOUR: '1000'
       TAGGING_MODE: ${TAGGING_MODE:-user}
       TAGGING_SERVER_TAGS: ${TAGGING_SERVER_TAGS:-}
+      # The modification disclosure, which GET /rules gives beside the rules: true if this instance runs a
+      # modified version of Evieverse, which then needs the address its source code can be obtained from.
+      EVIEVERSE_MODIFIED: ${EVIEVERSE_MODIFIED:-false}
+      EVIEVERSE_SOURCE_URL: ${EVIEVERSE_SOURCE_URL:-}
+      # Ads in hashtag feeds and at the end of posts, which admins keep at /monetization/ads. Off unless set to true.
+      MONETIZATION_FEED_ADS: ${MONETIZATION_FEED_ADS:-false}
+      MONETIZATION_POST_ADS: ${MONETIZATION_POST_ADS:-false}
     volumes: [content:/app/data]
 
 volumes:

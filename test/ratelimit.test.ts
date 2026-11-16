@@ -1,8 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, describe, expect, it } from 'vitest';
-import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
-import { HOUR } from '../src/time.js';
 import { createTestContext, TARGETS, type TestContext } from './helpers.js';
 
 describe('TRUST_PROXY', () => {
@@ -22,9 +20,6 @@ for (const target of TARGETS) {
   describe(`shared limits (${target.name})`, () => {
     let ctx: TestContext;
     afterEach(() => ctx.close());
-
-    const register = (app: TestContext['app'], username: string, forwardedFor?: string) =>
-      app.inject({ method: 'POST', url: '/register', payload: { username }, headers: forwardedFor ? { 'x-forwarded-for': forwardedFor } : {} });
 
     it('counts in the hot store, each counter lasting one window from its first count', async () => {
       ctx = await createTestContext(target);
@@ -70,44 +65,22 @@ for (const target of TARGETS) {
       expect(await held()).toBeNull();
     });
 
-    it('limits registrations from one address across every server sharing the hot store', async () => {
-      ctx = await createTestContext(target, { registerRateLimitPerHour: 2 });
-      // A second node, or another instance of a function: its own process state, the same Redis.
-      const { app: _, ...deps } = ctx;
-      const other = await buildApp({ ...deps, now: () => ctx.clock.now }, { logger: false });
-      try {
-        const first = await register(ctx.app, 'alice');
-        expect(first.statusCode, first.body).toBe(201);
-        expect(first.headers['x-ratelimit-remaining']).toBe('1');
-        expect((await register(other, 'bob')).statusCode).toBe(201);
-        for (const app of [ctx.app, other]) {
-          const refused = await register(app, 'carol');
-          expect(refused.statusCode).toBe(429);
-          expect(Number(refused.headers['retry-after'])).toBeGreaterThan(3500);
-        }
-        // Other routes aren't counted with it.
-        expect((await ctx.app.inject({ method: 'GET', url: `/users/${first.json().userId}` })).statusCode).toBe(200);
+    it('adds one to a count the hot store has, and leaves one it does not have missing', async () => {
+      ctx = await createTestContext(target);
+      const held = async () => (await ctx.hot.get('tally'))?.toString() ?? null;
+      expect(await ctx.hot.bump('tally')).toBeNull();
+      expect(await held()).toBeNull();
 
-        if (target.hot === 'memory') {
-          ctx.clock.now += HOUR;
-          expect((await register(other, 'carol')).statusCode).toBe(201);
-        }
-      } finally {
-        await other.close();
-      }
-    });
+      await ctx.hot.set('tally', '5', 200);
+      const bumps = await Promise.all(Array.from({ length: 20 }, () => ctx.hot.bump('tally')));
+      expect([...bumps].sort((a, b) => a! - b!)).toEqual(Array.from({ length: 20 }, (_, i) => i + 6));
+      expect(await held()).toBe('25');
 
-    it('counts by the client’s address behind proxies it is told to trust, and by the connection’s otherwise', async () => {
-      ctx = await createTestContext(target, { registerRateLimitPerHour: 1, trustProxy: 1 });
-      // One proxy is trusted: the last address is the one it saw, whatever a client put before it.
-      expect((await register(ctx.app, 'alice', '203.0.113.1')).statusCode).toBe(201);
-      expect((await register(ctx.app, 'bob', '203.0.113.2')).statusCode).toBe(201);
-      expect((await register(ctx.app, 'carol', '198.51.100.99, 203.0.113.2')).statusCode).toBe(429);
-      await ctx.close();
-
-      ctx = await createTestContext(target, { registerRateLimitPerHour: 1 });
-      expect((await register(ctx.app, 'alice', '203.0.113.1')).statusCode).toBe(201);
-      expect((await register(ctx.app, 'bob', '203.0.113.2')).statusCode).toBe(429);
+      // It keeps the time the count had left: it expires when it would have.
+      if (target.hot === 'memory') ctx.clock.now += 250;
+      else await sleep(250);
+      expect(await ctx.hot.bump('tally')).toBeNull();
+      expect(await held()).toBeNull();
     });
   });
 }

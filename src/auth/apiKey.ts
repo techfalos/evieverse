@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { FastifyRequest } from 'fastify';
 import { lockUser, type Db, type DbDialect } from '../db/index.js';
-import { unauthorized } from '../http/errors.js';
+import { forbidden, notFound, unauthorized } from '../http/errors.js';
 import { msg, type Languages } from '../language.js';
 
 const KEY_PATTERN = /^tu_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$/;
@@ -72,6 +72,53 @@ export async function reissueApiKey(
     const presented = await revokeLive().where('key_hash', '=', hashKey(apiKey)).executeTakeFirst();
     if (Number(presented.numUpdatedRows) === 0) throw unauthorized();
     await revokeLive().execute();
+    return issueApiKey(trx, userId, now);
+  });
+}
+
+/**
+ * Replaces the key of `userId`, a user other than the one the request's credentials are of, which
+ * an admin does for them: for a user who lost their key, or whose key someone else holds. The new
+ * key is the user's only one, and goes to the admin to pass on: every key the user had stops
+ * working as this commits. The admin's own key is left as it is. The user can be an admin too.
+ *
+ * Both users' rows are locked first, in the order of their ids (as revoking an admin does), so two
+ * of these can't deadlock, and the caller is checked only then: an admin, whose key still works.
+ * What ends either through the API locks the caller's row too (replacing their key, revoking their
+ * role, deleting their account), so it comes before this or after it, never during. Otherwise
+ * whoever held an admin's leaked key could take another admin's account at the moment its owner
+ * replaces it.
+ *
+ * 401 for credentials that aren't a user's, 403 for a caller who isn't an admin, and 404 for a user
+ * who isn't there.
+ */
+export async function reissueApiKeyFor(
+  db: Db,
+  dialect: DbDialect,
+  req: FastifyRequest,
+  userId: string,
+  fields: { userId?: unknown; apiKey?: unknown } = {},
+  now = Date.now(),
+): Promise<string> {
+  const { userId: callerId, apiKey } = credentialsFrom(req, fields);
+  if (!callerId || !apiKey) throw unauthorized(msg('auth.required'));
+  if (!KEY_PATTERN.test(apiKey)) throw unauthorized();
+  return db.transaction().execute(async (trx) => {
+    for (const id of [callerId, userId].sort()) await lockUser(trx, dialect, id);
+    const caller = await trx
+      .selectFrom('api_keys')
+      .innerJoin('users', 'users.id', 'api_keys.user_id')
+      .select('users.admin')
+      .where('api_keys.user_id', '=', callerId)
+      .where('api_keys.key_hash', '=', hashKey(apiKey))
+      .where('api_keys.revoked_at', 'is', null)
+      .where('users.deleted_at', 'is', null)
+      .executeTakeFirst();
+    if (!caller) throw unauthorized();
+    if (caller.admin !== 1) throw forbidden(msg('user.key_own_only'));
+    const user = await trx.selectFrom('users').select('id').where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
+    if (!user) throw notFound(msg('user.not_found'));
+    await trx.updateTable('api_keys').set({ revoked_at: now }).where('user_id', '=', userId).where('revoked_at', 'is', null).execute();
     return issueApiKey(trx, userId, now);
   });
 }

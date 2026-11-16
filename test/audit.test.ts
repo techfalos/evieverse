@@ -36,7 +36,7 @@ for (const target of TARGETS) {
       ctx = await createTestContext(target, { audit: true });
       const user = await ctx.register('alice');
       await storeText(ctx, user, 'with a key in the body #audit');
-      const registered = await ctx.app.inject({ method: 'POST', url: '/register', payload: { username: 'bob' } });
+      const registered = await ctx.registration({ username: 'bob' });
       expect(registered.statusCode, registered.body).toBe(201);
       const replaced = await ctx.app.inject({ method: 'POST', url: `/users/${user.userId}/key`, headers: as(user), payload: {} });
       expect(replaced.statusCode, replaced.body).toBe(201);
@@ -51,6 +51,22 @@ for (const target of TARGETS) {
       expect((post!.body as { apiKey: string }).apiKey).toBe('[redacted]');
       // A new user's id is in the response only, so it is kept from there; the credentials of the response are not.
       expect(records.find((r) => r.route === '/register' && (r.body as { username: string }).username === 'bob')).toMatchObject({ userId: null, result: { userId: registered.json().userId } });
+    });
+
+    it('writes down the client’s address behind proxies it is told to trust, and the connection’s otherwise', async () => {
+      const register = (username: string, forwardedFor: string) => ctx.registration({ username }, { 'x-forwarded-for': forwardedFor });
+      const addresses = async () => Object.fromEntries((await readAudit(ctx)).map((r) => [(r.body as { username: string }).username, r.ip]));
+
+      ctx = await createTestContext(target, { audit: true, trustProxy: 1 });
+      // One proxy is trusted: the last address is the one it saw, whatever a client put before it.
+      expect((await register('alice', '203.0.113.1')).statusCode).toBe(201);
+      expect((await register('bob', '198.51.100.99, 203.0.113.2')).statusCode).toBe(201);
+      expect(await addresses()).toEqual({ alice: '203.0.113.1', bob: '203.0.113.2' });
+      await ctx.close();
+
+      ctx = await createTestContext(target, { audit: true });
+      expect((await register('alice', '203.0.113.1')).statusCode).toBe(201);
+      expect(await addresses()).toEqual({ alice: '127.0.0.1' });
     });
 
     it('writes down updates and deletes, whatever their method', async () => {

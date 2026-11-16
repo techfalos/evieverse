@@ -7,7 +7,7 @@ import { IMAGE_HEAD_BYTES, ImageError, imageType, stripImage, type ImageType } f
 import { resolveMimeType } from './http/mime.js';
 import { msg } from './language.js';
 import { LINK_MIME, mediaType, TEXT_MIME, type MediaType, type PostType } from './posts.js';
-import { spoolToTemp, UploadTooLargeError, type ContentStore, type SpooledFile, type StoredBytes } from './storage/index.js';
+import { spoolToTemp, UploadTooLargeError, type BytesOwner, type ContentStore, type SpooledFile, type StoredBytes } from './storage/index.js';
 
 /** Where uploads are spooled (the system's temp directory if not set), and how large one can be. */
 export interface UploadLimits {
@@ -28,8 +28,8 @@ export interface PostBytes {
    * the server takes. These bytes are then released by the ones returned.
    */
   image(): Promise<{ type: ImageType; file: PostBytes }>;
-  /** Writes the bytes as the content's, over the ones it had, and returns their size as stored. */
-  place(content: ContentStore, contentId: string, mimeType: string): Promise<StoredBytes>;
+  /** Writes the bytes as the content's, over the ones it had, or as a comment's image or video, and returns their size as stored. */
+  place(content: ContentStore, of: BytesOwner, mimeType: string): Promise<StoredBytes>;
   /**
    * Call when the request is over. `stored`: the server now holds the post, so its upload can go.
    * Otherwise an upload in the content store is kept, for the request to be sent again (with a
@@ -57,8 +57,8 @@ const spooled = (file: SpooledFile, tmpPath?: string): PostBytes => ({
     await file.cleanup();
     return { type: stripped.type, file: spooled(stripped.file, tmpPath) };
   },
-  async place(content, contentId, mimeType) {
-    await content.putFile(contentId, file.path, mimeType);
+  async place(content, of, mimeType) {
+    await content.putFile(of, file.path, mimeType);
     return { size: file.size };
   },
   release: () => file.cleanup(),
@@ -94,11 +94,11 @@ export async function readUploaded(content: ContentStore, userId: string, upload
     async image() {
       const type = imageType(await content.uploadHead(userId, uploadId, Math.min(found.size, IMAGE_HEAD_BYTES)));
       if (!type) throw notAnImage(new ImageError(null));
-      const place: PostBytes['place'] = async (_content, contentId) => {
+      const place: PostBytes['place'] = async (_content, of) => {
         // It must still be a `type`: whoever holds the upload link may have replaced the upload since.
         const stripped = await strip(await content.streamUpload(userId, uploadId, maxUploadBytes), tmpPath, type);
         try {
-          await content.putFile(contentId, stripped.file.path, type);
+          await content.putFile(of, stripped.file.path, type);
           return { size: stripped.file.size };
         } finally {
           await stripped.file.cleanup();
@@ -106,7 +106,7 @@ export async function readUploaded(content: ContentStore, userId: string, upload
       };
       return { type, file: { ...file, place } };
     },
-    place: (_content, contentId, mimeType) => content.adoptUpload(userId, uploadId, contentId, mimeType, maxUploadBytes),
+    place: (_content, of, mimeType) => content.adoptUpload(userId, uploadId, of, mimeType, maxUploadBytes),
     release: async (stored) => {
       if (stored) await content.removeUpload(userId, uploadId);
     },
@@ -165,6 +165,40 @@ export async function readMultipart(req: FastifyRequest, { tmpPath, maxUploadByt
   return { fields, upload };
 }
 
+/** What a request says of a file it sends, beside the file. */
+type FileFields = Pick<PostFields, 'content' | 'contentEncoding' | 'contentType' | 'filename'>;
+
+/** The name a file was sent with, and its content type: the one it was sent as, or the one its name says. */
+function sentAs(fields: FileFields, upload: Upload | undefined): { filename: string | null; mimeType: string } {
+  const filename = upload?.filename ?? fields.filename ?? null;
+  const sent = upload?.mimeType ?? (fields.contentEncoding === 'base64' ? 'application/octet-stream' : 'text/plain');
+  return { filename, mimeType: resolveMimeType(fields.contentType ?? sent, filename) };
+}
+
+/** The image or video a comment comes with, and its bytes. */
+export interface CommentFile {
+  kind: 'image' | 'video';
+  file: PostBytes;
+  filename: string | null;
+  mimeType: string;
+}
+
+/**
+ * The image or video a request sends with a comment, from the upload or inline in `content`, as a
+ * post's file is sent; undefined for a request that sends none. It is held to what an image or a
+ * video post's file is (see readPost): an image is checked by its bytes and stored without its
+ * metadata, and a video's type is the one it was sent as. Any other file is refused, audio too.
+ */
+export async function readCommentFile({ content, contentEncoding, contentType, filename }: FileFields, upload: Upload | undefined, limits: UploadLimits): Promise<CommentFile | undefined> {
+  if (!upload && content === undefined) return undefined;
+  const fields = { content, contentEncoding, contentType, filename };
+  const { mimeType } = sentAs(fields, upload);
+  const kind = mediaType(mimeType);
+  if (kind !== 'image' && kind !== 'video') throw badRequest(msg('comment.wrong_file_type', { mimeType }));
+  const post = await readPost({ ...fields, type: kind }, upload, limits);
+  return { kind, file: post.file, filename: post.filename, mimeType: post.mimeType };
+}
+
 /**
  * The post the request describes. An image, video or audio post needs a file of that type, from the
  * upload or inline in `content`. A text post's text and a link's URL are stored as its bytes.
@@ -189,9 +223,7 @@ export async function readPost(fields: PostFields, upload: Upload | undefined, {
   }
 
   if (!upload && fields.content === undefined) throw badRequest(msg('post.content_required', { type }));
-  const filename = upload?.filename ?? fields.filename ?? null;
-  const sent = upload?.mimeType ?? (fields.contentEncoding === 'base64' ? 'application/octet-stream' : 'text/plain');
-  const mimeType = resolveMimeType(fields.contentType ?? sent, filename);
+  const { filename, mimeType } = sentAs(fields, upload);
   if (mediaType(mimeType) !== type) throw wrongFileType(type, mimeType);
   let file = upload?.file;
   if (!file) {

@@ -1,13 +1,16 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { InjectOptions, LightMyRequestResponse } from 'fastify';
 import pino from 'pino';
 import { buildApp } from '../../src/app.js';
+import { issueApiKey } from '../../src/auth/apiKey.js';
 import { createCompactor } from '../../src/compact/compactor.js';
 import { loadConfig } from '../../src/config.js';
 import { bootstrap, createStores } from '../../src/deps.js';
+import { setAdmin } from '../../src/moderation/policy.js';
 import { DAY, HOUR, iso } from '../../src/time.js';
 import { mapLimit } from '../../src/util.js';
 import {
@@ -46,13 +49,14 @@ const AI_SHARE = Number(process.env.SEED_AI_SHARE ?? 0.2);
 
 const log = (msg: string) => console.log(`${iso(Date.now())} seed: ${msg}`);
 
-// It registers and posts on clocks set back in time, so no person is there to solve a challenge. Every
-// post carries its planned hashtags, whatever TAGGING_MODE the app runs with.
+// It posts on clocks set back in time, so no person is there to solve a challenge: the post window and
+// the limit on posts a minute are off. No setting spares a registration its challenge, so the users are
+// registered by an admin (see below). Every post carries its planned hashtags, whatever TAGGING_MODE
+// the app runs with.
 const config = loadConfig({
   logLevel: 'warn',
-  registerRateLimitPerHour: 1_000_000,
   postRateLimitPerMinute: 0,
-  challenge: { register: false, postWindowSeconds: 0 },
+  challenge: { postWindowSeconds: 0 },
   tagging: { mode: 'user' },
 });
 const clock = new AsyncLocalStorage<number>();
@@ -197,6 +201,16 @@ const updates = shuffle(
     return { post: p, body, tags, time: Math.min(p.time + between(r, 1, 20) * HOUR, start - 10 * 60_000) };
   });
 
+// Registering takes a challenge that a person solves, except when an admin registers the user. So the
+// seed registers its users as an admin of its own: an account put straight in the database, as the
+// operator's first admin is, which is no longer an admin, and deleted, once the users are registered.
+const seedAdminId = randomUUID();
+await db
+  .insertInto('users')
+  .values({ id: seedAdminId, username: 'testbed-seed', created_at: registeredAt, updated_at: registeredAt, admin: 1 })
+  .execute();
+const asSeedAdmin = { authorization: `Bearer ${await issueApiKey(db, seedAdminId, registeredAt)}`, 'x-user-id': seedAdminId };
+
 log(`registering ${userPlans.length} users`);
 const users: (UserPlan & { userId: string; apiKey: string })[] = new Array(userPlans.length);
 await mapLimit(
@@ -206,11 +220,17 @@ await mapLimit(
     const res = await call<{ userId: string; apiKey: string }>(registeredAt, {
       method: 'POST',
       url: '/register',
+      headers: asSeedAdmin,
       payload: { username: u.username },
     });
     users[i] = { ...u, userId: res.userId, apiKey: res.apiKey };
   },
 );
+
+// The only admin's account isn't deleted, so it gives up the role first, then deletes itself as any user does.
+await setAdmin(db, seedAdminId, false);
+const { status: seedAdminStatus } = await call<{ status: string }>(registeredAt, { method: 'DELETE', url: `/users/${seedAdminId}`, headers: asSeedAdmin });
+if (seedAdminStatus !== 'deleted') throw new Error(`the seed's admin account was not deleted: ${seedAdminStatus}`);
 const creds = (i: number) => ({ userId: users[i]!.userId, apiKey: users[i]!.apiKey });
 
 // Edits go in time order with the posts: each store stamps its hashtags' last activity (what /tags sorts by)

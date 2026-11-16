@@ -211,16 +211,17 @@ export interface ReportsTable {
 
 /**
  * A comment that waits for a server moderator or an admin to accept or reject it, in the moderation
- * queue beside the posts of moderation_queue. Comments themselves are objects in the content store
- * (CommentStore): only the ones that wait have a row.
+ * queue beside the posts of moderation_queue: a new one, or one whose author edited it. Comments
+ * themselves are objects in the content store (CommentStore), and so are their likes: only the
+ * comments that wait have a row.
  */
 export interface CommentQueueTable {
   comment_id: string;
   /** The post the comment is on. */
   content_id: string;
-  /** The comment's trust score (0-100), which sent it here. Kept nowhere else. */
+  /** The trust score (0-100) of the comment, or of its last edit, which sent it here. Kept nowhere else. */
   trust_score: number;
-  /** When the comment was written, and so joined the queue. */
+  /** When the comment joined the queue: when it was written, or when the edit that sent it here was made. */
   created_at: number;
 }
 
@@ -239,6 +240,48 @@ export interface CommentReportsTable {
   created_at: number;
   /** When the comment was accepted in spite of the report; null while it waits. */
   accepted_at: number | null;
+}
+
+export type AdKind = 'text' | 'image';
+
+/**
+ * The ads the server shows, which its admins keep (/monetization/ads): in hashtag feeds and at the
+ * end of posts, where the server turns each on. The compactor copies the ones that haven't ended
+ * to Redis (AdStore), which is where they are shown from.
+ */
+export interface MonetizationTable {
+  id: string;
+  /** text: the ad is its text. image: an image, at ads/<id> in the content store, with an optional caption in `text`. */
+  kind: AdKind;
+  /** A text ad's text, or an image ad's caption; null for an image ad with none. */
+  text: string | null;
+  /** Where the ad leads when it is followed, if anywhere. */
+  url: string | null;
+  /** The content type of an image ad's image, read from its bytes; null on a text ad. */
+  image_type: string | null;
+  /** Null: the ad appears all the time, under every hashtag. Otherwise the hashtags it is targeted at, separated by single spaces. */
+  tags: string | null;
+  /** The ad is shown from this instant... */
+  starts_at: number;
+  /** ...until this one; null for an ad with no end. */
+  ends_at: number | null;
+  /** The admin who created it; null once that user is gone. */
+  created_by: string | null;
+  created_at: number;
+  /** When it was created or last changed. */
+  updated_at: number;
+}
+
+/** One of the server's rules, which its admins keep and anyone reads (GET /rules). */
+export interface ServerRulesTable {
+  id: string;
+  /** Where the rule comes among the others, lowest first. A response gives its place in the list instead, counted from 1. */
+  sort_order: number;
+  /** The rule's text. */
+  body: string;
+  created_at: number;
+  /** When its text or its place was last changed by a request about it; created_at until then. */
+  updated_at: number;
 }
 
 /** One row ('compactor'): which compactor run may publish heads and delete, and until when. */
@@ -269,6 +312,8 @@ export interface Database {
   comment_reports: CommentReportsTable;
   inbox: InboxTable;
   user_blocks: UserBlocksTable;
+  server_rules: ServerRulesTable;
+  monetization: MonetizationTable;
 }
 
 export type ContentRow = Selectable<ContentTable>;

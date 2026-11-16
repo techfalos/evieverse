@@ -161,8 +161,7 @@ for (const target of TARGETS) {
       dir = await languagesDir();
       ctx = await createTestContext(target, { ...opts, languages: loadLanguages(defaultLanguage, dir) });
     };
-    // More registrations an hour than any test here makes, the one that tests the limit aside.
-    beforeEach(() => start({ challenge: { register: true }, registerRateLimitPerHour: 100 }));
+    beforeEach(() => start());
     afterEach(async () => {
       await ctx.close();
       await rm(dir, { recursive: true, force: true });
@@ -321,16 +320,6 @@ for (const target of TARGETS) {
       expect(await whoami(ana)).toMatchObject({ language: 'en' });
       const own = await ctx.app.inject({ method: 'PUT', url: `/users/${ana.userId}/following/${ana.userId}`, headers: { ...as(ana), ...SPANISH_FIRST } });
       expect(own.json()).toEqual({ error: "you can't follow yourself" });
-    });
-
-    it('says how long a registration past the limit has to wait', async () => {
-      await ctx.close();
-      await rm(dir, { recursive: true, force: true });
-      await start({ registerRateLimitPerHour: 1 });
-      expect((await register({ username: 'ana' })).done.statusCode).toBe(201);
-      const refused = await ctx.app.inject({ method: 'POST', url: '/register', payload: { username: 'bob' } });
-      expect([refused.statusCode, refused.json()]).toEqual([429, { error: 'Rate limit exceeded, retry in 60 minutes' }]);
-      expect(Number(refused.headers['retry-after'])).toBeGreaterThan(3500);
     });
   });
 }

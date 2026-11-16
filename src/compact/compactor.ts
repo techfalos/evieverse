@@ -4,6 +4,7 @@ import type { TagDecision } from '../db/schema.js';
 import { setForDeletion } from '../deletion.js';
 import type { AppDeps } from '../deps.js';
 import { syncFollowing } from '../follows.js';
+import { publishedAd } from '../monetization.js';
 import type { ContentMeta, Summary } from '../storage/index.js';
 import {
   authorIndex,
@@ -52,13 +53,13 @@ const NONE: ReadonlySet<string> = new Set();
 
 const json = <T>(buf: Buffer) => JSON.parse(buf.toString('utf8')) as T;
 
-/** What superseded index keys are kept for, past the cursor lifetime and the time a node caches a head: a first page may be planned from a head that was just replaced. */
+/** What superseded index keys are kept for, past the time a node caches a head: a request under way reads on from a head that was just replaced. */
 const HEAD_SLACK_MS = 60_000;
 
 type LogFn = (o: object, msg?: string) => void;
 type CompactorLog = { info: LogFn; warn: LogFn; error: LogFn };
 
-interface CompactorDeps extends Pick<AppDeps, 'config' | 'db' | 'hot' | 'summaries' | 'content' | 'comments' | 'publishers' | 'follows' | 'relatedTags' | 'now'> {
+interface CompactorDeps extends Pick<AppDeps, 'config' | 'db' | 'hot' | 'summaries' | 'content' | 'comments' | 'publishers' | 'follows' | 'relatedTags' | 'ads' | 'now'> {
   log?: CompactorLog;
 }
 
@@ -246,8 +247,8 @@ export interface RunResult {
  * index holds any more, and deletes summaries past retention (and with them, once a day, what is in
  * users' inboxes for longer than `inbox.retentionDays`). Each publisher's own index is compacted
  * the same way, alongside the hashtags of their content, but keeps each day's newest posts. Readers
- * are never blocked: they keep reading the keys they started with, which only expire after
- * `genRetentionMinutes`.
+ * are never blocked: a request under way keeps reading the keys it started with, which only expire
+ * a minute after no node can still hold the head that named them.
  *
  * An entry is never copied from what a write says: it is built from the database and the content's
  * meta file as they are when the run reads them. The queue is read before any meta file is, and a
@@ -270,6 +271,10 @@ export interface RunResult {
  * those of the hashtags whose counts in `tag_pairs` changed since its last run are worked out again
  * (see syncRelatedTags).
  *
+ * And, where the server shows ads (MONETIZATION_FEED_ADS, MONETIZATION_POST_ADS), it publishes the
+ * ones its admins keep to Redis, which is where feeds and posts read them (see syncAds): feeds
+ * read no database, so this is how an ad reaches them.
+ *
  * A run that is killed leaves nothing that lasts: what it wrote for a hashtag expires unless the
  * hashtag's head was swapped, and what it hadn't finished is found again by the next run.
  */
@@ -288,9 +293,13 @@ export class Compactor {
     return Math.min(this.cfg.feed.tagRetentionDays, this.cfg.feed.maxLookbackDays);
   }
 
-  /** How long superseded keys stay readable: the cursor lifetime, plus what covers heads cached by readers. */
+  /**
+   * How long superseded keys stay readable: as long as a node may still serve the head that named
+   * them from its cache, and a minute more for the requests that read it last. No feed session needs
+   * them longer: a cursor names no index, and each page reads the one its tag's head names by then.
+   */
   private get keepMs() {
-    return this.cfg.feed.genRetentionMinutes * 60_000 + this.cfg.feed.headCacheMs + HEAD_SLACK_MS;
+    return this.cfg.feed.headCacheMs + HEAD_SLACK_MS;
   }
 
   /** How long what a run writes for a hashtag lasts unless the hashtag's head is swapped to it. */
@@ -340,6 +349,7 @@ export class Compactor {
     await this.syncChangedPublishers(state.through, runStart, lease);
     await this.syncChangedFollowing(state.through, runStart, lease);
     const relatedThrough = await this.syncRelatedTags(state.relatedThrough ?? 0, runStart, !!(opts.all || opts.rebuild), lease);
+    await this.syncAds(runStart, lease);
     this.markQueue(workFor, queue, runStart);
     const deletions = await this.markDeletions(workFor, ctx);
     await this.prefetch(queue, ctx);
@@ -542,6 +552,39 @@ export class Compactor {
       .sort((a, b) => b.posts - a.posts || (a.tag < b.tag ? -1 : 1))
       .slice(0, most)
       .map((r) => r.tag);
+  }
+
+  /**
+   * Publishes the server's ads (src/monetization.ts) to Redis, where feeds and posts read them:
+   * every ad of the `monetization` table that hasn't ended at the run's start, those yet to start
+   * among them, each with its schedule, which whoever shows it holds it to. So an ad that an admin
+   * created, changed or deleted shows as it now is after the next run, and one that only starts or
+   * ends does so on time, with no run between.
+   *
+   * All of them, every run, as there are few (see MAX_OPEN_ADS); Redis is written only if what it
+   * holds isn't what the table says. A server that shows no ads has none published, and nothing is
+   * read for it. A failure is logged and left for the next run, as nothing else a run does depends
+   * on it.
+   */
+  private async syncAds(runStart: number, lease: CompactorLease): Promise<void> {
+    const { db, ads, log } = this.deps;
+    const { feedAds, postAds } = this.cfg.monetization;
+    if (!feedAds && !postAds) return;
+    try {
+      const rows = await db
+        .selectFrom('monetization')
+        .select(['id', 'kind', 'text', 'url', 'tags', 'starts_at', 'ends_at'])
+        .where((eb) => eb.or([eb('ends_at', 'is', null), eb('ends_at', '>', runStart)]))
+        // In an order of its own, so the same ads are published as the same bytes.
+        .orderBy('created_at')
+        .orderBy('id')
+        .execute();
+      await lease.check();
+      if (await ads.sync(rows.map(publishedAd))) log?.info({ ads: rows.length }, 'published the ads');
+    } catch (err) {
+      if (err instanceof LeaseLostError) throw err;
+      log?.error({ err }, 'could not publish the ads; the next run tries again');
+    }
   }
 
   private async syncFollowing(userIds: string[], lease: CompactorLease) {
@@ -1003,7 +1046,7 @@ export class Compactor {
     if (evicted.length) await hot.del(evicted).catch(() => {});
     await hot.setMany(published.map((p) => ({ key: headKey(p.tag), value: JSON.stringify({ v: 5, manifest: p.next.id, compactedAt: runStart } satisfies Head) })));
 
-    // Readers pinned to the previous heads keep their keys for the cursor lifetime.
+    // Requests that read the previous heads, from a node's cache or just before the swap, still find their keys.
     const superseded = published.flatMap(({ tag, previous, next: { days } }) => {
       if (!previous) return [];
       const used = new Set(days.map((d) => d.gen));
@@ -1208,6 +1251,6 @@ export class Compactor {
 }
 
 /** The compactor of an app's database and stores. */
-export function createCompactor({ config, db, hot, summaries, content, comments, publishers, follows, relatedTags, now }: AppDeps, log?: CompactorLog) {
-  return new Compactor({ config, db, hot, summaries, content, comments, publishers, follows, relatedTags, now, log });
+export function createCompactor({ config, db, hot, summaries, content, comments, publishers, follows, relatedTags, ads, now }: AppDeps, log?: CompactorLog) {
+  return new Compactor({ config, db, hot, summaries, content, comments, publishers, follows, relatedTags, ads, now, log });
 }
