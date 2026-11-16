@@ -9,7 +9,7 @@ import { createOperator, isNotFound, readObject, streamObject } from './opendal.
 import { UploadTooLargeError } from './spool.js';
 
 /** Where a post's bytes are kept: an image's, video's or audio's file, a text post's text, or a link's URL. */
-export const contentKey = (contentId: string) => `content/${contentId}`;
+const contentKey = (contentId: string) => `content/${contentId}`;
 /** Where a post's meta file is kept (see ContentMeta): beside its bytes, as JSON. */
 const metaKey = (contentId: string) => `content/${contentId}.meta.json`;
 /**
@@ -17,10 +17,10 @@ const metaKey = (contentId: string) => `content/${contentId}.meta.json`;
  * post's. Under the user's id, so nobody stores another user's upload. The bucket should expire
  * what is left under `uploads/` after a day: uploads never stored, or stored by a request that failed.
  */
-export const uploadKey = (userId: string, uploadId: string) => `uploads/${userId}/${uploadId}`;
+const uploadKey = (userId: string, uploadId: string) => `uploads/${userId}/${uploadId}`;
 
 /** Where the image of an image ad is kept (src/monetization.ts): apart from posts, as an ad is no post. */
-export const adImageKey = (adId: string) => `ads/${adId}`;
+const adImageKey = (adId: string) => `ads/${adId}`;
 
 /**
  * Whose bytes a file in the store is: a post's, named by the post's id, those of the image or

@@ -16,7 +16,7 @@ const compress = promisify(brotliCompress);
  * summaries being looked for, and written where one is missing (ensureMany), or copies being
  * deleted (remove).
  */
-const COLD_READS = 32;
+const STORE_CONCURRENCY = 32;
 
 /** The Redis key of a piece of content's summary: one key, under however many days the object store keeps it. */
 export const summaryKey = (r: { contentId: string }) => `sum:${r.contentId}`;
@@ -27,7 +27,7 @@ const objectKey = (contentId: string, day: number) => `${dayPrefix(day)}${conten
 /** Where a feed reads the summary of an entry placed at `createdAt`. */
 export const summaryObjectKey = (r: { contentId: string; createdAt: number }) => objectKey(r.contentId, utcDay(r.createdAt));
 /** Every key a summary is kept under: one for the day the content was created, and one for each day it was reposted. */
-export const summaryObjectKeys = (r: SummaryRef) => [...new Set([r.createdAt, ...(r.repostedAt ?? [])].map(utcDay))].map((day) => objectKey(r.contentId, day));
+const summaryObjectKeys = (r: SummaryRef) => [...new Set([r.createdAt, ...(r.repostedAt ?? [])].map(utcDay))].map((day) => objectKey(r.contentId, day));
 /** The latest time a summary is found by: for as long as that is young, Redis keeps the summary. */
 const latest = (r: SummaryRef) => Math.max(r.createdAt, ...(r.repostedAt ?? []));
 
@@ -183,7 +183,7 @@ export class SummaryStore {
     let next = 0;
     const inHot = hot.map((due) => (due ? found[next++]! : true));
     const errors: (Error | null)[] = list.map(() => null);
-    await mapLimit([...list.keys()], COLD_READS, async (i) => {
+    await mapLimit([...list.keys()], STORE_CONCURRENCY, async (i) => {
       const s = list[i]!;
       try {
         // Every copy: one under a day the content was reposted on is the only one an entry of that day finds.
@@ -210,7 +210,7 @@ export class SummaryStore {
       const got = await this.hot.mget(hot.map((i) => summaryKey(refs[i]!)));
       hot.forEach((i, k) => (got[k] ? (blobs[i] = got[k]) : cold.push(i)));
     }
-    await mapLimit(cold, COLD_READS, async (i) => {
+    await mapLimit(cold, STORE_CONCURRENCY, async (i) => {
       const ref = refs[i]!;
       const key = summaryObjectKey(ref);
       const cached = this.cache.get(key);
@@ -253,7 +253,7 @@ export class SummaryStore {
     if (!refs.length) return;
     const keys = refs.flatMap(summaryObjectKeys);
     for (const key of keys) this.cache.delete(key);
-    await mapLimit(keys, COLD_READS, (key) => this.op.delete(key).catch(() => {}));
+    await mapLimit(keys, STORE_CONCURRENCY, (key) => this.op.delete(key).catch(() => {}));
     await this.hot.del(refs.map(summaryKey));
   }
 

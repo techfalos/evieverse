@@ -21,7 +21,7 @@ declare module 'fastify' {
 const WRITES = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 /** The object a record is stored as: one gzipped JSON document, under its UTC hour. */
-export function auditKey(record: Pick<AuditRecord, 'id' | 'time'>): string {
+function auditKey(record: Pick<AuditRecord, 'id' | 'time'>): string {
   const [date, time] = record.time.split('T') as [string, string];
   return `${date.replaceAll('-', '/')}/${time.slice(0, 2)}/${Date.parse(record.time)}-${record.id}.json.gz`;
 }

@@ -46,7 +46,7 @@ const spooled = (file: SpooledFile, tmpPath?: string): PostBytes => {
   };
 };
 
-/** Bytes the server made itself, to store as a piece of content's: a text post's text, a link's URL, the address of a repost's original. */
+/** Bytes the server has in memory, to store as a piece of content's: a text post's text, a link's URL, a file sent inline in `content`, the address of a repost's original. */
 export const spoolBytes = async (bytes: Buffer, { tmpPath, maxUploadBytes }: UploadLimits): Promise<PostBytes> =>
   spooled(await spoolToTemp(Readable.from([bytes]), tmpPath, maxUploadBytes), tmpPath);
 

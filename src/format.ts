@@ -26,7 +26,7 @@
  * Whatever doesn't fit these is the text it is written with: there is no text the format refuses.
  */
 
-export type Mark = 'bold' | 'italic' | 'strike';
+type Mark = 'bold' | 'italic' | 'strike';
 
 export type Inline =
   | { type: 'text'; text: string }

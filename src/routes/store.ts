@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
 import { ChallengeFields } from '../challenge/challenges.js';
-import { contentNotFound, requireMeta, takesComments } from '../content.js';
+import { contentNotFound, PENDING_REVIEW, requireMeta, takesComments } from '../content.js';
 import type { ContentRow } from '../db/schema.js';
 import type { RouteDeps } from '../deps.types.js';
 import { badRequest, forbidden } from '../http/errors.js';
@@ -55,9 +55,6 @@ type Existing = { row: ContentRow; meta: ContentMeta; queued: boolean; reposts: 
 
 /** What a publisher says of a post beside what it is: that it was created with AI, and that it takes comments. */
 type PostFlags = { aiGenerated: boolean; comments: boolean };
-
-/** What /store answers about content that waits in the moderation queue, beside 202 for a write of it. */
-const PENDING_REVIEW = { status: 'pending_review' } as const;
 
 /**
  * Whether the post is what the content holds: a text post's text, a link post's URL, or an image's,
@@ -114,7 +111,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
 
   /**
    * Creates or updates content. Moderation first gives the post a trust score, which says where it
-   * goes: refused (422), held in the moderation queue for an admin, or published. It also drops
+   * goes: refused (422), held in the moderation queue for a server moderator or an admin, or published. It also drops
    * some of its hashtags (see moderatePost). A post soon after the user's previous one is then
    * answered with a challenge, or two once the run is a few posts long, before anything is stored. The post is
    * then written as contentWriter describes: an update writes over the content, which has one
@@ -143,7 +140,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, challen
    * a new post or an update, it is theirs no more to write.
    *
    * A post held in the queue is answered 202 with `status: "pending_review"`: it is stored, and its
-   * publisher can read and update it, but it is in no feed until an admin accepts it.
+   * publisher can read and update it, but it is in no feed until a server moderator or an admin accepts it.
    *
    * A file comes as a multipart part, inline in `content`, or as an `uploadId`: the file is then
    * already in the content store (see POST /uploads), which is how files reach a server whose requests

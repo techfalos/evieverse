@@ -8,7 +8,6 @@ Requires Node.js 20 or newer and runs macOS, Linux and Windows.
 - [Sign in](#sign-in)
 - [Commands](#commands)
 - [Examples](#examples)
-- [Updates](#updates)
 
 ## Install
 
@@ -156,7 +155,7 @@ Both queue and reports contain posts and comments. Each line starts with `post` 
 
 | Command                                   | What it does                                                                                                                                                                                                                                                                    |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `register <username> [--language <code>]` | Registers a user (`[POST /register](API.md#post-register)`), with no challenge, and prints their `userId` and their API key. The key is shown this once, for you to pass on. With `--language`, the server answers them in that [language](API.md#languages), instead of yours. |
+| `register <username> [--language <code>]` | Registers a user (`[POST /register](API.md#post-register)`), with no challenge, and prints their `userId` and their API key. The key is shown this once, for you to pass on. With `--language`, the server answers them in that [language](LANGUAGES.md), instead of yours. |
 | `admins list`                             | Lists the admins.                                                                                                                                                                                                                                                               |
 | `admins grant <userId>`                   | Makes a user an admin.                                                                                                                                                                                                                                                          |
 | `admins revoke <userId>`                  | Revokes a user's admin role. The server refuses to revoke its only admin's.                                                                                                                                                                                                     |

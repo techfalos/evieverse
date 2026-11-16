@@ -16,6 +16,7 @@ import { rateLimitStore } from './http/rateLimitStore.js';
 import { loadLanguages, msg } from './language.js';
 import { loadTrustPlugins } from './moderation/trust.js';
 import { loadCliRelease, requireCliBuild } from './routes/cli.js';
+import { MINUTE } from './time.js';
 import { contentWriter } from './write.js';
 
 /**
@@ -65,7 +66,7 @@ export async function buildApp(
     global: false,
     store: rateLimitStore(deps.hot),
     // The plugin's own words are English only. It sets Retry-After itself.
-    errorResponseBuilder: (_req, { statusCode, ttl }) => new HttpError(statusCode, msg('error.rate_limited', { count: Math.max(1, Math.ceil(ttl / 60_000)) })),
+    errorResponseBuilder: (_req, { statusCode, ttl }) => new HttpError(statusCode, msg('error.rate_limited', { count: Math.max(1, Math.ceil(ttl / MINUTE)) })),
   });
   // Responses of a kilobyte or more, and a feed whatever its size (it is streamed), go out compressed
   // to a client that says it takes gzip or Brotli (Accept-Encoding), and as they are to one that

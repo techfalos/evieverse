@@ -36,7 +36,7 @@ const BY_EXTENSION: Record<string, string> = {
   '.flac': 'audio/flac',
 };
 
-/** Prefers an explicit client mime type, falling back to the file extension. */
+/** Prefers an explicit client mime type, falling back to the file extension. `application/octet-stream` says nothing of a file, so the extension is tried before it. */
 export function resolveMimeType(clientType: string | undefined, filename: string | null | undefined): string {
   const declared = clientType?.split(';')[0]?.trim().toLowerCase();
   if (declared && declared !== 'application/octet-stream') return declared;

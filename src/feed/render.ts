@@ -56,9 +56,9 @@ export async function loadBodies(picked: (Candidate & { by?: string })[], summar
  * - its summary doesn't carry `tag` any more: an update dropped the hashtag, or a moderator
  *   removed it.
  *
- * The index is as the compactor's last run left it, and a feed session reads the one its first page
- * did for as long as its cursor lasts. The summary is what the content is now, so this is what
- * keeps content out of a feed it has left before the index says so.
+ * The index is as the compactor's last run left it, whichever page of a feed reads it (see
+ * TagFeedReader). The summary is what the content is now, so this is what keeps content out of a
+ * feed it has left before the index says so.
  */
 function shown(bodies: FeedBodies, c: Candidate, tag: string): Summary | undefined {
   const s = bodies.summaries.get(refKey(c));

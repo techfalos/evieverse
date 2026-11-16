@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
 import type { AuthUser } from '../auth/apiKey.types.js';
 import { ChallengeFields } from '../challenge/challenges.js';
-import { loadPublished, requireMeta } from '../content.js';
+import { loadPublished, PENDING_REVIEW, requireMeta } from '../content.js';
 import { isUniqueViolation } from '../db/index.js';
 import type { RouteDeps } from '../deps.types.js';
 import { plainText } from '../format.js';
@@ -288,8 +288,7 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, challe
     reply.status(queued ? 202 : 201);
     return {
       contentId,
-      // How /store answers about content that waits in the moderation queue, and so does a repost that is held there.
-      ...(queued && { status: 'pending_review' }),
+      ...(queued && PENDING_REVIEW),
       tags: moderated.tags,
       ...(moderated.removedTags.length > 0 && { removedTags: moderated.removedTags }),
       preview,

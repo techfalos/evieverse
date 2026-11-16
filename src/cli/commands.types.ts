@@ -89,6 +89,6 @@ export interface WhoAmI {
   /** Whether anyone can list whom they follow, and who follows them. */
   showFollowing: boolean;
   showFollowers: boolean;
-  /** Whether a moderator banned them: they can't post, comment, like or send messages. */
+  /** Whether a server moderator or an admin banned them: they can't post, comment, like or send messages. */
   banned?: boolean;
 }

@@ -34,7 +34,7 @@ const LIKE_FILE = new RegExp(`^${ID}$`);
  * reply to it stay where they are, and nothing of what the comment was: not its author, its text,
  * or its image or video.
  */
-export const placeholder = ({ commentId, contentId, parentId, createdAt }: Pick<Comment, 'commentId' | 'contentId' | 'parentId' | 'createdAt'>, gone: NonNullable<Comment['gone']>): Comment => ({
+const placeholder = ({ commentId, contentId, parentId, createdAt }: Pick<Comment, 'commentId' | 'contentId' | 'parentId' | 'createdAt'>, gone: NonNullable<Comment['gone']>): Comment => ({
   commentId,
   contentId,
   ...(parentId !== undefined && { parentId }),
@@ -57,19 +57,19 @@ interface Reply {
  */
 const commentDir = (postId: string) => `comments/${postId}/`;
 /** A published comment's object, which holds its JSON, or that of the placeholder that stands in its place. */
-export const commentObjectKey = (postId: string, commentId: string) => `${commentDir(postId)}${commentId}.json`;
+const commentObjectKey = (postId: string, commentId: string) => `${commentDir(postId)}${commentId}.json`;
 /**
  * What says a published comment is a reply, and to which comment: an object beside the two, whose
  * name is all there is to it. So one list of a post's objects gives its comments and which replies
  * to which, without reading any.
  */
-export const replyObjectKey = (postId: string, parentId: string, commentId: string) => `${commentDir(postId)}${parentId}.${commentId}.reply`;
+const replyObjectKey = (postId: string, parentId: string, commentId: string) => `${commentDir(postId)}${parentId}.${commentId}.reply`;
 /** Where a comment is while it waits in the moderation queue: apart, so no list of the post's comments finds it. */
-export const heldCommentObjectKey = (postId: string, commentId: string) => `${commentDir(postId)}held/${commentId}.json`;
+const heldCommentObjectKey = (postId: string, commentId: string) => `${commentDir(postId)}held/${commentId}.json`;
 /** The prefix a comment's likes are under, an object for each user who liked it: a list of it counts them, and removing it deletes them all. */
 const likeDir = (postId: string, commentId: string) => `${commentDir(postId)}likes/${commentId}/`;
 /** A user's like of a comment: an object whose name is all there is to it, so a like is made once however often it is sent. */
-export const likeObjectKey = (postId: string, commentId: string, userId: string) => `${likeDir(postId, commentId)}${userId}`;
+const likeObjectKey = (postId: string, commentId: string, userId: string) => `${likeDir(postId, commentId)}${userId}`;
 /**
  * The bytes of the image or video a comment came with. In one place whether the comment is
  * published or waits in the moderation queue, so that neither accepting it nor holding an edit of

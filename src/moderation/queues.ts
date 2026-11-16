@@ -14,9 +14,9 @@ import type { QueueKind, QueueRow } from './queues.types.js';
 export const kindColumn = (kind: QueueKind) => (kind === 'post' ? sql<QueueKind>`'post'` : sql<QueueKind>`'comment'`).as('kind');
 
 /** A post in a queue: its feed record, with its whole text or caption. */
-export type QueuedPost = { kind: 'post' } & FeedRecord & { text?: string };
+type QueuedPost = { kind: 'post' } & FeedRecord & { text?: string };
 /** A comment in a queue: as GET /content/:contentId/comments gives it. */
-export type QueuedComment = { kind: 'comment' } & CommentRecord;
+type QueuedComment = { kind: 'comment' } & CommentRecord;
 
 /**
  * What each row of a page of a queue is, in the rows' order: a post as a feed record with its

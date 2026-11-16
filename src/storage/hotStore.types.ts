@@ -1,6 +1,9 @@
 /**
- * The RAM tier: the feed index (heads, manifests, day indexes), hot summaries and publisher
- * credits. Keys are relative; each store adds its own prefix. Any Redis-protocol server
+ * The RAM tier: the feed index (heads, manifests, day indexes), hot summaries, publisher credits,
+ * whom each user follows, related hashtags, the ads, and comments with their likes; and what is
+ * only kept for a while: challenges, the counts that limits are held to, and the compactor's state.
+ * Keys are relative to REDIS_KEY_PREFIX, and whatever keeps a kind of thing here names its keys
+ * with a prefix of its own (`sum:`, `pub:`, `head:`, ...). Any Redis-protocol server
  * works (Redis, Valkey, ElastiCache, Memorystore, Azure); without one, MemoryHotStore keeps
  * everything in this process, which only suits a single node.
  */

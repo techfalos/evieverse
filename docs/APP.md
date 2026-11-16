@@ -225,6 +225,7 @@ src/
                        cli (the CLI's download, its install scripts, and the check that holds a CLI to the server's build)
 scripts/build-cli.mjs  bundles src/cli into dist/cli/evieverse.mjs, with the manifest that names its build (part of `npm run build`)
 scripts/build-challenge-voice.mjs  records a language's voice for audio challenges into src/challenge/voices, with eSpeak NG (run by hand, when a language is added)
+scripts/check-conventions.mjs  checks the conventions of src that the compiler doesn't: where interfaces are, JSDoc comments, constants at the top (`npm run check`, and CI)
 test/                  vitest: API, feed index, the compactor as a process, planners, follows, reposts, moderation, the moderation queues and trust scores, comments, related hashtags, trust plugins, links that spread malware, challenges, formats, migrations, CORS, response compression, functions, uploads, rate limits, admins, the server's rules, monetization and the CLI; helpers.ts has the test server and the requests they share
 bench/                 the benchmark (`npm run bench`, which `npm test` doesn't run): in Docker, starts a server in a container with a set number of CPUs and amount of memory, fills it with the testbed's posts, sends it requests over HTTP from a second container, and writes BENCHMARKS.md
 testbed/               a seeded Docker stack with a web page, for trying the server out (section 13)
@@ -233,6 +234,8 @@ compose.base.yml       the services the three compose files share (section 13)
 ```
 
 A module's exported interfaces are in a file of their own beside it, named after it: those of `src/feed/cursor.ts` are in `src/feed/cursor.types.ts`. Such a file holds types alone (interfaces, and the type aliases only they need), imports types alone, and is where everything else imports them from. A type that is read off a value (`Config` off its zod schema, `FeedAlgorithm` off the list of algorithms) stays beside the value. `src/db/schema.ts` holds the database's types and nothing else, so it has no such file.
+
+`npm run check` (`scripts/check-conventions.mjs`) holds `src` to that and to two more conventions, and CI runs it: every module-level constant, exported function and interface has a JSDoc comment right on top of it, and a module's constants are at the top of the file, above its first function or class. A constant built from an arrow function of the file stays below it, and a script, which runs its statements in their order, is left as it is.
 
 ## 5. Data model
 

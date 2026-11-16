@@ -1,7 +1,9 @@
 /** Every timestamp is UTC epoch milliseconds. */
 
+/** A minute, in milliseconds: what the limits counted by the minute count over, and what a wait is told in. */
+export const MINUTE = 60 * 1000;
 /** An hour, in milliseconds: what turns the settings and the feed windows given in hours into a time. */
-export const HOUR = 60 * 60 * 1000;
+export const HOUR = 60 * MINUTE;
 /** A day, in milliseconds: what a UTC day number counts (`utcDay`), and what turns the settings given in days into a time (retention, a feed's lookback). */
 export const DAY = 24 * HOUR;
 

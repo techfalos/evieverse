@@ -2,7 +2,7 @@ import { randomInt } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
-import { contentNotFound, loadReadable, publisherOf, requireMeta, takesComments } from '../content.js';
+import { contentNotFound, loadReadable, PENDING_REVIEW, publisherOf, requireMeta, takesComments } from '../content.js';
 import { setForDeletion } from '../deletion.js';
 import type { AppDeps } from '../deps.types.js';
 import { forbidden } from '../http/errors.js';
@@ -82,7 +82,7 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
     return {
       publisher: publisherOf(row),
       contentId: row.id,
-      ...(row.queued && { status: 'pending_review' }),
+      ...(row.queued && PENDING_REVIEW),
       preview: previewOf(meta, config.publicBaseUrl),
       ...(meta.text !== undefined && { text: meta.text }),
       tags: meta.tags,

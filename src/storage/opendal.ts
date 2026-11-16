@@ -6,7 +6,7 @@ import { Operator } from 'opendal';
 /** The directory each local `fs` operator made here keeps its files in. */
 const roots = new WeakMap<Operator, string>();
 
-/** OpenDAL reports missing paths as a generic error whose message starts with "NotFound". */
+/** OpenDAL reports missing paths as a generic error whose message has "NotFound" in it. */
 export function isNotFound(err: unknown): boolean {
   return /NotFound/.test((err as Error)?.message ?? '');
 }

@@ -4,16 +4,16 @@ This is the reference for every setting a server has, and for putting a changed 
 
 - [How settings are read](#how-settings-are-read)
 - [How to write a value](#how-to-write-a-value)
-- [A. Every setting](#a-every-setting)
+- [A. Settings](#a-settings)
 - [B. Deploying a change](#b-deploying-a-change)
   - [Local](#local)
   - [Cloud](#cloud)
 
 `[.env.example](../.env.example)` lists the same settings as a file you can copy to `.env`, and `[src/config.ts](../src/config.ts)` is where they are read and checked.
 
-## Configuration settings not descibed here.
+## Configuration settings not described here.
 
-Please see separate documents for the languages the server answers in ([LANGUAGES.md](docs/LANGUAGES.md)) and the trust plugins that score posts ([TRUST_PLUGINS.md](docs/TRUST_PLUGINS.md)).
+Please see separate documents for the languages the server answers in ([LANGUAGES.md](LANGUAGES.md)) and the trust plugins that score posts ([TRUST_PLUGINS.md](TRUST_PLUGINS.md)).
 
 ## How settings are read
 
@@ -98,6 +98,7 @@ In the file, `TRUST_PROXY` (`trustProxy`) is a number, `true` or a string, so a 
 | `DEFAULT_LANGUAGE`     | `defaultLanguage` | text                    | `en`                    | The code of the language the server answers in when a request asks for none it has, and users register in when they choose none. It must be a file of `[languages](../languages)`, or the server doesn't start ([Languages](LANGUAGES.md)).                                                                                                                                                                                                                                                                   |
 | `EVIEVERSE_MODIFIED`   | `modified`        | true/false              | `false`                 | The modification disclosure: `true` if this instance runs a modified version of Evieverse, one whose source code differs from a release, as Evieverse's [additional license terms](../LICENSE.md) define it. Those terms have a modified version say so, and setting this is the supported way. `[GET /rules](API.md#get-rules)` gives it to anyone, with the release the code is based on. It's your own statement: the server checks it against nothing.                                                    |
 | `EVIEVERSE_SOURCE_URL` | `sourceUrl`       | text (a URL)            | empty                   | Where the source code this instance runs can be obtained: an `http` or `https` address, which `GET /rules` gives with the disclosure. A modified version has to give one, so a server with `EVIEVERSE_MODIFIED=true` and no address doesn't start. Empty: none is given.                                                                                                                                                                                                                                      |
+| `SUPPORT_EMAIL`        | `supportEmail`    | text (an email address) | `noreply@yoururl.com`   | The email address people write to for support, which `[GET /rules](API.md#get-rules)` gives to anyone who asks, beside the server's rules. The default is a placeholder: set it to an address that someone reads. The server sends it nothing, and doesn't start if it isn't an email address. Empty: the default.                                                                                                                                                                                            |
 | `EVIEVERSE_CONFIG`     |                   | text (a path)           | `evieverse.config.json` | The JSON file of settings. Environment only: a file can't name itself.                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 
@@ -179,6 +180,33 @@ The server only writes records. Moving them to cold storage is the bucket's own 
 | --------------------- | -------------------- | ------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `TAGGING_MODE`        | `tagging.mode`       | choice | `user`  | `user`: a post can have any hashtags. `server`: only those of `TAGGING_SERVER_TAGS`, and a post with another is refused.                                                                       |
 | `TAGGING_SERVER_TAGS` | `tagging.serverTags` | list   | empty   | The hashtags posts can have in server mode, as many as you like, such as `news,local,sports`. Required in server mode, which doesn't start without one. `GET /tagging` lists them for clients. |
+
+
+
+
+### Post types
+
+
+Which [types of post](API.md#post-store) the server takes: all five by default. `false` turns one off, and at least one must stay on, or the server doesn't start: a server of pictures alone sets every one but `POST_TYPE_IMAGE` to `false`. A type that's off takes no new post and no update of one (`400`), and `POST /uploads` gives no link for its files. Posts of it the server already holds stay, to read, like and delete.
+
+| Variable          | File key          | Format     | Default | What it does                                                                                                              |
+| ----------------- | ----------------- | ---------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `POST_TYPE_TEXT`  | `postTypes.text`  | true/false | `true`  | Whether the server takes text posts. A comment's text is no text post, so comments are written whether this is on or off. |
+| `POST_TYPE_IMAGE` | `postTypes.image` | true/false | `true`  | Whether it takes image posts, and comments that come with an image.                                                       |
+| `POST_TYPE_VIDEO` | `postTypes.video` | true/false | `true`  | Whether it takes video posts, and comments that come with a video.                                                        |
+| `POST_TYPE_AUDIO` | `postTypes.audio` | true/false | `true`  | Whether it takes audio posts.                                                                                             |
+| `POST_TYPE_LINK`  | `postTypes.link`  | true/false | `true`  | Whether it takes link posts.                                                                                              |
+
+
+
+
+### Reposts
+
+
+| Variable         | File key          | Format     | Default | What it does                                                                                                                                                                                                                                                                                                         |
+| ---------------- | ----------------- | ---------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `REPOSTS`        | `reposts.enabled` | true/false | `true`  | Whether the server takes reposts (`POST /repost`): a user gives a post more hashtags, which puts it in those hashtags' feeds and in the following feeds of their own followers, as a new post there. The post isn't copied. `false`: `POST /repost` is refused (`400`), and what was reposted before stays as it is. |
+| `REPOSTS_REMOTE` | `reposts.remote`  | true/false | `true`  | Whether it also takes reposts of posts on other servers. Such a repost is stored as a link to the original with the original's summary, which the reposter's client sends: this server asks the other one nothing. `false`: only posts on this server are reposted.                                                  |
 
 
 
@@ -302,14 +330,14 @@ These are read by the function entry points (`[src/functions](../src/functions)`
 | Variable               | Format | Default        | What it does                                                                                                                                        |
 | ---------------------- | ------ | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `FUNCTION_GROUP`       | choice | none, required | Which route group this function is: `feed`, `content`, `store` or `api`. On AWS Lambda also `migrate`, the step a deploy runs first: it checks that the functions start with their settings, and then brings the database schema up to date. |
-| `FUNCTION_EDGE_SECRET` | text   | unset          | A secret the CDN in front of the functions sends as `X-Edge-Secret`. Requests without it get `403`, except `/health`. Unset: no check.              |
+| `FUNCTION_EDGE_SECRET` | text   | unset          | A secret the CDN in front of the functions sends as `X-Origin-Secret`. Requests without it get `403`, except `/health`. Unset: no check.            |
 
 
 A function also takes different defaults from a server where the variable isn't set: `DB_MIGRATE_ON_START=false`, `DB_POOL_SIZE=2`, `DB_IDLE_TIMEOUT_MS=10000` and `COMPACT_IN_PROCESS=false`.
 
 ### `BOOTSTRAP_ADMIN`
 
-Read only by `npm run migrate` and the step a deployment of functions runs first (the migrate function on AWS, the migrate job elsewhere), for deployments that set up their [first admin](../README.md#the-first-admin) without a person at a command line. It's JSON, `{ "userId", "username", "keyHash" }`: an account's id and name, and the SHA-256 (in hex) of an API key made in the server's format, `tu_<12 hex characters>_<43 base64url characters>`. After the migrations, that account is created if it doesn't exist, made an admin, and, if the key is new to it, given that key as its only one. Running it again with the same value changes nothing, and with another key replaces the one the account has. A key the account had and replaced since (`[POST /users/:userId/key](API.md#post-usersuseridkey)`) stays revoked. The key itself never reaches the server. The [Terraform modules](DEPLOY.md#the-admin-account) set it, so you won't set it there yourself.
+Read only by `npm run migrate` and the step a deployment of functions runs first (the migrate function on AWS, the migrate job elsewhere), for deployments that set up their [first admin](API.md#moderation) without a person at a command line. It's JSON, `{ "userId", "username", "keyHash" }`: an account's id and name, and the SHA-256 (in hex) of an API key made in the server's format, `tu_<12 hex characters>_<43 base64url characters>`. After the migrations, that account is created if it doesn't exist, made an admin, and, if the key is new to it, given that key as its only one. Running it again with the same value changes nothing, and with another key replaces the one the account has. A key the account had and replaced since (`[POST /users/:userId/key](API.md#post-usersuseridkey)`) stays revoked. The key itself never reaches the server. The [Terraform modules](DEPLOY.md#the-admin-account) set it, so you won't set it there yourself.
 
 ```sh
 BOOTSTRAP_ADMIN='{"userId":"<a UUID>","username":"admin","keyHash":"<64 hex>"}' npm run migrate

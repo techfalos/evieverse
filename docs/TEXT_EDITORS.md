@@ -21,7 +21,7 @@ A client reads the formatting wherever one of these texts comes back:
 | Field | Where | What it holds |
 | --- | --- | --- |
 | `text` | [`GET /content/:contentId`](API.md#get-contentcontentid) | The whole text or caption, as written. A text post's bytes (`contentUrl`) are the same text. |
-| `preview.text` | Feeds, `GET /content/:contentId`, and the response of `POST /store` | The start of the text or caption, itself a formatted text ([below](#previews)). |
+| `preview.text` | Feeds, `GET /content/:contentId`, and the response of `POST /store` | The start of the text or caption, itself a formatted text ([API.md](API.md#previews)). |
 | `text` | A [comment](API.md#comments), in every list of them | The comment's text, as written. |
 
 Everything else is plain text, shown as written: a link post's URL, hashtags, usernames, direct messages, the instance's rules, ads, and a notice's `text` and `excerpt`. An `excerpt` quotes a post or comment with its formatting already taken out.

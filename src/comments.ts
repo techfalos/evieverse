@@ -59,7 +59,7 @@ export function newCommentId(now: number): string {
 }
 
 /** Where the bytes of a comment's image or video are read, as a post's are at /content/:contentId/raw. */
-export const commentMediaUrl = (publicBaseUrl: string, postId: string, commentId: string) => `${publicBaseUrl}/content/${postId}/comments/${commentId}/raw`;
+const commentMediaUrl = (publicBaseUrl: string, postId: string, commentId: string) => `${publicBaseUrl}/content/${postId}/comments/${commentId}/raw`;
 
 /**
  * A comment as responses give it: with `author` as its credit, and the link to its image or video
@@ -143,7 +143,7 @@ type RemovalDeps = Pick<AppDeps, 'db' | 'comments'>;
  * the post's rows in the queue, which are few. Not to be called inside a transaction: it reads
  * the database on its own.
  */
-export async function hasReplies({ db, comments }: RemovalDeps, postId: string, commentId: string): Promise<boolean> {
+async function hasReplies({ db, comments }: RemovalDeps, postId: string, commentId: string): Promise<boolean> {
   if ((await comments.count(postId, commentId)) > 0) return true;
   for (const { comment_id: id } of await db.selectFrom('comment_queue').select('comment_id').where('content_id', '=', postId).where('comment_id', '!=', commentId).execute()) {
     if ((await comments.getHeld(postId, id))?.parentId === commentId) return true;

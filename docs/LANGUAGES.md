@@ -19,6 +19,6 @@ To add a language, copy `en.json` or another language file to a file named after
 
 - `DEFAULT_LANGUAGE` (`en`) is the language of anyone who hasn't chosen one. 
 
-Users pick any of the server's languages when they register, and can edit their language at any time. Use `GET /languages` to list them ([API.md](API.md#languages)).
+Users pick any of the server's languages when they register, and can edit their language at any time. Use `GET /languages` to list them ([API.md](API.md#get-languages)).
 
 Please consider opening a PR on the repo to add language support to the base instance.

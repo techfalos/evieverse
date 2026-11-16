@@ -14,7 +14,7 @@ import { wholeSeconds } from './time.js';
 import type { ContentWrite, RepostWrite } from './write.types.js';
 
 /** 409: the content is set for deletion, and takes no update. */
-export const pendingDeletion = () => conflict(msg('content.pending_deletion'));
+const pendingDeletion = () => conflict(msg('content.pending_deletion'));
 
 /** Refuses an update, of content type `mimeType`, that the content can't take. `meta` is its meta file as it is. */
 export function assertUpdatable(existing: { delete_requested_at: number | null }, meta: { mimeType: string }, mimeType: string) {

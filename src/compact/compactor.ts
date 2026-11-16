@@ -10,7 +10,7 @@ import type { ContentMeta, Summary } from '../storage/index.js';
 import { authorIndex, compareRecent, compareRecords, COMPACTOR_STATE_KEY, dayKey, dayQuota, EMPTY_HEAD, headKey, indexAuthor, manifestKey, newGenId, newManifestId, packDay, unpackDay } from '../tagfeed/layout.js';
 import type { DayRef, Head, IndexEntry, Manifest } from '../tagfeed/layout.types.js';
 import { readJson } from '../tagfeed/read.js';
-import { DAY, HOUR, utcDay, wholeSeconds } from '../time.js';
+import { DAY, HOUR, MINUTE, utcDay, wholeSeconds } from '../time.js';
 import { mapLimit } from '../util.js';
 import type { RunOptions, RunResult } from './compactor.types.js';
 import { CompactorLease, LeaseLostError } from './lease.js';
@@ -321,7 +321,7 @@ export class Compactor {
    */
   private get keepMs() {
     // A minute past the time a node caches a head: a request under way reads on from a head that was just replaced.
-    return this.cfg.feed.headCacheMs + 60_000;
+    return this.cfg.feed.headCacheMs + MINUTE;
   }
 
   /** How long what a run writes for a hashtag lasts unless the hashtag's head is swapped to it. */

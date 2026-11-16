@@ -2,7 +2,8 @@
   "name": "evieverse",
   "version": "0.1.0",
   "description": "Open source social media server: image, video, audio, text and link posts, hashtags, likes, and feeds planned from a per-hashtag index in Redis.",
-  "license": "Modified AGPLv3",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "private": true,
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -16,6 +17,7 @@
     "migrate": "node dist/db/migrate.js",
     "admin": "node dist/moderation/admin.js",
     "typecheck": "tsc --noEmit",
+    "check": "node scripts/check-conventions.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "bench": "node bench/run.mjs"

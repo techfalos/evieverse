@@ -680,7 +680,7 @@ resource "azurerm_cdn_frontdoor_rule" "edge_secret" {
   actions {
     request_header_action {
       header_action = "Overwrite"
-      header_name   = "X-Edge-Secret"
+      header_name   = "X-Origin-Secret"
       value         = random_password.edge.result
     }
   }

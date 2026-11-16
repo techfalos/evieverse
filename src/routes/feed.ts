@@ -23,7 +23,7 @@ import { DAY } from '../time.js';
 import type { FeedDeps } from './feed.types.js';
 
 /** The most hashtags a feed reads: the ones asked for and, with addRelated, the ones related to them. */
-const MAX_TAGS = 20;
+const MAX_FEED_TAGS = 20;
 
 /** Most posts in the page; FEED_PAGE_SIZE when omitted, at most FEED_MAX_PAGE_SIZE. */
 const Limit = z.coerce.number().int().positive().optional();
@@ -108,7 +108,7 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries
       ),
     ];
     if (!tags.length || tags.includes(null)) throw badRequest(msg('feed.tags_invalid'));
-    if (tags.length > MAX_TAGS) throw badRequest(msg('feed.too_many_tags', { max: MAX_TAGS }));
+    if (tags.length > MAX_FEED_TAGS) throw badRequest(msg('feed.too_many_tags', { max: MAX_FEED_TAGS }));
     const tagList = tags as string[];
     const limit = pageLimit(config, q.limit);
 
@@ -127,7 +127,7 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries
       throw badRequest(msg('feed.cursor_mismatch'));
     }
     // A cursor is the client's to hold, so what it names is held to what a first page could have read.
-    if (cursor?.related && tagList.length + cursor.related.length > MAX_TAGS) throw invalidCursor();
+    if (cursor?.related && tagList.length + cursor.related.length > MAX_FEED_TAGS) throw invalidCursor();
     // The window ends where the first page's did, so a session never reaches posts newer than its first page.
     const anchor = cursor?.anchor ?? now();
     const seed = cursor?.seed ?? randomInt(2 ** 31);
@@ -136,7 +136,7 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries
     // Later pages read the related hashtags the first page did: what was counted since could name others.
     const related = !addRelated
       ? undefined
-      : (cursor?.related ?? relatedTo(tagList, await Promise.all(tagList.map((tag) => relatedTags.get(tag))), MAX_TAGS));
+      : (cursor?.related ?? relatedTo(tagList, await Promise.all(tagList.map((tag) => relatedTags.get(tag))), MAX_FEED_TAGS));
     const feedTags = related ? [...tagList, ...related] : tagList;
     if (cursor && cursor.after.length !== feedTags.length) throw invalidCursor();
 

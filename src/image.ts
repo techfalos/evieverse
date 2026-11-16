@@ -8,7 +8,7 @@ import type { SpooledFile } from './storage/spool.types.js';
  * The images a post can be: the formats browsers show whose metadata `stripImage` knows how to
  * remove. Any other (SVG, which can carry scripts; HEIC, TIFF, ...) is refused.
  */
-export const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'] as const;
+const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'] as const;
 export type ImageType = (typeof IMAGE_TYPES)[number];
 
 /** How many of a file's first bytes say which image it is. */

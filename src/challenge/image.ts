@@ -93,8 +93,9 @@ interface Stroke {
 
 /**
  * Renders `text` as a grayscale PNG meant to be read by people and not by OCR. The characters overlap
- * and are each scaled, rotated and sheared; curves as thick as their strokes run through them, with
- * glyph fragments scattered around, so neither stroke width nor gaps separate the characters. A wave
+ * and are each scaled, rotated and sheared; two curves run through them, one as thick as their
+ * strokes and one thinner, with short arcs scattered around, so neither stroke width nor gaps
+ * separate the characters. A wave
  * bends the whole image, a band of it is inverted (so no single threshold separates ink from
  * background), and noise covers the rest. It's a raster, so its shapes can only be recovered by reading it.
  */
@@ -233,7 +234,7 @@ function chunk(type: string, data: Buffer): Buffer {
 }
 
 /** An 8-bit grayscale PNG. */
-export function encodePng(width: number, height: number, gray: Uint8Array): Buffer {
+function encodePng(width: number, height: number, gray: Uint8Array): Buffer {
   const rows = Buffer.alloc((width + 1) * height);
   for (let y = 0; y < height; y++) rows.set(gray.subarray(y * width, (y + 1) * width), y * (width + 1) + 1);
   const header = Buffer.alloc(13);

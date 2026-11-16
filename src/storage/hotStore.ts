@@ -67,7 +67,7 @@ function check(results: [Error | null, unknown][] | null): unknown[] {
   });
 }
 
-export class RedisHotStore implements HotStore {
+class RedisHotStore implements HotStore {
   private readonly redis: Redis;
 
   constructor(url: string, private readonly prefix: string) {

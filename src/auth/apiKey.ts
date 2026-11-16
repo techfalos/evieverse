@@ -16,14 +16,18 @@ const KEY_PATTERN = /^tu_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$/;
  * default for a user who has none (an account the operator set up), or whose language the server
  * no longer speaks.
  */
-export const languageOf = (languages: Languages, stored: string | null): string =>
+const languageOf = (languages: Languages, stored: string | null): string =>
   (stored === null ? undefined : languages.find(stored)) ?? languages.default;
 
 function hashKey(apiKey: string): string {
   return createHash('sha256').update(apiKey).digest('hex');
 }
 
-/** Keys are 256-bit random secrets, so a fast hash is sufficient (no password-style stretching needed). */
+/**
+ * Makes the user a new API key and returns it. Only its hash is stored, so this is the one time the
+ * key can be read. Keys are 256-bit random secrets, so a fast hash is sufficient (no password-style
+ * stretching needed).
+ */
 export async function issueApiKey(db: Db, userId: string, now = Date.now()): Promise<string> {
   const apiKey = `tu_${randomBytes(6).toString('hex')}_${randomBytes(32).toString('base64url')}`;
   await db

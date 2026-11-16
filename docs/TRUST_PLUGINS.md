@@ -13,7 +13,7 @@ To add one, add a folder with an `index.ts` whose default export has an `assess`
 
 ```ts
 // src/plugins/trust/links/index.ts
-import type { TrustAlgorithm } from '../../../moderation/trust.js';
+import type { TrustAlgorithm } from '../../../moderation/trust.types.js';
 
 export default {
   assess({ texts, commentOn }) {
@@ -27,7 +27,7 @@ export default {
 
 ```ts
 // src/plugins/trust/new_accounts/index.ts
-import type { TrustAlgorithm } from '../../../moderation/trust.js';
+import type { TrustAlgorithm } from '../../../moderation/trust.types.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 

@@ -149,12 +149,13 @@ export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
     return { from: pools, at: freshPos };
   };
 
+  /** The tag whose turn it is, where tags take turns. */
+  let rr = 0;
   /**
    * The tag the next pick comes from, or -1 once none has a record left: the next tag in turn that
    * has one or, in chronological order, the tag whose next record is the newest (of tags whose next
    * records were created in the same second, the one with the lower content id, as in each list).
    */
-  let rr = 0;
   const turn = (): number => {
     let t = -1;
     for (let step = 0; step < T; step++) {

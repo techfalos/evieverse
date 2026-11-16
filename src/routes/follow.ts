@@ -16,7 +16,7 @@ const Params = z.object({ userId: z.string().uuid() });
 const PairParams = z.object({ userId: z.string().uuid(), followeeId: z.string().uuid() });
 
 /** Each list is the user's side of a follow, and the other user's. */
-const SIDES = {
+const SIDE_COLUMNS = {
   following: { own: 'follows.follower_id', other: 'follows.followee_id' },
   followers: { own: 'follows.followee_id', other: 'follows.follower_id' },
 } as const;
@@ -114,7 +114,7 @@ export function followRoutes(app: FastifyInstance, { db, config, follows, now = 
       const page = listQuery(req.query);
       await requireShownFollows(db, req, userId, list);
 
-      const { own, other } = SIDES[list];
+      const { own, other } = SIDE_COLUMNS[list];
       const { rows, nextCursor } = await listPage(
         db
           .selectFrom('follows')

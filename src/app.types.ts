@@ -10,7 +10,7 @@ import type { CliRelease } from './routes/cli.types.js';
  * a function passes on its `server` options (createFunction).
  */
 export interface AppOptions extends FastifyServerOptions {
-  /** Refuse requests that don't carry this in X-Edge-Secret (functions/edge.ts). */
+  /** Refuse requests that don't carry this in X-Origin-Secret (functions/edge.ts). */
   edgeSecret?: string;
   /** The CLI the server ships, or null for none. By default, the one built with it, if it was (routes/cli.ts). */
   cli?: CliRelease | null;

@@ -12,8 +12,9 @@ import { functionConfig, requireRedis } from './handler.js';
  * The compactor isn't one of them: it is a process that stays up (`node dist/compact/main.js`),
  * which the same platforms run from the same image as a worker with no address.
  *
- * FUNCTION_EDGE_SECRET, if set, is what the CDN in front of a route group sends as X-Edge-Secret;
- * requests without it are refused. Set it where the platform can't keep other callers out itself.
+ * FUNCTION_EDGE_SECRET, if set, is what the CDN in front of a route group sends as
+ * X-Origin-Secret; requests without it are refused. Set it where the platform can't keep other
+ * callers out itself.
  */
 
 /** FUNCTION_GROUP as the environment has it: the route group this container serves, once it is checked to name one (below). */

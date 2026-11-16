@@ -1,5 +1,6 @@
 import type { Config } from '../../../config.js';
 import type { TrustContext } from '../../../moderation/trust.types.js';
+import { MINUTE } from '../../../time.js';
 import { addressOf, beforeStepsBack, endings } from './links.js';
 import type { Link } from './links.types.js';
 import type { Listed } from './list.types.js';
@@ -122,13 +123,13 @@ export class MalwareList {
   refresh({ config, now, log }: Context): void {
     if (this.download || now() < this.dueAt) return;
     // A minute from now the next one is tried, if this one fails.
-    this.dueAt = now() + 60_000;
+    this.dueAt = now() + MINUTE;
     this.download = download(config.urlhaus, this.fetcher)
       .then(
         (listed) => {
           this.listed = listed;
           this.failure = undefined;
-          this.dueAt = now() + config.urlhaus.refreshMinutes * 60_000;
+          this.dueAt = now() + config.urlhaus.refreshMinutes * MINUTE;
           log?.info({ urls: listed.urls.size, hosts: listed.hosts.size }, "urlhaus: downloaded URLhaus's list of malware URLs");
         },
         (err: unknown) => {

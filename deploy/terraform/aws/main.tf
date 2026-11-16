@@ -955,7 +955,7 @@ resource "aws_cloudfront_distribution" "app" {
     domain_name = replace(aws_apigatewayv2_api.main.api_endpoint, "https://", "")
     origin_id   = "gateway"
     custom_header {
-      name  = "X-Edge-Secret"
+      name  = "X-Origin-Secret"
       value = random_password.edge.result
     }
     custom_origin_config {

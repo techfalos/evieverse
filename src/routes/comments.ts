@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
 import { ChallengeFields } from '../challenge/challenges.js';
 import { MAX_COMMENT_CHARS, newCommentId, publishComment, removeComment, toCommentRecord, toCommentRecords } from '../comments.js';
-import { loadContent, loadPublished, loadReadable, readsHeld, requireMeta, takesComments } from '../content.js';
+import { loadContent, loadPublished, loadReadable, PENDING_REVIEW, readsHeld, requireMeta, takesComments } from '../content.js';
 import { updateOnConflict } from '../db/index.js';
 import type { AppDeps, RouteDeps } from '../deps.types.js';
 import { badRequest, forbidden, notFound } from '../http/errors.js';
@@ -53,14 +53,11 @@ const CommentBody = Credentials.extend({
   contentEncoding: z.enum(['utf8', 'base64']).default('utf8'),
   ...ChallengeFields,
 });
-/** An edit's text, which may be empty for a comment that has an image or a video to be. */
+/** An edit's text, which may be empty for a comment that has an image or a video. */
 const EditBody = Credentials.extend({ text: Text, ...ChallengeFields });
 
-/** What a comment that waits in the moderation queue carries, as a post that waits there does. */
-const PENDING_REVIEW = { status: 'pending_review' } as const;
-
 /** The 404 for a comment that isn't there, which a comment its reader may not read is answered with too. It is returned, not thrown. */
-export const commentNotFound = () => notFound(msg('comment.not_found'));
+const commentNotFound = () => notFound(msg('comment.not_found'));
 
 /**
  * Reading a post's comments (see comments.ts for what they are). Whoever may read the post may read

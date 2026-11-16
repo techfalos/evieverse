@@ -3,8 +3,11 @@ import type { FastifyInstance } from 'fastify';
 import { say } from '../http/language.js';
 import { msg } from '../language.js';
 
-/** The header a CDN in front of the functions sends to prove a request came through it (see FUNCTION_EDGE_SECRET). */
-export const EDGE_SECRET_HEADER = 'x-edge-secret';
+/**
+ * The header a CDN in front of the functions sends to prove a request came through it (see
+ * FUNCTION_EDGE_SECRET). Not `X-Edge-*`: CloudFront refuses to add a header of that prefix.
+ */
+export const EDGE_SECRET_HEADER = 'x-origin-secret';
 
 /**
  * Whether `given`, a header's value, is `secret`: false for anything that isn't a string. Values

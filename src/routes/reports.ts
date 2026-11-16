@@ -14,10 +14,10 @@ import { notify } from '../inbox.js';
 import { msg } from '../language.js';
 import { moderatesServer } from '../moderation/policy.js';
 import { kindColumn, queueItems } from '../moderation/queues.js';
-import { HOUR, iso } from '../time.js';
+import { HOUR, iso, MINUTE } from '../time.js';
 
 /** The longest reason a report can give, which is what `reports.reason` holds. */
-export const MAX_REASON_CHARS = 500;
+const MAX_REASON_CHARS = 500;
 
 /** What POST /report says: the post that is reported, or with `commentId` a comment on it, and why, if the user gives a reason. */
 const ReportBody = Credentials.extend({
@@ -64,7 +64,7 @@ export function reportRoutes(app: FastifyInstance, deps: AppDeps) {
     if (config.reportsPerHour <= 0) return;
     const { count, ttlMs } = await hot.incr(`reports:${userId}`, HOUR);
     if (count > config.reportsPerHour) {
-      throw tooManyRequests(msg('report.rate_limited', { count: Math.max(1, Math.ceil(ttlMs / 60_000)) }), Math.max(1, Math.ceil(ttlMs / 1000)));
+      throw tooManyRequests(msg('report.rate_limited', { count: Math.max(1, Math.ceil(ttlMs / MINUTE)) }), Math.max(1, Math.ceil(ttlMs / 1000)));
     }
   }
 

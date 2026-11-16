@@ -184,7 +184,7 @@ The audit log is written by the functions that answer requests, in each request,
 
 The limit on registrations counts by the client's address, which the server reads from `X-Forwarded-For`, as far from the end as there are proxies in front of it (`TRUST_PROXY`). Nothing can reach the functions except through the address in front, so a client can't make one up:
 
-- **AWS:** CloudFront sends a secret header (`X-Edge-Secret`) that the functions require, since the API Gateway's own address is public.
+- **AWS:** CloudFront sends a secret header (`X-Origin-Secret`) that the functions require, since the API Gateway's own address is public.
 - **GCP:** the Cloud Run services only admit the gateway's service account. There's no `allUsers` binding.
 - **Azure:** Front Door sends the same secret header, since each Container App's own address is public.
 

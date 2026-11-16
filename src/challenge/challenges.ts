@@ -5,7 +5,7 @@ import { challengeRequired, notFound, tooManyRequests } from '../http/errors.js'
 import { msg, type MessageKey } from '../language.js';
 import type { Message } from '../language.types.js';
 import type { HotStore } from '../storage/index.js';
-import { iso } from '../time.js';
+import { iso, MINUTE } from '../time.js';
 import { renderSpoken, shippedVoices, type Voices } from './audio.js';
 import type { Challenge, ChallengeSolution } from './challenges.types.js';
 import { challengeText, renderChallenge } from './image.js';
@@ -22,9 +22,6 @@ const WORDS = {
   post: { atOnce: 'post.too_many_at_once', overtaken: 'challenge.overtaken', toSend: 'challenge.to_post', toSendNew: 'challenge.to_post_new' },
   comment: { atOnce: 'comment.too_many_at_once', overtaken: 'challenge.comment_overtaken', toSend: 'challenge.to_comment', toSendNew: 'challenge.to_comment_new' },
 } as const satisfies Record<Sent, Record<string, MessageKey>>;
-
-/** A minute, in milliseconds: what the limits on posts and on comments count over, and how long a run of challenged comments lasts. */
-const MINUTE = 60_000;
 
 /** Where a challenge stands in the run a request needs; for a post or a comment, `streak` is what set `steps`. */
 interface Step {
@@ -67,7 +64,7 @@ export function leadingZeroBits(hash: Buffer): number {
  * What a user sends that is limited: a post (/store), or a comment, which an edit of one counts as.
  * Both go by the same rules, each with its own settings, keys and challenges (see `Pace`).
  */
-export type Sent = 'post' | 'comment';
+type Sent = 'post' | 'comment';
 
 /** The settings a post or a comment is limited by. */
 interface Pace {
@@ -83,13 +80,13 @@ interface Pace {
 }
 
 /** When a user's posts in the last minute were: epoch ms separated by spaces, oldest first. Kept a minute. */
-export const recentPostsKey = (userId: string) => `posts:${userId}`;
+const recentPostsKey = (userId: string) => `posts:${userId}`;
 /** A user's run of posts, as `<last> <streak>` (see Run). Kept one post window. */
-export const postRunKey = (userId: string) => `run:${userId}`;
+const postRunKey = (userId: string) => `run:${userId}`;
 /** When a user's comments in the last minute were, as their posts' times are kept. Kept a minute. */
-export const recentCommentsKey = (userId: string) => `cmtsent:${userId}`;
+const recentCommentsKey = (userId: string) => `cmtsent:${userId}`;
 /** A user's run of challenged comments, as their run of posts is kept. Kept a minute. */
-export const commentRunKey = (userId: string) => `cmtrun:${userId}`;
+const commentRunKey = (userId: string) => `cmtrun:${userId}`;
 
 /**
  * A user's run of posts or of comments: when they last sent one that is in it, or were challenged
@@ -130,7 +127,7 @@ function refuseOverLimit(sent: Sent, times: number[], at: number, limit: number)
 type Release = () => Promise<void>;
 
 /** Where a challenge's characters are read out (routes/challenges.ts). */
-export const challengeAudioUrl = (publicBaseUrl: string, id: string) => `${publicBaseUrl}/challenges/${id}/audio`;
+const challengeAudioUrl = (publicBaseUrl: string, id: string) => `${publicBaseUrl}/challenges/${id}/audio`;
 
 /**
  * Challenges people solve to register, to post again soon after posting, and to comment past a few

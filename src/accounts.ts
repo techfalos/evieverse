@@ -34,8 +34,8 @@ import { msg } from './language.js';
 type Log = { warn: (o: object, msg?: string) => void };
 
 /** What setting the content of an account for deletion needs. */
-export type SweepDeps = Pick<AppDeps, 'db' | 'now'>;
-export type AccountDeps = SweepDeps & Pick<AppDeps, 'follows' | 'publishers'>;
+type SweepDeps = Pick<AppDeps, 'db' | 'now'>;
+type AccountDeps = SweepDeps & Pick<AppDeps, 'follows' | 'publishers'>;
 
 /** Users per read of their follows, well within every dialect's limit on parameters. */
 const SYNC_BATCH = 500;

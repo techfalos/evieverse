@@ -17,7 +17,7 @@ import { httpApiHandler, runLambda } from './lambdaRuntime.js';
  * The compactor isn't a function: it is a process that stays up (`node dist/compact/main.js`), which
  * a deployment runs from the same image as a container of its own.
  *
- * FUNCTION_EDGE_SECRET, if set, is what the CDN in front of the gateway sends as X-Edge-Secret.
+ * FUNCTION_EDGE_SECRET, if set, is what the CDN in front of the gateway sends as X-Origin-Secret.
  */
 
 /** FUNCTION_GROUP as the environment has it: which function this is, a route group's or `migrate`. Anything else is refused below. */

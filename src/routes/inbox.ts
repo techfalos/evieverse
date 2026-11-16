@@ -13,7 +13,7 @@ import { isNotice, MAX_MESSAGE_CHARS, MESSAGE, NOTICES } from '../inbox.js';
 import { msg } from '../language.js';
 import type { Message } from '../language.types.js';
 import { refuseBanned } from '../moderation/policy.js';
-import { iso } from '../time.js';
+import { iso, MINUTE } from '../time.js';
 
 /** The path of a user's inbox, and of the list of whom they block: the user's id. */
 const Params = z.object({ userId: z.string().uuid() });
@@ -109,7 +109,7 @@ export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.
 
     const { messagesPerMinute } = config.inbox;
     if (messagesPerMinute > 0) {
-      const { count, ttlMs } = await hot.incr(`messages:${sender.id}`, 60_000);
+      const { count, ttlMs } = await hot.incr(`messages:${sender.id}`, MINUTE);
       const seconds = Math.max(1, Math.ceil(ttlMs / 1000));
       if (count > messagesPerMinute) throw tooManyRequests(msg('message.rate_limited', { count: seconds }), seconds);
     }

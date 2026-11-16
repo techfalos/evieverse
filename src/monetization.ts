@@ -76,7 +76,7 @@ export const adImageUrl = (publicBaseUrl: string, adId: string) => `${publicBase
  * to where the ad leads (GET /monetization/ads/:adId/click). It names the ad and nothing else, so
  * it stays the same whatever the ad's link is changed to.
  */
-export const adClickUrl = (publicBaseUrl: string, adId: string) => `${publicBaseUrl}/monetization/ads/${adId}/click`;
+const adClickUrl = (publicBaseUrl: string, adId: string) => `${publicBaseUrl}/monetization/ads/${adId}/click`;
 
 /** An ad as a response carries it, under `label`. Its link, where it has one, is the one that counts the click. */
 export const adRecord = (ad: Pick<PublishedAd, 'adId' | 'kind' | 'text' | 'url'>, label: string, publicBaseUrl: string): AdRecord => ({

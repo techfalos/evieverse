@@ -4,7 +4,7 @@ import { BUNDLE_PATH, CliError, isRelease } from './client.js';
 import type { Release } from './client.types.js';
 
 /** The commands that install the CLI a server ships, which is how to get it back if an update can't be made. */
-export const installHint = (server: string) =>
+const installHint = (server: string) =>
   `install it again with \`curl -fsSL ${server}/cli/install.sh | sh\` (macOS, Linux) or \`irm ${server}/cli/install.ps1 | iex\` (Windows)`;
 
 /** The CLI a server ships (GET /cli). */

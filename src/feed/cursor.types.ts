@@ -4,7 +4,8 @@ import type { Boundary } from './plan.types.js';
 /**
  * A hashtag feed's cursor says where the feed has got to, not what it read: the last record taken
  * from each tag's list, and from its fresh pool. The next page is planned over the index as it is
- * by then and carries on after those, so the cursor pins nothing and doesn't expire.
+ * by then and carries on after those, so the cursor pins nothing. It lasts until a server whose
+ * cursors are of a newer version reads it, which refuses it as expired (410, see decodeCursor).
  */
 export interface CursorState {
   /** The instant the first page was computed for, which ends the window; later pages reuse it so the window stays the same. */

@@ -7,6 +7,12 @@ import { moderatesServer } from './moderation/policy.js';
 import { previewOf } from './posts.js';
 import type { ContentMeta, ContentStore, Publisher, Summary } from './storage/index.js';
 
+/**
+ * What a response says of a post or a comment that waits in the moderation queue: the `status` it
+ * carries, beside 202 where the request wrote it. Only its author, server moderators and admins get to read it.
+ */
+export const PENDING_REVIEW = { status: 'pending_review' } as const;
+
 /** 404 for content that isn't there, and for content the caller may not know is there. */
 export const contentNotFound = () => notFound(msg('content.not_found'));
 
@@ -38,7 +44,7 @@ export async function loadPublished(db: Db, contentId: string) {
   return row;
 }
 
-export type LoadedContent = Awaited<ReturnType<typeof loadContent>>;
+type LoadedContent = Awaited<ReturnType<typeof loadContent>>;
 
 /**
  * The content, for whoever may read it. Published content is anyone's to read, with no key. Content

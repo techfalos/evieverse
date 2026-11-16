@@ -10,7 +10,7 @@ import { msg } from '../language.js';
 import { refuseBanned } from '../moderation/policy.js';
 import { mediaType } from '../posts.js';
 import { UploadTooLargeError } from '../storage/index.js';
-import { iso } from '../time.js';
+import { iso, MINUTE } from '../time.js';
 import { requirePostType, wrongFileType } from '../upload.js';
 
 /**
@@ -50,7 +50,7 @@ export function uploadRoutes(app: FastifyInstance, { db, config, content, hot, n
     if (body.size > maxUploadBytes) throw new UploadTooLargeError(maxUploadBytes);
 
     if (uploadLinksPerMinute > 0) {
-      const { count, ttlMs } = await hot.incr(`uploads:${user.id}`, 60_000);
+      const { count, ttlMs } = await hot.incr(`uploads:${user.id}`, MINUTE);
       const seconds = Math.max(1, Math.ceil(ttlMs / 1000));
       if (count > uploadLinksPerMinute) throw tooManyRequests(msg('upload.rate_limited', { count: seconds }), seconds);
     }

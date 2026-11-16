@@ -94,8 +94,6 @@ Apart from its admin CLI, an instance has no client of its own. It's designed fo
 3. **Let the user set the parameters of each request,** such as a feed's tags, window and algorithm, so the experience is theirs.
 4. **Syndicate a post to several instances** by posting it to each one. Instances don't pass posts on to each other, so a user's key for one instance never goes to another.
 
-
-
 ## Bring your own client
 
 Every instance serves the same API, so anyone can register on an instance directly, keep their own key, and use whatever client they like, including one they wrote. [API.md](docs/API.md) is the contract: every endpoint, what it takes and what it returns.
@@ -150,6 +148,14 @@ A text post's text, a caption and a comment's text can be formatted: bold, itali
 With each post, its publisher declares whether it was created with AI, and readers can filter feeds on that. 
 
 To keep bots from flooding an instance, a user who posts or comments again within a minute first solves a challenge, or two if they keep posting. By default nobody posts more than 3 times a minute.
+
+## Reposts
+Any content can be reposted to this server or to another server with additional tags that it did not have previously. 
+- It is not copied and still credited to its publisher.
+- A user cannot repost their own posts (but can change the tags by editing the post)
+- A repost still goes through tag moderation for its new tags
+- A repost to another server contains the URL to access the content, but it still lives on this instance of Evieverse
+- An instance can turn reposts off, or only those of posts on other instances (`REPOSTS`, `REPOSTS_REMOTE`).
 
 ## Comments
 
@@ -228,6 +234,7 @@ docker compose up -d postgres mysql redis
 TEST_POSTGRES_URL=postgres://evieverse:evieverse@localhost:5432/evieverse \
 TEST_MYSQL_URL=mysql://evieverse:evieverse@localhost:3306/evieverse \
 TEST_REDIS_URL=redis://127.0.0.1:6379 npm test
+npm run check    # the conventions of src that the compiler doesn't check: where interfaces are, JSDoc comments, constants at the top
 ```
 Optionally add `--no-file-parallelism` to run the tests one at a time.
 
