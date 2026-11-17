@@ -109,7 +109,7 @@ Initial deployment creates an [admin](API.md#moderation) account:
 
 1. **Terraform makes the account's id and API key,** in the format the server issues keys in. The key is random, and exists in two places only: the Terraform state, and the profile file below.
 2. **The migration step creates the account.** It's given the key's SHA-256, not the key (`BOOTSTRAP_ADMIN`), and after the migrations it creates the user if it isn't there, makes it an admin, and, if the key is new to the account, makes that key its only one. It runs again whenever the image, a setting or the account's values change, and changes nothing about the account when its values haven't.
-3. **The key is installed on the machine that applies,** once the account exists: Terraform writes `~/.evieverse/profiles/<name>.json` (`name` is the module's variable, `evieverse` by default), readable only by you. That's a profile of the server's [CLI](CLI.md), so after installing the CLI, it works as the admin with no sign-in:
+3. **The key is installed on the machine that applies,** once the account exists: Terraform writes `~/.evieverse/profiles/<name>.json` (`name` is the module's variable, `evieverse` by default, unless `admin_profile_name` gives the profile a name of its own), readable only by you. That's a profile of the server's [CLI](CLI.md), so after installing the CLI, it works as the admin with no sign-in:
 
 ```sh
 curl -fsSL "$(terraform output -raw url)/cli/install.sh" | sh     # Windows: irm <url>/cli/install.ps1 | iex
@@ -120,11 +120,14 @@ evieverse --profile evieverse admins grant <userId>            # make your own a
 
 With no other profile on the machine, `--profile` can be left out.
 
+Deployments with the same `name` that are applied from one machine write the same file, so each apply writes its admin's key over the other's. Give each a profile of its own with `admin_profile_name`: with `admin_profile_name = "evieverse-aws"`, the file is `~/.evieverse/profiles/evieverse-aws.json`, and the CLI uses it with `--profile evieverse-aws`. Changing it on a deployment that's applied already removes the file under the old name and writes the new one.
+
 
 | Variable                | Default |                                                                                                                                                                               |
 | ----------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `admin_username`        | `admin` | The account's username when it's created. It fails the apply if another user has it. To rename the account later, use `PATCH /users/:userId`: changing this variable doesn't. |
 | `install_admin_profile` | `true`  | Write the profile file. Set it to `false` where applies run unattended (CI), and read the key with `terraform output -raw admin_api_key`.                                     |
+| `admin_profile_name`    | `""`    | The profile's name, and so its file's. Empty: the same as `name`. A name is 1 to 64 letters, digits, `.`, `_` and `-`, the first a letter or a digit.                         |
 
 
 
@@ -311,6 +314,8 @@ It runs beside the compactor. If the compactor is mid-pass, the rebuild waits fo
 - The Redis access key reaches the containers only as a Container Apps secret. Blob Storage takes no account key at all: shared keys are turned off on the account, and the apps, the compactor and the jobs reach it as one managed identity. That identity may read, write and delete blobs in the content container, only write them in the audit container, and ask the account for the key upload links are signed with (a user delegation key, good for an hour at a time). Downloads aren't signed links: `/content/:id/raw` streams the bytes through the Container App and Front Door, where on AWS and GCP it redirects to the bucket.
 - Giving the identity its roles takes more than Contributor: whoever applies needs Owner, or User Access Administrator beside Contributor, on the subscription or the resource group.
 - PostgreSQL has no public address. The apps, the compactor and the jobs run in a virtual network, and reach the database through a private endpoint in it. TLS is required.
+- Some subscriptions may not create PostgreSQL Flexible Servers in some regions, and the apply then fails with `The value of the 'Version' should be in: []`. Set `db_location` to a region that allows them, which puts only the database there: `az postgres flexible-server list-skus --location <region>` lists what a region allows, and names the restriction where there is one. The private endpoint stays in `location` and reaches the database across regions, so choose one nearby (`eastus2` for `eastus`). Set it before the database holds anything: changing it replaces the database.
+- Container Apps needs the `Microsoft.App` resource provider, which a new subscription hasn't registered. The module registers it at the start of an apply, so whoever applies must be allowed to register resource providers (Contributor and Owner are).
 
 
 

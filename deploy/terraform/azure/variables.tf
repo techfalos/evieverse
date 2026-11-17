@@ -78,6 +78,12 @@ variable "db_sku" {
   default = "B_Standard_B1ms"
 }
 
+variable "db_location" {
+  description = "Region of the database, where it is not `location`. null, the default: the database is in `location` with everything else. Set it when the subscription may not create PostgreSQL Flexible Servers in `location`, which the apply says as \"The value of the 'Version' should be in: []\": `az postgres flexible-server list-skus --location <region>` lists what a region allows. Choose a region near `location`, as every query then crosses from one to the other. Changing it replaces the database, and what is in it."
+  type        = string
+  default     = null
+}
+
 variable "redis_sku" {
   description = "Azure Managed Redis SKU. Size it for the feed index (~30 bytes per indexed post) plus 8 days of compressed summaries; see docs/DEPLOY.md."
   type        = string
@@ -134,7 +140,17 @@ variable "admin_username" {
 }
 
 variable "install_admin_profile" {
-  description = "Write the admin account's API key to ~/.evieverse/profiles/<name>.json on the machine that applies, where the CLI reads it. Turn it off where applies run unattended, and read the key with `terraform output -raw admin_api_key`."
+  description = "Write the admin account's API key to ~/.evieverse/profiles/<name>.json on the machine that applies, where the CLI reads it (admin_profile_name gives the file another name). Turn it off where applies run unattended, and read the key with `terraform output -raw admin_api_key`."
   type        = bool
   default     = true
+}
+
+variable "admin_profile_name" {
+  description = "Name of the CLI profile the admin account's key is written to: ~/.evieverse/profiles/<admin_profile_name>.json, used as `evieverse --profile <admin_profile_name>`. Empty: the same as `name`. Set it where one machine applies several deployments with the same `name`, as each apply would otherwise write over the others' profile."
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.admin_profile_name == "" || can(regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", var.admin_profile_name))
+    error_message = "A profile's name is 1 to 64 letters, digits, \".\", \"_\" and \"-\", the first a letter or a digit."
+  }
 }

@@ -15,7 +15,7 @@ output "try_it" {
     The admin account is "${var.admin_username}" (${local.admin_user_id}). ${var.install_admin_profile ? "Its API key is in ${local.admin_profile_path}, where the CLI reads it:" : "Its API key is the admin_api_key output; sign the CLI in with it:"}
 
       curl -fsSL ${local.url}/cli/install.sh | sh        # Windows: irm ${local.url}/cli/install.ps1 | iex
-      ${var.install_admin_profile ? "evieverse --profile ${var.name} whoami" : "evieverse login ${local.url} ${local.admin_user_id}"}
+      ${var.install_admin_profile ? "evieverse --profile ${local.admin_profile_name} whoami" : "evieverse login ${local.url} ${local.admin_user_id}"}
   EOT
 }
 

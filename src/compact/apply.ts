@@ -504,6 +504,9 @@ async function applyLikes(deps: ApplyDeps, postId: string, { commentId, likes }:
     byUser.set(userId, [...(byUser.get(userId) ?? []), row]);
   }
   const made: PendingRow[] = [];
+  // From the first like made to the last row deleted, a like is both in the store and a row: the
+  // requests that count the two are told, and count again once this is over (see CommentStore.likesWith).
+  const done = await comments.makingLikes(commentId);
   try {
     await allDone(
       [...byUser].map(([userId, rows]) =>
@@ -517,6 +520,8 @@ async function applyLikes(deps: ApplyDeps, postId: string, { commentId, likes }:
   } finally {
     await settle(deps, postId, made);
   }
+  // Not after a failure: a like may then be in the store with its row still there, until the next run, which is over when it says so.
+  await done();
 }
 
 /**

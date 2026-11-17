@@ -123,9 +123,9 @@ In both modes, a post with no valid tags is rejected.
 
 **Bans.** A server moderator or an admin can ban a user (`evieverse bans add <userId>`). A banned user can't post, comment or send messages, but can still read, receive messages, and delete their own posts and account. The user is told, with a notice, and again when the ban ends. Admins and server moderators can't be banned until their role ends. See [API.md](docs/API.md#bans).
 
-**Deleting accounts.** A user can delete their own account (`evieverse account delete --yes`), and an admin can delete any (`evieverse users delete <userId> --yes`), except the only admin's. The account's posts are deleted with it, and its comments stay, without its name. The account is gone to everyone at once, but its username is free again only when its posts have been removed, which the compactor does. See [API.md](docs/API.md#delete-usersuserid).
+**Deleting accounts.** A user can delete their own account (`evieverse account delete --yes`), and an admin can delete any (`evieverse users delete <userId> --yes`) unless it's the only admin account. Posts are deleted with the account, comments stay. The account is gone to everyone at once, but its username is free again only when its posts have been removed, which the compactor does. See [API.md](docs/API.md#delete-usersuserid).
 
-**Reports.** Any user can report a published post or comment. Reported posts and comments stay published and wait in the report queue, where a server moderator or an admin accepts each, which leaves it as it is, or deletes it.
+**Reports.** Any user can report a published post or comment. Reported posts and comments stay published and wait in the report queue, where a server moderator or an admin accepts or deletes it.
 
 All of the moderation functions are available via the CLI [CLI](docs/CLI.md).
 
@@ -271,6 +271,10 @@ AI tools, including Generative AI tools, were used in the planning, development,
 ## License
 
 See [[LICENSE.md](LICENSE.md)]
+
+## Public Evieverse Servers
+
+Running a server? Put it here!
 
 ## Client Implementations
 

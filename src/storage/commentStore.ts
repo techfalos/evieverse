@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 import type { Operator } from 'opendal';
 import { mapLimit } from '../util.js';
 import type { Comment, CommentPageQuery } from './commentStore.types.js';
@@ -14,6 +16,13 @@ const MARK = '1';
 
 /** In a post's index once it holds every comment the store has. It sorts after every member, which begin with a hex digit, a dash or a colon. */
 const COMPLETE = '~';
+
+/** What `cmtlm:<commentId>` begins with while the comment's likes are being made (see CommentStore.makingLikes). */
+const MAKING = 'making:';
+/** How many times the likes of a comment are counted with the ones that wait, before a count that was made as they moved is given as it is. */
+const LIKE_COUNTS = 3;
+/** How long the first of those counts waits for the next, in milliseconds; the second waits twice as long. */
+const LIKE_RECOUNT_MS = 25;
 
 /**
  * What matches an id in an object's name, a comment's or a user's: 36 characters, each a lowercase
@@ -83,6 +92,8 @@ export const commentIndexKey = (postId: string) => `cmtidx:${postId}`;
 export const commentKey = (commentId: string) => `cmt:${commentId}`;
 /** How many likes a comment has. */
 export const commentLikesKey = (commentId: string) => `cmtl:${commentId}`;
+/** Which making of a comment's likes was the last, and whether it is still under way (see CommentStore.makingLikes). */
+export const commentLikesMadeKey = (commentId: string) => `cmtlm:${commentId}`;
 
 /**
  * A comment in its post's index: the id of the comment it replies to (nothing, for a comment on
@@ -146,6 +157,10 @@ function parse(blob: Buffer): Comment | null {
  * - A comment Redis doesn't have is read from the store, and kept.
  * - A number of likes Redis doesn't have is counted from one list of the comment's likes, and kept.
  *   A like adds one to a number that is there, and leaves one that isn't to be counted.
+ *
+ * `cmtlm:<commentId>` is not a cache: it says when a comment's likes are being made, for the
+ * requests that count them with the likes that still wait (see makingLikes). One that is evicted
+ * costs such a request its check, and nothing else.
  *
  * A comment that waits in the moderation queue is under `held/` instead, in no index and no cache,
  * until it is published (moved to where the others are) or removed.
@@ -469,6 +484,45 @@ export class CommentStore {
     }
     await this.op.write(key, MARK);
     await this.hot.bump(commentLikesKey(commentId));
+  }
+
+  /**
+   * Says that likes of the comment are being made (see addLike), until the function it returns is
+   * called: once the rows of those likes are deleted. The compactor's, around the likes of a
+   * comment that it applies.
+   *
+   * Between the two, a like that was made is in the store and is still a row that waits, and a
+   * request that adds the one to the other counts it twice. So such a request reads what this
+   * writes before it counts and after (see likesWith): a count is right if no likes were being
+   * made when it began, and none have been since.
+   */
+  async makingLikes(commentId: string): Promise<() => Promise<void>> {
+    const key = commentLikesMadeKey(commentId);
+    await this.hot.set(key, `${MAKING}${randomUUID()}`, this.opts.hotMs);
+    return () => this.hot.set(key, randomUUID(), this.opts.hotMs);
+  }
+
+  /**
+   * How many likes the comment has, with the ones that wait to be made: the store's number (see
+   * likes) and `waiting`, which counts the rows of the likes that requests committed and the
+   * compactor hasn't applied.
+   *
+   * The two are read one after the other, and a like the compactor makes meanwhile, or has made
+   * and not yet deleted the row of, is in both. So the count is made again, a moment later, if
+   * likes were being made as it began or have been by its end (see makingLikes). After
+   * LIKE_COUNTS of them it is given as it is, which can be over by the likes being made: the
+   * compactor is then at the likes of a comment that got very many at once.
+   */
+  async likesWith(postId: string, commentId: string, waiting: () => Promise<number>): Promise<number> {
+    const key = commentLikesMadeKey(commentId);
+    const last = async () => (await this.hot.get(key))?.toString('utf8') ?? null;
+    for (let count = 1; ; count++) {
+      const before = await last();
+      const rows = await waiting();
+      const [made = 0] = await this.likes(postId, [commentId]);
+      if (count === LIKE_COUNTS || (!before?.startsWith(MAKING) && before === (await last()))) return made + rows;
+      await sleep(LIKE_RECOUNT_MS * 2 ** (count - 1));
+    }
   }
 
   /**

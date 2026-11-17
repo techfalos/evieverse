@@ -318,6 +318,50 @@ for (const target of TARGETS) {
       expect(await ctx.comments.likes(contentId, [sent.commentId])).toEqual([1]);
     });
 
+    it('counts a like of a comment once, also when the compactor makes it as a request counts', async () => {
+      ctx = await createTestContext(target, { settle: false });
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const carol = await ctx.register('carol');
+      const contentId = ok(await storeText(ctx, alice, 'Talk to me #news', { comments: true })).contentId;
+      const sent = ok(await comment(bob, contentId, 'First'));
+      await ctx.compactor.runOnce();
+      const liked = (u: User, status: number, likes: number) => async () =>
+        expect(ok(await likeComment(u, contentId, sent.commentId), status)).toEqual({ contentId, commentId: sent.commentId, likes, alreadyLiked: status === 200 });
+      await liked(alice, 201, 1)();
+      expect(await pending()).toEqual(['0 comment_like']);
+
+      // A request counts the rows that wait, and then asks the store for its number. The compactor
+      // makes the like in between: it is in the store's number, and was among the rows.
+      const likes = ctx.comments.likes.bind(ctx.comments);
+      const counted = vi.spyOn(ctx.comments, 'likes').mockImplementationOnce(async (...args) => {
+        await ctx.compactor.runOnce();
+        return likes(...args);
+      });
+      await liked(alice, 200, 1)();
+      // Counted a second time, as likes were made during the first.
+      expect(counted).toHaveBeenCalledTimes(2);
+      expect(await pending()).toEqual([]);
+      counted.mockClear();
+      await liked(carol, 201, 2)();
+      expect(counted).toHaveBeenCalledTimes(1);
+
+      // A run that is killed once it made carol's like leaves the like in the store and its row where it was. Until a
+      // run deletes the row, the count can't be told from one made as likes are, and is given as it is after three.
+      killAfter(ctx.comments, 'addLike');
+      await ctx.compactor.runOnce();
+      expect(await pending()).toEqual(['0 comment_like']);
+      counted.mockClear();
+      await liked(carol, 200, 3)();
+      expect(counted).toHaveBeenCalledTimes(3);
+      await ctx.compactor.runOnce();
+      expect(await pending()).toEqual([]);
+      counted.mockClear();
+      await liked(carol, 200, 2)();
+      expect(counted).toHaveBeenCalledTimes(1);
+      expect(await list(contentId)).toMatchObject({ count: 1, comments: [{ commentId: sent.commentId, likes: 2 }] });
+    });
+
     it('leaves a placeholder for a deleted comment whose held reply is accepted before the compactor runs, and publishes the reply under it', async () => {
       ctx = await createTestContext(target, { settle: false, trust: { deleteBelow: 0 } });
       const root = await admin();

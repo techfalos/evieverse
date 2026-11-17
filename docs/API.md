@@ -235,7 +235,7 @@ curl -X PATCH localhost:3000/users/$USER_ID -H 'content-type: application/json' 
 
 ### `POST /users/:userId/key`
 
-Authenticated, own account only. Replaces the account's API key: it revokes the key the request was sent with and returns a new one, as `201` with `{ userId, apiKey, note }`. Use it when a key may have leaked, or to change keys as a routine. It takes no fields but the [credentials](#authentication).
+Authenticated: the account's own user, or an [admin](#moderation). Replaces the account's API key: it revokes the key the account had and returns a new one, as `201` with `{ userId, apiKey, note }`. Use it when a key may have leaked, or to change keys as a routine, and as an admin for a user who lost theirs. It takes no fields but the [credentials](#authentication).
 
 ```bash
 curl -X POST localhost:3000/users/$USER_ID/key -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID"
@@ -245,12 +245,13 @@ curl -X POST localhost:3000/users/$USER_ID/key -H "Authorization: Bearer $KEY" -
 - The new key is the account's only key. Any other key the account had is revoked with the one presented.
 - The new key is shown only once, as at registration, which `note` says. If the response is lost on its way, the account has a key nobody knows, and no endpoint gets it back.
 - Nothing else about the account changes: its `userId`, its name, its roles, its posts and what it follows stay as they are.
-- A request for another user's key gets `403`, whoever sends it: an admin can't replace someone else's key.
+- An admin can replace another user's key, another admin's included. Every key that user had stops working, and the new one is returned to the admin, once, to pass on. The admin's own key stays as it is. A user who doesn't exist gets `404`.
+- Anyone else's request for another user's key gets `403`.
 - Of two requests sent at once with the same key, one gets the new key and the other `401`.
-- Whoever holds a key can replace it, so this takes an account back from someone who copied its key only if its owner gets there first.
+- Whoever holds a key can replace it, so this takes an account back from someone who copied its key only if its owner gets there first. After that, an admin's replacement is the way back.
 - The admin account of a [Terraform deployment](DEPLOY.md#the-admin-account) gets its key from the deployment. A key replaced here lasts: later deploys leave it in place, and the deployment's key stays revoked. The deployment still holds the old key, though, so its `admin_api_key` output no longer works, and its next apply writes that key back to the profile file.
 
-The [CLI](CLI.md) does this with `evieverse key rotate`, and saves the new key in its profile.
+The [CLI](CLI.md) does this with `evieverse key rotate`, and saves the new key in its profile. An admin replaces another user's key with `evieverse users rotate-key <userId>`, which prints the new key.
 
 ### `DELETE /users/:userId`
 
@@ -943,7 +944,7 @@ A notice has no `from`. Its `kind` says what happened, `text` says it in the rea
 | `post_rejected` | They rejected it there: it's deleted. | `contentId`, `excerpt` |
 | `post_deleted` | An admin deleted the post. | `contentId`, `excerpt` |
 | `tag_removed` | A moderator removed a hashtag from the post. | `contentId`, `tag`, `excerpt` |
-| `last_tag_removed` | A moderator removed the post's last hashtag, so the post is deleted. | `contentId`, `tag`, `excerpt` |
+| `last_tag_removed` | A moderator removed the post's last hashtag, so the post is in no hashtag's feed any more. It can still be read. | `contentId`, `tag`, `excerpt` |
 | `tag_muted` | A moderator muted the user on a hashtag. | `tag` |
 | `tag_unmuted` | A moderator ended the mute. | `tag` |
 | `comment_accepted` | A server moderator or an admin accepted the user's [comment](#comments) from the moderation queue: it's published. | `contentId`, `excerpt` |
@@ -1452,14 +1453,14 @@ An item of either queue looks like this, a post and then a comment (of the moder
 ], "nextCursor": null }
 ```
 
-Someone without the role gets `403`. A user or content that doesn't exist gets `404`, and so does accepting or rejecting content or a comment that isn't in the moderation queue, or accepting or deleting one that isn't in the report queue. An entry with no letters or digits, or too long, gets `400`, and adding past 10,000 entries gets `409`.
+Someone without the role gets `403`. A user or content that doesn't exist gets `404`, and so does accepting or rejecting content or a comment that isn't in the moderation queue, or accepting or deleting one that isn't in the report queue. Listing reports is different: a post or a comment that has none waiting gets `200` with an empty `reports`, and so does a comment that was deleted, or was never on the post. An entry with no letters or digits, or too long, gets `400`, and adding past 10,000 entries gets `409`.
 
 **Removing a hashtag from content** is recorded at once. The compactor's next run then writes the content's meta file and summary again without the hashtag, and takes the content out of the hashtag's index, which is when that hashtag's feeds stop returning it, and `GET /content` and the content's records under its other hashtags stop listing the hashtag. Its bytes, text, preview and AI flag stay as they are. The response is `{ contentId, tag, tags, muted }`, with the hashtags the content is left with in `tags`.
 - The removal is recorded, and stays: the publisher's updates of that content don't get the hashtag back. Their other content still can. To stop that too, mute them on the hashtag (`{ "mute": true }`), or block the words that make the content unwelcome there.
 - A hashtag the content doesn't have gets `404`, and so does removing one a second time, or approving the content under a hashtag that was removed from it. Content in the moderation queue gets `404` too: it's for server moderators and admins to decide on first.
-- If it's the content's last hashtag, the content is taken down instead, as `DELETE /content` does. The response is then `202`, with `tags: []`, `status: "pending_deletion"` and `requestedAt`.
+- If it's the content's last hashtag, the content stays, and the response is `200` as for any other, with `tags: []`. The content is in no hashtag's feed from then on, and nothing else about it changes: it's still read at `/content`, liked and commented on, and those who follow its publisher still see it. A repost can give it hashtags again, other than the ones removed from it. Its publisher's [notice](#notices) is `last_tag_removed` in place of `tag_removed`.
 
-**Rules apply from when they're set.** A blocked word, a mute or a trust score threshold applies to the posts and updates written after it's set. Content already published keeps its hashtags until its next update: to take it down, delete it, or remove its hashtags.
+**Rules apply from when they're set.** A blocked word, a mute or a trust score threshold applies to the posts and updates written after it's set. Content already published keeps its hashtags until its next update: to take it out of a hashtag's feeds, remove the hashtag from it, and to take it down, delete it.
 
 ## The CLI download
 

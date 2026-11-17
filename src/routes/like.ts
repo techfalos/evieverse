@@ -69,10 +69,10 @@ export function likeRoutes(app: FastifyInstance, { db, config, content, comments
           already = true;
         }
       }
-      // The likes the store has and the ones that wait to be made there, this one among them.
-      const waiting = await pendingLikes(db, contentId, commentId);
-      const [made = 0] = await comments.likes(contentId, [commentId]);
-      return reply.status(already ? 200 : 201).send({ contentId, commentId, likes: made + waiting, alreadyLiked: already });
+      // The likes the store has and the ones that wait to be made there, this one among them: each
+      // once, also when the compactor is making them as they are counted.
+      const likes = await comments.likesWith(contentId, commentId, () => pendingLikes(db, contentId, commentId));
+      return reply.status(already ? 200 : 201).send({ contentId, commentId, likes, alreadyLiked: already });
     }
 
     let alreadyLiked = false;

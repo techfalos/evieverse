@@ -224,6 +224,11 @@ describe('Lambda adapter', () => {
     });
     const direct = toRequest(event({ headers: { 'x-forwarded-for': '198.51.100.7' } }));
     expect(direct.headers).toEqual({});
+    // The peer is the entry the gateway added, whatever it calls the source: here the client, as it does behind CloudFront.
+    const edge = toRequest(event({ headers: { 'x-forwarded-for': '10.9.9.9, 203.0.113.9, 198.51.100.7' }, requestContext: { http: { method: 'GET', sourceIp: '203.0.113.9' } } }));
+    expect(edge).toMatchObject({ headers: { 'x-forwarded-for': '10.9.9.9, 203.0.113.9' }, remoteAddress: '198.51.100.7' });
+    // With no such header, the source is all there is.
+    expect(toRequest(event({ headers: {} }))).toMatchObject({ headers: {}, remoteAddress: '198.51.100.7' });
 
     const post = toRequest(
       event({
@@ -239,6 +244,21 @@ describe('Lambda adapter', () => {
     expect(post).toMatchObject({ method: 'POST', url: '/store', headers: { 'content-type': 'application/json', cookie: 'a=1; b=2' }, remoteAddress: undefined });
     expect(post.headers['content-length']).toBeUndefined();
     expect(post.body?.toString()).toBe('{"type":"text"}');
+  });
+
+  it('encodes the path again, which the gateway gives decoded, and leaves the query string as it came', () => {
+    const url = (rawPath: string, rawQueryString = '') => toRequest(event({ rawPath, rawQueryString })).url;
+    // A hashtag sent with its "#" (%23): left as it came, the "#" would end the path at /tags/.
+    expect(url('/tags/#news/moderators')).toBe('/tags/%23news/moderators');
+    expect(url('/tags/#news/muted', 'limit=5&cursor=a%23b')).toBe('/tags/%23news/muted?limit=5&cursor=a%23b');
+    expect(url('/tags/what?/moderators', 'limit=5')).toBe('/tags/what%3F/moderators?limit=5');
+    expect(url('/tags/100%/moderators')).toBe('/tags/100%25/moderators');
+    expect(url('/tags/caf\u00e9 au lait/moderators')).toBe('/tags/caf%C3%A9%20au%20lait/moderators');
+    // What a path holds as it is stays as it is.
+    expect(url("/cli/install.sh;v=1,2:3@4&5=6+7$8!9*'()~_-")).toBe("/cli/install.sh;v=1,2:3@4&5=6+7$8!9*'()~_-");
+    expect(url('/users/7b0e3a52-5f0c-4e06-9d6c-0d8b1f3f5a10/inbox')).toBe('/users/7b0e3a52-5f0c-4e06-9d6c-0d8b1f3f5a10/inbox');
+    // Half a surrogate pair has no encoding: the path goes on as it came.
+    expect(url('/tags/\ud83d/moderators')).toBe('/tags/\ud83d/moderators');
   });
 
   it('answers with text as it is and anything else in base64', () => {
@@ -295,11 +315,30 @@ describe('Lambda adapter', () => {
         expect((await register('dave', '203.0.113.3', {})).statusCode).toBe(403);
         expect((await register('erin', '203.0.113.3', { [EDGE_SECRET_HEADER]: 'guess' })).statusCode).toBe(403);
         expect((await handler({ Records: [] })).statusCode).toBe(400);
+        // Behind CloudFront the gateway calls the client the source, and its own peer is still the header's last entry.
+        const behindCloudFront = (username: string, client: string) =>
+          handler(
+            event({
+              rawPath: '/register',
+              rawQueryString: '',
+              headers: { 'content-type': 'application/json', 'x-forwarded-for': `${client}, 198.51.100.8`, [EDGE_SECRET_HEADER]: 's3cret' },
+              requestContext: { http: { method: 'POST', sourceIp: client } },
+              body: JSON.stringify({ username }),
+            }),
+          );
+        expect((await behindCloudFront('frank', '203.0.113.4')).statusCode).toBe(428);
+        expect((await behindCloudFront('frank', '203.0.113.4')).statusCode).toBe(428);
+        expect((await behindCloudFront('frank', '203.0.113.4')).statusCode).toBe(429);
+        expect((await behindCloudFront('gina', '203.0.113.5')).statusCode).toBe(428);
         const records = await readAudit(d);
         expect(Object.fromEntries(records.map((r) => [(r.body as { username: string }).username, r.ip]))).toEqual({
           alice: '203.0.113.1',
           carol: '203.0.113.2',
         });
+        // A hashtag in a path with its "#", which the gateway has decoded from %23 by the time it gets here.
+        const moderators = await handler(event({ rawPath: '/tags/#News/moderators', rawQueryString: '', headers: { [EDGE_SECRET_HEADER]: 's3cret' } }));
+        expect(moderators.statusCode).toBe(200);
+        expect(JSON.parse(moderators.body)).toMatchObject({ tag: 'news', moderators: [] });
       } finally {
         await fn.close();
       }

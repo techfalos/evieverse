@@ -349,10 +349,13 @@ resource "random_password" "db" {
   special = false
 }
 
+# In `db_location` where that is set, for a subscription that may not create one in `location`.
+# The private endpoint below stays in `location`, with the virtual network it is in: a private
+# endpoint reaches a server in another region as it does one in its own.
 resource "azurerm_postgresql_flexible_server" "main" {
   name                   = "${var.name}-${random_string.suffix.result}"
   resource_group_name    = azurerm_resource_group.main.name
-  location               = azurerm_resource_group.main.location
+  location               = coalesce(var.db_location, azurerm_resource_group.main.location)
   version                = "16"
   administrator_login    = "evieverse"
   administrator_password = random_password.db.result
@@ -486,10 +489,13 @@ locals {
     username = var.admin_username
     keyHash  = nonsensitive(sha256(local.admin_api_key))
   })
-  admin_profile_path = pathexpand("~/.evieverse/profiles/${var.name}.json")
+  # The deployment's own name, unless the profile is given another: two deployments with the same
+  # name, applied from one machine, would otherwise write over each other's profile.
+  admin_profile_name = var.admin_profile_name != "" ? var.admin_profile_name : var.name
+  admin_profile_path = pathexpand("~/.evieverse/profiles/${local.admin_profile_name}.json")
 }
 
-# The admin's profile for the CLI, on the machine that applies: `evieverse --profile ${var.name} whoami`.
+# The admin's profile for the CLI, on the machine that applies: `evieverse --profile ${local.admin_profile_name} whoami`.
 resource "local_sensitive_file" "admin_profile" {
   count                = var.install_admin_profile ? 1 : 0
   filename             = local.admin_profile_path
@@ -697,15 +703,29 @@ resource "azurerm_container_app" "group" {
           secret_name = lower(replace(env.value, "_", "-"))
         }
       }
+      # A request that finds a group at no replica waits for one to be ready, so a replica is said
+      # to be ready as soon as it answers: it is asked every second while it starts, and one
+      # answer is enough. Left as the platform has them, a readiness probe is asked every 10
+      # seconds and believed at its third answer, which kept a replica that listened within a
+      # second of starting out of use for 20 to 30 more.
+      startup_probe {
+        transport               = "HTTP"
+        port                    = 3000
+        path                    = "/health"
+        interval_seconds        = 1
+        timeout                 = 1
+        failure_count_threshold = 30
+      }
       liveness_probe {
         transport = "HTTP"
         port      = 3000
         path      = "/health"
       }
       readiness_probe {
-        transport = "HTTP"
-        port      = 3000
-        path      = "/health"
+        transport               = "HTTP"
+        port                    = 3000
+        path                    = "/health"
+        success_count_threshold = 1
       }
     }
   }

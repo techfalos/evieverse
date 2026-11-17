@@ -764,10 +764,13 @@ locals {
     username = var.admin_username
     keyHash  = nonsensitive(sha256(local.admin_api_key))
   })
-  admin_profile_path = pathexpand("~/.evieverse/profiles/${var.name}.json")
+  # The deployment's own name, unless the profile is given another: two deployments with the same
+  # name, applied from one machine, would otherwise write over each other's profile.
+  admin_profile_name = var.admin_profile_name != "" ? var.admin_profile_name : var.name
+  admin_profile_path = pathexpand("~/.evieverse/profiles/${local.admin_profile_name}.json")
 }
 
-# The admin's profile for the CLI, on the machine that applies: `evieverse --profile ${var.name} whoami`.
+# The admin's profile for the CLI, on the machine that applies: `evieverse --profile ${local.admin_profile_name} whoami`.
 resource "local_sensitive_file" "admin_profile" {
   count                = var.install_admin_profile ? 1 : 0
   filename             = local.admin_profile_path

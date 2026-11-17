@@ -12,10 +12,27 @@ export { EDGE_SECRET_HEADER };
 const CONNECTION_HEADERS = new Set(['connection', 'keep-alive', 'transfer-encoding', 'content-length']);
 
 /**
- * An HTTP API event as the request a function takes: the path with its query string, the body
- * decoded to bytes, and the cookies back in a `cookie` header. Content-Length and Transfer-Encoding
- * are dropped, as they were true of the body the gateway was sent. The peer the gateway saw is the
- * request's remote address, and is taken off the end of X-Forwarded-For, where the gateway put it.
+ * The path of an HTTP API event as a request has it: percent-encoded. The gateway gives it decoded
+ * (`rawPath`, unlike `rawQueryString`), so a "#" or a "?" that was part of a segment, as the "#" of
+ * a hashtag sent as %23 is, would end the path where it stands. They are encoded again here, with
+ * "%" and whatever else a path can't hold as it is. A "/" that was sent encoded can't be told from
+ * one that divides segments, and stays one that does.
+ */
+function encodedPath(rawPath: string): string {
+  try {
+    return encodeURI(rawPath).replace(/[?#]/g, (c) => (c === '?' ? '%3F' : '%23'));
+  } catch {
+    // Half of a surrogate pair, which can't be encoded: the app is given the path as it came, to refuse.
+    return rawPath;
+  }
+}
+
+/**
+ * An HTTP API event as the request a function takes: the path, encoded again, with its query
+ * string, the body decoded to bytes, and the cookies back in a `cookie` header. Content-Length and
+ * Transfer-Encoding are dropped, as they were true of the body the gateway was sent. The peer the
+ * gateway saw is the request's remote address, and is taken off the end of X-Forwarded-For, where
+ * the gateway put it.
  */
 export function toRequest(event: HttpApiEvent): FunctionRequest {
   const headers: FunctionRequest['headers'] = { ...event.headers };
@@ -26,18 +43,21 @@ export function toRequest(event: HttpApiEvent): FunctionRequest {
 
   // The gateway appends the peer it saw to X-Forwarded-For. That peer becomes the request's remote
   // address instead, so the header lists what it would in front of a server: the hops before the peer.
-  const peer = event.requestContext.http.sourceIp;
+  // The peer is read from the header, and from `sourceIp` only where there is no header: the two
+  // aren't always the same address, and where they differ it is the header's last entry that the
+  // gateway added.
   const forwarded = headers['x-forwarded-for'];
-  if (peer && typeof forwarded === 'string') {
+  let peer = event.requestContext.http.sourceIp;
+  if (typeof forwarded === 'string') {
     const hops = forwarded.split(',').map((hop) => hop.trim()).filter(Boolean);
-    if (hops.at(-1) === peer) hops.pop();
+    peer = hops.pop() ?? peer;
     if (hops.length) headers['x-forwarded-for'] = hops.join(', ');
     else delete headers['x-forwarded-for'];
   }
 
   return {
     method: event.requestContext.http.method,
-    url: `${event.rawPath}${event.rawQueryString ? `?${event.rawQueryString}` : ''}`,
+    url: `${encodedPath(event.rawPath)}${event.rawQueryString ? `?${event.rawQueryString}` : ''}`,
     headers,
     body: event.body === undefined ? undefined : Buffer.from(event.body, event.isBase64Encoded ? 'base64' : 'utf8'),
     remoteAddress: peer,
