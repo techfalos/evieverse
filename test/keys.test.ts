@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { FastifyRequest, LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { issueApiKey, reissueApiKey, reissueApiKeyFor } from '../src/auth/apiKey.js';
@@ -32,7 +33,7 @@ for (const target of TARGETS) {
       const replaced = ok(await replace(alice));
       expect(replaced).toEqual({
         userId: alice.userId,
-        apiKey: expect.stringMatching(/^tu_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$/),
+        apiKey: expect.stringMatching(/^ev_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$/),
         note: 'Store this apiKey now; it cannot be retrieved again. The key it replaces no longer works.',
       });
       expect(replaced.apiKey).not.toBe(alice.apiKey);
@@ -61,11 +62,30 @@ for (const target of TARGETS) {
       expect([await whoami(alice), await whoami({ userId: alice.userId, apiKey: ok(res).apiKey })]).toEqual([401, 200]);
     });
 
+    it('still takes a key from before keys started with ev_, until it is replaced with one that does', async () => {
+      ctx = await createTestContext(target);
+      const alice = await ctx.register('alice');
+      // A key as the server issued it then: the same but for its first two letters, and kept by its hash like any.
+      const old = { userId: alice.userId, apiKey: `tu_${'0123456789ab'}_${'A'.repeat(43)}` };
+      await ctx.db
+        .insertInto('api_keys')
+        .values({ id: '00000000-0000-4000-8000-000000000001', user_id: alice.userId, key_hash: createHash('sha256').update(old.apiKey).digest('hex'), created_at: ctx.clock.now, revoked_at: null })
+        .execute();
+      expect(await whoami(old)).toBe(200);
+      await post(ctx, old, 'with the old key #news');
+      // Another prefix is no key at all.
+      expect(await whoami({ userId: alice.userId, apiKey: old.apiKey.replace(/^tu_/, 'xx_') })).toBe(401);
+
+      const fresh = { userId: alice.userId, apiKey: ok(await replace(old)).apiKey };
+      expect(fresh.apiKey).toMatch(/^ev_/);
+      expect([await whoami(old), await whoami(alice), await whoami(fresh)]).toEqual([401, 401, 200]);
+    });
+
     it("replaces only the caller's own key, and only for a key that works", async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const bob = await ctx.register('bob');
-      const wrong = `tu_${'0'.repeat(12)}_${'A'.repeat(43)}`;
+      const wrong = `ev_${'0'.repeat(12)}_${'A'.repeat(43)}`;
 
       expect((await replace(null, alice.userId)).json()).toEqual({ error: 'userId and apiKey are required' });
       for (const [who, userId] of [
@@ -136,7 +156,7 @@ for (const target of TARGETS) {
       expect(res.statusCode, res.body).toBe(201);
       expect(res.json()).toEqual({
         userId,
-        apiKey: expect.stringMatching(/^tu_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$/),
+        apiKey: expect.stringMatching(/^ev_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$/),
         note: 'Pass this apiKey on to the user now; it cannot be retrieved again. Every key they had no longer works.',
       });
       return { userId, apiKey: res.json().apiKey };

@@ -2,6 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import pino from 'pino';
 import { loadConfig } from '../config.js';
 import { bootstrap } from '../deps.js';
+import { createOriginSweep } from '../originSweep.js';
 import { createCompactor } from './compactor.js';
 
 /**
@@ -9,6 +10,10 @@ import { createCompactor } from './compactor.js';
  * `npm run compact` runs pass after pass until it is stopped, never two at once and never more than
  * one in COMPACT_INTERVAL_SECONDS. A second copy does no harm (the lease lets one of them run at a
  * time) and no good.
+ *
+ * Beside the passes, the process asks other servers after the posts this one holds reposts of
+ * (src/originSweep.ts), so it has to reach them over https: without that, a repost learns what
+ * its original became only from an attestation a client brings.
  *
  * `--all` first rebuilds every day of every tag, and works out every hashtag's related hashtags
  * again. `--rebuild` first rebuilds the whole feed index, the summaries, the publisher credits and
@@ -60,7 +65,10 @@ if (process.argv.includes('--once')) {
     log.info({ tags: (await pass()).tags.length }, opts.rebuild ? 'rebuilt the feed index' : 'rebuilt every tag');
   }
   const stop = compactor.start();
+  // Beside the compactor, as this is the one process that is always up: what asks other servers after the posts this one holds reposts of.
+  const stopOriginSweep = (await createOriginSweep(deps, log)).start();
   const shutdown = async () => {
+    await stopOriginSweep();
     await stop();
     await close();
     process.exit(0);

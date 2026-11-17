@@ -50,9 +50,14 @@ const ENV_MAP: Record<string, string> = {
   REPOSTS: 'reposts.enabled',
   REPOSTS_REMOTE: 'reposts.remote',
   REPOSTS_SIGNING_KEYS: 'reposts.signingKeys',
+  REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE: 'reposts.attestationRateLimitPerMinute',
+  REPOSTS_REFRESH_HOURS: 'reposts.refreshHours',
+  REPOSTS_GONE_DAYS: 'reposts.goneDays',
+  CONTENT_RATE_LIMIT_PER_MINUTE: 'contentRateLimitPerMinute',
   FEED_PAGE_SIZE: 'feed.pageSize',
   FEED_MAX_PAGE_SIZE: 'feed.maxPageSize',
   FEED_RATE_LIMIT_PER_MINUTE: 'feed.rateLimitPerMinute',
+  FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE: 'feed.followingRateLimitPerMinute',
   FEED_MAX_CONCURRENT: 'feed.maxConcurrent',
   FEED_TAG_DAY_MAX_POSTS: 'feed.tagDayMaxPosts',
   FEED_TAG_DAY_MIN_POSTS: 'feed.tagDayMinPosts',
@@ -78,6 +83,7 @@ const ENV_MAP: Record<string, string> = {
   COMPACT_INTERVAL_SECONDS: 'compact.intervalSeconds',
   COMPACT_GRACE_SECONDS: 'compact.graceSeconds',
   COMPACT_CONCURRENCY: 'compact.concurrency',
+  COMPACT_COMMENT_WRITES: 'compact.commentWrites',
   COMPACT_LEASE_SECONDS: 'compact.leaseSeconds',
   CHALLENGE_POST_WINDOW_SECONDS: 'challenge.postWindowSeconds',
   CHALLENGE_COMMENTS_PER_MINUTE: 'challenge.commentsPerMinute',
@@ -95,6 +101,7 @@ const ENV_MAP: Record<string, string> = {
   MAX_FOLLOWING: 'maxFollowing',
   REPORTS_PER_HOUR: 'reportsPerHour',
   COMMENTS_PER_MINUTE: 'comments.perMinute',
+  COMMENTS_LIST_RATE_LIMIT_PER_MINUTE: 'comments.listRateLimitPerMinute',
   COMMENTS_HOT_HOURS: 'comments.hotHours',
   INBOX_MESSAGES_PER_MINUTE: 'inbox.messagesPerMinute',
   INBOX_RETENTION_DAYS: 'inbox.retentionDays',
@@ -225,12 +232,16 @@ const ConfigSchema = z.object({
 
   /**
    * The proxies in front of the server whose X-Forwarded-For is believed, which decides the client
-   * address that registrations and feeds are limited by (`registerRateLimitPerHour`,
-   * `feed.rateLimitPerMinute`) and that the audit log
+   * address that registrations, feeds and the reads that need no key are limited by
+   * (`registerRateLimitPerHour`, `feed.rateLimitPerMinute`, `feed.followingRateLimitPerMinute`,
+   * `contentRateLimitPerMinute`, `comments.listRateLimitPerMinute`,
+   * `reposts.attestationRateLimitPerMinute`) and that the audit log
    * and the request log record: how many of them there are, true for any, or their addresses and
    * CIDR ranges (separated by commas or spaces). Empty: none, so the address is the connection's
    * own. A count is only safe where the server can't be reached except through those proxies:
-   * anyone who connects directly chooses the address they are counted and recorded under.
+   * anyone who connects directly chooses the address they are counted and recorded under. And
+   * a count that is too low has every reader counted as the last proxy it leaves out, so that
+   * they all share one address's limits (see warnOfUncountedProxies).
    */
   trustProxy: z
     .union([z.boolean(), z.number().int().min(0), z.string()])
@@ -241,7 +252,13 @@ const ConfigSchema = z.object({
   redis: z.object({
     /** redis:// or rediss:// URL of any Redis-protocol server. Unset: an in-process store, for a single node only. */
     url: z.string().optional(),
-    keyPrefix: z.string().default('tu:'),
+    /**
+     * Put in front of every key, so instances can share a Redis. It was `tu:` before: a
+     * deployment that leaves it unset reads an empty index after this change, until the index is
+     * rebuilt (`npm run compact -- --rebuild --once`), unless it sets REDIS_KEY_PREFIX=tu: to
+     * keep the keys it has.
+     */
+    keyPrefix: z.string().default('ev:'),
   }),
 
   storage: z.object({
@@ -350,7 +367,37 @@ const ConfigSchema = z.object({
         ctx.addIssue({ code: 'custom', message: `key ${keys.findIndex((key) => seedOf(key) === null) + 1} of REPOSTS_SIGNING_KEYS is not 32 random bytes in base64 or hex, such as \`openssl rand -base64 32\` makes` });
         return z.NEVER;
       }),
+    /**
+     * Requests to GET /content/:id/attestation from one address in a minute, past which they are
+     * refused (0: no limit). It needs no key, reads the database and signs an answer for any id,
+     * one that was never a post's among them. Counted as feeds are (`feed.rateLimitPerMinute`).
+     * Other servers ask it too, of the posts they hold reposts of (`refreshHours`): at most 30
+     * times a minute each, so keep it above that.
+     */
+    attestationRateLimitPerMinute: z.coerce.number().int().min(0).default(60),
+    /**
+     * How often, in hours, the server asks the server of each post it holds a repost of for the
+     * post's attestation again, which is how the repost follows an edit of the original, and is
+     * hidden once the original is gone (0: never, so a repost changes only when a client brings
+     * an attestation to POST /repost/refresh). The process that runs the compactor does the
+     * asking, over https, a few posts a minute, so it needs to reach the other servers.
+     */
+    refreshHours: z.coerce.number().int().min(0).default(24),
+    /**
+     * Days a repost of a post on another server stays hidden after that server said it published
+     * no post there, before the compactor deletes it. The other server says that of a post it
+     * deleted and of one that only waits in its moderation queue, so the repost is kept this
+     * long for the post to be attested again, which brings it back with what reposts gave it.
+     */
+    goneDays: int(7),
   }),
+
+  /**
+   * Requests to GET /content/:id from one address in a minute, past which they are refused (0: no
+   * limit). It needs no key and reads the database and the content store for each. Counted as
+   * feeds are (`feed.rateLimitPerMinute`).
+   */
+  contentRateLimitPerMinute: z.coerce.number().int().min(0).default(300),
 
   feed: z.object({
     /** Posts per feed page when the request doesn't pass `limit`. */
@@ -364,6 +411,13 @@ const ConfigSchema = z.object({
      * which is what one host is given.
      */
     rateLimitPerMinute: z.coerce.number().int().min(0).default(120),
+    /**
+     * The same for GET /feed/following, counted apart (0: no limit). A page of it costs more
+     * than a hashtag feed's: it asks the database who may read it, and reads the index of every
+     * user followed, up to `maxFollowing` of them. It needs no key where the user shows whom
+     * they follow.
+     */
+    followingRateLimitPerMinute: z.coerce.number().int().min(0).default(60),
     /**
      * GET /feed requests one process answers at a time. One that arrives while this many are under
      * way is refused (503) rather than made to wait behind them, whatever addresses they come from:
@@ -437,6 +491,11 @@ const ConfigSchema = z.object({
     graceSeconds: z.coerce.number().int().min(0).default(30),
     /** Batches of indexes compacted at a time. A batch is a couple of hundred tags, read and written together. */
     concurrency: int(4),
+    /**
+     * Writes to comments a run has under way at once, on whatever posts: a comment's own write,
+     * or one like of it. Beside them, a run writes the posts of `concurrency` posts at a time.
+     */
+    commentWrites: int(16),
     /**
      * Lifetime of the database lease that keeps the runs of two compactor processes from overlapping
      * (a deploy replacing one, a rebuild started by hand). It is renewed for as long as a run holds
@@ -544,6 +603,13 @@ const ConfigSchema = z.object({
      * outright, before any challenge, however many challenges they'd solve (0: no limit).
      */
     perMinute: z.coerce.number().int().min(0).default(10),
+    /**
+     * Requests from one address in a minute to each of the two lists of comments (GET
+     * /content/:id/comments, and a comment's replies), past which they are refused (0: no
+     * limit). They need no key, and a list of a post whose comments Redis doesn't hold is a
+     * listing of the content store. Counted as feeds are (`feed.rateLimitPerMinute`).
+     */
+    listRateLimitPerMinute: z.coerce.number().int().min(0).default(120),
     /**
      * How long Redis keeps a post's index of its comments, each comment, and each comment's number
      * of likes, before they are read from the content store again: the index from one list of the

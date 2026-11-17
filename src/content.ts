@@ -14,14 +14,34 @@ import type { ContentMeta, ContentStore, Publisher, Summary } from './storage/in
  */
 export const PENDING_REVIEW = { status: 'pending_review' } as const;
 
+/**
+ * What a response says of the server's entry for a post on another server that the other server
+ * says it no longer publishes: the `status` it carries. The entry is hidden, and only its owner,
+ * server moderators and admins get to read it (see `withheld`).
+ */
+export const ORIGIN_GONE = { status: 'origin_gone' } as const;
+
 /** 404 for content that isn't there, and for content the caller may not know is there. */
 export const contentNotFound = () => notFound(msg('content.not_found'));
 
 /**
- * Content's row with its publisher's username, and whether it waits in the moderation queue
- * (`queued`): it is then unpublished, and only its publisher, server moderators and admins may know of it. Content set
- * for deletion is already gone as far as readers are concerned, so it's 404 like content that was
- * never there.
+ * Whether content that is there is kept from readers. It is for one of two reasons: it waits in
+ * the moderation queue (`queued_id`), or it is the server's entry for a post on another server,
+ * and that server says it publishes no post at the address (`origin_gone_at`), which it says of
+ * a post it deleted and of one that only waits in its own moderation queue. Either way the
+ * content has no summary and is in no index, and it is 404 to everyone but its owner, server
+ * moderators and admins. It keeps its hashtags and the places reposts gave it, and is back in
+ * feeds with them once it is published again: accepted from the queue, or attested again by the
+ * original's server.
+ */
+export const withheld = (row: { queued_id: string | null; origin_gone_at: number | null }): boolean => row.queued_id !== null || row.origin_gone_at !== null;
+
+/**
+ * Content's row with its publisher's username, whether it waits in the moderation queue
+ * (`queued`), and whether it is an entry for a post on another server that the other server says
+ * is gone (`gone`): either way it is unpublished (see `withheld`), and only its publisher, server
+ * moderators and admins may know of it. Content set for deletion is already gone as far as
+ * readers are concerned, so it's 404 like content that was never there.
  */
 export async function loadContent(db: Db, contentId: string) {
   const row = await db
@@ -35,13 +55,16 @@ export async function loadContent(db: Db, contentId: string) {
     .executeTakeFirst();
   if (!row) throw contentNotFound();
   const { queued_id, ...content } = row;
-  return { ...content, queued: queued_id !== null };
+  return { ...content, queued: queued_id !== null, gone: content.origin_gone_at !== null };
 }
 
-/** Published content's row: 404 for content that waits in the moderation queue, as for content that isn't there. */
+/**
+ * Published content's row: 404 for content that waits in the moderation queue, and for an entry
+ * whose original is gone from its own server, as for content that isn't there.
+ */
 export async function loadPublished(db: Db, contentId: string) {
   const row = await loadContent(db, contentId);
-  if (row.queued) throw contentNotFound();
+  if (row.queued || row.gone) throw contentNotFound();
   return row;
 }
 
@@ -51,11 +74,12 @@ type LoadedContent = Awaited<ReturnType<typeof loadContent>>;
  * The content, for whoever may read it. Published content is anyone's to read, with no key. Content
  * that waits in the moderation queue is read only by its publisher and by those who decide on it
  * there (server moderators and admins), who send their credentials in the headers: to anyone else
- * it is 404, like content that isn't there. Who may read a post may read its comments.
+ * it is 404, like content that isn't there. The same goes for an entry whose original is gone
+ * from its own server. Who may read a post may read its comments.
  */
 export async function loadReadable(db: Db, req: FastifyRequest, contentId: string): Promise<LoadedContent> {
   const row = await loadContent(db, contentId);
-  if (!row.queued) return row;
+  if (!row.queued && !row.gone) return row;
   if (!(await readsHeld(db, req, row.user_id))) throw contentNotFound();
   return row;
 }

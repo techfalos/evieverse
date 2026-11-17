@@ -252,7 +252,7 @@ for (const target of TARGETS) {
       const answer = solution.challengeAnswer.toLowerCase().split('').join(' ');
       const done = await register({ ...payload, ...solution, challengeAnswer: answer });
       expect(done.statusCode, done.body).toBe(201);
-      expect(done.json()).toMatchObject({ username: 'alice', apiKey: expect.stringMatching(/^tu_/) });
+      expect(done.json()).toMatchObject({ username: 'alice', apiKey: expect.stringMatching(/^ev_/) });
       expect(await gone(challenge)).toBe(true);
 
       const again = await register({ ...payload, username: 'alicia', ...solution });
@@ -415,7 +415,7 @@ for (const target of TARGETS) {
       const byHeaders = await ctx.app.inject({ method: 'POST', url: '/register', payload: { username: 'alice' }, headers: as(root) });
       expect(byHeaders.statusCode, byHeaders.body).toBe(201);
       const alice = byHeaders.json() as User;
-      expect(alice).toMatchObject({ username: 'alice', apiKey: expect.stringMatching(/^tu_/) });
+      expect(alice).toMatchObject({ username: 'alice', apiKey: expect.stringMatching(/^ev_/) });
       expect(alice.userId).not.toBe(root.userId);
       const byFields = await register({ username: 'bob', ...by(root) });
       expect([byFields.statusCode, byFields.json().username]).toEqual([201, 'bob']);

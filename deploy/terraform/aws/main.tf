@@ -27,11 +27,12 @@ locals {
   }
 
   # API Gateway gives a function 30 seconds at most, so the route groups get no longer.
+  # `concurrency` is the most instances of the function at once (-1: as many as the account allows).
   functions = {
-    feed    = { memory = var.function_memory, timeout = 30 }
-    content = { memory = var.function_memory, timeout = 30 }
-    store   = { memory = var.store_function_memory, timeout = 30 }
-    api     = { memory = var.function_memory, timeout = 30 }
+    feed    = { memory = var.function_memory, timeout = 30, concurrency = coalesce(var.feed_function_max_concurrency, -1) }
+    content = { memory = var.function_memory, timeout = 30, concurrency = coalesce(var.function_max_concurrency, -1) }
+    store   = { memory = var.store_function_memory, timeout = 30, concurrency = coalesce(var.function_max_concurrency, -1) }
+    api     = { memory = var.function_memory, timeout = 30, concurrency = coalesce(var.function_max_concurrency, -1) }
   }
   route_groups = toset(distinct(values(local.routes)))
 }
@@ -758,7 +759,7 @@ locals {
     element(["8", "9", "a", "b"], parseint(substr(random_uuid.admin.result, 19, 1), 16) % 4),
     substr(random_uuid.admin.result, 20, 16),
   ])
-  admin_api_key = sensitive("tu_${random_id.admin_key_prefix.hex}_${random_password.admin_key.result}")
+  admin_api_key = sensitive("ev_${random_id.admin_key_prefix.hex}_${random_password.admin_key.result}")
   bootstrap_admin = jsonencode({
     userId   = local.admin_user_id
     username = var.admin_username
@@ -854,7 +855,7 @@ resource "aws_lambda_invocation" "migrate" {
 
   lifecycle {
     precondition {
-      condition     = can(regex("^tu_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$", local.admin_api_key))
+      condition     = can(regex("^ev_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$", local.admin_api_key))
       error_message = "The admin API key isn't in the format the server issues and accepts (KEY_PATTERN in src/auth/apiKey.ts)."
     }
     precondition {
@@ -880,6 +881,9 @@ resource "aws_lambda_function" "fn" {
   architectures = ["x86_64"]
   memory_size   = each.value.memory
   timeout       = each.value.timeout
+  # An instance answers one request at a time, so nothing in the server limits how many there are:
+  # this does. A request past it is refused by Lambda, and the gateway answers it with an error.
+  reserved_concurrent_executions = each.value.concurrency
 
   image_config {
     entry_point       = ["node"]

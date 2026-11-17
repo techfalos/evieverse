@@ -892,15 +892,18 @@ for (const target of TARGETS) {
       expect(refused(await refresh(alice!, nth(11)))).toEqual([400, "this server doesn't take reposts of posts on other servers"]);
     });
 
-    it('deletes its entry for a post that the post\'s own server says is gone', async () => {
+    it("hides its entry for a post that the post's own server says is gone, brings it back when the post is attested again, and deletes it after days with no word of it", async () => {
       ctx = await createTestContext(target, { keyFetcher });
+      const root = await admin();
       const [alice, bob, carol, erin] = await Promise.all(['alice', 'bob', 'carol', 'erin'].map((name) => ctx.register(name)));
+      const address = `${OTHER}/content/${ORIGINAL}`;
       await follow(erin!, bob!);
       const madeAt = ctx.clock.now;
       const { contentId } = ok(await repost(bob!, { origin: origin(), tags: 'news' }), 201);
       ok(await repost(carol!, { origin: origin(), tags: 'rain' }), 201);
       await ctx.compact();
       expect(ids(await following(erin!))).toEqual([contentId]);
+      const carols = [`${authorIndex(carol!.userId)} carol 0`, 'rain carol 0'];
 
       // That a post is gone is nothing to repost.
       ctx.clock.now += 5 * MINUTE;
@@ -911,21 +914,188 @@ for (const target of TARGETS) {
       expect(refused(await refresh(alice!, gone({ url: other(1) })))).toEqual([404, NO_ENTRY]);
       expect((await content(contentId)).contentId).toBe(contentId);
 
-      // Then the entry is set for deletion, as its owner would set it: gone to readers at once, and from every feed with the compactor's next run.
-      expect(ok(await refresh(alice!, gone()), 202)).toEqual({ contentId, status: 'pending_deletion', requestedAt: iso(ctx.clock.now) });
-      expect((await req(null, 'GET', `/content/${contentId}`)).statusCode).toBe(404);
-      expect(refused(await refresh(alice!, gone()))).toEqual([404, 'content not found']);
-      expect((await ctx.compact()).deleted).toEqual([contentId]);
+      // Then the entry is hidden, and not deleted: the other server says the same of a post that only waits in its moderation queue.
+      const goneAt = ctx.clock.now;
+      const hidden = { contentId, status: 'origin_gone', goneAt: iso(goneAt), deleteAfter: iso(goneAt + 7 * DAY) };
+      expect(ok(await refresh(alice!, gone()))).toEqual(hidden);
+      // It is gone to readers at once, as content that waits in the moderation queue is: its owner and the admins still read it, and are told why.
+      for (const reader of [null, alice!, carol!]) expect(refused(await req(reader, 'GET', `/content/${contentId}`))).toEqual([404, 'content not found']);
+      for (const reader of [bob!, root]) {
+        expect(await content(contentId, reader)).toMatchObject({ status: 'origin_gone', tags: ['news', 'rain'], origin: { url: address, goneAt: iso(goneAt), deleteAfter: iso(goneAt + 7 * DAY) } });
+      }
+      expect((await req(null, 'GET', `/content/${contentId}/raw`)).statusCode).toBe(404);
+      // Nobody likes it or reposts it meanwhile.
+      expect(refused(await like(alice!, contentId))).toEqual([404, 'content not found']);
+      expect(refused(await repost(alice!, { contentId, tags: 'weather' }))).toEqual([404, 'content not found']);
+      // The same word again changes nothing, and later word that it is still gone leaves it hidden from when it first was.
+      expect(refused(await refresh(alice!, gone()))).toEqual([409, NOT_NEWER]);
+      ctx.clock.now += MINUTE;
+      const confirmedAt = ctx.clock.now;
+      expect(ok(await refresh(alice!, gone()))).toEqual({ ...hidden, unchanged: true });
+      // The compactor's next run takes it out of every feed, and its summary with it. What reposts gave it stays its own.
+      expect((await ctx.compact()).deleted).toEqual([]);
       expect([await feedOf('news'), await feedOf('rain'), await following(erin!)]).toEqual([[], [], []]);
+      expect(await summaryDays(contentId)).toEqual([]);
+      expect(await places(contentId)).toEqual(carols);
+
+      // What the other server said of the post before it said it was gone doesn't bring it back, for the minutes that is still good for.
+      expect(refused(await refresh(alice!, attested({}, { at: confirmedAt - 1 })))).toEqual([409, NOT_NEWER]);
+      // The post only waited in a queue there, and is published again: a later attestation of it puts the entry back where it was.
+      ctx.clock.now += HOUR;
+      const backAt = ctx.clock.now;
+      const back = ok(await refresh(alice!, attested()));
+      expect(back).toMatchObject({ contentId, tags: ['news', 'rain'], origin: { url: address, publisher: DANA } });
+      expect(back).not.toHaveProperty('status');
+      const read = await content(contentId);
+      expect(read).not.toHaveProperty('status');
+      expect(read.origin).toEqual({ url: address, publisher: DANA, attestedAt: iso(backAt) });
+      await ctx.compact();
+      expect([ids(await feedOf('news')), ids(await feedOf('rain')), ids(await following(erin!))]).toEqual([[contentId], [contentId], [contentId]]);
+      expect((await feedOf('rain'))[0]).toMatchObject({ repost: expect.anything(), tags: ['news', 'rain'] });
+      expect(await places(contentId)).toEqual(carols);
+      ok(await like(alice!, contentId), 201);
+
+      // It is gone again, and this time no attestation of it follows. The entry is deleted by the first run after seven days of that, and not before.
+      ctx.clock.now += MINUTE;
+      const againAt = ctx.clock.now;
+      expect(ok(await refresh(alice!, gone()))).toMatchObject({ status: 'origin_gone', goneAt: iso(againAt), deleteAfter: iso(againAt + 7 * DAY) });
+      ctx.clock.now += 7 * DAY - HOUR;
+      expect((await ctx.compact()).deleted).toEqual([]);
+      expect(await content(contentId, bob!)).toMatchObject({ status: 'origin_gone', likes: 1 });
+      ctx.clock.now += HOUR;
+      expect((await ctx.compact()).deleted).toEqual([contentId]);
+      expect((await req(bob!, 'GET', `/content/${contentId}`)).statusCode).toBe(404);
       expect(await places(contentId)).toEqual([]);
       expect(refused(await refresh(alice!, gone()))).toEqual([404, NO_ENTRY]);
 
-      // A post that is there again is reposted anew, and what said it was gone before that isn't taken against the new entry.
+      // A post that is there again after that is reposted anew, and what said it was gone before isn't taken against the new entry.
       ctx.clock.now += MINUTE;
       const anew = ok(await repost(carol!, { origin: origin(), tags: 'news' }), 201).contentId;
       expect(anew).not.toBe(contentId);
       expect(refused(await refresh(alice!, gone({ at: ctx.clock.now - MINUTE })))).toEqual([409, NOT_NEWER]);
       expect((await content(anew)).contentId).toBe(anew);
+    });
+
+    it('takes a repost of a hidden entry as word that the post is there again', async () => {
+      const wary: TrustPlugin = { name: 'wary', assess: (assessed) => (assessed.texts.some((t) => t.includes('scam')) ? { set: 50 } : null) };
+      ctx = await createTestContext(target, { trustPlugins: [wary], keyFetcher });
+      const [alice, bob, carol] = await Promise.all(['alice', 'bob', 'carol'].map((name) => ctx.register(name)));
+      const { contentId } = ok(await repost(bob!, { origin: origin(), tags: 'news' }), 201);
+      const held = ok(await repost(bob!, { origin: origin({ url: other(1) }), tags: 'news' }), 201).contentId;
+      await ctx.compact();
+      ctx.clock.now += MINUTE;
+      const goneAt = ctx.clock.now;
+      expect(ok(await refresh(alice!, gone()))).toMatchObject({ contentId, status: 'origin_gone' });
+      expect(ok(await refresh(alice!, gone({ url: other(1) })))).toMatchObject({ contentId: held, status: 'origin_gone' });
+      await ctx.compact();
+      expect(await feedOf('news')).toEqual([]);
+
+      // Not with what the other server said before the post was gone: that is the older word.
+      expect(refused(await repost(carol!, { origin: origin({}, { at: goneAt - 1 }), tags: 'rain' }))).toEqual([409, NOT_NEWER]);
+      expect((await req(null, 'GET', `/content/${contentId}`)).statusCode).toBe(404);
+      // With a later attestation of the post, the entry is back as the post is now, and the repost is made of it as of any entry.
+      ctx.clock.now += MINUTE;
+      const now = { preview: { kind: 'text', text: 'The coast road is open again.' } };
+      expect(ok(await repost(carol!, { origin: origin(now), tags: 'rain' }), 201)).toMatchObject({ contentId, tags: ['rain'] });
+      expect(await content(contentId)).toMatchObject({ preview: now.preview, origin: { attestedAt: iso(ctx.clock.now) } });
+      await ctx.compact();
+      expect([ids(await feedOf('news')), ids(await feedOf('rain'))]).toEqual([[contentId], [contentId]]);
+      expect((await feedOf('rain'))[0]).toMatchObject({ preview: now.preview, tags: ['news', 'rain'] });
+
+      // What the post now says is moderated like any update. Held, it leaves the entry unpublished, though no longer for being gone, and nobody reposts it yet.
+      const scam = { url: other(1), preview: { kind: 'text', text: 'A scam on the coast road.' } };
+      expect(refused(await repost(carol!, { origin: origin(scam), tags: 'rain' }))).toEqual([409, "this server's entry for the original isn't published: it waits in the moderation queue, or is being deleted"]);
+      expect(await content(held, bob!)).toMatchObject({ status: 'pending_review', preview: scam.preview });
+      expect((await req(null, 'GET', `/content/${held}`)).statusCode).toBe(404);
+      expect(await places(held)).toEqual([]);
+    });
+
+    it('asks the servers of the posts it holds reposts of what the posts are now, itself, a day after it last heard', async () => {
+      /** What the other servers answer when they are asked for a post's attestation, by the address asked. One that isn't here gives no answer. */
+      const answers: Record<string, () => { status: number; body: unknown }> = {};
+      const fetched: string[] = [];
+      const attestationFetcher = async (address: string) => {
+        fetched.push(address);
+        const answer = answers[address];
+        if (!answer) throw new Error('no answer');
+        return answer();
+      };
+      /** The addresses asked since this was last called. */
+      const asks = () => fetched.splice(0);
+      ctx = await createTestContext(target, { keyFetcher, attestationFetcher });
+      servers['https://slow.example/repost/keys'] = published(KEY);
+      const [bob, carol] = await Promise.all(['bob', 'carol'].map((name) => ctx.register(name)));
+      const address = `${OTHER}/content/${ORIGINAL}`;
+      const slow = (n: number) => `https://slow.example/content/${ORIGINAL.slice(0, -1)}${n}`;
+      const shown = async (id: string) => (await content(id)).preview.text;
+      /** A hashtag's feed of the last week: the entries are older than a day by the time they are asked about. */
+      const week = async (tag: string) => (await feed(`tags=${tag}&hours=168`)).tags[tag] ?? [];
+      const is = (url: string, text: string) => () => ({ status: 200, body: { attestation: attested({ url, preview: { kind: 'text', text } }) } });
+      const isGone = (url: string) => () => ({ status: 404, body: { error: 'content not found', gone: gone({ url }) } });
+
+      // Three entries, made a moment apart: one of a post on one server, two of posts on another.
+      const { contentId } = ok(await repost(bob!, { origin: origin(), tags: 'news' }), 201);
+      ok(await repost(carol!, { origin: origin(), tags: 'rain' }), 201);
+      ctx.clock.now += 1;
+      const first = ok(await repost(bob!, { origin: origin({ url: slow(1) }), tags: 'news' }), 201).contentId;
+      ctx.clock.now += 1;
+      const second = ok(await repost(bob!, { origin: origin({ url: slow(2) }), tags: 'news' }), 201).contentId;
+      await ctx.compact();
+
+      // Nobody is asked about a post the server heard of within the day.
+      ctx.clock.now += 23 * HOUR;
+      expect(await ctx.sweep()).toBe(0);
+      expect(asks()).toEqual([]);
+
+      // A day on, each post's own server is asked for its attestation. One post was edited, and the entry now says so.
+      // The other server gives no answer: it is asked once, not once for each of its posts, and its entries stay as they are.
+      ctx.clock.now += HOUR;
+      answers[`${address}/attestation`] = is(address, 'The coast road is open again.');
+      expect(await ctx.sweep()).toBe(3);
+      expect(asks()).toEqual([`${address}/attestation`, `${slow(1)}/attestation`]);
+      expect(await shown(contentId)).toBe('The coast road is open again.');
+      expect(await shown(first)).toBe('Flooding closes the coast road.');
+      await ctx.compact();
+      expect((await week('rain'))[0]).toMatchObject({ contentId, preview: { kind: 'text', text: 'The coast road is open again.' }, tags: ['news', 'rain'] });
+      // The entry that was heard of isn't asked about again for a day, and the others for an hour.
+      expect(await ctx.sweep()).toBe(0);
+
+      // An hour on, that server answers. What it says is checked as what a client brings is: an attestation
+      // that isn't signed with its key, or is of another post, changes nothing.
+      ctx.clock.now += HOUR;
+      answers[`${slow(1)}/attestation`] = () => ({ status: 200, body: { attestation: attested({ url: slow(1), preview: { kind: 'text', text: 'Forged.' } }, { key: STRAY_KEY }) } });
+      expect(await ctx.sweep()).toBe(2);
+      expect(asks()).toEqual([`${slow(1)}/attestation`]);
+      ctx.clock.now += HOUR;
+      answers[`${slow(1)}/attestation`] = is(slow(2), 'Of another post.');
+      expect(await ctx.sweep()).toBe(2);
+      expect(asks()).toEqual([`${slow(1)}/attestation`]);
+      expect([await shown(first), await shown(second)]).toEqual(['Flooding closes the coast road.', 'Flooding closes the coast road.']);
+
+      // It says one post is gone: a 404 that carries its signed word of that. The entry is hidden. A 404 with nothing signed says nothing.
+      ctx.clock.now += HOUR;
+      answers[`${slow(1)}/attestation`] = isGone(slow(1));
+      answers[`${slow(2)}/attestation`] = () => ({ status: 404, body: { error: 'content not found' } });
+      expect(await ctx.sweep()).toBe(2);
+      expect(asks()).toEqual([`${slow(1)}/attestation`, `${slow(2)}/attestation`]);
+      expect((await req(null, 'GET', `/content/${first}`)).statusCode).toBe(404);
+      expect(await content(first, bob!)).toMatchObject({ status: 'origin_gone' });
+      expect(await shown(second)).toBe('Flooding closes the coast road.');
+      await ctx.compact();
+      expect(ids(await week('news')).sort()).toEqual([contentId, second].sort());
+
+      // A hidden entry is asked about again after six hours, not a day. The post is back, and so is the entry.
+      answers[`${slow(2)}/attestation`] = is(slow(2), 'Flooding closes the coast road.');
+      ctx.clock.now += 5 * HOUR;
+      expect(await ctx.sweep()).toBe(1);
+      expect(asks()).toEqual([`${slow(2)}/attestation`]);
+      ctx.clock.now += HOUR;
+      answers[`${slow(1)}/attestation`] = is(slow(1), 'Back on the coast road.');
+      expect(await ctx.sweep()).toBe(1);
+      expect(asks()).toEqual([`${slow(1)}/attestation`]);
+      expect(await shown(first)).toBe('Back on the coast road.');
+      await ctx.compact();
+      expect(ids(await week('news')).sort()).toEqual([contentId, first, second].sort());
     });
 
     it('keeps the later of two attestations that arrive at once, whichever is written first', async () => {
@@ -958,13 +1128,18 @@ for (const target of TARGETS) {
       ok(await refresh(alice!, saying('Latest.', t + 2)));
       expect(await shown()).toBe('Latest.');
 
-      // A deletion is set on the entry as it was read. One that the post was attested to again meanwhile is sent again, and is by then the older word.
+      // Word that the post is gone is held to the same. The post was attested again while it was on its way: it is the older word as it commits.
       meanwhile = async () => ok(await refresh(alice!, saying('Back again.', t + 4)));
-      expect(refused(await refresh(alice!, gone({ at: t + 3 })))).toEqual([409, 'the entry was written to as this arrived, so nothing was changed: send it again']);
       expect(refused(await refresh(alice!, gone({ at: t + 3 })))).toEqual([409, NOT_NEWER]);
       expect(await shown()).toBe('Back again.');
       await ctx.compact();
       expect((await feedOf('news'))[0]).toMatchObject({ contentId, preview: { kind: 'text', text: 'Back again.' } });
+
+      // And the other way round: an attestation of the post from before it was gone, which commits after the word that it is, doesn't bring it back.
+      meanwhile = async () => expect(ok(await refresh(alice!, gone({ at: t + 6 })))).toMatchObject({ status: 'origin_gone' });
+      expect(refused(await refresh(alice!, saying('Too late.', t + 5)))).toEqual([409, NOT_NEWER]);
+      expect((await req(null, 'GET', `/content/${contentId}`)).statusCode).toBe(404);
+      expect(await content(contentId, bob!)).toMatchObject({ status: 'origin_gone', preview: { kind: 'text', text: 'Back again.' } });
     });
 
     it('attests its own published posts, signed with its first key, and publishes its keys', async () => {

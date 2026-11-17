@@ -100,6 +100,7 @@ Each module makes the key the instance signs its posts with, which is what lets 
 - **To sign nothing,** set `REPOSTS_SIGNING_KEYS = ""` in `environment`. The instance's posts are then reposted only on the instance itself.
 - **The key is in the Terraform state,** in plain text, like the other secrets these modules create.
 - To check a repost of a post on another server, the functions ask that server for its public keys over `https`. That takes the same way out as above: the NAT gateway on AWS, and directly on GCP and Azure.
+- The [compactor](#compactor)'s container asks other servers too: about once a day, for the attestation of each post the instance holds a repost of (`REPOSTS_REFRESH_HOURS`). It takes the same way out.
 
 [CONFIG.md](CONFIG.md) lists all settings.
 
@@ -169,6 +170,17 @@ In earlier versions the requests wrote posts and comments to the bucket themselv
 
 This upgrade wasn't applied to a live deployment. The modules pass `terraform validate` with the new rule, and applying the writes that waited, and again after a pass that stopped, is covered by the server's tests, on SQLite.
 
+## Upgrading to the `ev` prefixes
+
+Three things change on the first `apply` of a version whose API keys start with `ev_` and whose Redis keys start with `ev:` (they were `tu_` and `tu:`). It also runs migration `0005_origin_gone`, which adds two columns to `content` and changes nothing else.
+
+- **The feed index starts empty.** The modules don't set `REDIS_KEY_PREFIX`, so the functions and the compactor read and write under `ev:` from then on, where there's nothing yet: feeds are empty, and challenges and rate-limit counts start over. Run the [rebuild](#redis) straight after the apply, which fills the index from the database and the bucket. To skip that, keep the old prefix: `environment = { REDIS_KEY_PREFIX = "tu:" }`. The keys under `tu:` aren't deleted: those with no expiry (the index) stay in Redis until you delete them or flush it.
+- **The deployment's admin key is replaced.** Terraform makes the key in the server's format, so the same apply gives the [admin account](#the-admin-account) a key that starts with `ev_`, revokes the one it had, and rewrites the profile file and the `admin_api_key` output. A copy of the old key kept anywhere else stops working.
+- **Every other user's key keeps working.** The server still takes a key that starts with `tu_`; a key issued or replaced from now on starts with `ev_`.
+- **AWS: the functions get a cap on instances** ([below](#scaling-and-the-database)), which needs room in the account's Lambda quota. Check it before applying.
+
+This upgrade wasn't applied to a live deployment either. The modules pass `terraform validate`, and the migration, old keys and the new settings are covered by the server's tests, on SQLite.
+
 ## Uploads
 
 A request to a function can't carry a large file. The limits on a file sent in the request to `/store`:
@@ -205,17 +217,24 @@ The audit log is written by the functions that answer requests, in each request,
 
 ## Client addresses
 
-The limits on registrations and on feeds (`REGISTER_RATE_LIMIT_PER_HOUR`, `FEED_RATE_LIMIT_PER_MINUTE`) count by the client's address, which the server reads from `X-Forwarded-For`, as far from the end as there are proxies in front of it (`TRUST_PROXY`). Nothing can reach the functions except through the address in front, so a client can't make one up:
+The limits on registrations, on feeds and on the other reads that need no key (`REGISTER_RATE_LIMIT_PER_HOUR`, `FEED_RATE_LIMIT_PER_MINUTE`, `FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE`, `CONTENT_RATE_LIMIT_PER_MINUTE`, `COMMENTS_LIST_RATE_LIMIT_PER_MINUTE`, `REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE`) count by the client's address, which the server reads from `X-Forwarded-For`, as far from the end as there are proxies in front of it (`TRUST_PROXY`). Nothing can reach the functions except through the address in front, so a client can't make one up:
 
 - **AWS:** CloudFront sends a secret header (`X-Origin-Secret`) that the functions require, since the API Gateway's own address is public.
 - **GCP:** the Cloud Run services only admit the gateway's service account. There's no `allUsers` binding.
 - **Azure:** Front Door sends the same secret header, since each Container App's own address is public.
 
-On GCP and Azure the number of proxies (`trust_proxy`, 2) wasn't checked against a live deployment. After the first apply, make a request and look at `remoteAddress` in the function's request log: it should be your own public address. If it's a Google or Microsoft address, raise `trust_proxy` by one; if it's something a client could choose, lower it. Check it before the deployment has readers: while every reader is seen as the same Google or Microsoft address, they share one address's 120 feeds a minute, and all get `429` once those are used. `FEED_RATE_LIMIT_PER_MINUTE = "0"` in `environment` turns that limit off until it's checked.
+The number of proxies was checked against a live deployment of each module (November 2026), by sending requests with and without an `X-Forwarded-For` of their own, over IPv4 and IPv6, and reading `remoteAddress` in the functions' request logs:
+
+- **AWS** (`TRUST_PROXY` fixed at 1) and **GCP** (`trust_proxy`, 2): every request was recorded under the sender's own address, whatever the header said.
+- **Azure** (`trust_proxy`, 2): the same, for every request an app was up for. A request that waited for an app to start from no replicas was recorded under an address of Front Door's own (in its `AzureFrontDoor.Backend` ranges, such as `69.15.x.x` and `147.243.x.x`), with the sender's address one entry further back: it looks as if Front Door sent the slow request again through a second address of its own, which adds a hop. Those few requests are limited and audited as that address. Don't raise `trust_proxy` for them: at 3, every other request could choose its own address. `min_replicas = 1` keeps an app up, and then there are none.
+
+A cloud can change what stands in front of a service, so it's worth a look after the first apply: make a request and read `remoteAddress` in the function's request log, which should be your own public address. If nearly every request shows a Google or Microsoft address, raise `trust_proxy` by one; if it's something a client could choose, lower it. While every reader is seen as one of a few such addresses, they share one address's limits, and most get `429` once those are used. The server logs a warning when it sees that: one address counted as the client, with 20 different public addresses just before it in `X-Forwarded-For`. Setting a limit to `"0"` in `environment` turns it off until the number is right.
 
 ## Compactor
 
 The compactor is one container that's always up, and makes pass after pass. Each pass writes out the posts and comments that requests committed since the one before, to the bucket and Redis, and then brings the feed index up to date. It isn't a function and nothing calls it: it has no address, and reaches Redis, the database and the bucket from inside the network, as the functions do.
+
+The same container asks other servers, over `https`, for the attestations of the posts the instance holds reposts of ([API.md](API.md#refreshing-a-repost)): each about once a day, at most 30 a minute. So it needs a way out to the internet, which each module's network gives it as it gives the functions: the NAT gateway on AWS, and directly on GCP and Azure. Without one, the rest of its work is unaffected, its log has a warning an hour for each server it couldn't reach, and reposts follow their originals only when a client brings an attestation. `REPOSTS_REFRESH_HOURS = "0"` in `environment` turns the asking off.
 
 
 | Cloud | What runs it                                                                | Kept at one by                                                                    |
@@ -240,7 +259,7 @@ What waits for it:
 
 Its size is `compactor_cpu` and `compactor_memory` (half a CPU and 1 GB on AWS and Azure, one CPU and 1 GiB on GCP). It runs all the time, so unlike the functions it costs the same with or without traffic: about $18 a month on AWS at the default size, from Fargate's list prices in `us-east-1`. `terraform output compactor` names it, for finding its logs (on AWS, the log group too).
 
-None of this was applied to a live account for this change: the modules pass `terraform validate`, and the pacing, the lease and stopping mid-pass are covered by the server's tests.
+None of this was applied to a live account for this change: the modules pass `terraform validate`, and the pacing, the lease and stopping mid-pass are covered by the server's tests. That the compactor's container reaches other servers is read from each module's network, and wasn't tried on a live one.
 
 ## Scaling and the database
 
@@ -250,6 +269,18 @@ Each group scales on its own, and the feed group holds no database connections. 
 - **GCP and Azure:** the small database sizes these modules default to have no built-in pooler, so the limit is arithmetic: `3 x max_instances x db_pool_size + 5` (or `max_replicas`) must stay within the database's connections, which is 50 on `db-g1-small` and 35 usable on `B_Standard_B1ms`. The defaults (3 instances of 4 connections; 3 replicas of 3) fit. To scale further, raise `db_tier` or `db_sku` with them.
 
 `min_instances` and `min_replicas` are 0, so a group with no traffic costs nothing and its next request waits for an instance to start. Set them to 1 to keep one warm.
+
+Every group has a cap on instances, the feed group too. The limits by address can't tell a flood from many addresses from many readers, so the cap is what bounds what such a flood costs, in Redis load and on the bill: past it, the platform refuses requests itself.
+
+| Cloud | Groups that use the database | The feed group |
+| ----- | ---------------------------- | -------------- |
+| AWS   | `function_max_concurrency` (50) | `feed_function_max_concurrency` (100) |
+| GCP   | `max_instances` (3) | `feed_max_instances` (10) |
+| Azure | `max_replicas` (3) | `feed_max_replicas` (10) |
+
+- **On AWS the cap is Lambda's reserved concurrency.** A Lambda instance takes one request at a time, so it's also how many requests a function answers at once, and the server's own bound on feeds at a time (`FEED_MAX_CONCURRENT`) is never reached there. One request more is refused by Lambda, and the gateway answers it with an error; it isn't queued.
+- **Reserved concurrency comes out of the account's quota,** which must keep 100 unreserved. The defaults reserve 250 (100 for feeds, 50 for each of the other three), so they need a quota of 350: `aws lambda get-account-settings` shows it. An established account has 1,000; a new one may have less, and the apply then fails on the functions. Lower the two variables, ask AWS for a larger quota, or set them to `null`, which sets no cap and reserves nothing.
+- GCP's and Azure's instances take many requests at a time each, so their caps are lower.
 
 ## What to expect
 

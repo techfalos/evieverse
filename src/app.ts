@@ -12,6 +12,7 @@ import { requireEdgeSecret } from './functions/edge.js';
 import { GROUP_NAMES, GROUPS, type GroupName } from './functions/groups.js';
 import { HttpError, registerErrorHandler } from './http/errors.js';
 import { registerLanguages } from './http/language.js';
+import { warnOfUncountedProxies } from './http/proxyCheck.js';
 import { rateLimitStore } from './http/rateLimitStore.js';
 import { loadLanguages, msg } from './language.js';
 import { loadTrustPlugins } from './moderation/trust.js';
@@ -47,20 +48,8 @@ export async function buildApp(
     app.log.warn({ language: code, missing: keys }, `the language ${code} lacks messages, which are said in ${languages.default} instead`);
   }
   registerErrorHandler(app);
-  if (trustProxy === false || trustProxy === 0) {
-    // Said once, of the first such request: behind a proxy nobody told the server of, every client has
-    // the proxy's address, and they all share what one address may send to /register and to /feed.
-    // A client that connects directly can send the header too, so it is a warning and no more.
-    let warned = false;
-    app.addHook('onRequest', async (req) => {
-      if (warned || req.headers['x-forwarded-for'] === undefined) return;
-      warned = true;
-      req.log.warn(
-        { address: req.ip },
-        'a request came with X-Forwarded-For, and TRUST_PROXY names no proxy: if this server is behind one, every client is counted as that proxy, and they share the limits on /register and /feed. Set TRUST_PROXY to the proxies in front',
-      );
-    });
-  }
+  // Said once: what a TRUST_PROXY that names too few proxies looks like from here, where every client is counted as a proxy.
+  warnOfUncountedProxies(app, trustProxy);
   if (edgeSecret) requireEdgeSecret(app, edgeSecret);
   // In every group, as every group that changes something has to write it down.
   registerAudit(app, audit, deps.now);
@@ -76,8 +65,9 @@ export async function buildApp(
       maxAge: 600,
     });
   }
-  // Only for the routes that ask for it (POST /register and GET /feed), which it counts by the
-  // client's address: an IPv4 address by itself, one written as IPv6 (::ffff:a.b.c.d) as the same,
+  // Only for the routes that ask for it (POST /register, and the reads that need no key and cost
+  // the server most: both feeds, a post, its attestation, and the lists of comments; see
+  // perMinute), each counted apart, by the client's address: an IPv4 address by itself, one written as IPv6 (::ffff:a.b.c.d) as the same,
   // and an IPv6 address with the rest of its /64, as that many are one host's to send from.
   await app.register(rateLimit, {
     global: false,

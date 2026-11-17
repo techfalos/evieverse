@@ -17,8 +17,9 @@ const NO_COMMENT = 'comment not found';
 describe('COMMENTS_PER_MINUTE and COMMENTS_HOT_HOURS', () => {
   it('are 10 and 24 unless set, and 0 comments a minute is no limit', () => {
     const load = (env: Record<string, string> = {}) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).comments;
-    expect(load()).toEqual({ perMinute: 10, hotHours: 24 });
-    expect(load({ COMMENTS_PER_MINUTE: '0', COMMENTS_HOT_HOURS: '2' })).toEqual({ perMinute: 0, hotHours: 2 });
+    // The limit on reading the lists of comments by address is its own setting (see ratelimit.test.ts).
+    expect(load()).toEqual({ perMinute: 10, hotHours: 24, listRateLimitPerMinute: 120 });
+    expect(load({ COMMENTS_PER_MINUTE: '0', COMMENTS_HOT_HOURS: '2' })).toEqual({ perMinute: 0, hotHours: 2, listRateLimitPerMinute: 120 });
     expect(() => load({ COMMENTS_PER_MINUTE: '-1' })).toThrow();
   });
 });

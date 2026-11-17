@@ -27,6 +27,26 @@ variable "store_function_memory" {
   default     = 2048
 }
 
+variable "function_max_concurrency" {
+  description = "Most instances of each function that uses the database (content, store, api) that run at once. Lambda gives an instance one request at a time, so this is also how many requests the function answers at once; one more is refused, not queued. Without it a flood of requests starts instances up to the account's limit, each with its own connections to Redis and the database proxy, and each billed. It is Lambda's reserved concurrency, which also sets that many aside from the account's quota: the three of these and `feed_function_max_concurrency` must leave the account 100 unreserved, so the defaults need a quota of 350 (`aws lambda get-account-settings`; a new account may have less, and a quota increase is a request to AWS). null: no limit, and nothing set aside."
+  type        = number
+  default     = 50
+  validation {
+    condition     = var.function_max_concurrency == null ? true : var.function_max_concurrency >= 1 && floor(var.function_max_concurrency) == var.function_max_concurrency
+    error_message = "A whole number of instances, 1 or more, or null for no limit."
+  }
+}
+
+variable "feed_function_max_concurrency" {
+  description = "Most instances of the feed function that run at once, which is how many feeds are answered at once: the server's own limit on that (FEED_MAX_CONCURRENT) is per process, and never reached where a process has one request at a time. See `function_max_concurrency`. null: no limit."
+  type        = number
+  default     = 100
+  validation {
+    condition     = var.feed_function_max_concurrency == null ? true : var.feed_function_max_concurrency >= 1 && floor(var.feed_function_max_concurrency) == var.feed_function_max_concurrency
+    error_message = "A whole number of instances, 1 or more, or null for no limit."
+  }
+}
+
 variable "compactor_cpu" {
   description = "CPU units of the compactor's Fargate task (1024 is one vCPU). The compactor is one task that is always up; how often it makes a pass is COMPACT_INTERVAL_SECONDS in `environment` (5 by default)."
   type        = number

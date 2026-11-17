@@ -28,9 +28,11 @@ import { MINUTE } from './time.js';
  * nothing more; and that the post is still what it was, once the attestation is used.
  *
  * So a server that holds a repost is told what the post became by a later attestation of it, which
- * anyone can bring (POST /repost/refresh): a newer one replaces the summary, and one that says the
- * post is gone (AttestedGone), which a server signs in place of a post it no longer publishes,
- * has the repost deleted. An older one changes nothing.
+ * it asks the post's server for now and then (originSweep.ts) and which anyone can bring sooner
+ * (POST /repost/refresh): a newer one replaces the summary, and one that says the post is gone
+ * (AttestedGone), which a server signs in place of whatever it doesn't publish, has the repost
+ * hidden. It is deleted only if no attestation of the post follows for some days, since a post
+ * that isn't published may only wait in a moderation queue. An older one changes nothing.
  */
 
 /** A post's address on its own server ends with its id, as GET /content/:id reads it. */

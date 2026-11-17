@@ -59,7 +59,6 @@
     "repost.refresh_no_entry": "this server has no entry for that post, so there is nothing to refresh: repost it to make one",
     "repost.refresh_not_newer": "this server's entry is from an attestation as new as this one, or newer, so nothing was changed",
     "repost.refresh_type_changed": "this server's entry for the original is {original}, and the attestation says {mimeType}: a post keeps its type, so the entry is as it was",
-    "repost.refresh_raced": "the entry was written to as this arrived, so nothing was changed: send it again",
     "repost.refresh_rate_limited": {
       "one": "too many refreshes of reposts; try again in {count} second",
       "other": "too many refreshes of reposts; try again in {count} seconds"

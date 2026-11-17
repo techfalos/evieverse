@@ -7,7 +7,7 @@ import { resetDatabase, TARGETS } from './helpers.js';
 
 describe('SQL migrations', () => {
   it('has the portable schema migrations, in order', () => {
-    expect(Object.keys(sqlMigrations())).toEqual(['0001_initial', '0002_pending_writes', '0003_staged_removals', '0004_unnumbered_writes']);
+    expect(Object.keys(sqlMigrations())).toEqual(['0001_initial', '0002_pending_writes', '0003_staged_removals', '0004_unnumbered_writes', '0005_origin_gone']);
   });
 
   it('splits scripts into statements, ignoring comment lines', () => {
@@ -67,7 +67,7 @@ describe('SQL migrations', () => {
       expect(await columns('inbox')).toEqual(['body', 'content_id', 'created_at', 'id', 'kind', 'read_at', 'sender_id', 'tag', 'user_id']);
       expect(await columns('user_blocks')).toEqual(['blocked_id', 'created_at', 'user_id']);
       expect(await columns('server_rules')).toEqual(['body', 'created_at', 'id', 'sort_order', 'updated_at']);
-      expect(await columns('content')).toEqual(['ai_generated', 'created_at', 'delete_requested_at', 'id', 'like_count', 'origin_hash', 'seq', 'user_id']);
+      expect(await columns('content')).toEqual(['ai_generated', 'created_at', 'delete_requested_at', 'id', 'like_count', 'origin_check_at', 'origin_gone_at', 'origin_hash', 'seq', 'user_id']);
       expect(await columns('pending_writes')).toEqual(['comment_id', 'content_id', 'created_at', 'kind', 'payload', 'seq', 'staged_key', 'write_key']);
       expect(await columns('staged_removals')).toEqual(['content_id', 'remove_at', 'staged_key']);
       expect(await columns('reposts')).toEqual(['content_id', 'created_at', 'likes_before', 'tag', 'user_id']);

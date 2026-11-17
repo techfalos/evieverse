@@ -56,7 +56,7 @@ for (const target of TARGETS) {
       expect((await askLink(alice, { type: 'text', size: 10 })).statusCode).toBe(400);
       expect((await askLink(alice, { type: 'video', filename: 'clip.mp4', size: 1001 })).statusCode).toBe(413);
       expect((await askLink(alice, { type: 'video', filename: 'clip.mp4' })).statusCode).toBe(400);
-      expect((await askLink({ userId: alice.userId, apiKey: 'tu_wrong' }, { type: 'image', filename: 'pixel.png', size: 10 })).statusCode).toBe(401);
+      expect((await askLink({ userId: alice.userId, apiKey: 'ev_wrong' }, { type: 'image', filename: 'pixel.png', size: 10 })).statusCode).toBe(401);
       // Each link is room in the bucket, so a user gets only so many a minute. Credentials go in headers too.
       const second = await ctx.app.inject({ method: 'POST', url: '/uploads', headers: as(alice), payload: { type: 'audio', contentType: 'audio/mpeg', size: 10 } });
       expect(second.statusCode, second.body).toBe(201);
@@ -77,7 +77,7 @@ for (const target of TARGETS) {
         expect([res.statusCode, res.json().error]).toEqual([400, `this server doesn't take ${type} posts: the types it takes are image, text, link`]);
       }
       // Only to a user, as ever.
-      expect((await askLink({ userId: alice.userId, apiKey: 'tu_wrong' }, { type: 'video', filename: 'clip.mp4', size: 10 })).statusCode).toBe(401);
+      expect((await askLink({ userId: alice.userId, apiKey: 'ev_wrong' }, { type: 'video', filename: 'clip.mp4', size: 10 })).statusCode).toBe(401);
     });
 
     it('gives no link where the content store signs none: files then go in the request to /store', async () => {
@@ -109,6 +109,8 @@ for (const target of TARGETS) {
         created_at: ctx.clock.now,
         delete_requested_at: null,
         origin_hash: null,
+        origin_gone_at: null,
+        origin_check_at: null,
         seq: 1,
       });
       expect(await meta(contentId)).toEqual({
@@ -171,7 +173,7 @@ for (const target of TARGETS) {
 
       await put(alice, id(2), PNG);
       expect((await image(mallory, id(2))).statusCode).toBe(400);
-      expect((await image({ userId: alice.userId, apiKey: 'tu_wrong' }, id(2))).statusCode).toBe(401);
+      expect((await image({ userId: alice.userId, apiKey: 'ev_wrong' }, id(2))).statusCode).toBe(401);
       expect((await store(alice, { type: 'text', text: 'words #pics', uploadId: id(2), tags: ['pics'] })).statusCode).toBe(400);
       expect((await image(alice, id(2), { content: PNG.toString('base64'), contentEncoding: 'base64' })).statusCode).toBe(400);
       // A directory keeps no content types, so the type comes from the request: here from neither.

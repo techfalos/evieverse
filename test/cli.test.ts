@@ -35,7 +35,7 @@ function release(source = 'console.log("the CLI the server ships");\n', build = 
 
 /** An admin account and its key, made as the Terraform modules make them. */
 function terraformAdmin(username = 'operator') {
-  const apiKey = `tu_${randomBytes(6).toString('hex')}_${randomBytes(32).toString('base64url')}`;
+  const apiKey = `ev_${randomBytes(6).toString('hex')}_${randomBytes(32).toString('base64url')}`;
   const admin: BootstrapAdmin = { userId: randomUUID(), username, keyHash: sha256(apiKey) };
   return { admin, user: { userId: admin.userId, apiKey } };
 }
@@ -364,7 +364,7 @@ describe('the CLI', () => {
 
     expect(await cli(['whoami'])).toMatchObject({ code: 1, err: 'evieverse: not signed in: run `evieverse login <server> <userId>`' });
     // A key the server doesn't know isn't saved, whether typed or in the environment.
-    const wrong = `tu_${'0'.repeat(12)}_${'A'.repeat(43)}`;
+    const wrong = `ev_${'0'.repeat(12)}_${'A'.repeat(43)}`;
     expect(await cli(['login', SERVER, alice.userId], { readSecret: async () => wrong })).toMatchObject({ code: 1, err: "evieverse: the server doesn't know this userId and API key" });
     expect(await cli(['login', SERVER, alice.userId])).toMatchObject({ code: 2, err: 'evieverse: no API key was given' });
     expect(await cli(['login', 'evieverse.example.com', alice.userId])).toMatchObject({ code: 2 });
@@ -400,7 +400,7 @@ describe('the CLI', () => {
 
     expect(await ran('key', 'rotate')).toBe(`Replaced the API key of profile "default": the old key no longer works.\nThe new one is saved in ${file}`);
     const first = await saved();
-    expect(first).toEqual({ server: SERVER, userId: alice.userId, username: 'alice', apiKey: expect.stringMatching(/^tu_/) });
+    expect(first).toEqual({ server: SERVER, userId: alice.userId, username: 'alice', apiKey: expect.stringMatching(/^ev_/) });
     expect(first.apiKey).not.toBe(alice.apiKey);
     if (process.platform !== 'win32') expect((await stat(file)).mode & 0o777).toBe(0o600);
     expect([(await whoami(alice)).statusCode, (await whoami(first)).statusCode]).toEqual([401, 200]);
@@ -537,13 +537,13 @@ describe('the CLI', () => {
     const whoami = (u: User) => ctx.app.inject({ method: 'GET', url: '/whoami', headers: as(u) });
 
     // The id and the key that come back are the new user's, and the key works at once.
-    const registered = /^Registered bob \((\S{36})\)\.\nTheir API key, shown this once: (tu_\S+)$/.exec(await by('root', 'register', 'bob'));
+    const registered = /^Registered bob \((\S{36})\)\.\nTheir API key, shown this once: (ev_\S+)$/.exec(await by('root', 'register', 'bob'));
     expect(registered).not.toBeNull();
     const [, userId, apiKey] = registered!;
     expect((await whoami({ userId: userId!, apiKey: apiKey! })).json()).toMatchObject({ userId, username: 'bob', language: 'en', admin: false });
     // --json is the server's answer, key and all, for a script to read.
     const carol = await json('register', 'Carol Jones', '--language', 'EN', '--profile', 'root');
-    expect(carol).toEqual({ userId: expect.any(String), username: 'Carol Jones', language: 'en', apiKey: expect.stringMatching(/^tu_/), note: 'Store this apiKey now; it cannot be retrieved again.' });
+    expect(carol).toEqual({ userId: expect.any(String), username: 'Carol Jones', language: 'en', apiKey: expect.stringMatching(/^ev_/), note: 'Store this apiKey now; it cannot be retrieved again.' });
     expect((await whoami(carol)).statusCode).toBe(200);
 
     expect(await refused('root', 'register', 'bob')).toMatchObject({ code: 1, err: 'evieverse: username is already taken' });
@@ -571,7 +571,7 @@ describe('the CLI', () => {
     const by = (name: string, ...args: string[]) => ran(...args, '--profile', name);
     const refused = (name: string, ...args: string[]) => cli([...args, '--profile', name]);
     const whoami = async (u: User) => (await ctx.app.inject({ method: 'GET', url: '/whoami', headers: as(u) })).statusCode;
-    const printed = (userId: string) => new RegExp(`^Replaced the API key of ${userId}: the keys they had no longer work\\.\\nTheir new API key, shown this once: (tu_\\S+)$`);
+    const printed = (userId: string) => new RegExp(`^Replaced the API key of ${userId}: the keys they had no longer work\\.\\nTheir new API key, shown this once: (ev_\\S+)$`);
 
     // The key that comes back is the user's, and the only one of theirs that works.
     const [, apiKey] = printed(alice.userId).exec(await by('root', 'users', 'rotate-key', alice.userId))!;
@@ -580,7 +580,7 @@ describe('the CLI', () => {
     const again = await json('users', 'rotate-key', alice.userId, '--profile', 'root');
     expect(again).toEqual({
       userId: alice.userId,
-      apiKey: expect.stringMatching(/^tu_/),
+      apiKey: expect.stringMatching(/^ev_/),
       note: 'Pass this apiKey on to the user now; it cannot be retrieved again. Every key they had no longer works.',
     });
     expect([await whoami({ userId: alice.userId, apiKey: apiKey! }), await whoami(again)]).toEqual([401, 200]);

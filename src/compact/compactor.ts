@@ -1,6 +1,6 @@
 import type { ExpressionBuilder } from 'kysely';
 import { purgeAccounts, sweepContent } from '../accounts.js';
-import { summaryOf } from '../content.js';
+import { summaryOf, withheld } from '../content.js';
 import type { Database, TagDecision } from '../db/schema.js';
 import type { AppDeps } from '../deps.types.js';
 import { syncFollowing } from '../follows.js';
@@ -143,6 +143,8 @@ interface ContentRow {
   delete_requested_at: number | null;
   /** Its id again, if it waits in the moderation queue. */
   queued_id: string | null;
+  /** On an entry for a post on another server: since when that server says the post is gone, if it does (see `withheld`). */
+  origin_gone_at: number | null;
 }
 
 /** What hashtags' moderators decided about content under them, by `decidedKey`. */
@@ -290,6 +292,10 @@ const addTo = (ids: Map<number, Set<string>>, day: number, id: string) => {
  * builds the content's entry in each of those indexes at the time of the repost (see Placement).
  * An update of the content that committed meanwhile is applied with them too (see applyPending).
  *
+ * A repost of a post on another server is hidden when that server says the post is gone, and no
+ * index holds it while it is (see `withheld`). A run brings it back where it was once the post
+ * is attested again, and deletes it if it has been hidden for REPOSTS_GONE_DAYS (see expireGone).
+ *
  * And it keeps each hashtag's related hashtags in Redis, where feeds asked to add them read them:
  * those of the hashtags whose counts in `tag_pairs` changed since its last run are worked out again
  * (see syncRelatedTags).
@@ -404,6 +410,7 @@ export class Compactor {
     await this.syncAds(runStart, lease);
     this.markQueue(workFor, queue, runStart, ctx);
     await this.markOutlived(workFor, queue, runStart, ctx);
+    await this.expireGone(runStart, lease);
     const deletions = await this.markDeletions(workFor, ctx);
     await this.prefetch(queue, ctx);
 
@@ -837,7 +844,8 @@ export class Compactor {
    * settles its hashtags by the places reposts gave it (see applyPending), whatever the update
    * knew of them.
    *
-   * Content that waits in the moderation queue has no summary, and gets none here. Returns the
+   * Content that is withheld (it waits in the moderation queue, or its original is gone from
+   * another server) has no summary, and gets none here. Returns the
    * content it couldn't write: its rows stay in the queue, so the next run tries again.
    */
   private async applyReposts(queue: QueueRow[], at: number, lease: CompactorLease, ctx: RunContext): Promise<Set<string>> {
@@ -873,7 +881,7 @@ export class Compactor {
         if (!missing.length) return;
         const next: ContentMeta = { ...meta, tags: [...meta.tags, ...missing], updatedAt: Math.max(meta.updatedAt, at) };
         // The meta file last, as for any write: what it says is there.
-        if (row.queued_id === null) await summaries.put(summaryOf(row, next, this.cfg.publicBaseUrl, repostTimes(places)));
+        if (!withheld(row)) await summaries.put(summaryOf(row, next, this.cfg.publicBaseUrl, repostTimes(places)));
         await content.putMeta(next);
         ctx.metas.set(id, Promise.resolve(next));
       } catch (err) {
@@ -936,6 +944,7 @@ export class Compactor {
         'content.created_at',
         'content.ai_generated',
         'content.delete_requested_at',
+        'content.origin_gone_at',
         'moderation_queue.content_id as queued_id',
         'tag_moderation.tag',
         'tag_moderation.decision',
@@ -981,11 +990,11 @@ export class Compactor {
    *
    * The summary is also what takes the content out of the hashtag's feeds in the indexes this run
    * doesn't rebuild, which feed sessions under way still read: a feed leaves out a record whose
-   * summary doesn't carry the hashtag it is listed under. Content that waits in the moderation
-   * queue (`queued_id`) has no summary, and gets none here, which would put it back in those feeds.
+   * summary doesn't carry the hashtag it is listed under. Content that is withheld (see
+   * `withheld`) has no summary, and gets none here, which would put it back in those feeds.
    */
   private async untag(
-    row: { id: string; user_id: string; created_at: number; ai_generated: number; delete_requested_at: number | null; queued_id: string | null },
+    row: { id: string; user_id: string; created_at: number; ai_generated: number; delete_requested_at: number | null; queued_id: string | null; origin_gone_at: number | null },
     at: number,
     ctx: RunContext,
   ): Promise<void> {
@@ -998,7 +1007,7 @@ export class Compactor {
     if (tags.length === meta.tags.length) return;
     const next: ContentMeta = { ...meta, tags, updatedAt: Math.max(meta.updatedAt, at) };
     // The meta file last, as for any write: what it says is there.
-    if (row.queued_id === null) await summaries.put(summaryOf(row, next, this.cfg.publicBaseUrl, repostTimes(this.placed(row.id, ctx))));
+    if (!withheld(row)) await summaries.put(summaryOf(row, next, this.cfg.publicBaseUrl, repostTimes(this.placed(row.id, ctx))));
     await content.putMeta(next);
     ctx.metas.set(row.id, Promise.resolve(next));
   }
@@ -1026,6 +1035,31 @@ export class Compactor {
         .execute();
       if (d.decision === 'removed') await db.deleteFrom('reposts').where('content_id', '=', d.id).where('tag', '=', d.tag).execute();
     }
+  }
+
+  /**
+   * Sets for deletion the entries for posts on other servers that have been hidden for
+   * REPOSTS_GONE_DAYS: the original's server said it published no post there (see contentWriter's
+   * withhold), and has attested none since, so the post is taken for deleted. Until then the
+   * entry could come back, which is why it was hidden and not deleted: the same word is signed
+   * for a post that only waits in a moderation queue. The run then deletes them like any content
+   * set for deletion (see markDeletions), with the places reposts gave them.
+   *
+   * One statement, which sets only an entry that is still hidden as it runs: an attestation that
+   * brings the entry back commits before it, and keeps the entry, or after it, and is refused as
+   * any write of content set for deletion is.
+   */
+  private async expireGone(runStart: number, lease: CompactorLease) {
+    await lease.check();
+    const expired = await this.deps.db
+      .updateTable('content')
+      .set({ delete_requested_at: runStart })
+      .where('origin_gone_at', 'is not', null)
+      .where('origin_gone_at', '<=', runStart - this.cfg.reposts.goneDays * DAY)
+      .where('delete_requested_at', 'is', null)
+      .executeTakeFirst();
+    const entries = Number(expired.numUpdatedRows);
+    if (entries > 0) this.deps.log?.info({ entries }, 'set for deletion the reposts of posts that have been gone from their own servers for REPOSTS_GONE_DAYS');
   }
 
   /**
@@ -1302,14 +1336,14 @@ export class Compactor {
     return { plan, before, held: [...held.values()], build: [...plan.recheck, ...[...plan.readmit].filter((id) => !held.has(id) && !plan.recheck.has(id))], entries: [] };
   }
 
-  /** The rows of these pieces of content, by id, each with whether it waits in the moderation queue. */
+  /** The rows of these pieces of content, by id, each with whether it is withheld from readers (see `withheld`). */
   private async contentRows(ids: string[]): Promise<Map<string, ContentRow>> {
     const out = new Map<string, ContentRow>();
     for (let i = 0; i < ids.length; i += BATCH) {
       for (const r of await this.deps.db
         .selectFrom('content')
         .leftJoin('moderation_queue', 'moderation_queue.content_id', 'content.id')
-        .select(['content.id', 'content.user_id', 'content.like_count', 'content.created_at', 'content.ai_generated', 'content.delete_requested_at', 'moderation_queue.content_id as queued_id'])
+        .select(['content.id', 'content.user_id', 'content.like_count', 'content.created_at', 'content.ai_generated', 'content.delete_requested_at', 'content.origin_gone_at', 'moderation_queue.content_id as queued_id'])
         .where('content.id', 'in', ids.slice(i, i + BATCH))
         .execute())
         out.set(r.id, r);
@@ -1334,12 +1368,13 @@ export class Compactor {
   }
 
   /**
-   * Whether an index can hold the content at all: it is there, not set for deletion, not waiting
-   * in the moderation queue, and within retention, which content older than that is for as long
-   * as a repost of it is (see Placement).
+   * Whether an index can hold the content at all: it is there, not set for deletion, not withheld
+   * (waiting in the moderation queue, or an entry whose original is gone from its own server),
+   * and within retention, which content older than that is for as long as a repost of it is (see
+   * Placement).
    */
   private indexable(row: ContentRow | undefined, runStart: number, ctx: RunContext): row is ContentRow {
-    if (!row || row.delete_requested_at !== null || row.queued_id !== null) return false;
+    if (!row || row.delete_requested_at !== null || withheld(row)) return false;
     const oldest = runStart - this.retentionDays * DAY;
     return row.created_at > oldest || this.placed(row.id, ctx).some((p) => p.created_at > oldest);
   }
@@ -1348,7 +1383,7 @@ export class Compactor {
    * The entries a day holds, with current likes, the AI flag and, in a hashtag's index, what its
    * moderators decided, from the database: content they approved is flagged as moderated, and
    * content they removed the hashtag from is dropped. So is content that is deleted, set for
-   * deletion, past retention, or waiting in the moderation queue.
+   * deletion, past retention, or withheld (see `withheld`).
    *
    * An entry a repost made counts the likes since the repost, and is dropped if the repost's place
    * in this index is no more: the reposter's account is gone, or the place was given again since,
@@ -1359,7 +1394,7 @@ export class Compactor {
     const out: IndexEntry[] = [];
     for (const e of entries) {
       const row = rows.get(e.contentId);
-      if (!row || row.delete_requested_at !== null || row.queued_id !== null || e.createdAt <= oldest) continue;
+      if (!row || row.delete_requested_at !== null || withheld(row) || e.createdAt <= oldest) continue;
       let likes = row.like_count;
       if (e.repost) {
         const place = this.placed(e.contentId, ctx).find((p) => p.tag === tag);

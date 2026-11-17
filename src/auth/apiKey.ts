@@ -5,11 +5,18 @@ import { forbidden, notFound, unauthorized } from '../http/errors.js';
 import { msg, type Languages } from '../language.js';
 import type { AuthUser } from './apiKey.types.js';
 
+/** What every API key starts with, which says what kind of secret it is to whoever finds one: `ev`, for Evieverse. */
+const KEY_PREFIX = 'ev_';
+
 /**
- * An API key as `issueApiKey` makes one: `tu_`, 12 hex digits, `_`, and the 43 base64url characters
+ * An API key as `issueApiKey` makes one: `ev_`, 12 hex digits, `_`, and the 43 base64url characters
  * of its 32 random bytes. Anything else is refused with 401 before the database is asked.
+ *
+ * A key that starts with `tu_` is one the server issued before its keys started with `ev_`, and
+ * is taken as it always was: a key is found by the hash of all of it, so those keep working
+ * until their users replace them.
  */
-const KEY_PATTERN = /^tu_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$/;
+const KEY_PATTERN = /^(?:ev|tu)_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$/;
 
 /**
  * The language a user is answered in: the one they registered in or changed to since. The server's
@@ -29,7 +36,7 @@ function hashKey(apiKey: string): string {
  * stretching needed).
  */
 export async function issueApiKey(db: Db, userId: string, now = Date.now()): Promise<string> {
-  const apiKey = `tu_${randomBytes(6).toString('hex')}_${randomBytes(32).toString('base64url')}`;
+  const apiKey = `${KEY_PREFIX}${randomBytes(6).toString('hex')}_${randomBytes(32).toString('base64url')}`;
   await db
     .insertInto('api_keys')
     .values({ id: randomUUID(), user_id: userId, key_hash: hashKey(apiKey), created_at: now, revoked_at: null })

@@ -10,6 +10,7 @@ import { updateOnConflict } from '../db/index.js';
 import type { Database } from '../db/schema.js';
 import type { AppDeps, RouteDeps } from '../deps.types.js';
 import { badRequest, forbidden, notFound } from '../http/errors.js';
+import { perMinute } from '../http/rateLimitStore.js';
 import { Credentials } from '../http/schemas.js';
 import { notify } from '../inbox.js';
 import { msg } from '../language.js';
@@ -84,6 +85,13 @@ const commentNotFound = () => notFound(msg('comment.not_found'));
  */
 export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
   const { db, content, comments } = deps;
+  /**
+   * The limit on each of the two lists of comments, which need no key: one address gets
+   * `comments.listRateLimitPerMinute` requests a minute to each, counted in Redis for every node
+   * and function (see app.ts), and is refused past that (429) before anything is read for it. A
+   * list of a post whose comments Redis doesn't hold is a listing of the content store.
+   */
+  const listLimit = { config: perMinute(deps.config.comments.listRateLimitPerMinute) };
 
   /** The post, for whoever may read it, if it takes comments. */
   async function commented(req: FastifyRequest, contentId: string) {
@@ -132,9 +140,9 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
    * many comments the post has in all, replies included. A comment that waits in the moderation
    * queue is in neither, unless it was published before: an edit that is held leaves a placeholder
    * in its place, as deleting a comment that has replies does (see comments.ts). A placeholder is
-   * listed, and counted, as the comment it stands for.
+   * listed, and counted, as the comment it stands for. Limited by address (see `listLimit`).
    */
-  app.get('/content/:contentId/comments', async (req) => {
+  app.get('/content/:contentId/comments', listLimit, async (req) => {
     const { contentId } = Params.parse(req.params);
     const query = PageQuery.parse(req.query);
     await commented(req, contentId);
@@ -146,9 +154,10 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
    * The replies to a comment, a page at a time, as the comments on a post are read, with how many
    * replies the comment has: to it, not to its replies, each of which is asked for its own. The
    * replies to a comment that was deleted, or that an edit took back to the moderation queue, are
-   * read as any others are. 404 for a comment that isn't there, or was never published.
+   * read as any others are. 404 for a comment that isn't there, or was never published. Limited
+   * by address, apart from the comments on the post itself (see `listLimit`).
    */
-  app.get('/content/:contentId/comments/:commentId/replies', async (req) => {
+  app.get('/content/:contentId/comments/:commentId/replies', listLimit, async (req) => {
     const { contentId, commentId } = CommentParams.parse(req.params);
     const query = PageQuery.parse(req.query);
     await commented(req, contentId);

@@ -483,7 +483,7 @@ locals {
     element(["8", "9", "a", "b"], parseint(substr(random_uuid.admin.result, 19, 1), 16) % 4),
     substr(random_uuid.admin.result, 20, 16),
   ])
-  admin_api_key = sensitive("tu_${random_id.admin_key_prefix.hex}_${random_password.admin_key.result}")
+  admin_api_key = sensitive("ev_${random_id.admin_key_prefix.hex}_${random_password.admin_key.result}")
   bootstrap_admin = jsonencode({
     userId   = local.admin_user_id
     username = var.admin_username
@@ -612,7 +612,7 @@ resource "terraform_data" "migrate" {
 
   lifecycle {
     precondition {
-      condition     = can(regex("^tu_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$", local.admin_api_key))
+      condition     = can(regex("^ev_[0-9a-f]{12}_[A-Za-z0-9_-]{43}$", local.admin_api_key))
       error_message = "The admin API key isn't in the format the server issues and accepts (KEY_PATTERN in src/auth/apiKey.ts)."
     }
     precondition {

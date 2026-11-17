@@ -15,7 +15,7 @@ Provide an open source alternative to traditional social media that allows for:
 9. Pay-as-you-go architecture that scales effortlessly.
 10. Easy infrastructure-as-code cloud deployment, setup, database migrations, and updates.
 
-Evieverse is designed with the idea that clients will enable users to connect to multiple different Evieverse instances. Content is not federated from server-to-server, but from client to servers they have subscribed to. The one thing an instance asks another for is the public key that instance signs its posts with, to check a repost.
+Evieverse is designed with the idea that clients will enable users to connect to multiple different Evieverse instances. Content is not federated from server-to-server, but from client to servers they have subscribed to. An instance asks another for two things only, both for reposts: the public key that instance signs its posts with, to check a repost, and, about once a day, whether a post it holds a repost of has changed or gone.
 
 
 | To                                               | Read                                           |
@@ -72,7 +72,7 @@ evieverse register <username>  #e.g. evelynn
 
 ```
 Registered evelynn (56243052-…).
-Their API key, shown this once: tu_cba15064d3f1_…
+Their API key, shown this once: ev_cba15064d3f1_…
 ```
 
 To make the new account an admin:

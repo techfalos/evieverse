@@ -211,7 +211,7 @@ for (const target of TARGETS) {
         userId: expect.any(String),
         username: 'ana',
         language: 'es',
-        apiKey: expect.stringMatching(/^tu_/),
+        apiKey: expect.stringMatching(/^ev_/),
         note: 'Guarda esta apiKey ahora; no se puede recuperar después.',
       });
       const ana: User = done.json();

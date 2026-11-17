@@ -82,6 +82,19 @@ export interface ContentTable {
    */
   origin_hash: string | null;
   /**
+   * On a repost of a post on another server: when that server was first found to publish no post
+   * at the original's address, or null while it publishes one as far as this server knows. The
+   * entry is hidden while it is set, as content that waits in the moderation queue is (see
+   * `withheld`), a later attestation of the post sets it back to null, and the compactor sets the
+   * entry for deletion once it is REPOSTS_GONE_DAYS old. Null on a post written here.
+   */
+  origin_gone_at: Generated<number | null>;
+  /**
+   * On a repost of a post on another server: from when the server asks the original's server for
+   * the post's attestation again (src/originSweep.ts). Null on a post written here.
+   */
+  origin_check_at: Generated<number | null>;
+  /**
    * The number of the post's last numbered write: a write of the post, an edit or a removal of a
    * comment on it, or a moderator's decision on one adds one with the row locked, and takes the
    * number for its row in `pending_writes` (see nextSeq). A new comment and a like of one take none.

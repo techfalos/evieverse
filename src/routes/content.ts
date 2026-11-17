@@ -3,11 +3,12 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { attest, signingKeys } from '../attestation.js';
 import { authenticate } from '../auth/apiKey.js';
-import { contentNotFound, loadPublished, loadReadable, PENDING_REVIEW, publisherOf, requireMeta, takesComments } from '../content.js';
+import { contentNotFound, loadPublished, loadReadable, ORIGIN_GONE, PENDING_REVIEW, publisherOf, requireMeta, takesComments } from '../content.js';
 import { setForDeletion } from '../deletion.js';
 import type { AppDeps } from '../deps.types.js';
 import { badRequest, forbidden, HttpError } from '../http/errors.js';
 import { say } from '../http/language.js';
+import { perMinute } from '../http/rateLimitStore.js';
 import { Credentials } from '../http/schemas.js';
 import { notify } from '../inbox.js';
 import { msg } from '../language.js';
@@ -17,7 +18,7 @@ import { payloadBytes, pendingPost } from '../pending.js';
 import { originMediaUrl, ownAddress, postAddress, previewOf } from '../posts.js';
 import type { BytesOwner, ContentStore, Publisher } from '../storage/index.js';
 import { indexAuthor } from '../tagfeed/layout.js';
-import { iso } from '../time.js';
+import { DAY, iso } from '../time.js';
 
 /** The path of a piece of content: its id. */
 const Params = z.object({ contentId: z.string().uuid() });
@@ -109,17 +110,26 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    * server signed what is shown of it here (see POST /repost/refresh). The preview is the
    * original's, and so are the bytes, which this server doesn't hold: `contentUrl` leads to them, and there is no
    * `size` or whole `text` to give.
+   *
+   * `status: "origin_gone"` on such a repost whose original's server says it publishes no post
+   * there any more: it is hidden, and read only by who may read what waits in the moderation
+   * queue (see loadReadable). `origin` then says since when (`goneAt`), and when the entry is
+   * deleted unless the post is attested again before (`deleteAfter`). It has no ad either.
+   *
+   * One address gets `contentRateLimitPerMinute` requests a minute, and is refused past that
+   * (429) before anything is read for it (see app.ts): it needs no key.
    */
-  app.get('/content/:contentId', async (req) => {
+  app.get('/content/:contentId', { config: perMinute(config.contentRateLimitPerMinute) }, async (req) => {
     const { contentId } = Params.parse(req.params);
     const row = await loadReadable(db, req, contentId);
     // The row says whose the content is and how liked; what it is, is in the meta file beside its bytes.
     const [meta, reposts] = await Promise.all([requireMeta({ db, content }, contentId), repostsMade(contentId)]);
-    const ad = row.queued ? undefined : await postAd(req, meta.tags);
+    const ad = row.queued || row.gone ? undefined : await postAd(req, meta.tags);
     return {
       publisher: publisherOf(row),
       contentId: row.id,
       ...(row.queued && PENDING_REVIEW),
+      ...(row.gone && ORIGIN_GONE),
       preview: previewOf(meta, config.publicBaseUrl),
       ...(meta.text !== undefined && { text: meta.text }),
       tags: meta.tags,
@@ -132,7 +142,13 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
       createdAt: iso(row.created_at),
       updatedAt: iso(meta.updatedAt),
       ...(reposts.length > 0 && { reposts }),
-      ...(meta.origin && { origin: { ...meta.origin, ...(meta.originAttestedAt !== undefined && { attestedAt: iso(meta.originAttestedAt) }) } }),
+      ...(meta.origin && {
+        origin: {
+          ...meta.origin,
+          ...(meta.originAttestedAt !== undefined && { attestedAt: iso(meta.originAttestedAt) }),
+          ...(row.origin_gone_at !== null && { goneAt: iso(Number(row.origin_gone_at)), deleteAfter: iso(Number(row.origin_gone_at) + config.reposts.goneDays * DAY) }),
+        },
+      }),
       ...(ad && { ad: adRecord(ad, say(req, msg('ad.sponsored')), config.publicBaseUrl) }),
     };
   });
@@ -174,14 +190,19 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    *
    * A 404 here is signed too: beside its `error` it carries `gone`, an attestation that says no
    * post is published at the address (see AttestedGone). It is what tells a server that holds a
-   * repost of a post deleted here to delete its repost (POST /repost/refresh there). It is given
+   * repost of the post to hide it (POST /repost/refresh there, or that server's own asking, see
+   * src/originSweep.ts), and to delete it if the post stays gone. It is given
    * for whatever isn't published, which is all a 404 says of it: a post that was deleted, one that
    * waits in the moderation queue, and an id that was never a post's.
    *
    * 400 on a server that signs nothing (it has no REPOSTS_SIGNING_KEYS, or no PUBLIC_BASE_URL to
    * say where its posts are). Its 404 is a bare one.
+   *
+   * One address gets `reposts.attestationRateLimitPerMinute` requests a minute, and is refused
+   * past that (429) before anything is read or signed for it (see app.ts): it needs no key, and
+   * signs an answer for any id at all.
    */
-  app.get('/content/:contentId/attestation', async (req, reply) => {
+  app.get('/content/:contentId/attestation', { config: perMinute(config.reposts.attestationRateLimitPerMinute) }, async (req, reply) => {
     const { contentId } = Params.parse(req.params);
     const row = await loadPublished(db, contentId).catch((err) => {
       if (!(err instanceof HttpError) || err.statusCode !== 404 || !signingKey || ownBase === null) throw err;

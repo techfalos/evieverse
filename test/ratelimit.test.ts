@@ -460,27 +460,90 @@ for (const target of TARGETS) {
       });
     });
 
-    it('warns once of a forwarded address it was not told to trust', async () => {
+    it('limits the other reads that need no key by address, each on a count of its own', async () => {
+      ctx = await createTestContext(target, {
+        feed: { followingRateLimitPerMinute: 2 },
+        contentRateLimitPerMinute: 3,
+        comments: { listRateLimitPerMinute: 2 },
+        reposts: { attestationRateLimitPerMinute: 1 },
+      });
+      const alice = await ctx.register('alice');
+      const stored = await ctx.app.inject({ method: 'POST', url: '/store', payload: { ...alice, type: 'text', text: 'Talk to me #news', tags: ['news'], comments: true } });
+      expect(stored.statusCode, stored.body).toBe(201);
+      const { contentId } = stored.json() as { contentId: string };
+      /** What `count` requests for `url` are answered with, one after another, and the limit the last one names. */
+      const statuses = async (url: string, count: number) => {
+        const answers = [];
+        for (let i = 0; i < count; i++) answers.push(await ctx.app.inject({ method: 'GET', url, headers: as(alice) }));
+        return [answers.map((res) => res.statusCode), answers.at(-1)!.headers['x-ratelimit-limit'], answers.at(-1)!.json().error];
+      };
+      const LIMITED = 'Rate limit exceeded, retry in 1 minute';
+
+      expect(await statuses(`/feed/following?userId=${alice.userId}`, 3)).toEqual([[200, 200, 429], '2', LIMITED]);
+      expect(await statuses(`/content/${contentId}`, 4)).toEqual([[200, 200, 200, 429], '3', LIMITED]);
+      expect(await statuses(`/content/${contentId}/comments`, 3)).toEqual([[200, 200, 429], '2', LIMITED]);
+      // The replies to a comment are counted apart from the comments on the post, and a request that is refused for what it asks is counted like any.
+      expect(await statuses(`/content/${contentId}/comments/00000000-0000-4000-8000-000000000000/replies`, 3)).toEqual([[404, 404, 429], '2', LIMITED]);
+      // The attestation is refused here for another reason first (the server signs nothing), and that counts too.
+      expect(await statuses(`/content/${contentId}/attestation`, 2)).toEqual([[400, 429], '1', LIMITED]);
+      // The hashtag feed has its own limit, which is off here, and what isn't one of these has none.
+      for (const url of ['/feed?tags=news', `/content/${contentId}/raw`, '/tags', `/users/${alice.userId}`]) {
+        const res = await ctx.app.inject({ method: 'GET', url });
+        expect(res.statusCode, `${url} ${res.body}`).toBe(200);
+        expect(res.headers['x-ratelimit-limit']).toBeUndefined();
+      }
+      if (target.hot === 'memory') {
+        ctx.clock.now += MINUTE;
+        expect((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}` })).statusCode).toBe(200);
+      }
+
+      // The settings are the server's own unless it is given others.
+      const config = loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json' });
+      expect([config.feed.followingRateLimitPerMinute, config.contentRateLimitPerMinute, config.comments.listRateLimitPerMinute, config.reposts.attestationRateLimitPerMinute]).toEqual([60, 300, 120, 60]);
+      const set = loadConfig(
+        {},
+        { EVIEVERSE_CONFIG: '/nonexistent.json', FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE: '5', CONTENT_RATE_LIMIT_PER_MINUTE: '0', COMMENTS_LIST_RATE_LIMIT_PER_MINUTE: '7', REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE: '9' },
+      );
+      expect([set.feed.followingRateLimitPerMinute, set.contentRateLimitPerMinute, set.comments.listRateLimitPerMinute, set.reposts.attestationRateLimitPerMinute]).toEqual([5, 0, 7, 9]);
+    });
+
+    it('warns once of a forwarded address it was not told to trust, and of proxies it was not told to count', async () => {
       ctx = await createTestContext(target);
       const { app: _, ...deps } = ctx;
-      /** What a server that trusts `trustProxy` proxies warns of, when feeds reach it from three forwarded addresses. */
-      const logged = async (trustProxy: false | number) => {
-        const lines: { level: number; msg: string }[] = [];
+      /** What a server that trusts `trustProxy` proxies warns of, when feeds reach it with each of these in X-Forwarded-For. */
+      const logged = async (trustProxy: false | number | string[], forwarded = ['203.0.113.1', '203.0.113.2', '203.0.113.3']) => {
+        const lines: { level: number; msg: string; address?: string }[] = [];
         const logger = { level: 'warn', stream: { write: (line: string) => void lines.push(JSON.parse(line)) } };
         const app = await buildApp({ ...deps, config: { ...ctx.config, trustProxy }, now: () => ctx.clock.now }, { logger, cli: null });
         try {
           expect((await app.inject({ method: 'GET', url: '/health' })).statusCode).toBe(200);
-          for (const address of ['203.0.113.1', '203.0.113.2', '203.0.113.3']) expect((await read(app, address)).statusCode).toBe(200);
+          for (const address of forwarded) expect((await read(app, address)).statusCode).toBe(200);
         } finally {
           await app.close();
         }
-        return lines.map((line) => line.msg);
+        return lines;
       };
       const warnings = await logged(false);
       expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toMatch(/X-Forwarded-For.*TRUST_PROXY/);
+      expect(warnings[0]!.msg).toMatch(/X-Forwarded-For.*TRUST_PROXY names no proxy/);
       expect(await logged(0)).toHaveLength(1);
       expect(await logged(1)).toEqual([]);
+
+      // One proxy is counted, and there are two: every reader is counted as the second, with their own addresses just before it.
+      // Twenty readers seen that way are warned of, once.
+      const readers = (count: number) => Array.from({ length: count }, (_, n) => n + 1);
+      const through = (proxy: string, clients: number[]) => clients.map((n) => `8.8.4.${n}, ${proxy}`);
+      const uncounted = await logged(1, through('192.0.2.10', readers(25)));
+      expect(uncounted).toHaveLength(1);
+      expect(uncounted[0]).toMatchObject({ address: '192.0.2.10', msg: expect.stringMatching(/^requests counted as coming from 192\.0\.2\.10 .*TRUST_PROXY names too few proxies/) });
+      expect(await logged(['127.0.0.1'], through('192.0.2.10', readers(20)))).toHaveLength(1);
+      // Not for fewer readers than that, the same ones again and again, or addresses that are nobody's on the internet: a reader's own network.
+      expect(await logged(1, through('192.0.2.10', [...readers(19), ...readers(19)]))).toEqual([]);
+      expect(await logged(1, readers(25).map((n) => `10.0.0.${n}, 192.0.2.10`))).toEqual([]);
+      // Nor where the proxy is counted: the address before the reader's is then nothing, or what the reader sent.
+      expect(await logged(2, through('192.0.2.10', readers(25)))).toEqual([]);
+      // Each counted address is told apart: readers behind as many proxies are so many readers.
+      expect(await logged(1, readers(25).map((n) => `8.8.4.${n}, 192.0.2.${n}`))).toEqual([]);
     });
   });
 }

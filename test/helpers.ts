@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import type { InjectOptions } from 'fastify';
 import { sql } from 'kysely';
+import pino from 'pino';
 import { expect } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { AuditRecord } from '../src/audit.types.js';
@@ -18,6 +19,8 @@ import { createDb, type Db } from '../src/db/index.js';
 import { bootstrap } from '../src/deps.js';
 import type { Languages } from '../src/language.js';
 import type { KeyFetcher } from '../src/originKeys.js';
+import { createOriginSweep } from '../src/originSweep.js';
+import type { OriginSweepOptions } from '../src/originSweep.types.js';
 import { repostsOf } from '../src/reposts.js';
 import type { HotStore } from '../src/storage/index.js';
 import type { TrustPlugin } from '../src/moderation/trust.types.js';
@@ -176,6 +179,10 @@ export async function createTestContext(
     reposts?: Partial<Config['reposts']>;
     /** What answers for the other servers this one asks for their keys. Nothing does unless given: a test reaches no other server. */
     keyFetcher?: KeyFetcher;
+    /** What answers for the other servers this one asks for the attestations of their posts (see `sweep`). Nothing does unless given. */
+    attestationFetcher?: OriginSweepOptions['fetcher'];
+    /** Requests to GET /content/:id from one address in a minute. No limit, unless given. */
+    contentRateLimitPerMinute?: number;
   } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'evieverse-test-'));
@@ -194,11 +201,12 @@ export async function createTestContext(
         ...(opts.uploadLinksPerMinute !== undefined && { uploadLinksPerMinute: opts.uploadLinksPerMinute }),
       },
       ...(opts.audit && { audit: { scheme: 'fs', options: { root: join(dir, 'audit') } } }),
-      feed: { headCacheMs: 0, rateLimitPerMinute: 0, maxConcurrent: 0, ...opts.feed },
+      feed: { headCacheMs: 0, rateLimitPerMinute: 0, followingRateLimitPerMinute: 0, maxConcurrent: 0, ...opts.feed },
+      contentRateLimitPerMinute: opts.contentRateLimitPerMinute ?? 0,
       challenge: { postWindowSeconds: 0, commentsPerMinute: 0, powBits: 8, minSolveMs: 0, ...opts.challenge },
       ...(opts.tagging && { tagging: opts.tagging }),
       ...(opts.postTypes && { postTypes: opts.postTypes }),
-      ...(opts.reposts && { reposts: opts.reposts }),
+      reposts: { attestationRateLimitPerMinute: 0, ...opts.reposts },
       ...(opts.trust && { trust: opts.trust }),
       ...(opts.urlhaus && { urlhaus: opts.urlhaus }),
       registerRateLimitPerHour: opts.registerRateLimitPerHour ?? 1_000_000,
@@ -206,7 +214,7 @@ export async function createTestContext(
       ...(opts.maxFollowing && { maxFollowing: opts.maxFollowing }),
       ...(opts.reportsPerHour !== undefined && { reportsPerHour: opts.reportsPerHour }),
       ...(opts.inbox && { inbox: opts.inbox }),
-      comments: { perMinute: 0, ...opts.comments },
+      comments: { perMinute: 0, listRateLimitPerMinute: 0, ...opts.comments },
       ...(opts.monetization && { monetization: opts.monetization }),
       ...(opts.modified !== undefined && { modified: opts.modified }),
       ...(opts.sourceUrl !== undefined && { sourceUrl: opts.sourceUrl }),
@@ -225,15 +233,24 @@ export async function createTestContext(
 
   const clock = { now: Date.UTC(2026, 10, 6, 12) };
   const { close, ...deps } = await bootstrap(config, () => clock.now);
+  const unreached = async (address: string) => Promise.reject(new Error(`a test asked ${address}, and no test reaches another server`));
+  const keyFetcher = opts.keyFetcher ?? unreached;
   const app = await buildApp(deps, {
     logger: false,
     cli: opts.cli ?? null,
     trustPlugins: opts.trustPlugins,
     languages: opts.languages,
-    keyFetcher: opts.keyFetcher ?? (async (address) => Promise.reject(new Error(`a test asked ${address}, and no test reaches another server`))),
+    keyFetcher,
   });
 
   const compactor = createCompactor(deps);
+  // What asks other servers after the posts this one holds reposts of, as the compactor's process runs it: here a test runs each look itself.
+  const originSweep = await createOriginSweep(deps, pino({ level: 'silent' }), {
+    fetcher: opts.attestationFetcher ?? unreached,
+    keyFetcher,
+    trustPlugins: opts.trustPlugins,
+    pauseMs: 0,
+  });
   const graceMs = config.compact.graceSeconds * 1000;
 
   // One at a time, in the order they were asked for, as a compactor's runs are.
@@ -293,6 +310,16 @@ export async function createTestContext(
     ...deps,
     compactor,
     apply,
+    /**
+     * One look of the server's own asking after reposts' originals (src/originSweep.ts): asks
+     * `attestationFetcher` about every entry that is due, and applies what that committed.
+     * Returns how many entries were due.
+     */
+    async sweep() {
+      const due = await originSweep.sweep();
+      if (opts.settle !== false) await apply();
+      return due;
+    },
     /**
      * Runs one compaction pass, which is what puts writes in feeds, with the clock moved past the
      * grace period first: the run then takes everything there is to take, the hashtag counts too.

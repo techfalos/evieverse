@@ -14,6 +14,7 @@ import { atMostAtOnce } from '../http/concurrency.js';
 import { badRequest, busy } from '../http/errors.js';
 import { say } from '../http/language.js';
 import { invalidCursor } from '../http/listCursor.js';
+import { perMinute } from '../http/rateLimitStore.js';
 import { HASHTAG } from '../http/schemas.js';
 import { messageKey, msg } from '../language.js';
 import { adRecord, eligibleAds, orderAds, placeAds } from '../monetization.js';
@@ -96,7 +97,7 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries
    * comes first, as it is the plugin's onRequest hook, so an address past its limit takes no place.
    */
   const limits: RouteShorthandOptions = {
-    config: { rateLimit: rateLimitPerMinute > 0 ? { max: rateLimitPerMinute, timeWindow: '1 minute' } : false },
+    config: perMinute(rateLimitPerMinute),
     ...atMostAtOnce(maxConcurrent, () => busy(msg('feed.busy'), 1)),
   };
 
@@ -225,8 +226,13 @@ export function followingFeedRoutes(app: FastifyInstance, { db, config, authorRe
    * the same rule as the list of them, which the feed would otherwise give away (see
    * requireShownFollows). That is all it asks the database: whom they follow, and the posts, come
    * from Redis and the summary store, as a hashtag feed's do.
+   *
+   * One address gets `feed.followingRateLimitPerMinute` requests a minute, counted apart from
+   * its hashtag feeds, and is refused past that (429) before anything is read for it: a page
+   * here asks the database, and reads an index for every user followed, which a hashtag feed
+   * doesn't.
    */
-  app.get('/feed/following', async (req) => {
+  app.get('/feed/following', { config: perMinute(config.feed.followingRateLimitPerMinute) }, async (req) => {
     const q = FollowingQuery.parse(req.query);
     const limit = pageLimit(config, q.limit);
     const after = q.cursor ? decodeFollowingCursor(q.cursor) : undefined;

@@ -103,7 +103,7 @@ Errors are JSON, `{ error, details? }`. A request that doesn't validate gets `40
 | `422` | [Moderation](#moderation) refused the post, or the comment. |
 | `426` | For the CLI only: the instance ships another build of it ([CLI.md](CLI.md#for-everyone)). |
 | `428` | The request needs a [challenge](#challenges) solved. |
-| `429` | Too many requests: registrations or [feeds](#get-feed) from one address, posts in a minute, upload links in a minute, messages in a minute, comments in a minute, or reports in an hour. |
+| `429` | Too many requests: registrations, [feeds](#get-feed) or the [other reads that need no key](#limits-on-reads-that-need-no-key) from one address, posts in a minute, upload links in a minute, messages in a minute, comments in a minute, or reports in an hour. |
 | `501` | The instance's content store can't sign upload links ([`POST /uploads`](#post-uploads)). |
 | `503` | An unfollow was made, but the following feed couldn't be updated: send it again. Also a [feed](#get-feed) asked for while the instance is answering as many as it does at a time: `Retry-After` says when to try again. |
 
@@ -457,6 +457,10 @@ Both return `404` for content set for deletion.
 
 Content waiting in the [moderation queue](#the-moderation-queue) isn't published, so both return `404` for it too, except to its publisher, to server moderators and to admins, who send their credentials in the headers (`Authorization: Bearer <apiKey>` and `X-User-Id`). They get it with `status: "pending_review"`.
 
+A repost of a post on another server is hidden the same way while that server says the post is gone ([below](#refreshing-a-repost)): `404` from both, except to the same three, who get it with `status: "origin_gone"`, and in `origin`, `goneAt` (since when) and `deleteAfter` (when the instance deletes the entry, unless the post is attested again before).
+
+One address can ask for 300 posts a minute (`CONTENT_RATE_LIMIT_PER_MINUTE`), then gets `429` ([below](#limits-on-reads-that-need-no-key)). `/raw` isn't limited.
+
 ### `DELETE /content/:contentId`
 
 Authenticated. Only the original publisher or an [admin](#moderation) can delete content, otherwise `403`. Returns `202` with `{ contentId, status: "pending_deletion", requestedAt }`, and repeating the request returns the same response. When an admin deletes someone else's post, its publisher gets a [notice](#notices) in their inbox.
@@ -553,7 +557,7 @@ The instance checks the attestation before it uses anything in it, whether or no
 | `502` | The original's server didn't give its keys, so the signature couldn't be checked. The instance doesn't ask that server again for a minute. |
 | `429` | Your reposts had the instance ask other servers for their keys more than 10 times in a minute. `Retry-After` says when to try again. Reposts from servers whose keys the instance already has aren't counted. |
 
-To check the signature, the instance asks the original's server for its public keys ([`GET /repost/keys`](#attestations) there, over `https`, on port 443), and keeps them for 3 hours. That's the one request an instance makes of another server: everything else of a repost between servers is carried by the client. When an attestation names a key the instance doesn't have, it asks again, at most once a minute. So an attestation signed with a key its server has just changed to can be refused (`400`) for up to a minute.
+To check the signature, the instance asks the original's server for its public keys ([`GET /repost/keys`](#attestations) there, over `https`, on port 443), and keeps them for 3 hours. That's the one request a repost has an instance make of another server: everything else of a repost between servers is carried by the client. Later, the instance asks the original's server for the post's attestation again by itself, about once a day ([below](#refreshing-a-repost)). When an attestation names a key the instance doesn't have, it asks again, at most once a minute. So an attestation signed with a key its server has just changed to can be refused (`400`) for up to a minute.
 
 An original that is itself a repost of a post elsewhere isn't its server's to attest: `GET /content/:contentId/attestation` answers `409` for it, with the address of the post it reposts in `origin.url`. Ask that post's server instead, so a post has one address wherever it's reposted from.
 
@@ -564,11 +568,12 @@ The first repost of an original makes the instance's entry for it: a post of the
 - **Show the original's server beside its publisher's name.** `origin.publisher.username` is a name on the server at `origin.url`, and nothing more. The attestation says that server said it, not who the person is: anyone can run a server and attest posts under any name, one that is somebody's on this instance among them. So show the host of `origin.url` with the name (`Dana of the North` on `other.example`), never the name alone. And `origin.publisher.userId` is an id on that server: don't link it to a user of this instance, or show it as one.
 - **Its bytes stay where the original is.** An image's, video's or audio's `preview.url` is the original's, `<origin.url>/raw`, and `GET /content/:contentId/raw` redirects there (`302`). `GET /content/:contentId` has no `size` for it, and no whole `text`.
 - **It takes no comments, and has no update** (`400`): what it shows is the original's. Its owner deletes it like any post.
-- **The summary is the original's server's word, as of `origin.attestedAt`.** The instance checks who signed it, and doesn't read the original, then or later. So an edit or a deletion there shows here only once somebody [brings a later attestation](#refreshing-a-repost) of the original; until then the entry says what the post was. And a server is free to say what it likes of its own posts. An image's, video's or audio's bytes aren't signed: they're read at the original's address.
+- **The summary is the original's server's word, as of `origin.attestedAt`.** The instance checks who signed it, and never reads the original. So an edit or a deletion there shows here once the instance has a [later attestation](#refreshing-a-repost) of the original, which it asks that server for about once a day and which anybody can bring sooner; until then the entry says what the post was. And a server is free to say what it likes of its own posts. An image's, video's or audio's bytes aren't signed: they're read at the original's address.
 
 An instance holds one entry per original, however many users repost it:
 - **A repost of an original the instance already has an entry for is a repost of that entry,** exactly as if it had named the entry's `contentId`: it gives the entry hashtags, shows it to the reposter's followers, and is answered as [above](#post-repost), with `repostedAt`. The user who made the entry has reposted the original already (`409`).
 - **While the entry waits in the moderation queue, or is set for deletion,** the original can't be reposted (`409`). Once it's deleted, the next repost makes a new entry.
+- **While the entry is hidden because the original was gone** ([below](#refreshing-a-repost)), a repost's attestation is first taken as a refresh, which brings the entry back, and the repost is then made of it. It can be refused as a refresh can, and gets `409` if what the post now says is held in the moderation queue.
 - **An address on this instance** names a post of its own, and is reposted as one, as if by its `contentId`. Its attestation is this instance's own, and is checked with this instance's own keys.
 
 An instance can refuse reposts of posts on other servers alone (`REPOSTS_REMOTE=false`): they get `400`, and reposts of its own posts stay on.
@@ -577,7 +582,12 @@ The [CLI](CLI.md) does both steps with `evieverse repost https://other.example/c
 
 #### Refreshing a repost
 
-An instance's entry for a post on another server holds the original's summary as it was when it was last attested, and the instance asks the other server nothing about it afterwards. `POST /repost/refresh` is how it learns what the original became: a client asks the original's server for its attestation again ([`GET /content/:contentId/attestation`](#attestations) there), and sends what it got here, as a repost sends it:
+An instance's entry for a post on another server holds the original's summary as it was when it was last attested. It learns what the original became from a later attestation, which reaches it in two ways:
+
+- **The instance asks for one itself,** every 24 hours for each entry (`REPOSTS_REFRESH_HOURS`; `0` turns it off): [`GET /content/:contentId/attestation`](#attestations) on the original's server. So an edit or a deletion of the original shows here within about a day with no client doing anything. While an entry is hidden because the post was gone, it asks every 6 hours.
+- **A client brings one sooner,** with `POST /repost/refresh`: it asks the original's server for the attestation, and sends what it got here, as a repost sends it. A client that shows a repost can compare `origin.attestedAt` with how fresh it wants it, and do this when it's older.
+
+Either way the instance does the same with it. The request:
 
 ```json
 { "userId": "...", "apiKey": "...", "origin": { "attestation": "eyJ2IjoxLCJraWQiOiI…" } }
@@ -587,7 +597,7 @@ Authenticated. Any user can send it, not only those who reposted the original: i
 
 What to send is whichever the original's server gave:
 - **Its `attestation`,** if the post is there (`200`). The entry takes the post's summary as it is now: its publisher's name there, its AI declaration and its preview.
-- **Its `gone`,** if the post isn't (`404` there, with `gone` beside the `error`). It's sent in `origin.attestation` like the other, and has the entry deleted.
+- **Its `gone`,** if the post isn't (`404` there, with `gone` beside the `error`). It's sent in `origin.attestation` like the other, and has the entry hidden, not deleted.
 
 The attestation is [checked as a repost's is](#a-post-on-another-server), with the same refusals, except that one which says the post is gone is taken. Then:
 
@@ -595,21 +605,24 @@ The attestation is [checked as a repost's is](#a-post-on-another-server), with t
 | --- | --- |
 | `200` | The entry was brought up to date: `{ contentId, tags, preview, aiGenerated, origin }`, plus `removedTags` when what it now says cost it hashtags. |
 | `200` | It says what the entry says already: `{ contentId, unchanged: true }`. Nothing was written. |
-| `202` | It says the post is gone: `{ contentId, status: "pending_deletion", requestedAt }`. The entry is set for deletion, as by [`DELETE /content/:contentId`](#delete-contentcontentid): it can't be read from then on, and the compactor's next run takes it out of every feed, with the places reposts gave it. If the post is there again later, it can be reposted anew. |
+| `200` | It says the post is gone: `{ contentId, status: "origin_gone", goneAt, deleteAfter }`. The entry is hidden (below). For an entry that was hidden already, `unchanged: true` comes with it, and `goneAt` is still when it was first hidden. |
 | `202` | What it now says is held in the [moderation queue](#the-moderation-queue): `status: "pending_review"` beside the fields of a `200`. The entry is out of the feeds until it's accepted. |
 | `400` | The attestation's address is on this instance: there's nothing to refresh of its own posts. |
 | `400` | It says the post is of another content type than the entry's. A post keeps its type, and the entry stays as it was. |
 | `404` | The instance has no entry for that original, or one that is set for deletion already. |
-| `409` | It was signed no later than the attestation the entry is from (`origin.attestedAt`). So an attestation somebody kept doesn't bring back what the post was. |
-| `409` | Another refresh was written to the entry as this one arrived, and nothing was changed. Send it again. |
+| `409` | It was signed no later than the attestation the entry is from (`origin.attestedAt`), or than one that was written to the entry as this one arrived. So an attestation somebody kept doesn't bring back what the post was, and of two sent at once the later one stays. |
 | `422` | What it now says is something the instance doesn't trust enough to keep. The entry stays as it was. |
 | `429` | Your refreshes changed entries more than 10 times in a minute. `Retry-After` says when to try again. One that changes nothing isn't counted. |
 
 - **What the entry now says is [moderated](#moderation) as an update of a post is,** in the name of the entry's owner: it gets a trust score, and its hashtags are held to their rules. A hashtag whose blocked words it now has comes off it, one a repost gave it too, and is listed in `removedTags`.
 - **It shows as an update does:** `GET /content/:contentId` has it at once, with the new `origin.attestedAt`, and the feeds after the compactor's next run. The entry stays its owner's post, where it was, with the hashtags reposts gave it.
-- **Nobody is told.** The entry's owner gets no notice when it's changed or deleted this way.
-- **Nothing refreshes an entry by itself.** One that nobody brings a later attestation for stays as it was. A client that shows a repost can compare `origin.attestedAt` with how fresh it wants it, and refresh it.
-- **An instance that takes no reposts of posts on other servers** (`REPOSTS_REMOTE=false`, or `REPOSTS=false`) takes no refreshes either (`400`). The entries it has stay as they are.
+- **A post that's gone has its entry hidden, and deleted only if it stays gone.** A server signs `gone` for whatever it doesn't publish at an address, which includes a post whose update waits in its moderation queue, so it's no proof that the post was deleted.
+  - **Hidden** is as a post that waits in the moderation queue is: `404` to everyone but its owner, server moderators and admins, in no feed, and not to be liked or reposted. The entry keeps its hashtags, the ones reposts gave it too. [`GET /content/:contentId`](#get-contentcontentid) shows it to those three with `status: "origin_gone"`.
+  - **A later attestation of the post brings it back** where it was, with all its hashtags, once the compactor has run. It's moderated like any refresh, so it can come back held (`202`).
+  - **After 7 days hidden** (`REPOSTS_GONE_DAYS`) with no such attestation, the instance deletes the entry, as [`DELETE /content/:contentId`](#delete-contentcontentid) would: that's `deleteAfter`. The days count from `goneAt`, whatever `gone` attestations arrive later. Once it's deleted, the original can be reposted anew if it's there again.
+- **Nobody is told.** The entry's owner gets no notice when it's changed, hidden or deleted this way.
+- **An original's server that doesn't answer changes nothing.** When the instance asks and gets no attestation it can check (the server is down, or answers with nothing signed), the entry stays as it is, and that server is asked again an hour later. Only a signed `gone` hides an entry.
+- **An instance that takes no reposts of posts on other servers** (`REPOSTS_REMOTE=false`, or `REPOSTS=false`) takes no refreshes from clients either (`400`). It still asks after the entries it has, unless `REPOSTS_REFRESH_HOURS=0`.
 
 #### Attestations
 
@@ -628,7 +641,8 @@ curl localhost:3000/content/$CONTENT_ID/attestation
 - **Ask for it when you use it.** It's signed as of the request, and other servers take it for 10 minutes. It comes with `Cache-Control: no-store`.
 - **Send it on whole.** A client has no need to read it, and a change to it makes the signature wrong.
 - **Only a published post has one.** A post that isn't there, is set for deletion, or waits in the [moderation queue](#the-moderation-queue) gets `404`, to its publisher too.
-- **The `404` is signed too.** Beside its `error` it has `gone`: an attestation that says there's no post at the address, for a client to send to the servers that hold a repost of one that was ([`POST /repost/refresh`](#refreshing-a-repost) there). It's the same for all three, so it says no more than the `404` does. So a post that an update sent to the moderation queue can be deleted from other servers while it waits, if somebody carries this to them. Once it's accepted, it's reposted there anew.
+- **The `404` is signed too.** Beside its `error` it has `gone`: an attestation that says there's no post at the address, which the servers that hold a repost of one that was read when they ask, and a client can send them sooner ([`POST /repost/refresh`](#refreshing-a-repost) there). It's the same for all three, so it says no more than the `404` does. That's why those servers hide their repost on it and don't delete it: a post that an update sent to the moderation queue is hidden there while it waits, and is back once it's accepted and attested again.
+- **One address can ask for 60 attestations a minute** (`REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE`), then gets `429` ([below](#limits-on-reads-that-need-no-key)). A server that asks after the posts it holds reposts of sends at most 30 a minute.
 - **Only a post that is the instance's own has one.** Its entry for a [post on another server](#a-post-on-another-server) gets `409`, with `origin: { url }` beside the `error`: the address of the original, whose server is the one to ask.
 - **An instance that signs nothing gives none** (`400`): one with no signing key (`REPOSTS_SIGNING_KEYS`), or no address of its own (`PUBLIC_BASE_URL`). Its posts are reposted only on the instance itself, and its `404` has no `gone`. It still takes reposts of posts on servers that sign.
 - **An instance whose address names a port** (`PUBLIC_BASE_URL=https://api.example.com:8443`) signs attestations that other servers refuse: they ask for keys on port 443 only.
@@ -793,6 +807,8 @@ What they count and list:
 `GET /content/:contentId/comments/:commentId/raw` returns the bytes of the image or video a comment came with, as [`GET /content/:contentId/raw`](#get-contentcontentid) returns a post's: streamed with their content type and the same headers, or a redirect to a presigned URL on stores that support them. Whoever can read the comment can read its file. A comment that is only text gets `404`, and so does a placeholder.
 
 All four return `404` for a post that isn't there, is set for deletion, or doesn't take comments. A post that waits in the moderation queue is `404` too, except to those who can read it there ([`GET /content/:contentId`](#get-contentcontentid)), and nobody can comment on it until it's accepted.
+
+One address can ask for 120 pages a minute of each of the two lists (`COMMENTS_LIST_RATE_LIMIT_PER_MINUTE`), then gets `429` ([below](#limits-on-reads-that-need-no-key)). Reading one comment, and its file, isn't limited.
 
 ```bash
 curl "localhost:3000/content/$CONTENT_ID/comments?order=newest&limit=20"
@@ -1056,6 +1072,21 @@ Each record is `{ contentId, publisher: { userId, username }, mimeType, aiGenera
   ```
   It says the instance is busy, not that the reader asked too often: the same request a second later is answered if a place is free.
 
+#### Limits on reads that need no key
+
+The other reads that anyone can make without a key are limited by address as feeds are, each on a count of its own, so using one up leaves the others:
+
+| Request | A minute, from one address | Setting |
+| --- | --- | --- |
+| [`GET /feed`](#get-feed) | 120 | `FEED_RATE_LIMIT_PER_MINUTE` |
+| [`GET /feed/following`](#get-feedfollowing) | 60 | `FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE` |
+| [`GET /content/:contentId`](#get-contentcontentid) | 300 | `CONTENT_RATE_LIMIT_PER_MINUTE` |
+| [`GET /content/:contentId/comments`](#reading-comments) | 120 | `COMMENTS_LIST_RATE_LIMIT_PER_MINUTE` |
+| [`GET /content/:contentId/comments/:commentId/replies`](#reading-comments) | 120 | `COMMENTS_LIST_RATE_LIMIT_PER_MINUTE` |
+| [`GET /content/:contentId/attestation`](#attestations) | 60 | `REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE` |
+
+One past its limit gets `429`, with when to try again in a `Retry-After` header, and every response has the `x-ratelimit-limit`, `x-ratelimit-remaining` and `x-ratelimit-reset` headers. An IPv6 address is counted with the rest of its /64. A request with a key is counted the same: it's the address that's counted, not the user. `0` turns a limit off.
+
 ### Related hashtags
 
 With `addRelated=true`, the feed is planned over the hashtags asked for and then the ones related to them, as if all had been asked for: they take turns with the others in a `popular` feed, a post under several of them is returned once, and their records are listed under their own names in `tags`. The response names the hashtags it added in `related`, most related first (an empty list if there are none yet).
@@ -1093,6 +1124,8 @@ What it shows:
 - Deletions and like counts after the next compactor run, as on `/feed`.
 
 **Pagination:** the cursor names the last post the page returned, and the next page starts just after it. So pages never repeat a post, or skip one that was there when the previous page was read, even while new posts arrive and the compactor runs. Posts newer than the first page show when the reader starts over. A cursor doesn't expire. One that isn't valid, including a cursor from `/feed`, gets `400`.
+
+**Limit:** one address can ask for 60 pages a minute (`FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE`), counted apart from `/feed`, then gets `429` ([above](#limits-on-reads-that-need-no-key)).
 
 ### `GET /tags`
 

@@ -128,7 +128,7 @@ for (const target of TARGETS) {
 
       const refused = [
         { method: 'POST', url: '/store', payload: { ...user, type: 'text', text: 'no hashtags' } },
-        { method: 'POST', url: '/store', headers: as({ userId: user.userId, apiKey: 'tu_000000000000_' + 'a'.repeat(43) }), payload: { type: 'text', text: 'x #audit' } },
+        { method: 'POST', url: '/store', headers: as({ userId: user.userId, apiKey: 'ev_000000000000_' + 'a'.repeat(43) }), payload: { type: 'text', text: 'x #audit' } },
         { method: 'POST', url: '/like', payload: { userId: user.userId, apiKey: user.apiKey, contentId: 'not-a-post' } },
         { method: 'POST', url: '/nowhere', payload: {} },
       ] as const;

@@ -51,6 +51,22 @@ export interface ContentWrite {
   originHash?: string;
 }
 
+/**
+ * The word of another server that it publishes no post at the address of an original this server
+ * has an entry for, as contentWriter's `withhold` takes it: what hides the entry.
+ */
+export interface OriginGone {
+  /** The entry. */
+  contentId: string;
+  /** When the original's server signed that the post is gone, which the entry is then as of (see ContentMeta.originAttestedAt). */
+  issuedAt: number;
+  /**
+   * Called as the write commits, with the entry's meta file as it is by then and its row locked:
+   * it throws to refuse word that is no newer than what the entry holds.
+   */
+  recheck: (current: ContentMeta) => void;
+}
+
 /** A repost of content that is there (see contentWriter's repost). */
 export interface RepostWrite {
   contentId: string;

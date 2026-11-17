@@ -1,5 +1,5 @@
 import { hasReplies, prune, removeCommentRows } from '../comments.js';
-import { summaryOf } from '../content.js';
+import { summaryOf, withheld } from '../content.js';
 import type { PendingKind } from '../db/schema.js';
 import type { AppDeps } from '../deps.types.js';
 import { awaitReplies, payloadBytes, payloadOf, UNNUMBERED } from '../pending.js';
@@ -16,13 +16,6 @@ import { LeaseLostError, type CompactorLease } from './lease.js';
 const BATCH = 500;
 
 /**
- * How many writes to comments a run has under way at once, on whatever posts: a comment's own
- * write, or one like of it. Beside them, a run writes the posts of `compact.concurrency` posts
- * at a time.
- */
-const COMMENT_WRITES = 16;
-
-/**
  * How long past the lifetime of a link an applied staged file is kept (see settle): for a request
  * that read the write's row just before it was applied and signs its link just after, and for
  * clocks that differ between nodes.
@@ -34,7 +27,7 @@ const STAGED_REMOVALS = 5000;
 
 type LogFn = (o: object, msg?: string) => void;
 
-/** What runs a write to a comment once it is its turn among the run's (see COMMENT_WRITES). */
+/** What runs a write to a comment once it is its turn among the run's (see `compact.commentWrites`). */
 type Slot = <T>(fn: () => Promise<T>) => Promise<T>;
 
 /**
@@ -68,6 +61,8 @@ interface PostRow {
   delete_requested_at: number | null;
   /** Its id again, if it waits in the moderation queue. */
   queued_id: string | null;
+  /** On an entry for a post on another server: since when that server says the post is gone, if it does (see `withheld`). */
+  origin_gone_at: number | null;
 }
 
 /** The pending writes of one comment, which are applied together: each kind oldest first. */
@@ -99,8 +94,9 @@ interface CommentWrites {
  *
  * 1. its bytes: the staged file is copied to where the post's bytes are kept, or for a text or
  *    a link, written from the row;
- * 2. its summary, or for content that waits in the moderation queue, none: the one it had is
- *    erased, which is what takes a held update out of the feeds;
+ * 2. its summary, or for content that is withheld, none: the one it had is erased, which is what
+ *    takes a held update out of the feeds, and an entry whose original is gone from its own
+ *    server (see `withheld`);
  * 3. its meta file, last, as what it says is there, with its hashtags settled: without the ones
  *    moderators removed from the content, and with the ones reposts gave it, whatever the write
  *    knew of either;
@@ -125,7 +121,8 @@ export async function applyPending(deps: ApplyDeps): Promise<Applied> {
   const ids = (await db.selectFrom('pending_writes').select('content_id').distinct().execute()).map((r) => r.content_id);
   if (!ids.length) return applied;
 
-  const slot = limiter(COMMENT_WRITES);
+  // Writes to comments, on whatever posts, a set number at a time: beside the posts' own, which are `compact.concurrency` posts at a time.
+  const slot = limiter(deps.config.compact.commentWrites);
   await mapLimit(ids, deps.config.compact.concurrency, async (id) => {
     await lease.check();
     const post = await postRow(deps, id);
@@ -160,12 +157,12 @@ export async function applyPending(deps: ApplyDeps): Promise<Applied> {
   return applied;
 }
 
-/** The post's row, with whether it waits in the moderation queue; undefined for one that is gone. */
+/** The post's row, with whether it is withheld from readers (see `withheld`); undefined for one that is gone. */
 function postRow({ db }: Pick<ApplyDeps, 'db'>, id: string): Promise<PostRow | undefined> {
   return db
     .selectFrom('content')
     .leftJoin('moderation_queue', 'moderation_queue.content_id', 'content.id')
-    .select(['content.id', 'content.user_id', 'content.created_at', 'content.ai_generated', 'content.delete_requested_at', 'moderation_queue.content_id as queued_id'])
+    .select(['content.id', 'content.user_id', 'content.created_at', 'content.ai_generated', 'content.delete_requested_at', 'content.origin_gone_at', 'moderation_queue.content_id as queued_id'])
     .where('content.id', '=', id)
     .executeTakeFirst();
 }
@@ -281,9 +278,9 @@ async function applyPost(deps: ApplyDeps, post: PostRow, writes: PendingRow[]): 
   const own = meta.tags.filter((tag) => !removed.has(tag));
   const next: ContentMeta = { ...meta, tags: [...own, ...repostedTags(placed).filter((tag) => !own.includes(tag) && !removed.has(tag))] };
 
-  // Content that waits in the moderation queue has no summary: an update that was held loses the one it had.
+  // Content that is withheld has no summary: an update that was held loses the one it had, and so does an entry whose original is gone.
   const repostedAt = repostTimes(placed);
-  if (post.queued_id !== null) await summaries.erase({ contentId: post.id, createdAt: post.created_at, repostedAt });
+  if (withheld(post)) await summaries.erase({ contentId: post.id, createdAt: post.created_at, repostedAt });
   else await summaries.put(summaryOf(post, next, config.publicBaseUrl, repostedAt));
 
   // The meta file last, as for any write: what it says is there.
@@ -304,7 +301,7 @@ async function applyPost(deps: ApplyDeps, post: PostRow, writes: PendingRow[]): 
  * - Its removal is last, as it committed last: nothing commits to a comment once its removal
  *   has. A comment that is removed is given no likes first.
  *
- * Different comments are written several at a time (see COMMENT_WRITES), in two passes:
+ * Different comments are written several at a time (COMPACT_COMMENT_WRITES), in two passes:
  *
  * 1. The puts and the likes. A reply waits for the comment it replies to, if that one has a put
  *    here too: a reply is never written before its comment. So a post's new comments are

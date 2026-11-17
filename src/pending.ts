@@ -74,7 +74,11 @@ export const likeKey = (commentId: string, userId: string) => `${commentId}:${us
  * set for deletion: nothing is written to it, or under it, any more. `set` is what else the
  * write changes of the row.
  */
-export async function nextSeq(trx: Transaction<Database>, contentId: string, set: { ai_generated?: number } = {}): Promise<number | null> {
+export async function nextSeq(
+  trx: Transaction<Database>,
+  contentId: string,
+  set: { ai_generated?: number; origin_gone_at?: number | null; origin_check_at?: number | null } = {},
+): Promise<number | null> {
   const updated = await trx
     .updateTable('content')
     .set((eb) => ({ ...set, seq: eb('seq', '+', 1) }))

@@ -4,7 +4,8 @@ import { BlockList, isIP, type LookupFunction } from 'node:net';
 
 /**
  * A request to an address that somebody else chose: the one place the server asks a host it has
- * no reason to trust (another server's keys, originKeys.ts). Whoever names the address could name
+ * no reason to trust (another server's keys, originKeys.ts, and its attestation of a post this
+ * server holds a repost of, originSweep.ts). Whoever names the address could name
  * one that only this server can reach (the cloud's metadata service, the database's host, a
  * neighbour in its network), and have the server ask it for them. So a request is made only:
  *
@@ -92,6 +93,15 @@ const publicLookup: LookupFunction = (hostname, options, callback) => {
  * among them), that is too long or too late, or that isn't JSON.
  */
 export function fetchPublicJson(address: string): Promise<unknown> {
+  return fetchPublicAnswer(address, [200], MAX_BYTES).then(({ body }) => body);
+}
+
+/**
+ * The same, for an answer whose status says something too: the status, which must be one of
+ * `statuses` (a redirect is never taken, whatever they are), and the body, read as JSON, of up
+ * to `maxBytes`.
+ */
+export function fetchPublicAnswer(address: string, statuses: readonly number[], maxBytes: number): Promise<{ status: number; body: unknown }> {
   return new Promise((resolve, reject) => {
     const url = new URL(address);
     if (url.protocol !== 'https:') return reject(new Error(`${url.origin} is not an https address`));
@@ -112,15 +122,16 @@ export function fetchPublicJson(address: string): Promise<unknown> {
         signal: AbortSignal.timeout(TIMEOUT_MS),
       },
       (res) => {
-        if (res.statusCode !== 200) {
+        const status = res.statusCode ?? 0;
+        if (!statuses.includes(status) || (status >= 300 && status < 400)) {
           req.destroy();
-          return reject(new Error(`${url.origin} answered ${res.statusCode}`));
+          return reject(new Error(`${url.origin} answered ${status}`));
         }
         const chunks: Buffer[] = [];
         let size = 0;
         res.on('data', (chunk: Buffer) => {
           size += chunk.length;
-          if (size > MAX_BYTES) req.destroy(new Error(`${url.origin} answered with more than ${MAX_BYTES} bytes`));
+          if (size > maxBytes) req.destroy(new Error(`${url.origin} answered with more than ${maxBytes} bytes`));
           else chunks.push(chunk);
         });
         res.on('error', reject);
@@ -128,7 +139,7 @@ export function fetchPublicJson(address: string): Promise<unknown> {
         res.on('close', () => reject(new Error(`${url.origin} closed the connection before its answer ended`)));
         res.on('end', () => {
           try {
-            resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+            resolve({ status, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) });
           } catch {
             reject(new Error(`${url.origin} did not answer with JSON`));
           }

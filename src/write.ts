@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
-import { contentNotFound } from './content.js';
+import { contentNotFound, withheld } from './content.js';
 import { updateOnConflict } from './db/index.js';
 import type { AppDeps } from './deps.types.js';
 import { badRequest, conflict, unprocessable } from './http/errors.js';
@@ -10,8 +10,16 @@ import { MAX_REPOSTED_TAGS, repostedTags, repostsOf, type Repost } from './repos
 import type { ContentMeta, Publisher } from './storage/index.js';
 import { countTagPairs, touchTags } from './tags.js';
 import { authorIndex } from './tagfeed/layout.js';
-import { wholeSeconds } from './time.js';
-import type { ContentWrite, RepostWrite } from './write.types.js';
+import { HOUR, wholeSeconds } from './time.js';
+import type { ContentWrite, OriginGone, RepostWrite } from './write.types.js';
+
+/**
+ * How long after the server's entry for a post on another server was hidden, on that server's
+ * word that the post is gone, the server asks it about the post again (src/originSweep.ts), and
+ * how long after each such answer: sooner than it asks about an entry that is published
+ * (REPOSTS_REFRESH_HOURS), since a post that only waited in a moderation queue there may be back.
+ */
+export const GONE_RECHECK_MS = 6 * HOUR;
 
 /** 409: the content is set for deletion, and takes no update. */
 const pendingDeletion = () => conflict(msg('content.pending_deletion'));
@@ -30,12 +38,15 @@ export const alreadyReposted = () => conflict(msg('repost.already'));
 export const tooManyReposted = () => conflict(msg('repost.too_many_tags', { max: MAX_REPOSTED_TAGS }));
 
 /**
- * Writes content for /store and reposts for /repost, and publishes what an admin accepts from the
- * moderation queue. All three commit to the database and write nothing to a post's bytes, meta
- * file or summary: the compactor does, from what they committed (see applyPending).
+ * Writes content for /store and reposts for /repost, publishes what an admin accepts from the
+ * moderation queue, and hides the entry of a post on another server that is gone from there. All
+ * four commit to the database and write nothing to a post's bytes, meta file or summary: the
+ * compactor does, from what they committed (see applyPending).
  */
-export function contentWriter({ db, config, content, publishers, now = Date.now }: AppDeps, log: FastifyBaseLogger) {
+export function contentWriter({ db, config, content, publishers, now = Date.now }: Pick<AppDeps, 'db' | 'config' | 'content' | 'publishers' | 'now'>, log: Pick<FastifyBaseLogger, 'warn'>) {
   const { dialect } = config.db;
+  /** How long after an attestation of its original an entry for a post on another server is asked about again: 0 where the server doesn't ask. */
+  const refreshMs = config.reposts.refreshHours * HOUR;
 
   /**
    * Queues the content's entry in each of these indexes (see `feed_queue`): the compactor rebuilds it
@@ -97,6 +108,12 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
    * whatever the update said (see applyPending). One the update is refused, by the hashtag's own
    * rules, is recorded as removed from the content (see ContentWrite.droppedReposts).
    *
+   * An update of the server's entry for a post on another server is that post attested again
+   * (POST /repost/refresh), so it is also what brings back an entry that was hidden because the
+   * post was gone from its own server (see withhold): the row says so no more, and the entry is
+   * queued under every index it has a place in, like any update. And the entry isn't asked about
+   * again until REPOSTS_REFRESH_HOURS from now (`content.origin_check_at`).
+   *
    * Last, the write's hashtags are counted in `tag_pairs`, from which related hashtags are worked
    * out: all of new content's, and those an update added. It is counted once the write is
    * committed, queued or not, and outside its transaction, which then holds no lock on rows every
@@ -118,7 +135,7 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
     try {
       await db.transaction().execute(async (trx) => {
         if (previous) {
-          const next = await nextSeq(trx, contentId, { ai_generated: aiGenerated ? 1 : 0 });
+          const next = await nextSeq(trx, contentId, { ai_generated: aiGenerated ? 1 : 0, ...(stored.origin && { origin_gone_at: null, origin_check_at: ts + refreshMs }) });
           if (next === null) throw pendingDeletion();
           seq = next;
           // Something was written to it, or under it, since the request read it: its hashtags may be others by now.
@@ -131,7 +148,16 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
           seq = 1;
           await trx
             .insertInto('content')
-            .values({ id: contentId, user_id: publisher.userId, ai_generated: aiGenerated ? 1 : 0, created_at: createdAt, delete_requested_at: null, origin_hash: originHash ?? null, seq })
+            .values({
+              id: contentId,
+              user_id: publisher.userId,
+              ai_generated: aiGenerated ? 1 : 0,
+              created_at: createdAt,
+              delete_requested_at: null,
+              origin_hash: originHash ?? null,
+              origin_check_at: originHash === undefined ? null : createdAt + refreshMs,
+              seq,
+            })
             .execute();
         }
         if (queued) {
@@ -258,11 +284,11 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
       const live = await trx
         .selectFrom('content')
         .leftJoin('moderation_queue', 'moderation_queue.content_id', 'content.id')
-        .select(['content.like_count', 'moderation_queue.content_id as queued_id'])
+        .select(['content.like_count', 'content.origin_gone_at', 'moderation_queue.content_id as queued_id'])
         .where('content.id', '=', contentId)
         .where('content.delete_requested_at', 'is', null)
         .executeTakeFirst();
-      if (!live || live.queued_id !== null) throw contentNotFound();
+      if (!live || withheld(live)) throw contentNotFound();
 
       const places = await repostsOf(trx, contentId);
       if (places.some((r) => r.tag === own)) throw alreadyReposted();
@@ -287,6 +313,46 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
     return { tags: result.added, at };
   }
 
+  /**
+   * Hides the server's entry for a post on another server, on that server's signed word that it
+   * publishes no post at the original's address (see AttestedGone). It says that of a post it
+   * deleted and of one that only waits in its moderation queue, and nobody can tell which from
+   * here, so the entry isn't deleted: it is withheld, as content that waits in this server's own
+   * moderation queue is (see `withheld`). Readers get 404 from the moment this commits, and the
+   * compactor's next run erases the entry's summary and takes it out of every index it is in,
+   * which is every one this queues: its hashtags', its owner's own, and the ones reposts placed
+   * it in. The hashtags and those places stay the entry's own.
+   *
+   * What happens next is one of two things. The original's server attests the post again, and
+   * the update that brings (see write) puts the entry back where it was, reposts and all. Or it
+   * doesn't, and the compactor sets the entry for deletion once it has been hidden for
+   * REPOSTS_GONE_DAYS (see Compactor). Until then the server asks about the post again every
+   * GONE_RECHECK_MS (src/originSweep.ts).
+   *
+   * It is a numbered write of the entry, as an update is: the row is locked, the meta file is
+   * read with every write that committed before, and `recheck` refuses word that is no newer
+   * than what the entry holds. What it writes is the entry's meta file as it was, as of when
+   * this word was signed (`originAttestedAt`), so a later attestation is told from it. An entry
+   * that is hidden already stays hidden from when it first was: returns that time. 404 for an
+   * entry that is gone, or set for deletion.
+   */
+  async function withhold({ contentId, issuedAt, recheck }: OriginGone): Promise<number> {
+    const at = now();
+    return db.transaction().execute(async (trx) => {
+      const seq = await nextSeq(trx, contentId, { origin_check_at: at + GONE_RECHECK_MS });
+      if (seq === null) throw contentNotFound();
+      const row = await trx.selectFrom('content').select(['user_id', 'origin_gone_at']).where('id', '=', contentId).executeTakeFirstOrThrow();
+      const meta = await effectiveMeta(trx, content, contentId);
+      if (!meta) throw new Error(`the meta file of ${contentId} is missing`);
+      recheck(meta);
+      if (row.origin_gone_at === null) await trx.updateTable('content').set({ origin_gone_at: at }).where('id', '=', contentId).execute();
+      const places = await repostsOf(trx, contentId);
+      await insertPending(trx, { contentId, seq, kind: 'post', payload: { meta: { ...meta, originAttestedAt: issuedAt } }, at });
+      await enqueue(trx, contentId, [...new Set([...meta.tags, authorIndex(row.user_id), ...places.map((r) => r.tag)])]);
+      return row.origin_gone_at === null ? at : Number(row.origin_gone_at);
+    });
+  }
+
   /** Whether the content is there and not set for deletion. */
   async function isLive(trx: Pick<typeof db, 'selectFrom'>, contentId: string): Promise<boolean> {
     return (await trx.selectFrom('content').select('id').where('id', '=', contentId).where('delete_requested_at', 'is', null).executeTakeFirst()) !== undefined;
@@ -306,7 +372,7 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
     }
   }
 
-  return { write, publish, repost };
+  return { write, publish, repost, withhold };
 }
 
 export type ContentWriter = ReturnType<typeof contentWriter>;

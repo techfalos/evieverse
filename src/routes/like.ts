@@ -78,7 +78,7 @@ export function likeRoutes(app: FastifyInstance, { db, config, content, comments
     let alreadyLiked = false;
     try {
       await db.transaction().execute(async (trx) => {
-        // Published content only: what is set for deletion, or waits in the moderation queue, isn't there to like.
+        // Published content only: what is set for deletion, waits in the moderation queue, or is hidden because its original is gone, isn't there to like.
         if (
           !(await trx
             .selectFrom('content')
@@ -86,6 +86,7 @@ export function likeRoutes(app: FastifyInstance, { db, config, content, comments
             .select('content.id')
             .where('content.id', '=', contentId)
             .where('content.delete_requested_at', 'is', null)
+            .where('content.origin_gone_at', 'is', null)
             .where('moderation_queue.content_id', 'is', null)
             .executeTakeFirst())
         ) {
