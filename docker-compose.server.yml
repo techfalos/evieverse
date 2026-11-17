@@ -34,9 +34,10 @@ services:
       PUBLIC_BASE_URL: http://localhost:${SERVER_PORT:-3000}
       # Set to the frontend's origins, e.g. http://localhost:5173, to allow only those.
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
-      # Docker Desktop gives every request from the host the same source IP, so the per-IP limit on
-      # /register is effectively global.
+      # Docker Desktop gives every request from the host the same source IP, so the per-IP limits on
+      # /register and on /feed are effectively global.
       REGISTER_RATE_LIMIT_PER_HOUR: '1000'
+      FEED_RATE_LIMIT_PER_MINUTE: '6000'
       TAGGING_MODE: ${TAGGING_MODE:-user}
       TAGGING_SERVER_TAGS: ${TAGGING_SERVER_TAGS:-}
       # The types of post the server takes: all of them unless one is set to false.

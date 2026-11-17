@@ -87,7 +87,8 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
    * entries out of their indexes. They are told from the hashtags the content had (`previous`),
    * which the request read before it began: if anything was written to the content, or under it,
    * since then (`seenSeq`), they are read again here, with the row locked, so an update that
-   * committed in between is counted for what it gave the content.
+   * committed in between is counted for what it gave the content. That is also when an update
+   * that holds only for the content as it was read is asked again (`recheck`), and can refuse.
    *
    * Content that was reposted is also in the indexes its reposts put it in (`reposts`): an update
    * queues those too, the reposters' own among them, as its commit reads them, with the row locked
@@ -101,7 +102,7 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
    * committed, queued or not, and outside its transaction, which then holds no lock on rows every
    * post of a busy hashtag counts on. A count that fails is lost, and the write stands.
    */
-  async function write({ publisher, previous, seenSeq, summary, meta, stageBytes, queued, droppedReposts = [], originHash }: ContentWrite): Promise<void> {
+  async function write({ publisher, previous, seenSeq, recheck, summary, meta, stageBytes, queued, droppedReposts = [], originHash }: ContentWrite): Promise<void> {
     const { contentId, createdAt, updatedAt: ts, aiGenerated } = summary;
     const own = authorIndex(publisher.userId);
 
@@ -121,7 +122,11 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
           if (next === null) throw pendingDeletion();
           seq = next;
           // Something was written to it, or under it, since the request read it: its hashtags may be others by now.
-          if (seenSeq === undefined || next !== seenSeq + 1) had = [...new Set([...previous.tags, ...((await effectiveMeta(trx, content, contentId))?.tags ?? [])])];
+          if (seenSeq === undefined || next !== seenSeq + 1) {
+            const current = await effectiveMeta(trx, content, contentId);
+            if (current) recheck?.(current);
+            had = [...new Set([...previous.tags, ...(current?.tags ?? [])])];
+          }
         } else {
           seq = 1;
           await trx

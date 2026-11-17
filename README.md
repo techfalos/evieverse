@@ -94,6 +94,8 @@ Apart from its admin CLI, an instance has no client of its own. It's designed fo
 3. **Let the user set the parameters of each request,** such as a feed's tags, window and algorithm, so the experience is theirs.
 4. **Syndicate a post to several instances** by posting it to each one. Instances don't pass posts on to each other, so a user's key for one instance never goes to another.
 
+
+
 ## Bring your own client
 
 Every instance serves the same API, so anyone can register on an instance directly, keep their own key, and use whatever client they like, including one they wrote. [API.md](docs/API.md) is the contract: every endpoint, what it takes and what it returns.
@@ -125,8 +127,6 @@ In both modes, a post with no valid tags is rejected.
 
 **Reports.** Any user can report a published post or comment. Reported posts and comments stay published and wait in the report queue, where a server moderator or an admin accepts each, which leaves it as it is, or deletes it.
 
-If removing a tag would leave a post with no tags, the post itself is removed.
-
 All of the moderation functions are available via the CLI [CLI](docs/CLI.md).
 
 ## Rules
@@ -150,13 +150,16 @@ With each post, its publisher declares whether it was created with AI, and reade
 To keep bots from flooding an instance, a user who posts or comments again within a minute first solves a challenge, or two if they keep posting. By default nobody posts more than 3 times a minute.
 
 ## Reposts
+
 Any content can be reposted to this server or to another server with additional tags that it did not have previously. 
-- It is not copied and still credited to its publisher.
+
+- A repost to another server contains the URL to access the content, but it still lives on this instance of Evieverse
 - A user cannot repost their own posts (but can change the tags by editing the post)
 - A repost still goes through tag moderation for its new tags
-- A repost to another server contains the URL to access the content, but it still lives on this instance of Evieverse
-- A repost to another server is signed by this instance, and the other server checks the signature before it takes the repost. One that isn't signed by the post's own instance is refused, so nobody can repost a post that isn't there, or under someone else's name, or with other words.
+- A repost to another server is signed by this instance, and the other server checks the signature before it takes the repost. 
 - An instance can turn reposts off, or only those of posts on other instances (`REPOSTS`, `REPOSTS_REMOTE`). For its posts to be reposted elsewhere it needs a signing key (`REPOSTS_SIGNING_KEYS`), which the Terraform modules make.
+
+
 
 ## Comments
 
@@ -166,7 +169,7 @@ A post takes comments if its publisher turns them on, which they do post by post
 - Comments are stored in a tree form on each post (users may respond to other users comments)
 - Anyone can read a post's comments, oldest or newest first, and any user can add one, up to 10 a minute by default.
 - Comments are moderated as posts are. Each gets a trust score from the same checks, and by the same thresholds is published, held in the moderation queue or rejected outright. Held comments wait in the same queue as held posts, for a server moderator or an admin.
-- Comments can be reported, and then wait in the same report queue as reported posts.
+- Comments can be reported - they go to the same report queue as reported posts.
 - A comment can be deleted by its author, by the publisher of the post it's on, and by an admin.
 - Turning comments off on a post closes and hides them without deleting them. 
 - Deleting the post deletes all comments on it.
@@ -190,12 +193,14 @@ Users receive notices and messages from other users in their inbox. Notices incl
 
 A feed is what the reader asks for. The reader chooses:
 
-- **Tags:** The system will return filtered content for one or more tags. If the related option is used, it will also return results for related tags. 
-- **A window:** from the past hour to the past 90 days. A feed holds the posts of its window and no others.
-- **An algorithm:**
+- Tags: The system will return filtered content for one or more tags. If the related option is used, it will also return results for related tags. 
+- A window: from the past hour to the past 90 days. A feed holds the posts of its window and no others.
+- An algorithm:
   - `popular` (the default) returns the window's most liked posts first. The tags asked for take turns, and some places go to new posts nobody has liked yet, so that new posts get seen.
   - `chronological` returns the window's posts in order of time, newest first.
-- **Filters:** AI-usage content filter. There is also a filter for only posts a tag's moderators have approved, or only posts they haven't.
+- Filters: AI-usage content filter. There is also a filter for only posts a tag's moderators have approved, or only posts they haven't.
+
+
 
 ## Running an instance locally
 
@@ -222,6 +227,8 @@ Things to know:
 - Without `REDIS_URL`, the feed index lives inside the process, and the server rebuilds it from the database and the content store each time it starts. To keep it across restarts, point `REDIS_URL` at a local Redis or Valkey (`docker compose up -d redis`, then `REDIS_URL=redis://127.0.0.1:6379`).
 - The API in Docker (`docker-compose.server.yml`) accepts browser requests from any origin. Set `CORS_ORIGINS` (e.g. `CORS_ORIGINS=http://localhost:5173`) to allow only your frontend's.
 
+
+
 ## Configuration
 
 See [CONFIG.md](docs/CONFIG.md)
@@ -229,6 +236,7 @@ See [CONFIG.md](docs/CONFIG.md)
 ## Tests
 
 Commands to run tests:
+
 ```bash
 npm test     # unit tests, migration tests, API and feed-index tests on SQLite with the in-process store
 docker compose up -d postgres mysql redis
@@ -237,16 +245,19 @@ TEST_MYSQL_URL=mysql://evieverse:evieverse@localhost:3306/evieverse \
 TEST_REDIS_URL=redis://127.0.0.1:6379 npm test
 npm run check    # the conventions of src that the compiler doesn't check: where interfaces are, JSDoc comments, constants at the top
 ```
+
 Optionally add `--no-file-parallelism` to run the tests one at a time.
 
 ## Benchmarks
 
 Running the benchmarks:
+
 ```bash
 npm run bench     # load-tests the API in Docker and writes BENCHMARKS.md again, in about 5 minutes
 # The settings a run can be given, at their defaults:
 BENCH_SERVER_CPUS=2 BENCH_SERVER_MEMORY=2g BENCH_DURATION_SECONDS=10 BENCH_CONNECTIONS=50 BENCH_POSTS=2000 npm run bench
 ```
+
 Requires Docker
 
 See [[BENCHMARKS.md](BENCHMARKS.md)] for the latest benchmark output. Note: this file is regenerated by the benchmark script. Do not edit it. 

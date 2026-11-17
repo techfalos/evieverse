@@ -9,7 +9,7 @@ import { notFound } from '../http/errors.js';
 import { Credentials } from '../http/schemas.js';
 import { msg } from '../language.js';
 import { refuseBanned } from '../moderation/policy.js';
-import { effectiveComment, insertPending, pendingLikers, writePending, type PendingReader } from '../pending.js';
+import { effectiveComment, insertPending, likeKey, pendingComment, pendingLike, pendingLikes, writeUnnumbered } from '../pending.js';
 
 /** The body of POST /like: who's asking, and the post to like, or the post and the comment on it to like. */
 const Body = Credentials.extend({
@@ -19,18 +19,22 @@ const Body = Credentials.extend({
 });
 
 /** Likes, of posts and of comments on them: POST /like, and nothing else. No route takes a like back. */
-export function likeRoutes(app: FastifyInstance, { db, content, comments, now = Date.now }: AppDeps) {
+export function likeRoutes(app: FastifyInstance, { db, config, content, comments, now = Date.now }: AppDeps) {
+  const { dialect } = config.db;
   /**
    * Likes a post, or with `commentId`, a comment on it. Likes are permanent and idempotent: liking
    * twice succeeds without double-counting.
    *
    * A post's likes are rows in the database, and its count a column of the post's. A comment's are
    * in the content store, as comments are, where the compactor makes them (see CommentStore.addLike):
-   * the request commits the like as a write of the comment's post (`pending_writes`), in the
-   * order of the post's writes, so a like of a comment that was deleted, or of one under a post
-   * that is set for deletion, is refused (404) and never made. The count it answers with has the
-   * likes that wait to be made; a comment read before the compactor's next run has only the
-   * ones that were.
+   * the request commits the like as a write of the comment's post (`pending_writes`), with the
+   * user and the comment as its key, so a user's like is there once. It takes no number and
+   * locks nothing (see writeUnnumbered): the likes of one comment, and of one post's comments,
+   * don't wait for each other. A like of a comment that was deleted, or of one under a post that
+   * is set for deletion, is refused (404), and one that commits as either happens is never made:
+   * the compactor applies a comment's removal last of its writes, and nothing of a post that is
+   * set for deletion. The count it answers with has the likes that wait to be made; a comment
+   * read before the compactor's next run has only the ones that were.
    *
    * A banned user is refused (403) either like, before anything is looked up: one they made before
    * the ban stays, and is answered the same way.
@@ -43,30 +47,32 @@ export function likeRoutes(app: FastifyInstance, { db, content, comments, now = 
 
     if (commentId !== undefined) {
       // A comment anyone can read: one of a published post that takes comments, and not one that waits in the moderation queue.
-      const post = await loadPublished(db, contentId);
+      await loadPublished(db, contentId);
       if (!takesComments(await requireMeta({ db, content }, contentId))) throw notFound(msg('comment.off'));
       const gone = () => notFound(msg('comment.not_found'));
-      // Whether the user likes the comment already, by a like that was applied or one that waits to be; null for a comment that isn't there to like.
-      const read = async (reader: PendingReader) => {
-        if ((await effectiveComment(reader, comments, contentId, commentId))?.held !== false) return null;
-        // The rows first, then the store: the compactor makes a like there before it deletes the like's row.
-        return { liked: (await pendingLikers(reader, contentId, commentId)).has(user.id) || (await comments.liked(contentId, commentId, user.id)) };
-      };
-      const seen = await read(db);
-      if (!seen) throw gone();
-      const already =
-        seen.liked ||
-        (await writePending(db, contentId, { seq: post.seq, state: seen }, read, async (trx, seq, state) => {
-          // Deleted, or taken back to the queue, while this was under way; or liked, by the same user's other request.
-          if (!state) throw gone();
-          if (state.liked) return true;
-          await insertPending(trx, { contentId, seq, kind: 'comment_like', commentId, payload: { userId: user.id }, at: now() });
-          return false;
-        }));
+      if ((await effectiveComment(db, comments, contentId, commentId))?.held !== false) throw gone();
+      // Whether the user likes the comment already, by a like that waits to be made or one that was.
+      // The rows first, then the store: the compactor makes a like there before it deletes the like's row.
+      let already = (await pendingLike(db, contentId, commentId, user.id)) || (await comments.liked(contentId, commentId, user.id));
+      if (!already) {
+        try {
+          // It takes no number, and no lock on the post: the likes of one comment commit side by side.
+          await writeUnnumbered(db, dialect, contentId, {}, async (trx) => {
+            // Deleted, or taken back to the queue, by a write that committed while this was under way.
+            const written = await pendingComment(trx, contentId, commentId);
+            if (written && written.put?.held !== false) throw gone();
+            await insertPending(trx, { contentId, key: likeKey(commentId, user.id), kind: 'comment_like', commentId, payload: { userId: user.id }, at: now() });
+          });
+        } catch (err) {
+          // The same user's other request committed the like first: its row has the key this one asked for.
+          if (!isUniqueViolation(err)) throw err;
+          already = true;
+        }
+      }
       // The likes the store has and the ones that wait to be made there, this one among them.
-      const waiting = await pendingLikers(db, contentId, commentId);
+      const waiting = await pendingLikes(db, contentId, commentId);
       const [made = 0] = await comments.likes(contentId, [commentId]);
-      return reply.status(already ? 200 : 201).send({ contentId, commentId, likes: made + waiting.size, alreadyLiked: already });
+      return reply.status(already ? 200 : 201).send({ contentId, commentId, likes: made + waiting, alreadyLiked: already });
     }
 
     let alreadyLiked = false;

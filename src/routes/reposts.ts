@@ -1,21 +1,22 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { ATTESTATION_MAX_AGE_MS, ATTESTATION_SKEW_MS, AttestedPost, MAX_ATTESTATION_CHARS, POST_PATH, readAttestation, signedBy, signingKeys } from '../attestation.js';
+import { ATTESTATION_MAX_AGE_MS, ATTESTATION_SKEW_MS, AttestedGone, AttestedPost, MAX_ATTESTATION_CHARS, POST_PATH, readAttestation, saysGone, signedBy, signingKeys } from '../attestation.js';
 import type { PublishedKey } from '../attestation.types.js';
 import { authenticate } from '../auth/apiKey.js';
 import type { AuthUser } from '../auth/apiKey.types.js';
 import { ChallengeFields } from '../challenge/challenges.js';
-import { loadPublished, PENDING_REVIEW, requireMeta } from '../content.js';
+import { loadContent, loadPublished, PENDING_REVIEW, publisherOf, requireMeta } from '../content.js';
 import { isUniqueViolation } from '../db/index.js';
 import type { RouteDeps } from '../deps.types.js';
 import { plainText } from '../format.js';
-import { badRequest, conflict, HttpError, tooManyRequests, unprocessable } from '../http/errors.js';
+import { badRequest, conflict, HttpError, notFound, tooManyRequests, unprocessable } from '../http/errors.js';
 import { Credentials } from '../http/schemas.js';
 import { msg } from '../language.js';
 import { moderatePost, moderateRepost, refuseBanned } from '../moderation/policy.js';
 import type { RemovedTag } from '../moderation/policy.types.js';
-import { LINK_MIME, mediaType, originMediaUrl, ownAddress, postAddress, previewCutter, TEXT_MIME } from '../posts.js';
+import { LINK_MIME, mediaType, originMediaUrl, ownAddress, postAddress, previewCutter, previewOf, TEXT_MIME } from '../posts.js';
 import { MAX_REPOSTED_TAGS, readableOf, repostedTags, repostsOf } from '../reposts.js';
 import type { Origin, Preview } from '../storage/index.js';
 import { authorIndex } from '../tagfeed/layout.js';
@@ -31,6 +32,14 @@ import { alreadyReposted, tooManyReposted } from '../write.js';
  * server send requests for them.
  */
 const ORIGIN_ASKS_PER_MINUTE = 10;
+
+/**
+ * How many times in a minute one user's refreshes (POST /repost/refresh) can change an entry: its
+ * summary, or that it is there. Each is a write the compactor applies, and the user is nobody the
+ * entry belongs to, so it is counted on its own, and not as a post of theirs. One that changes
+ * nothing isn't counted.
+ */
+const REFRESHES_PER_MINUTE = 10;
 
 /**
  * What a repost says of a post on another server (`origin` in POST /repost): the post's
@@ -57,9 +66,13 @@ const Body = Credentials.extend({
 });
 type Body = z.infer<typeof Body>;
 
+/** What POST /repost/refresh says: a later attestation of a post on another server that this server has an entry for. */
+const RefreshBody = Credentials.extend({ origin: OriginFields });
+
 /**
  * Reposts (POST /repost, see src/reposts.ts): a user gives someone else's post more hashtags, a
  * post on this server or one on another, which the server then keeps an entry of its own for.
+ * And what keeps such an entry to what its original is (POST /repost/refresh).
  */
 export function repostRoutes(app: FastifyInstance, { db, config, content, hot, challenges, writer, trustPlugins, originKeys, now = Date.now }: RouteDeps) {
   const cut = previewCutter(config.feed);
@@ -95,26 +108,27 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, hot, c
   }
 
   /**
-   * The post an attestation is of, once the attestation is found to be what the post's own server
-   * said, a short while ago. Until then nothing in it is believed, and a request that fails here
-   * has changed nothing.
+   * What an attestation says, once it is found to be what the post's own server said, a short
+   * while ago: the post, or that there is none at its address (see AttestedGone). Until then
+   * nothing in it is believed, and a request that fails here has changed nothing.
    *
    * - It is written as an attestation, and says what one says (400).
    * - It was issued within ATTESTATION_MAX_AGE_MS, by a clock no more than ATTESTATION_SKEW_MS
    *   ahead of this one (400): an old one says what the post was, and may no longer be.
    * - It is signed with a key of the server at the address it names. That server is asked for its
-   *   keys, where Redis doesn't hold them (see OriginKeys): over https only (400), and no more
-   *   than ORIGIN_ASKS_PER_MINUTE times a minute on one user's account (429). A server that gives
-   *   no keys leaves the attestation unchecked, and so refused (502); a key that isn't among the
-   *   server's, or a signature that isn't that key's, is a forgery as far as anyone can tell (400).
+   *   keys, where Redis doesn't hold them (see OriginKeys): over https only, on the port https
+   *   has (400), and no more than ORIGIN_ASKS_PER_MINUTE times a minute on one user's account
+   *   (429). A server that gives no keys leaves the attestation unchecked, and so refused (502);
+   *   a key that isn't among the server's, or a signature that isn't that key's, is a forgery as
+   *   far as anyone can tell (400).
    *
    * An address that is this server's own is checked with this server's own keys, and nobody is
    * asked. A server that signs nothing attested nothing, so there it is refused like any forgery.
    */
-  async function attestedOrigin(user: AuthUser, attestation: string): Promise<AttestedPost> {
+  async function attestedOrigin(user: AuthUser, attestation: string): Promise<AttestedPost | AttestedGone> {
     const read = readAttestation(attestation);
     if (!read) throw badRequest(msg('repost.attestation_invalid'));
-    const said = AttestedPost.safeParse(read.payload);
+    const said = saysGone(read.payload) ? AttestedGone.safeParse(read.payload) : AttestedPost.safeParse(read.payload);
     if (!said.success) throw badRequest(msg('repost.attestation_invalid'), said.error.issues);
     const post = said.data;
     const age = now() - post.issuedAt;
@@ -124,7 +138,8 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, hot, c
     if (ownContentId(post.url) !== null) key = ownKeys.find(({ id }) => id === post.kid);
     else {
       const server = post.url.replace(POST_PATH, '');
-      if (!server.startsWith('https://')) throw badRequest(msg('repost.origin_not_https'));
+      // The URL parser leaves out the port that is https's own, so one that is there is another.
+      if (!server.startsWith('https://') || new URL(post.url).port !== '') throw badRequest(msg('repost.origin_not_https'));
       const found = await originKeys.find(server, post.kid, async () => {
         const { count, ttlMs } = await hot.incr(`originasks:${user.id}`, MINUTE);
         const seconds = Math.max(1, Math.ceil(ttlMs / 1000));
@@ -171,6 +186,7 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, hot, c
     if (body.contentId !== undefined) return repostHere(req, reply, user, body.contentId, tags, body);
     // Checked whatever the server already holds of the original: nothing is reposted on a client's word.
     const origin = await attestedOrigin(user, body.origin!.attestation);
+    if ('gone' in origin) throw badRequest(msg('repost.origin_gone'));
     const local = ownContentId(origin.url);
     if (local !== null) return repostHere(req, reply, user, local, tags, body);
 
@@ -187,6 +203,132 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, hot, c
       return repostHere(req, reply, user, first, tags, body);
     }
   });
+
+  /**
+   * Brings the server's entry for a post on another server up to what the post is now: the entry
+   * holds the original's summary as it was when it was last attested, and this server reads
+   * nothing of the original itself, so it learns what the original became from a later
+   * attestation of it, which anyone with an account can bring. It is checked as a repost's is
+   * (see attestedOrigin), and says one of two things:
+   *
+   * - The post, as it is now. The entry's summary is written over with it: an update of the
+   *   entry, in the name of nobody but the original's server. It is held to what an update of a
+   *   post is: the type of post stays what it was (400), it is given a trust score and its
+   *   hashtags are held to their rules by what it now says, in the name of the entry's owner, so
+   *   it can be refused (422, and the entry stays as it was), held in the moderation queue (202)
+   *   or lose a hashtag. One that says what the entry says changes nothing (`unchanged`).
+   * - That no post is published there (see AttestedGone). The entry is set for deletion, as its
+   *   owner would set it: 202, and the compactor's next run deletes it, with the places reposts
+   *   gave it.
+   *
+   * Only an attestation issued after the one the entry is from is taken (409 otherwise, see
+   * ContentMeta.originAttestedAt), so nobody brings back what the post was with an attestation
+   * they kept. That holds for two that arrive at once: the one that commits second is checked
+   * against the first (see ContentWrite.recheck), and a deletion is set only on the entry as
+   * it was read (409: sent again, it is checked against what was written meanwhile).
+   *
+   * 404 where the server has no entry for the original, or one that is set for deletion already.
+   * An address that is this server's own has nothing to refresh (400). A banned user is refused
+   * (403), and one user's refreshes change at most REFRESHES_PER_MINUTE entries a minute (429).
+   * The route is off where reposts of posts on other servers are (400).
+   */
+  app.post('/repost/refresh', async (req, reply) => {
+    const body = RefreshBody.parse(req.body ?? {});
+    if (!config.reposts.enabled) throw badRequest(msg('repost.off'));
+    if (!config.reposts.remote) throw badRequest(msg('repost.remote_off'));
+    const user = await authenticate(db, req, body);
+    refuseBanned(user);
+    const said = await attestedOrigin(user, body.origin.attestation);
+    if (ownContentId(said.url) !== null) throw badRequest(msg('repost.refresh_own'));
+
+    const hash = createHash('sha256').update(said.url).digest('hex');
+    const entry = await db.selectFrom('content').select('id').where('origin_hash', '=', hash).executeTakeFirst();
+    if (!entry) throw notFound(msg('repost.refresh_no_entry'));
+    // The row, with the entry's write number, before the meta file: what is read after it is no older than the number says.
+    const row = await loadContent(db, entry.id);
+    const meta = await requireMeta({ db, content }, row.id);
+    const notNewer = () => conflict(msg('repost.refresh_not_newer'));
+    if (said.issuedAt <= (meta.originAttestedAt ?? 0)) throw notNewer();
+
+    if ('gone' in said) {
+      await countRefresh(user);
+      const at = now();
+      const set = await db.updateTable('content').set({ delete_requested_at: at }).where('id', '=', row.id).where('delete_requested_at', 'is', null).where('seq', '=', row.seq).executeTakeFirst();
+      if (Number(set.numUpdatedRows) !== 1) throw conflict(msg('repost.refresh_raced'));
+      return reply.status(202).send({ contentId: row.id, status: 'pending_deletion', requestedAt: iso(at) });
+    }
+
+    const { mimeType, origin, preview, texts } = summarised(said);
+    if (mimeType !== meta.mimeType) throw badRequest(msg('repost.refresh_type_changed', { original: meta.mimeType, mimeType }));
+    const { aiGenerated } = said;
+    if (aiGenerated === (row.ai_generated === 1) && isDeepStrictEqual(origin, meta.origin) && isDeepStrictEqual(preview, previewOf(meta, config.publicBaseUrl))) {
+      return { contentId: row.id, unchanged: true, ...(row.queued && PENDING_REVIEW) };
+    }
+
+    await countRefresh(user);
+    // What the entry now says is held to the rules of every hashtag it has, those reposts gave it too, as an update of a post is.
+    const given = repostedTags(await repostsOf(db, row.id));
+    const moderated = await moderatePost(
+      { db, config, trustPlugins, now, log: req.log },
+      { userId: row.user_id, contentId: row.id, tags: [...meta.tags.filter((tag) => !given.includes(tag)), ...given], texts },
+    );
+    const queued = moderated.route === 'queue';
+    const ts = now();
+    await writer.write({
+      publisher: publisherOf(row),
+      previous: meta,
+      seenSeq: Number(row.seq),
+      recheck: (current) => {
+        if (said.issuedAt <= (current.originAttestedAt ?? 0)) throw notNewer();
+      },
+      summary: { contentId: row.id, createdAt: row.created_at, updatedAt: ts, userId: row.user_id, mimeType, aiGenerated, comments: false, tags: moderated.tags, preview, origin },
+      meta: { contentId: row.id, mimeType, size: Buffer.byteLength(origin.url), aiGenerated, comments: false, preview, tags: moderated.tags, updatedAt: ts, origin, originAttestedAt: said.issuedAt },
+      queued: queued ? { trustScore: moderated.trustScore } : undefined,
+      // The hashtags of reposts that what it now says is refused: they come off the entry for good (see ContentWrite.droppedReposts).
+      droppedReposts: moderated.removedTags.filter((r) => given.includes(r.tag) && r.reason !== 'removed').map((r) => r.tag),
+    });
+    reply.status(queued ? 202 : 200);
+    return {
+      contentId: row.id,
+      ...(queued && PENDING_REVIEW),
+      tags: moderated.tags,
+      ...(moderated.removedTags.length > 0 && { removedTags: moderated.removedTags }),
+      preview,
+      aiGenerated,
+      origin,
+    };
+  });
+
+  /** Counts a refresh that changes an entry among the user's of this minute: 429 past REFRESHES_PER_MINUTE. */
+  async function countRefresh(user: AuthUser): Promise<void> {
+    const { count, ttlMs } = await hot.incr(`originrefreshes:${user.id}`, MINUTE);
+    const seconds = Math.max(1, Math.ceil(ttlMs / 1000));
+    if (count > REFRESHES_PER_MINUTE) throw tooManyRequests(msg('repost.refresh_rate_limited', { count: seconds }), seconds);
+  }
+
+  /**
+   * What the server keeps of a post on another server, from its attestation: its content type,
+   * which an image, video or audio has to say and be (400), where it is and who published it
+   * there, and its preview, cut to the length of this server's. `texts` is what there is of it to
+   * read, as moderation reads a post: the preview's text or link, the original's address and its
+   * publisher's name. The type of post must be one the server takes (400).
+   */
+  function summarised(sent: AttestedPost): { mimeType: string; origin: Origin; preview: Preview; texts: (string | undefined)[] } {
+    const { kind } = sent.preview;
+    requirePostType(config.postTypes, kind);
+    const mimeType = kind === 'text' ? TEXT_MIME : kind === 'link' ? LINK_MIME : sent.mimeType;
+    if (mimeType === undefined || (kind !== 'text' && kind !== 'link' && mediaType(mimeType) !== kind)) throw badRequest(msg('repost.origin_mime_type', { kind }));
+
+    const origin: Origin = { url: sent.url, publisher: sent.publisher };
+    const caption = sent.preview.kind === 'link' ? undefined : sent.preview.text || undefined;
+    const preview: Preview =
+      sent.preview.kind === 'text'
+        ? { kind: 'text', text: cut(sent.preview.text) }
+        : sent.preview.kind === 'link'
+          ? { kind: 'link', url: sent.preview.url }
+          : { kind: sent.preview.kind, url: originMediaUrl(origin), ...(caption ? { text: cut(caption) } : {}) };
+    return { mimeType, origin, preview, texts: [sent.preview.kind === 'link' ? sent.preview.url : caption && plainText(caption, true), origin.url, origin.publisher.username] };
+  }
 
   /**
    * The id of the server's entry for the original whose address hashes to `hash`, or null if it
@@ -260,28 +402,14 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, hot, c
    * post.
    *
    * The summary is the original's server's word, as it signed it when the repost was made (see
-   * attestedOrigin): this server doesn't read the original, then or later, so what the original
-   * becomes afterwards isn't seen here.
+   * attestedOrigin): this server doesn't read the original, then or later. What the original
+   * becomes afterwards is seen here once somebody brings a later attestation of it (POST
+   * /repost/refresh), which is told from an earlier one by when this one was signed (see
+   * ContentMeta.originAttestedAt).
    */
   async function repostFrom(req: FastifyRequest, reply: FastifyReply, user: AuthUser, sent: AttestedPost, hash: string, tags: string[], solution: Body) {
-    const { kind } = sent.preview;
-    requirePostType(config.postTypes, kind);
-    const mimeType = kind === 'text' ? TEXT_MIME : kind === 'link' ? LINK_MIME : sent.mimeType;
-    if (mimeType === undefined || (kind !== 'text' && kind !== 'link' && mediaType(mimeType) !== kind)) throw badRequest(msg('repost.origin_mime_type', { kind }));
-
-    const origin: Origin = { url: sent.url, publisher: sent.publisher };
-    const caption = sent.preview.kind === 'link' ? undefined : sent.preview.text || undefined;
-    const preview: Preview =
-      sent.preview.kind === 'text'
-        ? { kind: 'text', text: cut(sent.preview.text) }
-        : sent.preview.kind === 'link'
-          ? { kind: 'link', url: sent.preview.url }
-          : { kind: sent.preview.kind, url: originMediaUrl(origin), ...(caption ? { text: cut(caption) } : {}) };
-
-    const moderated = await moderatePost(
-      { db, config, trustPlugins, now, log: req.log },
-      { userId: user.id, tags, texts: [sent.preview.kind === 'link' ? sent.preview.url : caption && plainText(caption, true), origin.url, origin.publisher.username] },
-    );
+    const { mimeType, origin, preview, texts } = summarised(sent);
+    const moderated = await moderatePost({ db, config, trustPlugins, now, log: req.log }, { userId: user.id, tags, texts });
     const queued = moderated.route === 'queue';
 
     const contentId = randomUUID();
@@ -292,7 +420,7 @@ export function repostRoutes(app: FastifyInstance, { db, config, content, hot, c
         publisher: { userId: user.id, username: user.username },
         summary: { contentId, createdAt: ts, updatedAt: ts, userId: user.id, mimeType, aiGenerated, comments: false, tags: moderated.tags, preview, origin },
         // The bytes are an address, whatever the original is: the compactor writes them from the meta file, as it does a link's (see payloadBytes).
-        meta: { contentId, mimeType, size: Buffer.byteLength(origin.url), aiGenerated, comments: false, preview, tags: moderated.tags, updatedAt: ts, origin },
+        meta: { contentId, mimeType, size: Buffer.byteLength(origin.url), aiGenerated, comments: false, preview, tags: moderated.tags, updatedAt: ts, origin, originAttestedAt: sent.issuedAt },
         queued: queued ? { trustScore: moderated.trustScore } : undefined,
         originHash: hash,
       }),

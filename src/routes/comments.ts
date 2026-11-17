@@ -14,7 +14,7 @@ import { Credentials } from '../http/schemas.js';
 import { notify } from '../inbox.js';
 import { msg } from '../language.js';
 import { moderateComment, moderatesServer, refuseBanned } from '../moderation/policy.js';
-import { effectiveComment, insertPending, pendingComment, pendingCommentFile, writePending, type PendingReader } from '../pending.js';
+import { effectiveComment, insertPending, pendingComment, pendingCommentFile, writePending, writeUnnumbered, type PendingReader } from '../pending.js';
 import { commentPlaceholder, type Comment, type CommentMedia } from '../storage/index.js';
 import { readCommentFile, readMultipart, readUploaded } from '../upload.js';
 import type { CommentFile, Upload } from '../upload.types.js';
@@ -206,12 +206,14 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
  * server moderator or an admin, or published.
  *
  * None of them writes the comment store. Each is one commit to the database: a row of
- * `pending_writes` under the comment's post, with the post's next write number, and with it the
- * comment's row in the moderation queue where it is held (see src/pending.ts). The compactor's
- * next run writes the comment store from the rows, a post's in the order they committed. So a
- * comment, an edit and a deletion of one never write over each other, and none is written under a
- * post that is set for deletion, which gives no number (404). Until the run, the comment is read
- * by its id as it was written (see commentReadRoutes), and is in no list.
+ * `pending_writes` under the comment's post, and with it the comment's row in the moderation
+ * queue where it is held (see src/pending.ts). The compactor's next run writes the comment store
+ * from the rows. An edit and a deletion take the post's next write number, which locks the
+ * post's row: the two of one comment commit one after the other, and are applied in that order,
+ * so they never write over each other. A new comment takes no number and locks nothing: however
+ * many are sent to one post at once, none waits for another. None is written under a post that
+ * is set for deletion (404). Until the run, the comment is read by its id as it was written (see
+ * commentReadRoutes), and is in no list.
  *
  * A comment, and an edit of one, is then limited as a post is, by the code that limits posts
  * (Challenges.admitting), with settings of its own. A user's first `challenge.commentsPerMinute`
@@ -227,7 +229,7 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
   /**
    * The published post, if it takes comments: what is set for deletion, or waits in the moderation
    * queue, isn't there to comment on. Its row is read before anything of its comments is, which
-   * is what its write number is good for (see writePending).
+   * is what its write number is good for to an edit (see writePending).
    */
   async function commentable(contentId: string) {
     const post = await loadPublished(db, contentId);
@@ -295,7 +297,7 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
 
       const user = await authenticate(db, req, body);
       refuseBanned(user);
-      const post = await commentable(contentId);
+      await commentable(contentId);
       // A reply is to a comment anyone can read: not to one that waits in the moderation queue, or was deleted.
       const answerable = async (reader: PendingReader) => parentId === undefined || (await current(reader, contentId, parentId))?.held === false;
       if (!(await answerable(db))) throw commentNotFound();
@@ -316,11 +318,13 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
         const media: CommentMedia | undefined = attached && staged && { kind: attached.kind, mimeType: attached.mimeType, size: staged.size };
         const comment: Comment = { commentId, contentId, ...(parentId !== undefined && { parentId }), userId: user.id, text, ...(media && { media }), createdAt };
         try {
-          await writePending(db, contentId, { seq: post.seq, state: true }, answerable, async (trx, seq, there) => {
-            // The comment it replies to was deleted, or taken back to the queue, while this was under way.
-            if (!there) throw commentNotFound();
+          // It takes no number, and no lock on its post: the comments of one post commit side by side.
+          await writeUnnumbered(db, config.db.dialect, contentId, { reply: parentId !== undefined }, async (trx) => {
+            // The comment it replies to was deleted, or taken back to the queue, while this was under way. Read again
+            // here, where the compactor waits for this reply before it decides what a removal of that comment leaves.
+            if (parentId !== undefined && !(await answerable(trx))) throw commentNotFound();
             if (held) await queue(trx, comment, trustScore, createdAt);
-            await insertPending(trx, { contentId, seq, kind: 'comment_put', commentId, payload: { comment, held }, stagedKey: staged?.key, at: createdAt });
+            await insertPending(trx, { contentId, key: commentId, kind: 'comment_put', commentId, payload: { comment, held }, stagedKey: staged?.key, at: createdAt });
           });
         } catch (err) {
           // A COMMIT can fail yet still be applied, e.g. if the connection dropped mid-commit: the comment is then there, with its file.

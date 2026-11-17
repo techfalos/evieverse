@@ -105,8 +105,9 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    * the post's one count, all of them, whichever feed a like came from.
    *
    * `origin`, on a repost of a post on another server: the original's address and who published
-   * it there, with `publisher` the one who reposted it here. The preview is the original's, and so
-   * are the bytes, which this server doesn't hold: `contentUrl` leads to them, and there is no
+   * it there, with `publisher` the one who reposted it here, and `attestedAt`, when the original's
+   * server signed what is shown of it here (see POST /repost/refresh). The preview is the
+   * original's, and so are the bytes, which this server doesn't hold: `contentUrl` leads to them, and there is no
    * `size` or whole `text` to give.
    */
   app.get('/content/:contentId', async (req) => {
@@ -131,7 +132,7 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
       createdAt: iso(row.created_at),
       updatedAt: iso(meta.updatedAt),
       ...(reposts.length > 0 && { reposts }),
-      ...(meta.origin && { origin: meta.origin }),
+      ...(meta.origin && { origin: { ...meta.origin, ...(meta.originAttestedAt !== undefined && { attestedAt: iso(meta.originAttestedAt) }) } }),
       ...(ad && { ad: adRecord(ad, say(req, msg('ad.sponsored')), config.publicBaseUrl) }),
     };
   });
@@ -171,12 +172,22 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    * post that is this server's to speak for. A repost of a post on another server isn't: it is
    * 409, with the original's address in `origin`, which is where its attestation is had.
    *
+   * A 404 here is signed too: beside its `error` it carries `gone`, an attestation that says no
+   * post is published at the address (see AttestedGone). It is what tells a server that holds a
+   * repost of a post deleted here to delete its repost (POST /repost/refresh there). It is given
+   * for whatever isn't published, which is all a 404 says of it: a post that was deleted, one that
+   * waits in the moderation queue, and an id that was never a post's.
+   *
    * 400 on a server that signs nothing (it has no REPOSTS_SIGNING_KEYS, or no PUBLIC_BASE_URL to
-   * say where its posts are).
+   * say where its posts are). Its 404 is a bare one.
    */
   app.get('/content/:contentId/attestation', async (req, reply) => {
     const { contentId } = Params.parse(req.params);
-    const row = await loadPublished(db, contentId);
+    const row = await loadPublished(db, contentId).catch((err) => {
+      if (!(err instanceof HttpError) || err.statusCode !== 404 || !signingKey || ownBase === null) throw err;
+      const gone = attest(signingKey, { url: postAddress(ownBase, contentId.toLowerCase()), gone: true }, now());
+      throw new HttpError(404, err.text, undefined, { gone }, { 'cache-control': 'no-store' });
+    });
     const meta = await requireMeta({ db, content }, contentId);
     if (meta.origin) throw new HttpError(409, msg('attestation.is_repost', { url: meta.origin.url }), undefined, { origin: { url: meta.origin.url } });
     if (!signingKey || ownBase === null) throw badRequest(msg('attestation.off'));

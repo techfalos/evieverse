@@ -430,16 +430,31 @@ export class Compactor {
       await lease.check();
       // The post's comments, which only the content store lists by post: while the row is still there, so a run that fails here finds them again.
       await this.deps.comments.removeAll(d.id);
-      // The files of its writes that were never applied, and never will be: while the rows that name them are still there, for the same reason.
-      for (const { staged_key: staged } of await db.selectFrom('pending_writes').select('staged_key').where('content_id', '=', d.id).where('staged_key', 'is not', null).execute()) {
-        await content.removeStaged(staged!);
-      }
-      // And the files of the writes that were applied, kept for the links that were given to them (see applyPending): gone with the post, whatever time they had left.
+      // The files of the writes that were applied, kept for the links that were given to them (see applyPending): gone with the post, whatever time they had left.
       const kept = await db.selectFrom('staged_removals').select('staged_key').where('content_id', '=', d.id).execute();
       for (const { staged_key: staged } of kept) await content.removeStaged(staged);
       if (kept.length) await db.deleteFrom('staged_removals').where('content_id', '=', d.id).execute();
-      // Likes, feed_queue rows, pending writes and the places of reposts cascade, and so do the rows of the comments that waited in a queue.
-      await db.deleteFrom('content').where('id', '=', d.id).where('delete_requested_at', 'is not', null).execute();
+      // The files of its writes that were never applied, and never will be: while the rows that name them are still there, for the same reason.
+      // And then the row, once every one of them is gone: a comment takes no lock on its post, so one that read the post before it was set for
+      // deletion may commit its row, and the file it staged, as late as this. The row is locked for the last look, which waits for such a
+      // commit and lets no other begin. Nothing begins once the deletion is set, so the look is rarely made twice.
+      const removed = new Set<string>();
+      const stagedBy = (reader: Pick<typeof db, 'selectFrom'>) => reader.selectFrom('pending_writes').select('staged_key').where('content_id', '=', d.id).where('staged_key', 'is not', null).execute();
+      for (let gone = false; !gone; ) {
+        for (const { staged_key: staged } of await stagedBy(db)) {
+          if (removed.has(staged!)) continue;
+          await content.removeStaged(staged!);
+          removed.add(staged!);
+        }
+        gone = await db.transaction().execute(async (trx) => {
+          const row = trx.selectFrom('content').select('id').where('id', '=', d.id);
+          if (this.cfg.db.dialect !== 'sqlite') await row.forUpdate().execute();
+          if ((await stagedBy(trx)).some(({ staged_key: staged }) => !removed.has(staged!))) return false;
+          // Likes, feed_queue rows, pending writes and the places of reposts cascade, and so do the rows of the comments that waited in a queue.
+          await trx.deleteFrom('content').where('id', '=', d.id).where('delete_requested_at', 'is not', null).execute();
+          return true;
+        });
+      }
       await summaries.remove([{ contentId: d.id, createdAt: d.createdAt, repostedAt: d.repostedAt }]);
       await content.remove(d.id);
       deleted.push(d.id);

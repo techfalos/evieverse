@@ -2,7 +2,7 @@
   "name": "evieverse",
   "version": "0.1.0",
   "description": "Open source social media server: image, video, audio, text and link posts, hashtags, likes, and feeds planned from a per-hashtag index in Redis.",
-  "license": "SEE LICENSE IN LICENSE.md",
+  "license": "See Modified AGPLv3 License in LICENSE.md",
   "private": true,
   "type": "module",
   "engines": {

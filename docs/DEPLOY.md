@@ -158,7 +158,7 @@ Run `terraform plan` first and read what it will destroy.
 
 ## Upgrading to the compactor as the only writer
 
-In earlier versions the requests wrote posts and comments to the bucket themselves. Now they commit to the database, and the [compactor](#compactor) writes everything out. The two don't mix: a function or a node of the version before still writes the bucket itself, beside a compactor that now does. So every function and the compactor change version together, with the migrations that go with them (`0002_pending_writes`, which changes what requests write, and `0003_staged_removals`, which only adds a table):
+In earlier versions the requests wrote posts and comments to the bucket themselves. Now they commit to the database, and the [compactor](#compactor) writes everything out. The two don't mix: a function or a node of the version before still writes the bucket itself, beside a compactor that now does. So every function and the compactor change version together, with the migrations that go with them (`0002_pending_writes`, which changes what requests write, `0003_staged_removals`, which only adds a table, and `0004_unnumbered_writes`, which makes `pending_writes` again, with a key for the new comments and the likes of comments that take no write number, and copies its rows):
 
 - **With these modules,** one `apply` does it. It adds the rule that expires `staged/` to the bucket, and runs the migrations in its [first step](#deploy), before it updates the functions and the compactor. Between the migrations and the update, which is a few minutes, the functions of the version before run on the migrated database: they write a column that `0002_pending_writes` drops, so posts and updates sent then fail with a `500`. The compactor of the version before fails its passes for as long. Apply when the server is quiet, and have clients send again what failed.
 - **Where you run it yourself,** stop every API node and the compactor, migrate, and start them all on the new version. A rolling restart leaves the two versions writing at once for its length. Give the bucket a rule that deletes objects under `staged/` after 7 days, as the modules do.
@@ -202,13 +202,13 @@ The audit log is written by the functions that answer requests, in each request,
 
 ## Client addresses
 
-The limit on registrations counts by the client's address, which the server reads from `X-Forwarded-For`, as far from the end as there are proxies in front of it (`TRUST_PROXY`). Nothing can reach the functions except through the address in front, so a client can't make one up:
+The limits on registrations and on feeds (`REGISTER_RATE_LIMIT_PER_HOUR`, `FEED_RATE_LIMIT_PER_MINUTE`) count by the client's address, which the server reads from `X-Forwarded-For`, as far from the end as there are proxies in front of it (`TRUST_PROXY`). Nothing can reach the functions except through the address in front, so a client can't make one up:
 
 - **AWS:** CloudFront sends a secret header (`X-Origin-Secret`) that the functions require, since the API Gateway's own address is public.
 - **GCP:** the Cloud Run services only admit the gateway's service account. There's no `allUsers` binding.
 - **Azure:** Front Door sends the same secret header, since each Container App's own address is public.
 
-On GCP and Azure the number of proxies (`trust_proxy`, 2) wasn't checked against a live deployment. After the first apply, make a request and look at `remoteAddress` in the function's request log: it should be your own public address. If it's a Google or Microsoft address, raise `trust_proxy` by one; if it's something a client could choose, lower it.
+On GCP and Azure the number of proxies (`trust_proxy`, 2) wasn't checked against a live deployment. After the first apply, make a request and look at `remoteAddress` in the function's request log: it should be your own public address. If it's a Google or Microsoft address, raise `trust_proxy` by one; if it's something a client could choose, lower it. Check it before the deployment has readers: while every reader is seen as the same Google or Microsoft address, they share one address's 120 feeds a minute, and all get `429` once those are used. `FEED_RATE_LIMIT_PER_MINUTE = "0"` in `environment` turns that limit off until it's checked.
 
 ## Compactor
 

@@ -8,7 +8,8 @@ import { BlockList, isIP, type LookupFunction } from 'node:net';
  * one that only this server can reach (the cloud's metadata service, the database's host, a
  * neighbour in its network), and have the server ask it for them. So a request is made only:
  *
- * - over https, to a certificate that is the host's;
+ * - over https, to a certificate that is the host's, on the port https has (443) and no other:
+ *   a server answers for itself there, and the request is no way to try a host's other ports;
  * - to an address on the public internet, checked on the addresses the name resolves to as the
  *   connection is made, so that a name can't resolve to one address when it is checked and to
  *   another when it is connected to;
@@ -26,7 +27,9 @@ const MAX_BYTES = 64 * 1024;
  * The addresses that aren't the public internet's, as IANA's registries of special-purpose
  * addresses list them: this host, private networks, link-local (where clouds keep their metadata
  * services), carrier-grade NAT, documentation, multicast, what is reserved, and the IPv6 ranges
- * that carry an IPv4 address inside them (NAT64, 6to4, Teredo), which could carry a private one.
+ * that carry an IPv4 address inside them, which could carry a private one: IPv4-compatible
+ * (::/96, which this host's own :: and ::1 are in), IPv4-translated (::ffff:0:0:0/96), NAT64,
+ * 6to4 and Teredo. And site-local (fec0::/10), which was IPv6's private range before fc00::/7.
  * An IPv4 address written as IPv6 (::ffff:10.0.0.1) is held to the IPv4 ranges.
  */
 const NOT_PUBLIC = blockList(
@@ -47,7 +50,7 @@ const NOT_PUBLIC = blockList(
     '224.0.0.0/4',
     '240.0.0.0/4',
   ],
-  ['::/128', '::1/128', '64:ff9b::/96', '64:ff9b:1::/48', '100::/64', '2001::/23', '2001:db8::/32', '2002::/16', 'fc00::/7', 'fe80::/10', 'ff00::/8'],
+  ['::/96', '::ffff:0:0:0/96', '64:ff9b::/96', '64:ff9b:1::/48', '100::/64', '2001::/23', '2001:db8::/32', '2002::/16', 'fc00::/7', 'fe80::/10', 'fec0::/10', 'ff00::/8'],
 );
 
 /** A block list of the ranges given, each as `<address>/<prefix length>`. */
@@ -85,13 +88,15 @@ const publicLookup: LookupFunction = (hostname, options, callback) => {
 
 /**
  * What the server at `address` answers a GET with, read as JSON, under the rules above. Throws for
- * an address that isn't https or isn't public, an answer that isn't 200 (a redirect among them),
- * that is too long or too late, or that isn't JSON.
+ * an address that isn't https, names a port or isn't public, an answer that isn't 200 (a redirect
+ * among them), that is too long or too late, or that isn't JSON.
  */
 export function fetchPublicJson(address: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const url = new URL(address);
     if (url.protocol !== 'https:') return reject(new Error(`${url.origin} is not an https address`));
+    // The URL parser leaves out the port that is https's own, so one that is there is another.
+    if (url.port !== '') return reject(new Error(`${url.origin} is not on the port of https, which is the only one asked`));
     // A host written as an address is connected to as it is, with no name to resolve: it is checked here.
     const host = url.hostname.replace(/^\[|\]$/g, '');
     if (isIP(host) && !isPublicAddress(host)) return reject(new Error(`${host} is not an address on the public internet`));

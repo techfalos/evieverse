@@ -1,6 +1,6 @@
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { attest, AttestedPost, publishedKey, readAttestation, seedOf, signedBy, signingKeys, type Attestable } from '../src/attestation.js';
+import { attest, AttestedGone, AttestedPost, publishedKey, readAttestation, saysGone, seedOf, signedBy, signingKeys, type Attestable } from '../src/attestation.js';
 import type { SigningKey } from '../src/attestation.types.js';
 import { loadConfig } from '../src/config.js';
 import { fetchPublicJson, isPublicAddress } from '../src/http/publicFetch.js';
@@ -107,6 +107,18 @@ describe('attestations', () => {
     }
   });
 
+  it('signs that there is no post at an address, which reads as that and not as a post', () => {
+    const read = readAttestation(attest(key, { url: POST.url, gone: true }, 1_700_000_000_000))!;
+    expect(read.payload).toEqual({ v: 1, kid: key.id, issuedAt: 1_700_000_000_000, url: POST.url, gone: true });
+    expect([signedBy(key, read), signedBy(other, read)]).toEqual([true, false]);
+    expect([saysGone(read.payload), AttestedGone.safeParse(read.payload).success, AttestedPost.safeParse(read.payload).success]).toEqual([true, true, false]);
+    // A post's attestation doesn't say so, and nothing else does: it is said with `true`, of an address that is one post's.
+    const post = readAttestation(attest(key, POST, 0))!.payload;
+    expect([saysGone(post), AttestedGone.safeParse(post).success]).toEqual([false, false]);
+    for (const not of [null, 'gone', [true], { gone: 'true' }, { gone: 1 }, { gone: false }]) expect(saysGone(not), JSON.stringify(not)).toBe(false);
+    expect(AttestedGone.safeParse({ v: 1, kid: key.id, issuedAt: 0, url: `${POST.url}/raw`, gone: true }).success).toBe(false);
+  });
+
   it("knows this server's own address, and the address of a post under it", () => {
     expect(ownAddress('')).toBeNull();
     expect(ownAddress('not an address')).toBeNull();
@@ -128,6 +140,8 @@ describe('requests to an address somebody else chose', () => {
       ...['192.0.2.1', '198.51.100.1', '203.0.113.1', '198.18.0.1', '192.0.0.1', '224.0.0.1', '240.0.0.1', '255.255.255.255'],
       // The same in IPv6, and IPv6 addresses that carry an IPv4 one.
       ...['::', '::1', 'fe80::1', 'fc00::1', 'fd12:3456::1', 'ff02::1', '2001:db8::1', '::ffff:10.0.0.1', '::ffff:127.0.0.1', '::ffff:169.254.169.254', '64:ff9b::a00:1', '2002:a00:1::', '2001::1'],
+      // The older ways of writing an IPv4 address as an IPv6 one, a public one too, and the range that was IPv6's private one.
+      ...['::10.0.0.1', '::a00:1', '::127.0.0.1', '::169.254.169.254', '::8.8.8.8', '::ffff:0:10.0.0.1', '::ffff:0:a9fe:a9fe', 'fec0::1', 'feff::1'],
       // What isn't an address at all.
       ...['', 'localhost', 'other.example', '10.0.0', '8.8.8.8:443', '[::1]'],
     ];
@@ -139,9 +153,14 @@ describe('requests to an address somebody else chose', () => {
     await expect(fetchPublicJson('not an address')).rejects.toThrow();
     await expect(fetchPublicJson('https://127.0.0.1/repost/keys')).rejects.toThrow('127.0.0.1 is not an address on the public internet');
     await expect(fetchPublicJson('https://169.254.169.254/latest/meta-data/')).rejects.toThrow('169.254.169.254 is not an address on the public internet');
-    await expect(fetchPublicJson('https://10.1.2.3:8443/repost/keys')).rejects.toThrow('10.1.2.3 is not an address on the public internet');
+    await expect(fetchPublicJson('https://10.1.2.3/repost/keys')).rejects.toThrow('10.1.2.3 is not an address on the public internet');
     await expect(fetchPublicJson('https://[::1]/repost/keys')).rejects.toThrow('::1 is not an address on the public internet');
     await expect(fetchPublicJson('https://[::ffff:10.0.0.1]/repost/keys')).rejects.toThrow('is not an address on the public internet');
+    await expect(fetchPublicJson('https://[::10.0.0.1]/repost/keys')).rejects.toThrow('::a00:1 is not an address on the public internet');
+    // Nor of any port but the one https has, on a public address either: the port that is its own is the one left out.
+    await expect(fetchPublicJson('https://other.example:8443/repost/keys')).rejects.toThrow('https://other.example:8443 is not on the port of https');
+    await expect(fetchPublicJson('https://93.184.216.34:22/repost/keys')).rejects.toThrow('https://93.184.216.34:22 is not on the port of https');
+    await expect(fetchPublicJson('https://127.0.0.1:443/repost/keys')).rejects.toThrow('127.0.0.1 is not an address on the public internet');
     // An address written as a number is the address the URL parser makes of it.
     await expect(fetchPublicJson('https://2130706433/repost/keys')).rejects.toThrow('127.0.0.1 is not an address on the public internet');
     await expect(fetchPublicJson('https://0x7f.1/repost/keys')).rejects.toThrow('127.0.0.1 is not an address on the public internet');

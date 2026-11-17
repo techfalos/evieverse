@@ -2,7 +2,8 @@ import type { ContentMeta, Publisher, StagedBytes, Summary } from './storage/ind
 
 /**
  * One write of content, new or an update, as contentWriter's `write` takes it. The routes make it:
- * /store for a post, and /repost for the entry that stands for a post on another server.
+ * /store for a post, /repost for the entry that stands for a post on another server, and
+ * /repost/refresh for an update of such an entry, from a later attestation of the original.
  */
 export interface ContentWrite {
   publisher: Publisher;
@@ -17,6 +18,12 @@ export interface ContentWrite {
    * written in between, and the content's hashtags are read again as it commits.
    */
   seenSeq?: number;
+  /**
+   * An update that holds only for the content as the request read it: if something was written to
+   * the content since then (see `seenSeq`), this is called as the write commits, with the meta
+   * file as it is by then and the content's row locked, and throws to refuse the write.
+   */
+  recheck?: (current: ContentMeta) => void;
   /** Names the content id; `updatedAt` is when this write is made. What the request answers with: nothing of it is stored here. */
   summary: Summary;
   /** The meta file the write makes: the compactor writes it, with the size `stageBytes` returns in place of the one it has. */

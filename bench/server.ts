@@ -47,8 +47,9 @@ const COMMENTS_EACH = 20;
  * Starts a server as `npm run dev` runs one, listening on `host` and `port`: SQLite in a file,
  * content and summaries in a directory (both in `dir`), the feed index in the process, and the
  * compactor running in it, all with the settings a server has by default. It logs each request as
- * a server does, to nowhere. Two things differ, without which there would be no load to measure:
- * a user may post and comment as often as they like, and is never asked to solve a challenge for it.
+ * a server does, to nowhere. Three things differ, without which there would be no load to measure:
+ * a user may post and comment as often as they like, and is never asked to solve a challenge for it,
+ * and feeds are read as often as they are asked for, however many at once: the load is one address.
  *
  * It starts with `posts` posts, written through the app's own routes so that everything a write
  * leaves is there, and spread over the last 30 days as the testbed's are (testbed/seed/seed.ts):
@@ -77,6 +78,8 @@ export async function startServer({
       // The users are registered from one address, by an admin, whose requests count like anyone's.
       registerRateLimitPerHour: 1_000_000,
       postRateLimitPerMinute: 0,
+      // The load is one address, and at its largest more connections than a server answers feeds for at a time.
+      feed: { rateLimitPerMinute: 0, maxConcurrent: 0 },
       challenge: { postWindowSeconds: 0, commentsPerMinute: 0 },
       comments: { perMinute: 0 },
     },

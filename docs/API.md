@@ -27,7 +27,8 @@ Names in capitals, such as `FEED_PAGE_SIZE`, are an instance's settings ([`.env.
 | [`GET /content/:contentId/raw`](#get-contentcontentid) | Anyone | A post's bytes. |
 | [`DELETE /content/:contentId`](#delete-contentcontentid) | The publisher, or an admin | Deletes a post. |
 | [`POST /repost`](#post-repost) | Any user | Reposts someone else's post: gives it more hashtags, under which it shows as a new post, as it does to the reposter's followers. |
-| [`GET /content/:contentId/attestation`](#attestations) | Anyone | A post as the instance signs it, for a repost of it on another server. |
+| [`POST /repost/refresh`](#refreshing-a-repost) | Any user | Brings the instance's entry for a post on another server up to what that server now signs of it: its summary as it is now, or that it's gone. |
+| [`GET /content/:contentId/attestation`](#attestations) | Anyone | A post as the instance signs it, for a repost of it on another server. Where there's no post, a signed word of that. |
 | [`GET /repost/keys`](#attestations) | Anyone | The public keys the instance signs its posts' attestations with. |
 | [`POST /like`](#post-like) | Any user | Likes a post, or a comment on one. |
 | [`POST /report`](#post-report) | Any user | Reports a post, or a comment on one, to the server's moderators. |
@@ -102,9 +103,9 @@ Errors are JSON, `{ error, details? }`. A request that doesn't validate gets `40
 | `422` | [Moderation](#moderation) refused the post, or the comment. |
 | `426` | For the CLI only: the instance ships another build of it ([CLI.md](CLI.md#for-everyone)). |
 | `428` | The request needs a [challenge](#challenges) solved. |
-| `429` | Too many requests: registrations from one address, posts in a minute, upload links in a minute, messages in a minute, comments in a minute, or reports in an hour. |
+| `429` | Too many requests: registrations or [feeds](#get-feed) from one address, posts in a minute, upload links in a minute, messages in a minute, comments in a minute, or reports in an hour. |
 | `501` | The instance's content store can't sign upload links ([`POST /uploads`](#post-uploads)). |
-| `503` | An unfollow was made, but the following feed couldn't be updated: send it again. |
+| `503` | An unfollow was made, but the following feed couldn't be updated: send it again. Also a [feed](#get-feed) asked for while the instance is answering as many as it does at a time: `Retry-After` says when to try again. |
 
 ## Challenges
 
@@ -447,7 +448,7 @@ The whole text is in [`GET /content/:contentId`](#get-contentcontentid).
 
 Returns the publisher credit first: `publisher: { userId, username }`. Then come `contentId`, `preview`, `text` (a text post's whole text, or a caption), `tags`, `likes`, `mimeType`, `aiGenerated`, `comments` (whether the post takes [comments](#comments)), `size`, `contentUrl`, `createdAt` and `updatedAt`. Where the instance shows [ads](#ads) on posts, `ad` comes last: one ad to show at the post's end, `{ adId, label, kind, imageUrl?, text?, url? }`, as in [`GET /feed`](#get-feed). A post with no ad to show has none.
 
-A post that was [reposted](#post-repost) also has `reposts`, the reposts made of it, and a repost of a [post on another server](#a-post-on-another-server) has `origin`, and neither `size` nor `text`.
+A post that was [reposted](#post-repost) also has `reposts`, the reposts made of it, and a repost of a [post on another server](#a-post-on-another-server) has `origin`, and neither `size` nor `text`. Its `origin` has `attestedAt` here: when the original's server signed what the instance shows of it.
 
 `GET /content/:contentId/raw` streams the content's bytes as they are now, with their content type. The link stays the same across updates, so a cache or CDN in front decides how long a copy is good for. On stores that support presigned URLs (S3, GCS, ...), it redirects to one instead, valid for `CONTENT_SIGNED_URL_SECONDS` (900). Azure Blob Storage isn't one of them: the server signs links to upload with there, but streams the bytes to read. Bytes the server streams itself come with `X-Content-Type-Options: nosniff` and a `Content-Security-Policy` that sandboxes them: a browser shows or plays the file, and a page opened on it runs no script.
 
@@ -544,23 +545,25 @@ The instance checks the attestation before it uses anything in it, whether or no
 | --- | --- |
 | `400` | It isn't written as an attestation, or doesn't say what one says of a post: `details` names the part. The original's address must end in `/content/<contentId>`, with no query, fragment or credentials. |
 | `400` | It was signed more than 10 minutes ago, or by a clock more than a minute ahead of the instance's. Get a new one, and send it straight away. |
-| `400` | The original's address isn't an `https` one. |
+| `400` | The original's address isn't an `https` one, or names a port: a server's keys are asked for on the port `https` has (443), and on no other. |
+| `400` | It says the post is gone ([below](#attestations)): there's nothing to repost. |
 | `400` | It isn't signed with a key of the server at the address it names. A server signs only for its own address, so an attestation made up by a client, changed on the way, or signed by another server, is refused here. |
 | `400` | It's signed, and says of an image, a video or an audio no content type of that kind. |
 | `502` | The original's server didn't give its keys, so the signature couldn't be checked. The instance doesn't ask that server again for a minute. |
 | `429` | Your reposts had the instance ask other servers for their keys more than 10 times in a minute. `Retry-After` says when to try again. Reposts from servers whose keys the instance already has aren't counted. |
 
-To check the signature, the instance asks the original's server for its public keys ([`GET /repost/keys`](#attestations) there, over `https`), and keeps them for 3 hours. That's the one request an instance makes of another server: everything else of a repost between servers is carried by the client. When an attestation names a key the instance doesn't have, it asks again, at most once a minute. So an attestation signed with a key its server has just changed to can be refused (`400`) for up to a minute.
+To check the signature, the instance asks the original's server for its public keys ([`GET /repost/keys`](#attestations) there, over `https`, on port 443), and keeps them for 3 hours. That's the one request an instance makes of another server: everything else of a repost between servers is carried by the client. When an attestation names a key the instance doesn't have, it asks again, at most once a minute. So an attestation signed with a key its server has just changed to can be refused (`400`) for up to a minute.
 
 An original that is itself a repost of a post elsewhere isn't its server's to attest: `GET /content/:contentId/attestation` answers `409` for it, with the address of the post it reposts in `origin.url`. Ask that post's server instead, so a post has one address wherever it's reposted from.
 
 The first repost of an original makes the instance's entry for it: a post of the reposter's that is a link to the original, with the original's summary.
 - **It's a new post, and passes what a new post does.** Its type must be one the instance [takes](#post-store) (`400`). It's [moderated](#moderation): it gets a trust score from what there is of it to read (the preview's text or link, the original's address, its publisher's name), which can refuse it (`422`) or hold it in the [moderation queue](#the-moderation-queue), and its hashtags follow their rules. It's a post as far as [challenges](#challenges) and the limit on posts a minute go.
 - **The response** is `201` with `{ contentId, tags, preview, aiGenerated, origin }`, plus `removedTags` when moderation dropped some of its hashtags, or `202` with `status: "pending_review"` beside them when it's held. `contentId` is the entry's id here, and `preview` is the original's, as its server attested it, cut to this instance's [preview](#previews) length.
-- **It shows like any post, with `origin`.** Feed records and `GET /content/:contentId` carry `origin: { url, publisher: { userId, username } }`: the original's address, and who published it there. Their `publisher` is the user who reposted it here, whose post the entry is.
+- **It shows like any post, with `origin`.** Feed records and `GET /content/:contentId` carry `origin: { url, publisher: { userId, username } }`: the original's address, and who published it there. Their `publisher` is the user who reposted it here, whose post the entry is. `GET /content/:contentId` adds `origin.attestedAt`: when the original's server signed what is shown.
+- **Show the original's server beside its publisher's name.** `origin.publisher.username` is a name on the server at `origin.url`, and nothing more. The attestation says that server said it, not who the person is: anyone can run a server and attest posts under any name, one that is somebody's on this instance among them. So show the host of `origin.url` with the name (`Dana of the North` on `other.example`), never the name alone. And `origin.publisher.userId` is an id on that server: don't link it to a user of this instance, or show it as one.
 - **Its bytes stay where the original is.** An image's, video's or audio's `preview.url` is the original's, `<origin.url>/raw`, and `GET /content/:contentId/raw` redirects there (`302`). `GET /content/:contentId` has no `size` for it, and no whole `text`.
 - **It takes no comments, and has no update** (`400`): what it shows is the original's. Its owner deletes it like any post.
-- **The summary is the original's server's word, as of the repost.** The instance checks who signed it, and doesn't read the original, then or later: an edit or a deletion there doesn't show here, and a server is free to say what it likes of its own posts. An image's, video's or audio's bytes aren't signed: they're read at the original's address.
+- **The summary is the original's server's word, as of `origin.attestedAt`.** The instance checks who signed it, and doesn't read the original, then or later. So an edit or a deletion there shows here only once somebody [brings a later attestation](#refreshing-a-repost) of the original; until then the entry says what the post was. And a server is free to say what it likes of its own posts. An image's, video's or audio's bytes aren't signed: they're read at the original's address.
 
 An instance holds one entry per original, however many users repost it:
 - **A repost of an original the instance already has an entry for is a repost of that entry,** exactly as if it had named the entry's `contentId`: it gives the entry hashtags, shows it to the reposter's followers, and is answered as [above](#post-repost), with `repostedAt`. The user who made the entry has reposted the original already (`409`).
@@ -570,6 +573,42 @@ An instance holds one entry per original, however many users repost it:
 An instance can refuse reposts of posts on other servers alone (`REPOSTS_REMOTE=false`): they get `400`, and reposts of its own posts stay on.
 
 The [CLI](CLI.md) does both steps with `evieverse repost https://other.example/content/<contentId> --tags travel`: it gets the post's attestation from the other server, and sends it here.
+
+#### Refreshing a repost
+
+An instance's entry for a post on another server holds the original's summary as it was when it was last attested, and the instance asks the other server nothing about it afterwards. `POST /repost/refresh` is how it learns what the original became: a client asks the original's server for its attestation again ([`GET /content/:contentId/attestation`](#attestations) there), and sends what it got here, as a repost sends it:
+
+```json
+{ "userId": "...", "apiKey": "...", "origin": { "attestation": "eyJ2IjoxLCJraWQiOiI…" } }
+```
+
+Authenticated. Any user can send it, not only those who reposted the original: it's the original's server that says what the post is, and the user only carries its word. A [banned](#bans) user is refused (`403`).
+
+What to send is whichever the original's server gave:
+- **Its `attestation`,** if the post is there (`200`). The entry takes the post's summary as it is now: its publisher's name there, its AI declaration and its preview.
+- **Its `gone`,** if the post isn't (`404` there, with `gone` beside the `error`). It's sent in `origin.attestation` like the other, and has the entry deleted.
+
+The attestation is [checked as a repost's is](#a-post-on-another-server), with the same refusals, except that one which says the post is gone is taken. Then:
+
+| Status | When |
+| --- | --- |
+| `200` | The entry was brought up to date: `{ contentId, tags, preview, aiGenerated, origin }`, plus `removedTags` when what it now says cost it hashtags. |
+| `200` | It says what the entry says already: `{ contentId, unchanged: true }`. Nothing was written. |
+| `202` | It says the post is gone: `{ contentId, status: "pending_deletion", requestedAt }`. The entry is set for deletion, as by [`DELETE /content/:contentId`](#delete-contentcontentid): it can't be read from then on, and the compactor's next run takes it out of every feed, with the places reposts gave it. If the post is there again later, it can be reposted anew. |
+| `202` | What it now says is held in the [moderation queue](#the-moderation-queue): `status: "pending_review"` beside the fields of a `200`. The entry is out of the feeds until it's accepted. |
+| `400` | The attestation's address is on this instance: there's nothing to refresh of its own posts. |
+| `400` | It says the post is of another content type than the entry's. A post keeps its type, and the entry stays as it was. |
+| `404` | The instance has no entry for that original, or one that is set for deletion already. |
+| `409` | It was signed no later than the attestation the entry is from (`origin.attestedAt`). So an attestation somebody kept doesn't bring back what the post was. |
+| `409` | Another refresh was written to the entry as this one arrived, and nothing was changed. Send it again. |
+| `422` | What it now says is something the instance doesn't trust enough to keep. The entry stays as it was. |
+| `429` | Your refreshes changed entries more than 10 times in a minute. `Retry-After` says when to try again. One that changes nothing isn't counted. |
+
+- **What the entry now says is [moderated](#moderation) as an update of a post is,** in the name of the entry's owner: it gets a trust score, and its hashtags are held to their rules. A hashtag whose blocked words it now has comes off it, one a repost gave it too, and is listed in `removedTags`.
+- **It shows as an update does:** `GET /content/:contentId` has it at once, with the new `origin.attestedAt`, and the feeds after the compactor's next run. The entry stays its owner's post, where it was, with the hashtags reposts gave it.
+- **Nobody is told.** The entry's owner gets no notice when it's changed or deleted this way.
+- **Nothing refreshes an entry by itself.** One that nobody brings a later attestation for stays as it was. A client that shows a repost can compare `origin.attestedAt` with how fresh it wants it, and refresh it.
+- **An instance that takes no reposts of posts on other servers** (`REPOSTS_REMOTE=false`, or `REPOSTS=false`) takes no refreshes either (`400`). The entries it has stay as they are.
 
 #### Attestations
 
@@ -588,8 +627,10 @@ curl localhost:3000/content/$CONTENT_ID/attestation
 - **Ask for it when you use it.** It's signed as of the request, and other servers take it for 10 minutes. It comes with `Cache-Control: no-store`.
 - **Send it on whole.** A client has no need to read it, and a change to it makes the signature wrong.
 - **Only a published post has one.** A post that isn't there, is set for deletion, or waits in the [moderation queue](#the-moderation-queue) gets `404`, to its publisher too.
+- **The `404` is signed too.** Beside its `error` it has `gone`: an attestation that says there's no post at the address, for a client to send to the servers that hold a repost of one that was ([`POST /repost/refresh`](#refreshing-a-repost) there). It's the same for all three, so it says no more than the `404` does. So a post that an update sent to the moderation queue can be deleted from other servers while it waits, if somebody carries this to them. Once it's accepted, it's reposted there anew.
 - **Only a post that is the instance's own has one.** Its entry for a [post on another server](#a-post-on-another-server) gets `409`, with `origin: { url }` beside the `error`: the address of the original, whose server is the one to ask.
-- **An instance that signs nothing gives none** (`400`): one with no signing key (`REPOSTS_SIGNING_KEYS`), or no address of its own (`PUBLIC_BASE_URL`). Its posts are reposted only on the instance itself. It still takes reposts of posts on servers that sign.
+- **An instance that signs nothing gives none** (`400`): one with no signing key (`REPOSTS_SIGNING_KEYS`), or no address of its own (`PUBLIC_BASE_URL`). Its posts are reposted only on the instance itself, and its `404` has no `gone`. It still takes reposts of posts on servers that sign.
+- **An instance whose address names a port** (`PUBLIC_BASE_URL=https://api.example.com:8443`) signs attestations that other servers refuse: they ask for keys on port 443 only.
 
 An attestation is two parts in base64url with a dot between them: a JSON payload, and its Ed25519 signature. The payload:
 
@@ -610,6 +651,13 @@ An attestation is two parts in base64url with a dot between them: a JSON payload
 | `publisher` | `{ userId, username }`: who published the post here. |
 | `mimeType`, `aiGenerated` | The post's content type and AI declaration. |
 | `preview` | The post's [preview](#previews). An image's, video's or audio's has its caption, if it has one, and no `url`: the file is read at the post's address. |
+
+The one that says there's no post has `gone` in place of everything about a post:
+
+```json
+{ "v": 1, "kid": "9f2c4e1a7b3d5c60", "issuedAt": 1794319320000,
+  "url": "https://other.example/content/0b7c0f5e-…", "gone": true }
+```
 
 What is signed is the payload's part exactly as it's written, in base64url, after the prefix `evieverse-repost-attestation-v1.`.
 
@@ -998,6 +1046,14 @@ Each record is `{ contentId, publisher: { userId, username }, mimeType, aiGenera
 - A session can miss a post that came to be ahead of where it had got to: one liked past that point between two pages of a `popular` feed, or one that reached the index late. It's there when the reader starts over.
 - Later pages must ask for the same `tags`, `hours`, `algorithm`, `addRelated`, `aiGenerated` and `moderated`, otherwise `400`.
 - A cursor doesn't expire. One issued by an earlier release of the server gets `410`, and the client should start over; one that isn't valid gets `400`.
+
+**Limits:** a feed needs no key, so it's limited by the address it's asked from, and by how many feeds the instance is answering:
+- **One address can ask for 120 feeds a minute** (`FEED_RATE_LIMIT_PER_MINUTE`), whatever feeds they are, later pages included. One past that gets `429`, with when to try again in a `Retry-After` header. Every response says where the address stands, in the headers `x-ratelimit-limit`, `x-ratelimit-remaining` and `x-ratelimit-reset` (seconds until the count starts again). An IPv6 address is counted with the rest of its /64.
+- **An instance answers 100 feeds at a time** (`FEED_MAX_CONCURRENT`; each of its servers does, where it has several). One more gets `503` at once, rather than waiting behind them, with when to try again in a `Retry-After` header and in the body:
+  ```json
+  { "error": "the server is answering as many feeds as it can at once; try again in 1 second", "retryAfterSeconds": 1 }
+  ```
+  It says the instance is busy, not that the reader asked too often: the same request a second later is answered if a place is free.
 
 ### Related hashtags
 

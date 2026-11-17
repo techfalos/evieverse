@@ -82,8 +82,9 @@ export interface ContentTable {
    */
   origin_hash: string | null;
   /**
-   * The number of the post's last write: every write of it, or of a comment on it, adds one with the
-   * row locked, and takes the number for its row in `pending_writes` (see nextSeq).
+   * The number of the post's last numbered write: a write of the post, an edit or a removal of a
+   * comment on it, or a moderator's decision on one adds one with the row locked, and takes the
+   * number for its row in `pending_writes` (see nextSeq). A new comment and a like of one take none.
    */
   seq: Generated<number>;
 }
@@ -98,8 +99,13 @@ export type PendingKind = 'post' | 'comment_put' | 'comment_remove' | 'comment_l
  */
 export interface PendingWritesTable {
   content_id: string;
-  /** The write's number among the post's (see `content.seq`). */
+  /** The write's number among the post's (see `content.seq`); 0 for a write that took none: a new comment, a like of one. */
   seq: number;
+  /**
+   * What tells a post's writes that took no number apart, and makes a second one of the same fail:
+   * the comment's id for a new comment, `<commentId>:<userId>` for a like. '' on a numbered write.
+   */
+  write_key: Generated<string>;
   kind: PendingKind;
   /** The comment a comment's write is of; null on a post's. */
   comment_id: string | null;

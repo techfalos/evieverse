@@ -60,6 +60,8 @@ export const TABLES = [
   'reposts',
   'staged_removals',
   'pending_writes',
+  // What 0004_unnumbered_writes leaves behind if it stops halfway, where a database commits each statement of a migration.
+  'pending_writes_keyed',
   'feed_queue',
   'compactor_lease',
   'tag_pairs',
@@ -71,7 +73,8 @@ export const TABLES = [
   'kysely_migration_lock',
 ];
 
-async function resetDatabase(db: Db, dialect: TestTarget['dialect']) {
+/** Drops every table of the schema, and what the migrations keep of themselves. */
+export async function resetDatabase(db: Db, dialect: TestTarget['dialect']) {
   if (dialect === 'mysql') await sql`SET FOREIGN_KEY_CHECKS = 0`.execute(db);
   for (const t of TABLES) await db.schema.dropTable(t).ifExists().execute();
   if (dialect === 'mysql') await sql`SET FOREIGN_KEY_CHECKS = 1`.execute(db);
@@ -110,7 +113,8 @@ export const queued = async (ctx: { db: Db }) =>
  * the clock where it was, unless `challenge` says otherwise. The post window is off unless `challenge`
  * turns it on, as the challenges for comments are, and so are the limits on posts and on comments a
  * minute. So is the limit on registrations from one address, which every test's are, unless
- * `registerRateLimitPerHour` sets one.
+ * `registerRateLimitPerHour` sets one, and so are the limits on feeds, by address and at a time,
+ * unless `feed` sets them (`rateLimitPerMinute`, `maxConcurrent`).
  *
  * A request commits what it writes of posts and comments to the database, and the compactor
  * writes the stores (`pending_writes`). Here those writes are applied as soon as the request that
@@ -155,6 +159,8 @@ export async function createTestContext(
     supportEmail?: string;
     corsOrigins?: string | string[];
     compact?: Partial<Config['compact']>;
+    /** The connections the server keeps to its database, for a test of requests that are under way together. 4, unless given. */
+    poolSize?: number;
     /** Replaces the content store, which is otherwise a directory of the test's own. */
     content?: { scheme: string; options: Record<string, string> };
     maxUploadBytes?: number;
@@ -179,7 +185,7 @@ export async function createTestContext(
       publicBaseUrl: opts.publicBaseUrl ?? '',
       // Each test gets its own key prefix, so tests can share one Redis.
       redis: target.hot === 'redis' ? { url: process.env.TEST_REDIS_URL!, keyPrefix: `test:${dir.split('/').pop()}:` } : {},
-      db: { dialect: target.dialect, url: target.url, poolSize: 4 },
+      db: { dialect: target.dialect, url: target.url, poolSize: opts.poolSize ?? 4 },
       storage: {
         content: opts.content ?? { scheme: 'fs', options: { root: join(dir, 'content') } },
         summaries: { scheme: 'fs', options: { root: join(dir, 'summaries') } },
@@ -188,7 +194,7 @@ export async function createTestContext(
         ...(opts.uploadLinksPerMinute !== undefined && { uploadLinksPerMinute: opts.uploadLinksPerMinute }),
       },
       ...(opts.audit && { audit: { scheme: 'fs', options: { root: join(dir, 'audit') } } }),
-      feed: { headCacheMs: 0, ...opts.feed },
+      feed: { headCacheMs: 0, rateLimitPerMinute: 0, maxConcurrent: 0, ...opts.feed },
       challenge: { postWindowSeconds: 0, commentsPerMinute: 0, powBits: 8, minSolveMs: 0, ...opts.challenge },
       ...(opts.tagging && { tagging: opts.tagging }),
       ...(opts.postTypes && { postTypes: opts.postTypes }),

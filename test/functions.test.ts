@@ -139,6 +139,8 @@ describe('functions', () => {
       // What a repost on another server carries is read with the post, and the keys it is checked with are asked of the api function.
       ['content', 'GET', `/content/${contentId}/attestation`],
       ['api', 'GET', '/repost/keys'],
+      // A later attestation of a post on another server is brought to the function that takes reposts.
+      ['api', 'POST', '/repost/refresh'],
       ['store', 'POST', '/store'],
       ['store', 'POST', '/uploads'],
       ['api', 'POST', '/register'],

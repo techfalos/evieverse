@@ -24,7 +24,13 @@ import { MINUTE } from './time.js';
  * is read only to learn what they say.
  *
  * What it doesn't say: that the post's server tells the truth about its own posts, which it is
- * free not to; and that the post is still what it was, once the attestation is used.
+ * free not to; who the person behind a publisher's name is, which is a name on that server and
+ * nothing more; and that the post is still what it was, once the attestation is used.
+ *
+ * So a server that holds a repost is told what the post became by a later attestation of it, which
+ * anyone can bring (POST /repost/refresh): a newer one replaces the summary, and one that says the
+ * post is gone (AttestedGone), which a server signs in place of a post it no longer publishes,
+ * has the repost deleted. An older one changes nothing.
  */
 
 /** A post's address on its own server ends with its id, as GET /content/:id reads it. */
@@ -63,11 +69,11 @@ const PUBLIC_KEY = /^[A-Za-z0-9_-]{43}$/;
 const WRITTEN = /^([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{86})$/;
 
 /**
- * What an attestation says: a post, as its own server gives it. `v` is the version of this
- * format, `kid` the id of the key that signed (see PublishedKey), and `issuedAt` when, in UTC
- * epoch milliseconds, by the clock of the server that signed.
+ * What every attestation says: `v` is the version of this format, `kid` the id of the key that
+ * signed (see PublishedKey), `issuedAt` when, in UTC epoch milliseconds, by the clock of the
+ * server that signed, and `url` the post it is of.
  */
-export const AttestedPost = z.object({
+const Signed = {
   v: z.literal(1),
   kid: z.string().regex(/^[0-9a-f]{16}$/),
   issuedAt: z.number().int().min(0),
@@ -80,6 +86,11 @@ export const AttestedPost = z.object({
     const url = new URL(href);
     return POST_PATH.test(url.pathname) && !url.search && !url.hash && !url.username && !url.password;
   }).transform((href) => href.replace(POST_PATH, (path) => path.toLowerCase())),
+};
+
+/** What an attestation says of a post that is there: the post, as its own server gives it. */
+export const AttestedPost = z.object({
+  ...Signed,
   /** Who published it there. The name is one line: it is kept on a line of the summary. */
   publisher: z.object({
     userId: z.string().uuid(),
@@ -111,8 +122,22 @@ export const AttestedPost = z.object({
 });
 export type AttestedPost = z.infer<typeof AttestedPost>;
 
+/**
+ * What an attestation says of an address at which the server publishes no post: `gone`, and
+ * nothing of a post. It is what a server signs for a post it deleted, and for anything else that
+ * isn't published there, which it doesn't tell apart for anyone.
+ */
+export const AttestedGone = z.object({ ...Signed, gone: z.literal(true) });
+export type AttestedGone = z.infer<typeof AttestedGone>;
+
 /** What a server says of a post to attest it: all of an attestation but what signing adds. */
 export type Attestable = Omit<AttestedPost, 'v' | 'kid' | 'issuedAt'>;
+
+/** What a server says of an address it publishes no post at, to attest that. */
+export type AttestableGone = Omit<AttestedGone, 'v' | 'kid' | 'issuedAt'>;
+
+/** Whether a payload says its post is gone: it is then read as an AttestedGone, and as a post otherwise. */
+export const saysGone = (payload: unknown): boolean => typeof payload === 'object' && payload !== null && (payload as { gone?: unknown }).gone === true;
 
 /** The id of a public key, given as it is published: the first 8 bytes of its SHA-256, in hex. */
 const keyId = (publicKey: string) => createHash('sha256').update(Buffer.from(publicKey, 'base64url')).digest('hex').slice(0, 16);
@@ -149,8 +174,8 @@ export function publishedKey(publicKey: unknown): PublishedKey | null {
   return typeof publicKey === 'string' && PUBLIC_KEY.test(publicKey) ? { id: keyId(publicKey), publicKey } : null;
 }
 
-/** The attestation of `post`, signed with `key` as of `issuedAt`. */
-export function attest(key: SigningKey, post: Attestable, issuedAt: number): string {
+/** The attestation of `post`, or of there being none at an address, signed with `key` as of `issuedAt`. */
+export function attest(key: SigningKey, post: Attestable | AttestableGone, issuedAt: number): string {
   const payload = Buffer.from(JSON.stringify({ v: 1, kid: key.id, issuedAt, ...post })).toString('base64url');
   return `${payload}.${sign(null, Buffer.from(CONTEXT + payload), key.privateKey).toString('base64url')}`;
 }

@@ -81,6 +81,18 @@ export function isUniqueViolation(err: unknown): boolean {
   );
 }
 
+/** True if the error is a foreign-key violation on any supported dialect: a row was written for a row that isn't there. */
+export function isForeignKeyViolation(err: unknown): boolean {
+  const e = err as { code?: string } | null;
+  if (!e) return false;
+  return (
+    e.code === '23503' || // postgres
+    e.code === 'ER_NO_REFERENCED_ROW_2' || // mysql
+    e.code === 'ER_NO_REFERENCED_ROW' ||
+    e.code === 'SQLITE_CONSTRAINT_FOREIGNKEY'
+  );
+}
+
 /**
  * Locks a user's row until the transaction ends, so a user's transactions that start with it take
  * turns. SQLite has no row locks and needs none here: its one connection runs one transaction at a time.

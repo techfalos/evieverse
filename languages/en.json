@@ -46,7 +46,8 @@
     "repost.attestation_invalid": "origin.attestation must be the attestation of a post, as the post's own server gives it at GET /content/<id>/attestation",
     "repost.attestation_expired": "the attestation is more than {minutes} minutes old, or from a clock that runs ahead of this server's: get a new one from the post's own server",
     "repost.attestation_unsigned": "the attestation isn't signed with a key of the post's own server, so the post wasn't reposted",
-    "repost.origin_not_https": "a post on another server is reposted from an https address",
+    "repost.origin_not_https": "a post on another server is reposted from an https address, on the port https has: no other port is asked for a server's keys",
+    "repost.origin_gone": "the attestation says there is no post at that address any more, so there is nothing to repost",
     "repost.origin_keys_unavailable": "{server} didn't give the keys it signs with, so the attestation can't be checked: try again in a minute",
     "repost.origin_rate_limited": {
       "one": "too many reposts from servers this one had to ask for their keys; try again in {count} second",
@@ -54,6 +55,15 @@
     },
     "repost.origin_mime_type": "the original is {kind}, so its attestation must give its {kind}/* content type",
     "repost.origin_unavailable": "this server's entry for the original isn't published: it waits in the moderation queue, or is being deleted",
+    "repost.refresh_own": "that post is this server's own: what it is now is what this server shows",
+    "repost.refresh_no_entry": "this server has no entry for that post, so there is nothing to refresh: repost it to make one",
+    "repost.refresh_not_newer": "this server's entry is from an attestation as new as this one, or newer, so nothing was changed",
+    "repost.refresh_type_changed": "this server's entry for the original is {original}, and the attestation says {mimeType}: a post keeps its type, so the entry is as it was",
+    "repost.refresh_raced": "the entry was written to as this arrived, so nothing was changed: send it again",
+    "repost.refresh_rate_limited": {
+      "one": "too many refreshes of reposts; try again in {count} second",
+      "other": "too many refreshes of reposts; try again in {count} seconds"
+    },
 
     "attestation.off": "this server doesn't sign its posts, so they can't be reposted on other servers",
     "attestation.is_repost": "this is a repost of a post on another server, which is the one to repost: {url}",
@@ -189,6 +199,7 @@
     "feed.tags_invalid": "tags must be one or more hashtags (letters, digits, _)",
     "feed.too_many_tags": "at most {max} tags are allowed",
     "feed.cursor_mismatch": "cursor does not match the requested tags/hours/algorithm/addRelated/aiGenerated/moderated",
+    "feed.busy": "the server is answering as many feeds as it can at once; try again in 1 second",
 
     "cursor.invalid": "invalid cursor",
     "cursor.expired": "cursor expired; request the first page again",

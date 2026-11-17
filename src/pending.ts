@@ -1,9 +1,9 @@
-import type { Transaction } from 'kysely';
-import type { Db } from './db/index.js';
+import { sql, type Transaction } from 'kysely';
+import { isForeignKeyViolation, type Db, type DbDialect } from './db/index.js';
 import type { Database } from './db/schema.js';
 import { notFound } from './http/errors.js';
 import { msg } from './language.js';
-import type { CommentLikePayload, CommentPutPayload, EffectiveComment, PendingComment, PendingPost, PendingWrite, PostPayload } from './pending.types.js';
+import type { CommentPutPayload, EffectiveComment, PendingComment, PendingPost, PendingWrite, PostPayload, UnnumberedWrite } from './pending.types.js';
 import { LINK_MIME } from './posts.js';
 import type { CommentStore, ContentMeta, ContentStore } from './storage/index.js';
 
@@ -16,10 +16,32 @@ import type { CommentStore, ContentMeta, ContentStore } from './storage/index.js
  * applyPending). So no two writers ever write one object, and a write that didn't commit wrote
  * nothing.
  *
- * Every write of a post, or of anything under it, starts its transaction by taking the post's
- * next number (see nextSeq), which locks the post's row: the writes of one post commit one at a
- * time, each with a number of its own, and the compactor applies them in that order. Content set
- * for deletion gives no number, so nothing is written to a post, or under it, once it is.
+ * There are two sorts of write, by whether another write of the same thing may cross them.
+ *
+ * - **Numbered.** A write of a post, an edit or a removal of a comment, a moderator's decision
+ *   on one: each has to know what the write before it left. It starts its transaction by taking
+ *   the post's next number (see nextSeq), which locks the post's row, so the numbered writes of
+ *   one post commit one at a time, and the compactor applies them in that order. Content set
+ *   for deletion gives no number.
+ * - **Unnumbered.** A new comment, and a like of a comment (see writeUnnumbered). Nothing they
+ *   say depends on the order they commit in: a new comment is before every other write of that
+ *   comment, and the likes of a comment are a set, a user's once (the row's key). They are what
+ *   a post that many people answer at once gets most of, so they take no number: they neither
+ *   lock the post's row nor update it, and any number of them commit side by side. The
+ *   compactor applies them before the numbered writes of what they are of.
+ *
+ * What an unnumbered write may cross is a removal: of its post, of the comment a like is of, of
+ * the comment a reply is to. None of the three brings anything back:
+ *
+ * - Content that is set for deletion is never applied (see applyPending), so a comment or a
+ *   like that commits as its post is deleted goes with the post, as one that committed just
+ *   before does.
+ * - A like of a comment that is removed is never made: the removal is applied last of the
+ *   comment's writes, and a like that finds no comment is dropped.
+ * - A reply to a comment whose removal has committed is refused, and one that committed before
+ *   it keeps the comment's place, as a placeholder. For that to hold of a reply that is under
+ *   way as the removal is applied, the compactor waits for the replies under way before it
+ *   decides what a removal leaves (see replying, awaitReplies).
  *
  * What a request reads of a post or a comment that it is about to write, or that it shows its
  * author, is the newest pending write, and the stores only where there is none (effectiveMeta,
@@ -29,13 +51,28 @@ import type { CommentStore, ContentMeta, ContentStore } from './storage/index.js
 /** The database, or a transaction of it, to read pending writes with. */
 export type PendingReader = Pick<Db, 'selectFrom'>;
 
+/** The `seq` of a write that took no number: before every numbered write of its post, which count from 1. */
+export const UNNUMBERED = 0;
+
+/**
+ * The first key of the PostgreSQL advisory locks that replying and awaitReplies take, which
+ * keeps them apart from any other advisory lock taken in the database. The second is a hash of
+ * the post's id: two posts that share one wait for each other's replies, for a moment and for
+ * nothing, and nothing else comes of it.
+ */
+const REPLY_LOCK = 1702258021;
+
 /** What a row's `payload` holds: the JSON a write stored there, which SQLite gives back as text and the others parsed. */
 export const payloadOf = <T>(payload: unknown): T => (typeof payload === 'string' ? JSON.parse(payload) : payload) as T;
 
+/** The key of a user's like of a comment among the unnumbered writes of its post: a user's second like of the comment has the same, and fails. */
+export const likeKey = (commentId: string, userId: string) => `${commentId}:${userId}`;
+
 /**
  * Takes the post's next write number, and with it the lock on the post's row until the
- * transaction ends. Null for content that isn't there or is set for deletion: nothing is written
- * to it, or under it, any more. `set` is what else the write changes of the row.
+ * transaction ends: what a numbered write begins with. Null for content that isn't there or is
+ * set for deletion: nothing is written to it, or under it, any more. `set` is what else the
+ * write changes of the row.
  */
 export async function nextSeq(trx: Transaction<Database>, contentId: string, set: { ai_generated?: number } = {}): Promise<number | null> {
   const updated = await trx
@@ -48,13 +85,17 @@ export async function nextSeq(trx: Transaction<Database>, contentId: string, set
   return Number((await trx.selectFrom('content').select('seq').where('id', '=', contentId).executeTakeFirstOrThrow()).seq);
 }
 
-/** Adds a write to `pending_writes`, in the transaction that took its number. */
-export async function insertPending(trx: Transaction<Database>, { contentId, seq, kind, commentId, payload, stagedKey, at }: PendingWrite): Promise<void> {
+/**
+ * Adds a write to `pending_writes`: a numbered one, in the transaction that took its number, or
+ * one that takes none, by its key (see writeUnnumbered).
+ */
+export async function insertPending(trx: Transaction<Database>, write: PendingWrite | UnnumberedWrite): Promise<void> {
+  const { contentId, kind, commentId, payload, stagedKey, at } = write;
   await trx
     .insertInto('pending_writes')
     .values({
       content_id: contentId,
-      seq,
+      ...('key' in write ? { seq: UNNUMBERED, write_key: write.key } : { seq: write.seq }),
       kind,
       comment_id: commentId ?? null,
       payload: payload === undefined ? null : JSON.stringify(payload),
@@ -65,16 +106,81 @@ export async function insertPending(trx: Transaction<Database>, { contentId, seq
 }
 
 /**
- * Commits a write of something under a post: a comment, a removal of one, a like of one. `commit`
- * runs in a transaction that has taken the post's next number, which it is given, and adds the
- * write's row and whatever else the write changes in the database. 404 for a post that is gone or
- * set for deletion, which nothing is written under.
+ * Says that the transaction commits a reply to a comment of the post, until it ends: what the
+ * compactor waits for before it decides what a removal leaves (see awaitReplies). To be called
+ * before the reply reads the comment it replies to.
+ *
+ * It is a lock that every reply shares: replies neither wait for each other nor for any other
+ * write, and what waits for them is the compactor alone, once a run for each post that has
+ * removals. On PostgreSQL an advisory lock, which is granted in the order it is asked for; a
+ * shared lock on the post's row is not, there, and a stream of replies would keep the compactor
+ * waiting for good. On MySQL the shared lock on the post's row, which is: the one the reply's
+ * row takes as it is inserted, for its foreign key. SQLite runs one transaction at a time.
+ */
+export async function replying(trx: Transaction<Database>, dialect: DbDialect, contentId: string): Promise<void> {
+  if (dialect === 'postgres') await sql`select pg_advisory_xact_lock_shared(${REPLY_LOCK}::int4, hashtext(${contentId}::text))`.execute(trx);
+  else if (dialect === 'mysql') await trx.selectFrom('content').select('id').where('id', '=', contentId).forShare().execute();
+}
+
+/**
+ * Waits for the replies to the post's comments that are under way to commit or fail (see
+ * replying), and lets the ones that begin meanwhile through once they have. The compactor's,
+ * before it applies the removals it has read of a post's comments. From then on, every reply to
+ * one of those comments either has committed, and is among the post's pending writes for
+ * hasReplies to find, or reads the comment after its removal committed, and is refused. So no
+ * reply is left under a comment of which nothing is.
+ */
+export async function awaitReplies(db: Db, dialect: DbDialect, contentId: string): Promise<void> {
+  if (dialect === 'sqlite') return;
+  await db.transaction().execute(async (trx) => {
+    if (dialect === 'postgres') await sql`select pg_advisory_xact_lock(${REPLY_LOCK}::int4, hashtext(${contentId}::text))`.execute(trx);
+    else await trx.selectFrom('content').select('id').where('id', '=', contentId).forUpdate().execute();
+  });
+}
+
+/**
+ * Commits a write under a post that takes no number: a new comment, or a like of a comment (see
+ * the top of this file). `commit` runs in a transaction and adds the write's row, with a key
+ * (insertPending), and whatever else the write changes in the database. The post's row is
+ * neither locked nor changed, so these writes of one post don't wait for each other.
+ *
+ * 404 for a post that is gone, or set for deletion when the transaction reads it. One that is
+ * set a moment later is deleted with the row this commits, which is never applied.
+ *
+ * `reply` is for a reply to a comment, which the compactor's removals wait for (see replying):
+ * `commit` then reads the comment it replies to, and refuses a reply to one that is gone.
+ *
+ * A write whose key is taken fails as a unique violation (isUniqueViolation), which is the
+ * caller's to answer: a user's second like of a comment. It is thrown once the transaction is
+ * over, since PostgreSQL takes nothing more in a transaction a statement failed in.
+ */
+export async function writeUnnumbered<T>(db: Db, dialect: DbDialect, contentId: string, { reply = false }: { reply?: boolean }, commit: (trx: Transaction<Database>) => Promise<T>): Promise<T> {
+  try {
+    return await db.transaction().execute(async (trx) => {
+      if (reply) await replying(trx, dialect, contentId);
+      const post = await trx.selectFrom('content').select('id').where('id', '=', contentId).where('delete_requested_at', 'is', null).executeTakeFirst();
+      if (!post) throw notFound(msg('content.not_found'));
+      return commit(trx);
+    });
+  } catch (err) {
+    // The post's row went between the read and the insert: the compactor deleted the post.
+    if (isForeignKeyViolation(err)) throw notFound(msg('content.not_found'));
+    throw err;
+  }
+}
+
+/**
+ * Commits a numbered write of something under a post: an edit of a comment, a removal of one, a
+ * moderator's decision on one. `commit` runs in a transaction that has taken the post's next
+ * number, which it is given, and adds the write's row and whatever else the write changes in the
+ * database. 404 for a post that is gone or set for deletion, which nothing is written under.
  *
  * `seen` is what the request read before it decided to write: the post's number then, and after
- * it, whatever of the post's the write depends on (`state`): a comment as it was, the comment a
- * reply is to. If the number taken isn't the one after it, something was written to the post or
- * under it meanwhile, and `read` reads the state again, inside the transaction, where no other
- * write of the post can commit before this one: `commit` gets that, and decides by it.
+ * it, whatever of the post's the write depends on (`state`): the comment as it was. If the
+ * number taken isn't the one after it, a numbered write was made to the post or under it
+ * meanwhile, and `read` reads the state again, inside the transaction, where no other numbered
+ * write of the post can commit before this one: `commit` gets that, and decides by it. What an
+ * unnumbered write does meanwhile changes nothing of a comment that is there already.
  */
 export async function writePending<S, T>(
   db: Db,
@@ -176,14 +282,26 @@ export async function pendingCommentFile(db: PendingReader, postId: string, comm
   return row?.staged_key ?? null;
 }
 
-/** Who likes the comment by a write that hasn't been applied: the users of its pending likes. */
-export async function pendingLikers(db: PendingReader, postId: string, commentId: string): Promise<Set<string>> {
-  const rows = await db
+/** Whether the user likes the comment by a write that hasn't been applied: one row, found by its key. */
+export async function pendingLike(db: PendingReader, postId: string, commentId: string, userId: string): Promise<boolean> {
+  const row = await db
     .selectFrom('pending_writes')
-    .select('payload')
+    .select('kind')
+    .where('content_id', '=', postId)
+    .where('seq', '=', UNNUMBERED)
+    .where('write_key', '=', likeKey(commentId, userId))
+    .executeTakeFirst();
+  return row !== undefined;
+}
+
+/** How many likes of the comment haven't been applied: its pending likes, each a user's own. */
+export async function pendingLikes(db: PendingReader, postId: string, commentId: string): Promise<number> {
+  const { likes } = await db
+    .selectFrom('pending_writes')
+    .select((eb) => eb.fn.countAll().as('likes'))
     .where('content_id', '=', postId)
     .where('comment_id', '=', commentId)
     .where('kind', '=', 'comment_like')
-    .execute();
-  return new Set(rows.map((row) => payloadOf<CommentLikePayload>(row.payload).userId));
+    .executeTakeFirstOrThrow();
+  return Number(likes);
 }

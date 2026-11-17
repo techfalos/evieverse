@@ -52,6 +52,8 @@ const ENV_MAP: Record<string, string> = {
   REPOSTS_SIGNING_KEYS: 'reposts.signingKeys',
   FEED_PAGE_SIZE: 'feed.pageSize',
   FEED_MAX_PAGE_SIZE: 'feed.maxPageSize',
+  FEED_RATE_LIMIT_PER_MINUTE: 'feed.rateLimitPerMinute',
+  FEED_MAX_CONCURRENT: 'feed.maxConcurrent',
   FEED_TAG_DAY_MAX_POSTS: 'feed.tagDayMaxPosts',
   FEED_TAG_DAY_MIN_POSTS: 'feed.tagDayMinPosts',
   FEED_TAG_RETENTION_DAYS: 'feed.tagRetentionDays',
@@ -223,7 +225,8 @@ const ConfigSchema = z.object({
 
   /**
    * The proxies in front of the server whose X-Forwarded-For is believed, which decides the client
-   * address that registrations are limited by (`registerRateLimitPerHour`) and that the audit log
+   * address that registrations and feeds are limited by (`registerRateLimitPerHour`,
+   * `feed.rateLimitPerMinute`) and that the audit log
    * and the request log record: how many of them there are, true for any, or their addresses and
    * CIDR ranges (separated by commas or spaces). Empty: none, so the address is the connection's
    * own. A count is only safe where the server can't be reached except through those proxies:
@@ -354,6 +357,19 @@ const ConfigSchema = z.object({
     pageSize: int(50),
     /** The largest `limit` a feed request may pass. */
     maxPageSize: int(100),
+    /**
+     * Requests to GET /feed from one address in a minute, past which they are refused (0: no limit).
+     * A feed needs no key, so the address is all there is to count by: the connection's own, or the
+     * one `trustProxy` has read from X-Forwarded-For. An IPv6 address counts with the rest of its /64,
+     * which is what one host is given.
+     */
+    rateLimitPerMinute: z.coerce.number().int().min(0).default(120),
+    /**
+     * GET /feed requests one process answers at a time. One that arrives while this many are under
+     * way is refused (503) rather than made to wait behind them, whatever addresses they come from:
+     * what the limit by address can't stop, a flood from many of them, stops here (0: no limit).
+     */
+    maxConcurrent: z.coerce.number().int().min(0).default(100),
     /** Posts a tag's index keeps for today; each older UTC day keeps half the previous day's... */
     tagDayMaxPosts: int(400),
     /** ...but never fewer than this, so a day's most-liked content stays for the whole retention period. */

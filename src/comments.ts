@@ -29,8 +29,11 @@ import { iso } from './time.js';
  *
  * No request writes those objects. A comment, an edit, a like, a removal, an accept from the
  * moderation queue: each commits a row of `pending_writes` under its post (src/pending.ts), and
- * the compactor's next run writes the store from the rows, a post's in the order they committed.
- * So a write to a comment never races another, nor the deletion of the comment or of its post.
+ * the compactor's next run writes the store from the rows: a comment's as what they come to, with
+ * its removal last. So a write to a comment never races another, nor the deletion of the comment
+ * or of its post. A new comment and a like lock nothing as they commit, so a post that many
+ * answer at once takes them side by side; an edit, a removal and a moderator's decision take
+ * turns on the post's row, as each has to know what the one before it left.
  * Until then the comment's own routes answer by the rows (see effectiveComment), and the lists
  * and counts by the store: a comment is in its post's list once the compactor has run.
  */
@@ -134,11 +137,13 @@ type RemovalDeps = Pick<AppDeps, 'db' | 'comments'>;
  *
  * It reads the comment store, so it is the compactor's to ask, as it applies a removal: the
  * post's comments that were written before the removal are in the store by then, or still among
- * the post's pending writes, if one of theirs couldn't be applied; and none that committed after
- * it is a new reply to the comment, which takes none once its removal has committed. A write
- * that committed after it may still be of a reply it had: an edit of one, or a held one that a
- * moderator accepted, which is then out of the queue and not published yet. So the post's
- * pending writes are looked at as well.
+ * the post's pending writes, if one of theirs couldn't be applied or committed since the run
+ * read them. A new reply takes no lock on its post, so one that read the comment before its
+ * removal committed may commit after it: the run has waited for those (see awaitReplies), and
+ * they are among the pending writes too. None begins later, as a comment takes no reply once its
+ * removal has committed. A write that committed after the removal may also be of a reply the
+ * comment had: an edit of one, or a held one that a moderator accepted, which is then out of the
+ * queue and not published yet. So the post's pending writes are looked at as well.
  *
  * `without` is a comment whose own pending writes don't count: one that is being removed, and so
  * replies to nothing any more, though its rows are still there.
@@ -178,7 +183,7 @@ export async function prune(deps: RemovalDeps, postId: string, parentId: string 
 /**
  * Removes a comment for good, published or waiting in the moderation queue, and nothing that
  * replies to it. All of it is one commit, and nothing is written to the comment store: the
- * removal is a row of `pending_writes`, in the order of the post's writes, and with it go the
+ * removal is a row of `pending_writes`, with a number among the post's writes, and with it go the
  * comment's rows in the two queues, so neither lists a comment that is gone. The compactor's next
  * run removes the comment, its likes and its image or video; if something replies to it then, a
  * placeholder is left in its place, which keeps its replies where they are, and if nothing does,

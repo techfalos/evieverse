@@ -47,6 +47,20 @@ export async function buildApp(
     app.log.warn({ language: code, missing: keys }, `the language ${code} lacks messages, which are said in ${languages.default} instead`);
   }
   registerErrorHandler(app);
+  if (trustProxy === false || trustProxy === 0) {
+    // Said once, of the first such request: behind a proxy nobody told the server of, every client has
+    // the proxy's address, and they all share what one address may send to /register and to /feed.
+    // A client that connects directly can send the header too, so it is a warning and no more.
+    let warned = false;
+    app.addHook('onRequest', async (req) => {
+      if (warned || req.headers['x-forwarded-for'] === undefined) return;
+      warned = true;
+      req.log.warn(
+        { address: req.ip },
+        'a request came with X-Forwarded-For, and TRUST_PROXY names no proxy: if this server is behind one, every client is counted as that proxy, and they share the limits on /register and /feed. Set TRUST_PROXY to the proxies in front',
+      );
+    });
+  }
   if (edgeSecret) requireEdgeSecret(app, edgeSecret);
   // In every group, as every group that changes something has to write it down.
   registerAudit(app, audit, deps.now);
@@ -62,9 +76,12 @@ export async function buildApp(
       maxAge: 600,
     });
   }
-  // Only for the routes that ask for it (POST /register), which it counts by the client's address.
+  // Only for the routes that ask for it (POST /register and GET /feed), which it counts by the
+  // client's address: an IPv4 address by itself, one written as IPv6 (::ffff:a.b.c.d) as the same,
+  // and an IPv6 address with the rest of its /64, as that many are one host's to send from.
   await app.register(rateLimit, {
     global: false,
+    ipv6Subnet: 64,
     store: rateLimitStore(deps.hot),
     // The plugin's own words are English only. It sets Retry-After itself.
     errorResponseBuilder: (_req, { statusCode, ttl }) => new HttpError(statusCode, msg('error.rate_limited', { count: Math.max(1, Math.ceil(ttl / MINUTE)) })),

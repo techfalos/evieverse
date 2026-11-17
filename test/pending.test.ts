@@ -1,8 +1,11 @@
-import { readdir, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { newCommentId } from '../src/comments.js';
 import { setAdmin } from '../src/moderation/policy.js';
+import { insertPending, writeUnnumbered } from '../src/pending.js';
 import { as, createTestContext, feedItems, multipart, PNG, store, storeText, TARGETS, type TestContext, type User } from './helpers.js';
 
 /** A video's bytes are stored as they came, whatever they are. */
@@ -56,10 +59,13 @@ for (const target of TARGETS) {
     const likeComment = (u: User, contentId: string, commentId: string) => req(u, 'POST', '/like', { contentId, commentId });
     const rawOf = (contentId: string, commentId: string) => req(null, 'GET', `/content/${contentId}/comments/${commentId}/raw`);
 
-    /** The writes that wait for the compactor, in the order they committed: "<number> <kind>" of each. */
+    /**
+     * The writes that wait for the compactor, "<number> <kind>" of each: the ones that took no number first (0: new
+     * comments, likes of comments), by kind, then the numbered ones in the order they committed.
+     */
     const pending = async () =>
-      (await ctx.db.selectFrom('pending_writes').select(['seq', 'kind']).orderBy('seq').execute()).map((r) => `${Number(r.seq)} ${r.kind}`);
-    /** The kinds of the writes that wait, in the order they committed. */
+      (await ctx.db.selectFrom('pending_writes').select(['seq', 'kind']).orderBy('seq').orderBy('kind').execute()).map((r) => `${Number(r.seq)} ${r.kind}`);
+    /** The kinds of the writes that wait, in that order. */
     const kinds = async () => (await pending()).map((write) => write.split(' ')[1]);
     /** The files requests staged that the content store still holds. */
     const staged = async () => (await readdir(join(ctx.dir, 'content', 'staged')).catch(() => [])).sort();
@@ -116,7 +122,7 @@ for (const target of TARGETS) {
 
       // A comment on it, with an image: the same.
       const sent = ok(await attach(bob, contentId, 'Look'));
-      expect(await pending()).toEqual(['1 post', '2 comment_put']);
+      expect(await pending()).toEqual(['0 comment_put', '1 post']);
       expect(await staged()).toHaveLength(2);
       expect(await commentFiles(contentId)).toEqual([]);
       expect(ok(await one(null, contentId, sent.commentId), 200)).toEqual(sent);
@@ -133,9 +139,10 @@ for (const target of TARGETS) {
       const edited = ok(await edit(bob, contentId, sent.commentId, 'Look at this'), 200);
       expect(edited).toMatchObject({ commentId: sent.commentId, text: 'Look at this', media: sent.media });
       expect(ok(await one(null, contentId, sent.commentId), 200)).toMatchObject({ text: 'Look at this' });
-      expect(await pending()).toEqual(['1 post', '2 comment_put', '3 comment_like', '4 comment_put']);
+      // The comment and the like took no number, and left the post's as it was: the edit has the one after the post's.
+      expect(await pending()).toEqual(['0 comment_like', '0 comment_put', '1 post', '2 comment_put']);
 
-      // The run writes it all, in that order, and deletes the rows and the staged files.
+      // The run writes it all, and deletes the rows and the staged files.
       await ctx.compactor.runOnce();
       expect(await pending()).toEqual([]);
       expect(await staged()).toEqual([]);
@@ -193,7 +200,7 @@ for (const target of TARGETS) {
       ok(await likeComment(alice, contentId, first.commentId));
       ok(await edit(bob, contentId, first.commentId, 'First, edited'), 200);
       ok(await remove(bob, contentId, second.commentId), 200);
-      expect(await pending()).toEqual(['3 comment_put', '4 comment_like', '5 comment_put', '6 comment_remove']);
+      expect(await pending()).toEqual(['0 comment_like', '0 comment_put', '2 comment_put', '3 comment_remove']);
       expect(await staged()).toHaveLength(1);
 
       // A comment under way as the post is deleted, and whatever is sent after: refused.
@@ -237,7 +244,7 @@ for (const target of TARGETS) {
       ok(await likeComment(alice, contentId, c.commentId));
       ok(await edit(bob, contentId, c.commentId, 'C, edited'), 200);
       ok(await remove(bob, contentId, c.commentId), 200);
-      expect((await pending()).map((w) => w.split(' ')[1])).toEqual(['comment_remove', 'comment_remove', 'comment_like', 'comment_put', 'comment_remove']);
+      expect(await kinds()).toEqual(['comment_like', 'comment_remove', 'comment_remove', 'comment_put', 'comment_remove']);
 
       expect(await ctx.apply()).toBe(true);
       expect(await pending()).toEqual([]);
@@ -287,13 +294,13 @@ for (const target of TARGETS) {
       const contentId = ok(await storeText(ctx, alice, 'Talk to me #news', { comments: true })).contentId;
       const sent = ok(await comment(bob, contentId, 'First'));
       ok(await likeComment(alice, contentId, sent.commentId));
-      expect(await pending()).toEqual(['1 post', '2 comment_put', '3 comment_like']);
+      expect(await pending()).toEqual(['0 comment_like', '0 comment_put', '1 post']);
 
       // Killed once the post's meta file was written, and once the comment was: the rows are still there.
       killAfter(ctx.content, 'putMeta');
       killAfter(ctx.comments, 'put');
       await ctx.compactor.runOnce();
-      expect(await pending()).toEqual(['1 post', '2 comment_put', '3 comment_like']);
+      expect(await pending()).toEqual(['0 comment_like', '0 comment_put', '1 post']);
       expect(await postFiles(contentId)).toEqual([contentId, `${contentId}.meta.json`]);
       // The like waits for the comment's write, which is before it.
       expect(await commentFiles(contentId)).toEqual([`${sent.commentId}.json`]);
@@ -301,7 +308,7 @@ for (const target of TARGETS) {
       // The next run applies them again, and is killed once the like was made.
       killAfter(ctx.comments, 'addLike');
       await ctx.compactor.runOnce();
-      expect(await pending()).toEqual(['3 comment_like']);
+      expect(await pending()).toEqual(['0 comment_like']);
       await ctx.compactor.runOnce();
       expect(await pending()).toEqual([]);
 
@@ -350,7 +357,7 @@ for (const target of TARGETS) {
       ok(await likeComment(alice, contentId, sent.commentId));
       ctx.clock.now += 1000;
       ok(await edit(bob, contentId, sent.commentId, 'First!'), 200);
-      expect(await kinds()).toEqual(['comment_put', 'comment_put', 'comment_like', 'comment_put']);
+      expect(await kinds()).toEqual(['comment_like', 'comment_put', 'comment_put', 'comment_put']);
 
       const [put, publish, addLike] = [vi.spyOn(ctx.comments, 'put'), vi.spyOn(ctx.comments, 'publish'), vi.spyOn(ctx.comments, 'addLike')];
       expect(await ctx.apply()).toBe(true);
@@ -410,7 +417,7 @@ for (const target of TARGETS) {
       const toA = ok(await comment(alice, contentId, 'To A', a.commentId));
       ok(await likeComment(alice, contentId, b.commentId));
       ok(await remove(bob, contentId, a.commentId), 200);
-      expect(await pending()).toEqual(['2 comment_put', '3 comment_put', '4 comment_put', '5 comment_like', '6 comment_remove']);
+      expect(await pending()).toEqual(['0 comment_like', '0 comment_put', '0 comment_put', '0 comment_put', '2 comment_remove']);
 
       // The store takes every comment but A.
       const put = ctx.comments.put.bind(ctx.comments);
@@ -420,7 +427,7 @@ for (const target of TARGETS) {
       });
       expect(await ctx.apply()).toBe(true);
       // B is written, with its like. A's write is left, and with it what can't be applied before it: its reply, and its removal.
-      expect(await pending()).toEqual(['2 comment_put', '4 comment_put', '6 comment_remove']);
+      expect(await pending()).toEqual(['0 comment_put', '0 comment_put', '2 comment_remove']);
       expect(await list(contentId)).toMatchObject({ count: 1, comments: [{ commentId: b.commentId, text: 'B', likes: 1 }] });
 
       // The next run applies them as the first would have: A is removed, and its place kept for the reply.
@@ -511,13 +518,162 @@ for (const target of TARGETS) {
       expect(await kept()).toEqual([]);
     });
 
+    it("makes a user's like of a comment once, whichever of their requests commits it", async () => {
+      ctx = await createTestContext(target, { settle: false });
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const contentId = ok(await storeText(ctx, alice, 'Talk to me #news', { comments: true })).contentId;
+      const sent = ok(await comment(bob, contentId, 'First'));
+
+      // Two at once: both find no like, and the row's key lets one of them in.
+      const both = await Promise.all([likeComment(alice, contentId, sent.commentId), likeComment(alice, contentId, sent.commentId)]);
+      expect(both.map((res) => res.statusCode).sort()).toEqual([200, 201]);
+      expect(both.map((res) => res.json().alreadyLiked).sort()).toEqual([false, true]);
+      expect(await pending()).toEqual(['0 comment_like', '0 comment_put', '1 post']);
+      expect(ok(await likeComment(bob, contentId, sent.commentId))).toMatchObject({ likes: 2, alreadyLiked: false });
+
+      await ctx.compactor.runOnce();
+      expect(await pending()).toEqual([]);
+      expect(await ctx.comments.likes(contentId, [sent.commentId])).toEqual([2]);
+      expect(ok(await likeComment(alice, contentId, sent.commentId), 200)).toMatchObject({ likes: 2, alreadyLiked: true });
+    });
+
+    // SQLite has one connection, which runs one transaction at a time: there is nothing of it to hold open beside another.
+    it.skipIf(target.dialect === 'sqlite')('takes the comments and the likes of one post side by side, with no lock on the post and no number of it', async () => {
+      ctx = await createTestContext(target, { settle: false });
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const contentId = ok(await storeText(ctx, alice, 'Talk to me #news', { comments: true })).contentId;
+      const first = ok(await comment(bob, contentId, 'First'));
+      const seq = async () => Number((await ctx.db.selectFrom('content').select('seq').where('id', '=', contentId).executeTakeFirstOrThrow()).seq);
+      expect(await seq()).toBe(1);
+
+      // A comment whose transaction has written its row and is yet to commit.
+      let reached!: () => void;
+      let release!: () => void;
+      const paused = new Promise<void>((resolve) => (reached = resolve));
+      const released = new Promise<void>((resolve) => (release = resolve));
+      const slowId = newCommentId(ctx.clock.now);
+      const slow = writeUnnumbered(ctx.db, target.dialect, contentId, {}, async (trx) => {
+        const written = { commentId: slowId, contentId, userId: bob.userId, text: 'Slow', createdAt: ctx.clock.now };
+        await insertPending(trx, { contentId, key: slowId, kind: 'comment_put', commentId: slowId, payload: { comment: written, held: false }, at: ctx.clock.now });
+        reached();
+        await released;
+      });
+      await paused;
+
+      // Others commit meanwhile: a comment, a reply and a like. None waits for it, nor for each other.
+      try {
+        const second = ok(await comment(alice, contentId, 'Second'));
+        ok(await comment(alice, contentId, 'To the first', first.commentId));
+        ok(await likeComment(alice, contentId, first.commentId));
+        expect(ok(await one(null, contentId, second.commentId), 200)).toMatchObject({ text: 'Second' });
+        expect(await pending()).toEqual(['0 comment_like', '0 comment_put', '0 comment_put', '0 comment_put', '1 post']);
+      } finally {
+        release();
+        await slow;
+      }
+      // The post's row is as it was: none of them took a number.
+      expect(await seq()).toBe(1);
+
+      // They are listed in the order they were sent in, which their ids are in, whichever committed first.
+      await ctx.compactor.runOnce();
+      expect(await pending()).toEqual([]);
+      expect(await list(contentId)).toMatchObject({ count: 4, comments: [{ text: 'First', likes: 1, replies: 1 }, { text: 'Slow' }, { text: 'Second' }] });
+    });
+
+    it('keeps the place of a comment for a reply that commits as the compactor removes the comment', async () => {
+      ctx = await createTestContext(target, { settle: false });
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const contentId = ok(await storeText(ctx, alice, 'Talk to me #news', { comments: true })).contentId;
+      const parent = ok(await comment(bob, contentId, 'First'));
+      await ctx.compactor.runOnce();
+
+      // A reply that has read the comment in its transaction, found it there, and is yet to write its row.
+      let reached!: () => void;
+      let release!: () => void;
+      const paused = new Promise<void>((resolve) => (reached = resolve));
+      const released = new Promise<void>((resolve) => (release = resolve));
+      const get = ctx.comments.get.bind(ctx.comments);
+      let reads = 0;
+      vi.spyOn(ctx.comments, 'get').mockImplementation(async (postId, commentId) => {
+        const found = await get(postId, commentId);
+        // The reply reads it twice: before its transaction, and in it.
+        if (commentId === parent.commentId && ++reads === 2) {
+          reached();
+          await released;
+        }
+        return found;
+      });
+      const replying = comment(alice, contentId, 'To the first', parent.commentId);
+      await paused;
+
+      // The comment is deleted meanwhile, and the compactor runs. On PostgreSQL the deletion commits at once, and the run
+      // waits for the reply before it decides what to leave; elsewhere the deletion itself waits for the reply to commit.
+      const removing = remove(bob, contentId, parent.commentId);
+      if (target.dialect === 'postgres') ok(await removing, 200);
+      let ran = false;
+      const running = ctx.compactor.runOnce().then(() => (ran = true));
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      if (target.dialect === 'postgres') expect(ran).toBe(false);
+      release();
+      const reply = ok(await replying);
+      ok(await removing, 200);
+      await running;
+      await ctx.compactor.runOnce();
+      expect(await pending()).toEqual([]);
+
+      // The reply is there, under what is left of the comment: nothing of it but its place.
+      expect(await list(contentId)).toMatchObject({ count: 2, comments: [{ commentId: parent.commentId, status: 'deleted', author: null, text: '', replies: 1 }] });
+      expect(await replies(contentId, parent.commentId)).toMatchObject({ count: 1, comments: [{ commentId: reply.commentId, text: 'To the first' }] });
+      // And nothing replies to it from then on.
+      expect(refusal(await comment(alice, contentId, 'Too late', parent.commentId))).toEqual([404, 'comment not found']);
+    });
+
+    it('deletes with a post the file of a comment that committed as the post was being deleted', async () => {
+      ctx = await createTestContext(target, { settle: false });
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const contentId = ok(await storeText(ctx, alice, 'Talk to me #news', { comments: true })).contentId;
+      await ctx.compactor.runOnce();
+      ok(await attach(bob, contentId, 'Look'));
+      ok(await del(alice, contentId), 202);
+      expect(await staged()).toHaveLength(1);
+
+      // A comment that read the post before the deletion was set commits its row, and the file it staged, as the run
+      // deletes the files of the post's rows: after the run has read which there are.
+      const late = newCommentId(ctx.clock.now);
+      const file = randomUUID();
+      const removeStaged = ctx.content.removeStaged.bind(ctx.content);
+      vi.spyOn(ctx.content, 'removeStaged').mockImplementationOnce(async (key) => {
+        await writeFile(join(ctx.dir, 'content', 'staged', file), PNG);
+        await ctx.db.transaction().execute((trx) =>
+          insertPending(trx, {
+            contentId,
+            key: late,
+            kind: 'comment_put',
+            commentId: late,
+            payload: { comment: { commentId: late, contentId, userId: bob.userId, text: 'Late', createdAt: ctx.clock.now }, held: false },
+            stagedKey: `staged/${file}`,
+            at: ctx.clock.now,
+          }),
+        );
+        return removeStaged(key);
+      });
+      expect((await ctx.compactor.runOnce()).deleted).toEqual([contentId]);
+      expect(await staged()).toEqual([]);
+      expect(await pending()).toEqual([]);
+      expect(await ctx.db.selectFrom('content').select('id').execute()).toEqual([]);
+    });
+
     it('finishes the write it is making when the compactor is stopped, makes no other, and frees the lease', async () => {
       ctx = await createTestContext(target, { settle: false, compact: { intervalSeconds: 1 } });
       const alice = await ctx.register('alice');
       const bob = await ctx.register('bob');
       const contentId = ok(await storeText(ctx, alice, 'Talk to me #news', { comments: true })).contentId;
       ok(await comment(bob, contentId, 'First'));
-      expect(await pending()).toEqual(['1 post', '2 comment_put']);
+      expect(await pending()).toEqual(['0 comment_put', '1 post']);
 
       // The compactor's pass is held as it writes the post's meta file.
       let reached!: () => void;
@@ -542,7 +698,7 @@ for (const target of TARGETS) {
       await stopping;
 
       // The post was written, whole, and its row deleted. The comment's write was never begun, and waits.
-      expect(await pending()).toEqual(['2 comment_put']);
+      expect(await pending()).toEqual(['0 comment_put']);
       expect(await postFiles(contentId)).toEqual([contentId, `${contentId}.meta.json`]);
       expect(await commentFiles(contentId)).toEqual([]);
       expect(await ctx.db.selectFrom('compactor_lease').select('holder').execute()).toEqual([{ holder: null }]);

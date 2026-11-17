@@ -16,8 +16,9 @@ x-app-env: &app-env
   PUBLIC_BASE_URL: http://localhost:${TESTBED_PORT:-8080}/api
   COMPACT_IN_PROCESS: 'false'
   COMPACT_INTERVAL_SECONDS: ${COMPACT_INTERVAL_SECONDS:-5}
-  # Every request reaches the app from nginx, so the per-IP limit on /register is effectively global.
+  # Every request reaches the app from nginx, so the per-IP limits on /register and on /feed are effectively global.
   REGISTER_RATE_LIMIT_PER_HOUR: '1000'
+  FEED_RATE_LIMIT_PER_MINUTE: '6000'
   # user or server; server needs TAGGING_SERVER_TAGS too: the only hashtags posts from the page can then have.
   # The seed posts its planned hashtags either way.
   TAGGING_MODE: ${TAGGING_MODE:-user}

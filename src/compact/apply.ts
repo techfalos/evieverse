@@ -2,7 +2,7 @@ import { hasReplies, prune, removeCommentRows } from '../comments.js';
 import { summaryOf } from '../content.js';
 import type { PendingKind } from '../db/schema.js';
 import type { AppDeps } from '../deps.types.js';
-import { payloadBytes, payloadOf } from '../pending.js';
+import { awaitReplies, payloadBytes, payloadOf, UNNUMBERED } from '../pending.js';
 import type { CommentLikePayload, CommentPutPayload, CommentRemovePayload, PostPayload } from '../pending.types.js';
 import { repostedTags, repostTimes, type Repost } from '../reposts.js';
 import { commentPlaceholder, type Comment, type ContentMeta } from '../storage/index.js';
@@ -50,7 +50,9 @@ interface ApplyDeps extends Pick<AppDeps, 'config' | 'db' | 'content' | 'comment
 
 /** A row of `pending_writes`, as it is applied. */
 interface PendingRow {
+  /** Its number among its post's writes, or UNNUMBERED: then `write_key` is what tells it apart. */
   seq: number;
+  write_key: string;
   kind: PendingKind;
   comment_id: string | null;
   payload: unknown;
@@ -129,7 +131,8 @@ export async function applyPending(deps: ApplyDeps): Promise<Applied> {
     const post = await postRow(deps, id);
     // Gone, and its rows with it; or set for deletion, when the run deletes it with what its rows staged.
     if (!post || post.delete_requested_at !== null) return;
-    const rows = await db.selectFrom('pending_writes').select(['seq', 'kind', 'comment_id', 'payload', 'staged_key']).where('content_id', '=', id).orderBy('seq').execute();
+    // The ones that took no number first, in whatever order: new comments and likes, which are before the numbered writes of what they are of.
+    const rows = await db.selectFrom('pending_writes').select(['seq', 'write_key', 'kind', 'comment_id', 'payload', 'staged_key']).where('content_id', '=', id).orderBy('seq').orderBy('write_key').execute();
 
     const writes = rows.filter((r) => r.kind === 'post');
     if (writes.length) {
@@ -181,19 +184,12 @@ function postRow({ db }: Pick<ApplyDeps, 'db'>, id: string): Promise<PostRow | u
  */
 async function settle({ db, content, log, now = Date.now }: ApplyDeps, contentId: string, rows: PendingRow[]): Promise<void> {
   if (!rows.length) return;
-  const seqs = rows.map((r) => Number(r.seq));
   const staged = rows.flatMap((r) => (r.staged_key === null ? [] : [r.staged_key]));
   const keepMs = content.linkMs();
   if (staged.length && keepMs > 0) {
     const removeAt = now() + keepMs + LINK_MARGIN_MS;
     await db.transaction().execute(async (trx) => {
-      for (let i = 0; i < seqs.length; i += BATCH) {
-        await trx
-          .deleteFrom('pending_writes')
-          .where('content_id', '=', contentId)
-          .where('seq', 'in', seqs.slice(i, i + BATCH))
-          .execute();
-      }
+      await deleteRows(trx, contentId, rows);
       for (let i = 0; i < staged.length; i += BATCH) {
         const keys = staged.slice(i, i + BATCH);
         // None is there, unless a run that had lost its lease settled the same row.
@@ -206,6 +202,16 @@ async function settle({ db, content, log, now = Date.now }: ApplyDeps, contentId
     });
     return;
   }
+  await deleteRows(db, contentId, rows);
+  for (const key of staged) {
+    await content.removeStaged(key).catch((err) => log?.warn({ err, contentId, staged: key }, 'could not delete a staged file that was applied'));
+  }
+}
+
+/** Deletes rows of a post: the numbered ones by their numbers, and the ones that took none by their keys. */
+async function deleteRows(db: Pick<ApplyDeps['db'], 'deleteFrom'>, contentId: string, rows: PendingRow[]): Promise<void> {
+  const seqs = rows.filter((r) => Number(r.seq) !== UNNUMBERED).map((r) => Number(r.seq));
+  const keys = rows.filter((r) => Number(r.seq) === UNNUMBERED).map((r) => r.write_key);
   for (let i = 0; i < seqs.length; i += BATCH) {
     await db
       .deleteFrom('pending_writes')
@@ -213,8 +219,13 @@ async function settle({ db, content, log, now = Date.now }: ApplyDeps, contentId
       .where('seq', 'in', seqs.slice(i, i + BATCH))
       .execute();
   }
-  for (const key of staged) {
-    await content.removeStaged(key).catch((err) => log?.warn({ err, contentId, staged: key }, 'could not delete a staged file that was applied'));
+  for (let i = 0; i < keys.length; i += BATCH) {
+    await db
+      .deleteFrom('pending_writes')
+      .where('content_id', '=', contentId)
+      .where('seq', '=', UNNUMBERED)
+      .where('write_key', 'in', keys.slice(i, i + BATCH))
+      .execute();
   }
 }
 
@@ -282,7 +293,8 @@ async function applyPost(deps: ApplyDeps, post: PostRow, writes: PendingRow[]): 
 }
 
 /**
- * Applies the pending writes of a post's comments: `rows`, in the order they committed.
+ * Applies the pending writes of a post's comments: `rows`, the ones that took no number first
+ * (new comments, likes), then the numbered ones in the order they committed.
  *
  * The writes of one comment are applied together, as what they come to:
  *
@@ -300,7 +312,10 @@ async function applyPost(deps: ApplyDeps, post: PostRow, writes: PendingRow[]): 
  * 2. The removals, one after another, in the order they committed: whether a removal leaves a
  *    placeholder depends on what replies to the comment, and whether it takes the placeholder
  *    above it away on what else replies to that one, which two removals at once would both
- *    read before either had written.
+ *    read before either had written. Before the first of them, the run waits for the replies
+ *    to the post's comments that requests are committing (see awaitReplies), which is the one
+ *    lock a run takes on a post, and only on one that has removals: a reply that read a comment
+ *    before its removal committed is then a row, and keeps the comment's place.
  *
  * A write that fails is logged and left for the next run, with what depends on it: the rest of
  * that comment's writes, and the replies that waited for it, with theirs. Every other comment of
@@ -373,6 +388,11 @@ async function applyComments(deps: ApplyDeps, postId: string, rows: PendingRow[]
   /** A comment's place among the removals: where its removal committed, or for one whose file is lost, its newest put. */
   const at = (of: CommentWrites) => Number((of.removal ?? of.puts.at(-1)!).seq);
   const removals = [...byComment.values()].filter((of) => (of.removal || lost.has(of.commentId)) && !stuck.has(of.commentId) && !over.has(of.commentId)).sort((a, b) => at(a) - at(b));
+  if (!removals.length) return;
+  // A reply takes no lock on its post, so one may be under way that read a comment before its removal committed. Once
+  // for the post's removals, the run waits for those: each has then committed, and keeps its comment's place, or failed.
+  await lease.check();
+  await awaitReplies(deps.db, deps.config.db.dialect, postId);
   for (const of of removals) {
     try {
       await slot(async () => {

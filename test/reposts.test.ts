@@ -28,6 +28,11 @@ const INVALID = "origin.attestation must be the attestation of a post, as the po
 const EXPIRED = "the attestation is more than 10 minutes old, or from a clock that runs ahead of this server's: get a new one from the post's own server";
 const UNSIGNED = "the attestation isn't signed with a key of the post's own server, so the post wasn't reposted";
 const NO_KEYS = (server: string) => `${server} didn't give the keys it signs with, so the attestation can't be checked: try again in a minute`;
+const NOT_HTTPS = "a post on another server is reposted from an https address, on the port https has: no other port is asked for a server's keys";
+const GONE = 'the attestation says there is no post at that address any more, so there is nothing to repost';
+const NOT_NEWER = "this server's entry is from an attestation as new as this one, or newer, so nothing was changed";
+const NO_ENTRY = 'this server has no entry for that post, so there is nothing to refresh: repost it to make one';
+const NOT_TRUSTED = "this server doesn't trust the post enough to keep it, so it wasn't published";
 const NO_TAGS_LEFT = "none of the repost's hashtags is one the post can have and doesn't have already, so it wasn't reposted";
 const ALREADY = 'you already reposted this post';
 
@@ -94,6 +99,10 @@ for (const target of TARGETS) {
       attest(key, { url: `${OTHER}/content/${ORIGINAL}`, publisher: DANA, aiGenerated: false, preview: { kind: 'text', text: 'Flooding closes the coast road.' }, ...o } as Attestable, at);
     /** What a client sends of a post on another server: the attestation that server gave it. */
     const origin = (o: Record<string, unknown> = {}, signing: { key?: SigningKey; at?: number } = {}) => ({ attestation: attested(o, signing) });
+    /** What the other server signs for a post it no longer publishes: that there is none at the address. */
+    const gone = ({ url = `${OTHER}/content/${ORIGINAL}`, key = KEY, at = ctx.clock.now }: { url?: string; key?: SigningKey; at?: number } = {}) => attest(key, { url, gone: true }, at);
+    /** POST /repost/refresh as `user`, with an attestation. */
+    const refresh = (user: User | null, attestation: unknown) => ctx.app.inject({ method: 'POST', url: '/repost/refresh', payload: { ...user, origin: { attestation } } });
     const other = (n: number) => `${OTHER}/content/${ORIGINAL.slice(0, -1)}${n}`;
 
     it('gives a post more hashtags, under which it is a new post: placed at the repost, with the likes since', async () => {
@@ -688,8 +697,10 @@ for (const target of TARGETS) {
       const now = ctx.clock.now;
       expect(await send(bob!, attested({}, { at: now - 10 * MINUTE - 1 }))).toEqual([400, EXPIRED]);
       expect(await send(bob!, attested({}, { at: now + MINUTE + 1 }))).toEqual([400, EXPIRED]);
-      // Keys are asked for over https, so a post is reposted from an https address.
-      expect(await send(bob!, attested({ url: `http://other.example/content/${ORIGINAL}` }))).toEqual([400, 'a post on another server is reposted from an https address']);
+      // Keys are asked for over https, on its own port, so a post is reposted from an https address that names no other.
+      expect(await send(bob!, attested({ url: `http://other.example/content/${ORIGINAL}` }))).toEqual([400, NOT_HTTPS]);
+      expect(await send(bob!, attested({ url: `https://other.example:8443/content/${ORIGINAL}` }))).toEqual([400, NOT_HTTPS]);
+      expect(asked).toEqual([KEYS, 'https://elsewhere.example/repost/keys']);
       expect(await entries()).toBe(0);
 
       // What the server did sign, in time, is taken.
@@ -783,6 +794,179 @@ for (const target of TARGETS) {
       expect(asked).toHaveLength(12);
     });
 
+    it('brings its entry for a post on another server up to a later attestation of it, and never back to an earlier one', async () => {
+      const wary: TrustPlugin = {
+        name: 'wary',
+        assess: (assessed) => (assessed.texts.some((t) => t.includes('scam')) ? { set: 50 } : assessed.texts.some((t) => t.includes('malware')) ? { set: 0 } : null),
+      };
+      ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com', reposts: { signingKeys: OWN_SEEDS }, trustPlugins: [wary], keyFetcher });
+      const root = await admin();
+      const [alice, bob, carol, dave] = await Promise.all(['alice', 'bob', 'carol', 'dave'].map((name) => ctx.register(name)));
+      const address = `${OTHER}/content/${ORIGINAL}`;
+
+      const madeAt = ctx.clock.now;
+      const { contentId } = ok(await repost(bob!, { origin: origin(), tags: 'news' }), 201);
+      ok(await repost(carol!, { origin: origin(), tags: 'rain' }), 201);
+      await ctx.compact();
+      // The entry says when the other server signed what it shows.
+      expect((await content(contentId)).origin).toEqual({ url: address, publisher: DANA, attestedAt: iso(madeAt) });
+
+      // The post is edited where it is, and its publisher renamed. Somebody brings what the other server now signs:
+      // anyone with an account can, and alice has nothing to do with the entry.
+      ctx.clock.now += HOUR;
+      const editedAt = ctx.clock.now;
+      const edited = { preview: { kind: 'text', text: 'The coast road is open again.' }, aiGenerated: true, publisher: { ...DANA, username: 'Dana' } };
+      const now = { url: address, publisher: edited.publisher };
+      expect((await refresh(null, attested(edited))).statusCode).toBe(401);
+      expect(ok(await refresh(alice!, attested(edited)))).toEqual({ contentId, tags: ['news', 'rain'], preview: edited.preview, aiGenerated: true, origin: now });
+      // It is read as written at once, and feeds show it once the compactor has run: bob's entry still, where it was, with what reposts gave it.
+      expect(await content(contentId)).toMatchObject({
+        publisher: { userId: bob!.userId, username: 'bob' },
+        preview: edited.preview,
+        aiGenerated: true,
+        tags: ['news', 'rain'],
+        origin: { ...now, attestedAt: iso(editedAt) },
+        createdAt: iso(madeAt),
+        updatedAt: iso(editedAt),
+      });
+      await ctx.compact();
+      expect((await feedOf('news'))[0]).toMatchObject({ contentId, preview: edited.preview, aiGenerated: true, origin: now });
+      expect((await feedOf('rain'))[0]).toMatchObject({ contentId, preview: edited.preview, repost: expect.anything() });
+      expect(await places(contentId)).toEqual([`${authorIndex(carol!.userId)} carol 0`, 'rain carol 0']);
+
+      // What says the same changes nothing. What the post was before is not brought back, for the minutes its attestation is still good for.
+      ctx.clock.now += MINUTE;
+      expect(ok(await refresh(alice!, attested(edited)))).toEqual({ contentId, unchanged: true });
+      expect(refused(await refresh(carol!, attested({}, { at: editedAt - 1 })))).toEqual([409, NOT_NEWER]);
+      expect(refused(await refresh(carol!, attested({}, { at: editedAt })))).toEqual([409, NOT_NEWER]);
+      // It is checked as a repost's is: signed by the post's own server, a short while ago.
+      expect(refused(await refresh(carol!, attested({}, { key: STRAY_KEY })))).toEqual([400, UNSIGNED]);
+      expect(refused(await refresh(carol!, attested({}, { at: ctx.clock.now - 10 * MINUTE - 1 })))).toEqual([400, EXPIRED]);
+      expect(refused(await refresh(carol!, 'abc'))).toEqual([400, INVALID]);
+      // There is nothing to refresh of a post the server has no entry for, nor of its own posts. And a post keeps its type.
+      expect(refused(await refresh(carol!, attested({ url: other(1) })))).toEqual([404, NO_ENTRY]);
+      const own = await post(alice!, 'Written here #local');
+      expect(refused(await refresh(carol!, ok(await req(null, 'GET', `/content/${own}/attestation`)).attestation))).toEqual([400, "that post is this server's own: what it is now is what this server shows"]);
+      expect(refused(await refresh(carol!, attested({ mimeType: 'image/png', preview: { kind: 'image', text: 'A picture now' } })))).toEqual([
+        400,
+        "this server's entry for the original is text/plain, and the attestation says image/png: a post keeps its type, so the entry is as it was",
+      ]);
+      expect((await content(contentId)).preview).toEqual(edited.preview);
+
+      // What it now says is moderated as an update of a post is. A hashtag whose blocked words it has comes off it, though a repost gave it.
+      ok(await req(root, 'POST', '/tags/rain/blocked-words', { words: ['sewage'] }));
+      const lost = ok(await refresh(alice!, attested({ ...edited, preview: { kind: 'text', text: 'Sewage on the coast road.' } })));
+      expect(lost).toMatchObject({ tags: ['news'], removedTags: [{ tag: 'rain', reason: 'blocked_word' }] });
+      await ctx.compact();
+      expect(await feedOf('rain')).toEqual([]);
+      expect((await content(contentId)).tags).toEqual(['news']);
+      // A score that refuses a post refuses it, and the entry stays as it was. One that holds a post holds it: out of the feeds until it is accepted.
+      ctx.clock.now += MINUTE;
+      expect(refused(await refresh(alice!, attested({ ...edited, preview: { kind: 'text', text: 'Free malware on the coast road.' } })))).toEqual([422, NOT_TRUSTED]);
+      expect((await content(contentId)).preview.text).toBe('Sewage on the coast road.');
+      expect(ok(await refresh(alice!, attested({ ...edited, preview: { kind: 'text', text: 'A scam on the coast road.' } })), 202)).toMatchObject({ contentId, status: 'pending_review', tags: ['news'] });
+      await ctx.compact();
+      expect(await feedOf('news')).toEqual([]);
+      ok(await req(root, 'POST', `/moderation/queue/${contentId}/accept`));
+      await ctx.compact();
+      expect((await feedOf('news'))[0]).toMatchObject({ contentId, preview: { kind: 'text', text: 'A scam on the coast road.' } });
+
+      // One user's refreshes change an entry ten times a minute. What changes nothing isn't counted.
+      const nth = (n: number) => attested({ ...edited, preview: { kind: 'text', text: `The coast road, ${n}.` } });
+      for (let n = 0; n < 10; n++) {
+        ctx.clock.now += 1;
+        ok(await refresh(dave!, nth(n)));
+      }
+      ctx.clock.now += 1;
+      const limited = await refresh(dave!, nth(10));
+      expect(limited.statusCode, limited.body).toBe(429);
+      expect(limited.json().error).toMatch(/^too many refreshes of reposts; try again in \d+ seconds?$/);
+      expect(Number(limited.headers['retry-after'])).toBeGreaterThan(0);
+      expect(ok(await refresh(dave!, nth(9)))).toEqual({ contentId, unchanged: true });
+      expect((await content(contentId)).preview.text).toBe('The coast road, 9.');
+      // The other server's keys were asked for once for all of it, and once more for the key that was nobody's.
+      expect(asked).toEqual([KEYS, KEYS]);
+
+      // Where the server takes no reposts of posts on other servers, it takes no word of them either.
+      ctx.config.reposts.remote = false;
+      expect(refused(await refresh(alice!, nth(11)))).toEqual([400, "this server doesn't take reposts of posts on other servers"]);
+    });
+
+    it('deletes its entry for a post that the post\'s own server says is gone', async () => {
+      ctx = await createTestContext(target, { keyFetcher });
+      const [alice, bob, carol, erin] = await Promise.all(['alice', 'bob', 'carol', 'erin'].map((name) => ctx.register(name)));
+      await follow(erin!, bob!);
+      const madeAt = ctx.clock.now;
+      const { contentId } = ok(await repost(bob!, { origin: origin(), tags: 'news' }), 201);
+      ok(await repost(carol!, { origin: origin(), tags: 'rain' }), 201);
+      await ctx.compact();
+      expect(ids(await following(erin!))).toEqual([contentId]);
+
+      // That a post is gone is nothing to repost.
+      ctx.clock.now += 5 * MINUTE;
+      expect(refused(await repost(alice!, { origin: { attestation: gone() }, tags: 'weather' }))).toEqual([400, GONE]);
+      // It is the post's own server that says so, after it said what the entry holds: nobody else, and not from before.
+      expect(refused(await refresh(alice!, gone({ key: STRAY_KEY })))).toEqual([400, UNSIGNED]);
+      expect(refused(await refresh(alice!, gone({ at: madeAt })))).toEqual([409, NOT_NEWER]);
+      expect(refused(await refresh(alice!, gone({ url: other(1) })))).toEqual([404, NO_ENTRY]);
+      expect((await content(contentId)).contentId).toBe(contentId);
+
+      // Then the entry is set for deletion, as its owner would set it: gone to readers at once, and from every feed with the compactor's next run.
+      expect(ok(await refresh(alice!, gone()), 202)).toEqual({ contentId, status: 'pending_deletion', requestedAt: iso(ctx.clock.now) });
+      expect((await req(null, 'GET', `/content/${contentId}`)).statusCode).toBe(404);
+      expect(refused(await refresh(alice!, gone()))).toEqual([404, 'content not found']);
+      expect((await ctx.compact()).deleted).toEqual([contentId]);
+      expect([await feedOf('news'), await feedOf('rain'), await following(erin!)]).toEqual([[], [], []]);
+      expect(await places(contentId)).toEqual([]);
+      expect(refused(await refresh(alice!, gone()))).toEqual([404, NO_ENTRY]);
+
+      // A post that is there again is reposted anew, and what said it was gone before that isn't taken against the new entry.
+      ctx.clock.now += MINUTE;
+      const anew = ok(await repost(carol!, { origin: origin(), tags: 'news' }), 201).contentId;
+      expect(anew).not.toBe(contentId);
+      expect(refused(await refresh(alice!, gone({ at: ctx.clock.now - MINUTE })))).toEqual([409, NOT_NEWER]);
+      expect((await content(anew)).contentId).toBe(anew);
+    });
+
+    it('keeps the later of two attestations that arrive at once, whichever is written first', async () => {
+      ctx = await createTestContext(target, { keyFetcher });
+      const [alice, bob] = await Promise.all(['alice', 'bob'].map((name) => ctx.register(name)));
+      const { contentId } = ok(await repost(bob!, { origin: origin(), tags: 'news' }), 201);
+      const saying = (text: string, at: number) => attested({ preview: { kind: 'text', text } }, { at });
+      const shown = async () => (await content(contentId)).preview.text;
+      ctx.clock.now += 5 * MINUTE;
+      const t = ctx.clock.now;
+
+      // Another refresh, run between one's reading the entry and its writing it: where a refresh that changes something is counted.
+      let meanwhile: (() => Promise<unknown>) | undefined;
+      const incr = ctx.hot.incr.bind(ctx.hot);
+      ctx.hot.incr = async (key, ttlMs) => {
+        const run = key.startsWith('originrefreshes:') ? meanwhile : undefined;
+        if (run) {
+          meanwhile = undefined;
+          await run();
+        }
+        return incr(key, ttlMs);
+      };
+
+      // A later attestation commits while an earlier one is on its way: the earlier one is refused as it commits.
+      meanwhile = async () => ok(await refresh(alice!, saying('Later.', t)));
+      expect(refused(await refresh(alice!, saying('Earlier.', t - 1)))).toEqual([409, NOT_NEWER]);
+      expect(await shown()).toBe('Later.');
+      // The other way round both are written, in turn, and the later one last.
+      meanwhile = async () => ok(await refresh(alice!, saying('Earlier still.', t + 1)));
+      ok(await refresh(alice!, saying('Latest.', t + 2)));
+      expect(await shown()).toBe('Latest.');
+
+      // A deletion is set on the entry as it was read. One that the post was attested to again meanwhile is sent again, and is by then the older word.
+      meanwhile = async () => ok(await refresh(alice!, saying('Back again.', t + 4)));
+      expect(refused(await refresh(alice!, gone({ at: t + 3 })))).toEqual([409, 'the entry was written to as this arrived, so nothing was changed: send it again']);
+      expect(refused(await refresh(alice!, gone({ at: t + 3 })))).toEqual([409, NOT_NEWER]);
+      expect(await shown()).toBe('Back again.');
+      await ctx.compact();
+      expect((await feedOf('news'))[0]).toMatchObject({ contentId, preview: { kind: 'text', text: 'Back again.' } });
+    });
+
     it('attests its own published posts, signed with its first key, and publishes its keys', async () => {
       const wary: TrustPlugin = { name: 'wary', assess: (assessed) => (assessed.texts.some((t) => t.includes('scam')) ? { set: 50 } : null) };
       ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com/', reposts: { signingKeys: OWN_SEEDS }, trustPlugins: [wary], keyFetcher });
@@ -824,7 +1008,16 @@ for (const target of TARGETS) {
       expect(refused(await attestation(held, alice!))).toEqual([404, 'content not found']);
       expect(refused(await attestation(NO_CONTENT))).toEqual([404, 'content not found']);
       ok(await req(alice!, 'DELETE', `/content/${image}`), 202);
-      expect(refused(await attestation(image))).toEqual([404, 'content not found']);
+      const deleted = await attestation(image);
+      expect(refused(deleted)).toEqual([404, 'content not found']);
+      // That there is no post there is signed too, for the servers that hold a repost of one that was: the same of all three, which says no more than the 404 does.
+      const said = readAttestation(deleted.json().gone)!;
+      expect(said.payload).toEqual({ v: 1, kid: first.id, issuedAt: ctx.clock.now, url: `https://api.example.com/content/${image}`, gone: true });
+      expect([signedBy(first, said), deleted.headers['cache-control']]).toEqual([true, 'no-store']);
+      for (const res of [await attestation(held, alice!), await attestation('ABCDEF00-0000-4000-8000-000000000000')]) {
+        expect(Object.keys(res.json()).sort()).toEqual(['error', 'gone']);
+        expect(readAttestation(res.json().gone)!.payload).toMatchObject({ url: expect.stringMatching(/^https:\/\/api\.example\.com\/content\/[0-9a-f-]{36}$/), gone: true });
+      }
 
       // And only of what is this server's to speak for: its entry for a post on another server names the original instead.
       const entry = ok(await repost(bob!, { origin: origin(), tags: 'news' }), 201).contentId;
@@ -843,7 +1036,7 @@ for (const target of TARGETS) {
       const plain = await post(carol!, 'Flooding downtown #news');
       expect(ok(await req(null, 'GET', '/repost/keys'))).toEqual({ keys: [] });
       expect(refused(await attestation(plain))).toEqual([400, OFF]);
-      expect(refused(await attestation(NO_CONTENT))).toEqual([404, 'content not found']);
+      expect((await attestation(NO_CONTENT)).json()).toEqual({ error: 'content not found' });
       expect((await attestation(ok(await repost(dave!, { origin: origin(), tags: 'news' }), 201).contentId)).statusCode).toBe(409);
       // It still takes reposts from servers that do sign. Nothing signs for its own address, though.
       expect(refused(await repost(dave!, { origin: origin({ url: `https://api.example.com/content/${plain}` }), tags: 'local' }))).toEqual([400, UNSIGNED]);

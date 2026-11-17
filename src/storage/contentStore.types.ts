@@ -38,6 +38,13 @@ export interface ContentMeta {
    * own server attested them when it was reposted, and the content's bytes are the original's address.
    */
   origin?: Origin;
+  /**
+   * With `origin`: when the original's server signed the attestation this summary is from, by
+   * that server's clock, in UTC epoch milliseconds. A later attestation replaces the summary, and
+   * one that is no later doesn't (POST /repost/refresh). Absent on an entry made before
+   * attestations said when, which any attestation is later than.
+   */
+  originAttestedAt?: number;
 }
 
 /** The original of a repost of a post on another server: where it is read, and who published it there. */

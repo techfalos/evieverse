@@ -204,8 +204,8 @@ for (const target of TARGETS) {
               await hold;
               return transaction().execute(async (trx) => {
                 const out = await fn(trx);
-                for (const row of await trx.selectFrom('pending_writes').select(['content_id', 'seq', 'kind', 'payload']).where('kind', 'in', ['post', 'comment_put']).execute()) {
-                  const key = `${row.content_id}:${row.seq}`;
+                for (const row of await trx.selectFrom('pending_writes').select(['content_id', 'seq', 'write_key', 'kind', 'payload']).where('kind', 'in', ['post', 'comment_put']).execute()) {
+                  const key = `${row.content_id}:${row.seq}:${row.write_key}`;
                   if (seen.has(key)) continue;
                   const text = row.kind === 'post' ? payloadOf<PostPayload>(row.payload).meta.text! : payloadOf<CommentPutPayload>(row.payload).comment.text;
                   written.push(text);

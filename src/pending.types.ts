@@ -60,7 +60,7 @@ export interface EffectiveComment {
   held: boolean;
 }
 
-/** A row to add to `pending_writes`, as insertPending takes it. */
+/** A numbered row to add to `pending_writes`, as insertPending takes it. */
 export interface PendingWrite {
   contentId: string;
   /** The one nextSeq gave this write. */
@@ -70,4 +70,15 @@ export interface PendingWrite {
   payload?: PostPayload | CommentPutPayload | CommentRemovePayload | CommentLikePayload;
   stagedKey?: string | null;
   at: number;
+}
+
+/**
+ * A row to add to `pending_writes` that takes no number (see writeUnnumbered): a new comment, or
+ * a like of a comment.
+ */
+export interface UnnumberedWrite extends Omit<PendingWrite, 'seq' | 'kind' | 'commentId'> {
+  /** What tells it apart from its post's other unnumbered writes: the comment's id for a new comment, likeKey for a like. */
+  key: string;
+  kind: 'comment_put' | 'comment_like';
+  commentId: string;
 }

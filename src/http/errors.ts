@@ -37,6 +37,9 @@ export const challengeRequired = (text: Message, challenge: unknown) => new Http
 /** 429: the user is past a rate limit. When to try again is said twice: `retryAfterSeconds` in the body, and the Retry-After header. */
 export const tooManyRequests = (text: Message, retryAfterSeconds: number) =>
   new HttpError(429, text, undefined, { retryAfterSeconds }, { 'retry-after': String(retryAfterSeconds) });
+/** 503: the server has as many such requests under way as it answers at a time, whoever sent them. When to try again is said as a 429 says it. */
+export const busy = (text: Message, retryAfterSeconds: number) =>
+  new HttpError(503, text, undefined, { retryAfterSeconds }, { 'retry-after': String(retryAfterSeconds) });
 
 /**
  * Makes every error thrown while a request is handled a JSON response with an `error`: an

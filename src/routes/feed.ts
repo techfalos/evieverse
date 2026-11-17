@@ -1,6 +1,6 @@
 import { randomInt } from 'node:crypto';
 import { Readable } from 'node:stream';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, RouteShorthandOptions } from 'fastify';
 import { z } from 'zod';
 import type { Config } from '../config.js';
 import type { AppDeps } from '../deps.types.js';
@@ -10,7 +10,8 @@ import { FEED_ALGORITHMS, FEED_HOURS, planFeed } from '../feed/plan.js';
 import { relatedTo } from '../feed/related.js';
 import { followingRecords, loadBodies, planned, renderFeed } from '../feed/render.js';
 import { requireShownFollows } from '../follows.js';
-import { badRequest } from '../http/errors.js';
+import { atMostAtOnce } from '../http/concurrency.js';
+import { badRequest, busy } from '../http/errors.js';
 import { say } from '../http/language.js';
 import { invalidCursor } from '../http/listCursor.js';
 import { HASHTAG } from '../http/schemas.js';
@@ -81,6 +82,24 @@ function pageLimit(config: Config, requested: number | undefined): number {
  * does, and is a route of its own (followingFeedRoutes).
  */
 export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries, publishers, relatedTags, ads, now = Date.now }: FeedDeps) {
+  const { rateLimitPerMinute, maxConcurrent } = config.feed;
+
+  /**
+   * The two limits on GET /feed. It needs no key, so nothing else stands between it and whoever
+   * sends requests, and it is the read that costs the server most.
+   *
+   * One address gets `rateLimitPerMinute` requests a minute, counted in Redis for every node and
+   * function (see app.ts), and is refused past that (429) before anything is read for it.
+   *
+   * And a process answers `maxConcurrent` at a time, whatever addresses they come from: one more is
+   * refused (503) rather than made to wait behind them (see atMostAtOnce). The limit by address
+   * comes first, as it is the plugin's onRequest hook, so an address past its limit takes no place.
+   */
+  const limits: RouteShorthandOptions = {
+    config: { rateLimit: rateLimitPerMinute > 0 ? { max: rateLimitPerMinute, timeWindow: '1 minute' } : false },
+    ...atMostAtOnce(maxConcurrent, () => busy(msg('feed.busy'), 1)),
+  };
+
   /**
    * retrieve_feed. Each record says whether a moderator of the hashtag it is listed under has approved
    * it there (`moderated`), and `moderated=false` leaves only those none has: the hashtag's
@@ -95,8 +114,11 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, summaries
    * them (see AD_POSITIONS). They are chosen from the ads the compactor published to Redis
    * (AdStore) that are being shown now and that appear all the time or are targeted at one of the
    * hashtags the feed reads, the related ones among them. The records are the same with or without.
+   *
+   * It is limited twice over (see `limits`): by the address it comes from, and by how many feeds
+   * the process is answering.
    */
-  app.get('/feed', async (req, reply) => {
+  app.get('/feed', limits, async (req, reply) => {
     const q = Query.parse(req.query);
     const tags = [
       ...new Set(
