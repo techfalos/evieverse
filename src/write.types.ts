@@ -26,20 +26,36 @@ export interface ContentWrite {
   recheck?: (current: ContentMeta) => void;
   /** Names the content id; `updatedAt` is when this write is made. What the request answers with: nothing of it is stored here. */
   summary: Summary;
-  /** The meta file the write makes: the compactor writes it, with the size `stageBytes` returns in place of the one it has. */
+  /** The meta file the write makes: the compactor writes it, with the sizes `stageBytes` returns in place of the ones it has. */
   meta: ContentMeta;
   /**
-   * Stages the file of an image, video or audio post for the write whose id it is given (see
-   * PostBytes.stage), and returns where it waits and its size as stored, which is the one
-   * recorded in the meta file. Absent for a text, a link and a repost of a post on another
-   * server: their bytes are in `meta`, and the compactor writes them from it (see payloadBytes).
+   * What stages the files of an image, video or audio post: one for its file, or for an image
+   * post of several images, one for each, in their order (`meta.images` then describes each).
+   * Each stages its file under the id it is given, which is its own (see PostBytes.stage), and
+   * returns where it waits and its size as stored, which is the one recorded in the meta file.
+   * Absent for a text, a link and a repost of a post on another server: their bytes are in
+   * `meta`, and the compactor writes them from it (see payloadBytes).
    */
-  stageBytes?: (writeId: string) => Promise<StagedBytes>;
+  stageBytes?: ((writeId: string) => Promise<StagedBytes>)[];
+  /**
+   * The file `stageBytes` stages is a video the server is to process before it is published
+   * (src/video): the write's commit says so in its row (see PostPayload.process) and adds the
+   * job the video worker takes (`media_jobs`). The compactor applies the write once the worker
+   * has made the staged file what is published.
+   */
+  processVideo?: boolean;
   /**
    * The write's trust score sent it to the moderation queue: the content is stored, but has no
    * summary and is in no feed index until an admin accepts it. Absent: it is published.
    */
   queued?: { trustScore: number };
+  /**
+   * An update: the hashtags reposts gave the content, as the request read them. `meta` and
+   * `summary` hold them with the publisher's own. If one of them is no repost's any more as the
+   * write commits, its repost was removed meanwhile (see contentWriter's unrepost), and the
+   * write leaves it out.
+   */
+  given?: string[];
   /**
    * The hashtags a repost gave the content that this update is refused: its publisher is muted on
    * them now, or what it now says has their blocked words. They aren't the publisher's to send
@@ -76,4 +92,11 @@ export interface RepostWrite {
   tags: string[];
   /** The hashtags the content's meta file has, as its newest write made it. */
   carried: string[];
+}
+
+/** The removal of a user's repost of content that is there (see contentWriter's unrepost). */
+export interface RepostRemoval {
+  contentId: string;
+  /** Whose repost it is. */
+  userId: string;
 }

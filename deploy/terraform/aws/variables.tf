@@ -48,7 +48,7 @@ variable "feed_function_max_concurrency" {
 }
 
 variable "compactor_cpu" {
-  description = "CPU units of the compactor's Fargate task (1024 is one vCPU). The compactor is one task that is always up; how often it makes a pass is COMPACT_INTERVAL_SECONDS in `environment` (5 by default)."
+  description = "CPU units of the compactor's Fargate task (1024 is one vCPU). The compactor is one task that is always up; how often it makes a pass is COMPACT_INTERVAL_SECONDS in `environment` (5 by default). It also processes the videos users send, with ffmpeg, which is CPU work: where videos are common, give it 2048 or more (and memory to match), or set VIDEO_PROCESSING to false in `environment`."
   type        = number
   default     = 512
 }

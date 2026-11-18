@@ -6,12 +6,15 @@ import type { AppDeps } from './deps.types.js';
 import { badRequest, conflict, unprocessable } from './http/errors.js';
 import { msg } from './language.js';
 import { effectiveMeta, insertPending, nextSeq } from './pending.js';
+import { mediaType } from './posts.js';
 import { MAX_REPOSTED_TAGS, repostedTags, repostsOf, type Repost } from './reposts.js';
-import type { ContentMeta, Publisher } from './storage/index.js';
+import type { ContentMeta, Publisher, StagedBytes } from './storage/index.js';
 import { countTagPairs, touchTags } from './tags.js';
 import { authorIndex } from './tagfeed/layout.js';
 import { HOUR, wholeSeconds } from './time.js';
-import type { ContentWrite, OriginGone, RepostWrite } from './write.types.js';
+import { allDone } from './util.js';
+import { addVideoJob } from './video/jobs.js';
+import type { ContentWrite, OriginGone, RepostRemoval, RepostWrite } from './write.types.js';
 
 /**
  * How long after the server's entry for a post on another server was hidden, on that server's
@@ -24,10 +27,17 @@ export const GONE_RECHECK_MS = 6 * HOUR;
 /** 409: the content is set for deletion, and takes no update. */
 const pendingDeletion = () => conflict(msg('content.pending_deletion'));
 
-/** Refuses an update, of content type `mimeType`, that the content can't take. `meta` is its meta file as it is. */
-export function assertUpdatable(existing: { delete_requested_at: number | null }, meta: { mimeType: string }, mimeType: string) {
+/**
+ * Refuses an update, of content type `mimeType`, that the content can't take. `meta` is its meta
+ * file as it is.
+ *
+ * `videos`: the server processes videos (`video.processing`). A video's content type is then
+ * the one the server makes of it, not the one it was sent as, so an update of a video post
+ * takes a video of any type: it is made the same thing.
+ */
+export function assertUpdatable(existing: { delete_requested_at: number | null }, meta: { mimeType: string }, mimeType: string, { videos = false } = {}) {
   if (existing.delete_requested_at !== null) throw pendingDeletion();
-  if (mimeType !== meta.mimeType) {
+  if (mimeType !== meta.mimeType && !(videos && mediaType(mimeType) === 'video' && mediaType(meta.mimeType) === 'video')) {
     throw badRequest(msg('content.type_changed', { original: meta.mimeType, mimeType }));
   }
 }
@@ -39,9 +49,10 @@ export const tooManyReposted = () => conflict(msg('repost.too_many_tags', { max:
 
 /**
  * Writes content for /store and reposts for /repost, publishes what an admin accepts from the
- * moderation queue, and hides the entry of a post on another server that is gone from there. All
- * four commit to the database and write nothing to a post's bytes, meta file or summary: the
- * compactor does, from what they committed (see applyPending).
+ * moderation queue, hides the entry of a post on another server that is gone from there, and
+ * removes a repost a moderator took down. All five commit to the database and write nothing to
+ * a post's bytes, meta file or summary: the compactor does, from what they committed (see
+ * applyPending).
  */
 export function contentWriter({ db, config, content, publishers, now = Date.now }: Pick<AppDeps, 'db' | 'config' | 'content' | 'publishers' | 'now'>, log: Pick<FastifyBaseLogger, 'warn'>) {
   const { dialect } = config.db;
@@ -70,7 +81,9 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
    * feed queue for every hashtag of the content and for the publisher's own index. The file of an
    * image, video or audio post is staged first, under an id of the write's own, where nothing
    * else writes or reads it until the commit names it (see ContentWrite.stageBytes); a write that
-   * doesn't commit deletes what it staged.
+   * doesn't commit deletes what it staged. An image post of several images stages each, under an
+   * id of its own, and the commit names the ones after the first in rows of their own
+   * (`post_file`), which have the write's number.
    *
    * The compactor's next run applies the write: it is what writes the content's bytes, summary and
    * meta file (see applyPending), and then rebuilds the content's entries from the queue's rows.
@@ -106,7 +119,10 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
    * as a repost locks it. The hashtags a repost gave it are the content's, and an update keeps
    * them: they aren't its publisher's to drop, and the compactor writes them into the meta file
    * whatever the update said (see applyPending). One the update is refused, by the hashtag's own
-   * rules, is recorded as removed from the content (see ContentWrite.droppedReposts).
+   * rules, is recorded as removed from the content (see ContentWrite.droppedReposts). And one
+   * whose repost was removed between the request's reading the content and this commit (see
+   * unrepost) is left out of what is written: the request held it as a repost's
+   * (ContentWrite.given), and with the row locked no repost gives it any more.
    *
    * An update of the server's entry for a post on another server is that post attested again
    * (POST /repost/refresh), so it is also what brings back an entry that was hidden because the
@@ -114,24 +130,49 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
    * queued under every index it has a place in, like any update. And the entry isn't asked about
    * again until REPOSTS_REFRESH_HOURS from now (`content.origin_check_at`).
    *
+   * A video post's write waits longer where the server processes videos (`processVideo`): its
+   * row says its file is yet to be processed, and the commit adds the job the video worker
+   * takes (src/video). The compactor leaves the write, and the rows it queued, until the worker
+   * has put the processed file in the row; until then the post is read by its id as written,
+   * with `processing`, and nothing of the file that was sent is served.
+   *
    * Last, the write's hashtags are counted in `tag_pairs`, from which related hashtags are worked
    * out: all of new content's, and those an update added. It is counted once the write is
    * committed, queued or not, and outside its transaction, which then holds no lock on rows every
    * post of a busy hashtag counts on. A count that fails is lost, and the write stands.
+   *
+   * Returns the hashtags the write gives the content: the ones it came with (`summary.tags`),
+   * but for those of a repost that was removed meanwhile.
    */
-  async function write({ publisher, previous, seenSeq, recheck, summary, meta, stageBytes, queued, droppedReposts = [], originHash }: ContentWrite): Promise<void> {
+  async function write({ publisher, previous, seenSeq, recheck, summary, meta, stageBytes, processVideo, queued, given = [], droppedReposts = [], originHash }: ContentWrite): Promise<string[]> {
     const { contentId, createdAt, updatedAt: ts, aiGenerated } = summary;
     const own = authorIndex(publisher.userId);
 
-    // The file first, where only this write knows of it: the commit below is what makes it the content's.
-    const staged = stageBytes ? await stageBytes(randomUUID()) : null;
-    // The size recorded is that of the bytes as stored.
-    const stored: ContentMeta = staged ? { ...meta, size: staged.size } : meta;
+    // The files first, where only this write knows of them: the commit below is what makes them the content's.
+    const staged: StagedBytes[] = [];
+    /** Deletes what the write staged, which is then nobody's. */
+    const unstage = () =>
+      allDone(staged.map(({ key }) => content.removeStaged(key).catch((cause) => log.warn({ err: cause, contentId, staged: key }, 'could not delete the staged file of a write that did not commit'))));
+    try {
+      // One after another, an image post's in their order: each is as large as a file may be, and comes from a temp file here.
+      for (const stage of stageBytes ?? []) staged.push(await stage(randomUUID()));
+    } catch (err) {
+      await unstage();
+      throw err;
+    }
+    const [first] = staged;
+    // The sizes recorded are those of the bytes as stored.
+    const stored: ContentMeta = first
+      ? { ...meta, size: first.size, ...(meta.images && { images: meta.images.map((image, i) => ({ ...image, size: staged[i]?.size ?? image.size })) }) }
+      : meta;
 
     let seq: number | undefined;
     // The hashtags the content had, and the places reposts gave it, as the commit read them.
     let had: string[] = previous?.tags ?? [];
     let places: Repost[] = [];
+    // The hashtags the write gives the content, and its meta file with them: as it came, unless a repost was removed meanwhile.
+    let tags = summary.tags;
+    let written = stored;
     try {
       await db.transaction().execute(async (trx) => {
         if (previous) {
@@ -143,6 +184,14 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
             const current = await effectiveMeta(trx, content, contentId);
             if (current) recheck?.(current);
             had = [...new Set([...previous.tags, ...(current?.tags ?? [])])];
+          }
+          // Where reposts put it: the row is locked, so there are no more to come, and none to go, before this commits.
+          places = await repostsOf(trx, contentId);
+          // What the request read as a repost's and no repost gives any more: the repost was removed, and its hashtags with it.
+          const lost = given.filter((tag) => !places.some((r) => r.tag === tag));
+          if (lost.length) {
+            tags = tags.filter((tag) => !lost.includes(tag));
+            written = { ...stored, tags: stored.tags.filter((tag) => !lost.includes(tag)) };
           }
         } else {
           seq = 1;
@@ -173,33 +222,38 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
         }
         if (previous) await trx.deleteFrom('tag_moderation').where('content_id', '=', contentId).where('decision', '=', 'approved').execute();
         // The hashtags it is published under, not the ones it dropped: this is what /tags lists them by.
-        if (!queued) await touchTags(trx, dialect, [...summary.tags, own], ts);
+        if (!queued) await touchTags(trx, dialect, [...tags, own], ts);
         if (previous) {
           // Recorded as removals, with no moderator: the compactor takes them off the content as it does any (see applyDecisions).
           const removal = { decision: 'removed', moderator_id: null, decided_at: ts, applied_at: null } as const;
           for (const tag of droppedReposts) {
             await updateOnConflict(trx.insertInto('tag_moderation').values({ content_id: contentId, tag, ...removal }), dialect, ['content_id', 'tag'], removal).execute();
           }
-          // Where reposts put it: the row is locked, so there are no more to come before this commits.
-          places = await repostsOf(trx, contentId);
         }
         const placed = places.map((r) => r.tag);
         const touched = [
           ...new Set([
             // The indexes the content is published in: its hashtags', its publisher's own, and those reposts put it in.
-            ...(queued ? [] : [...summary.tags, own, ...placed]),
+            ...(queued ? [] : [...tags, own, ...placed]),
             // The ones an update dropped. Queued: also the hashtags it has now, should an admin accept what it was before this is applied.
-            ...(!previous ? [] : queued ? [...had, ...summary.tags, own, ...placed, ...droppedReposts] : [...had.filter((tag) => !summary.tags.includes(tag)), ...droppedReposts]),
+            ...(!previous ? [] : queued ? [...had, ...tags, own, ...placed, ...droppedReposts] : [...had.filter((tag) => !tags.includes(tag)), ...droppedReposts]),
           ]),
         ];
-        await insertPending(trx, { contentId, seq, kind: 'post', payload: { meta: stored }, stagedKey: staged?.key, at: ts });
+        // A video the server processes waits as it was sent: the row says so, and the job is what the video worker finds it by.
+        const process = processVideo === true && first !== undefined;
+        await insertPending(trx, { contentId, seq, kind: 'post', payload: { meta: written, ...(process && { process: true }) }, stagedKey: first?.key, at: ts });
+        if (process) await addVideoJob(trx, { contentId, seq, at: ts });
+        // The images after the first, of an image post of several: a row each, under the write's number, which names where the image waits.
+        for (const [i, { key }] of staged.entries()) {
+          if (i > 0) await insertPending(trx, { contentId, seq, kind: 'post_file', image: i + 1, stagedKey: key, at: ts });
+        }
         if (touched.length) await enqueue(trx, contentId, touched);
       });
     } catch (err) {
       // A COMMIT can fail yet still be applied, e.g. if the connection dropped mid-commit.
-      const held = seq === undefined ? false : await committed(contentId, seq, ts, staged?.key);
-      // What was staged is nobody's, unless the write may be there after all: then the file is its own, and stays.
-      if (held === false && staged) await content.removeStaged(staged.key).catch((cause) => log.warn({ err: cause, contentId, staged: staged.key }, 'could not delete the staged file of a write that did not commit'));
+      const held = seq === undefined ? false : await committed(contentId, seq, ts, first?.key);
+      // What was staged is nobody's, unless the write may be there after all: then the files are its own, and stay.
+      if (held === false) await unstage();
       if (held !== true) throw err;
     }
 
@@ -210,17 +264,19 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
     await countTagPairs(
       db,
       dialect,
-      summary.tags,
-      previous ? summary.tags.filter((tag) => !had.includes(tag) && !reposted.has(tag)) : summary.tags,
+      tags,
+      previous ? tags.filter((tag) => !had.includes(tag) && !reposted.has(tag)) : tags,
       now(),
     ).catch((err) => log.warn({ err, contentId }, 'could not count the hashtags of the write; related hashtags go without it'));
+    return tags;
   }
 
   /**
    * Publishes content that waits in the moderation queue, as an admin accepting it does: takes it
    * out of the queue, and queues its entry in the index of each of its hashtags, in its publisher's
    * own and in each that a repost put it in, as the write that was held back would have. Returns
-   * the content's hashtags, or null if it isn't in the queue (any more).
+   * the content's meta file as it is published, which has its hashtags and whom it mentions, or
+   * null if it isn't in the queue (any more).
    *
    * Content that waits has no summary. The compactor writes it: with the write that was held, if
    * it has yet to apply that (see applyPending), else as it rebuilds the content's entries.
@@ -228,7 +284,7 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
    * The content's row is locked first, as an update of it does, so the two take turns: whichever
    * commits last decides whether the content is in the queue.
    */
-  async function publish(row: { id: string; user_id: string; username: string; created_at: number; ai_generated: number }): Promise<string[] | null> {
+  async function publish(row: { id: string; user_id: string; username: string; created_at: number; ai_generated: number }): Promise<ContentMeta | null> {
     const contentId = row.id;
     const meta = await db.transaction().execute(async (trx) => {
       await trx.updateTable('content').set((eb) => ({ ai_generated: eb.ref('ai_generated') })).where('id', '=', contentId).execute();
@@ -252,7 +308,7 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
 
     const publisher: Publisher = { userId: row.user_id, username: row.username };
     await publishers.put(publisher).catch((err) => log.warn({ err, userId: publisher.userId }, 'could not refresh the publisher credit in Redis'));
-    return meta.tags;
+    return meta;
   }
 
   /**
@@ -314,6 +370,43 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
   }
 
   /**
+   * Removes a user's repost of content, as an admin or a server moderator does (DELETE
+   * /content/:contentId/reposts/:userId): what the repost added goes, and the content stays as
+   * its publisher and its other reposts made it. It is one commit, and nothing is written to the
+   * stores. The repost's rows of `reposts` are deleted: its place in the reposter's own index,
+   * and each hashtag it gave the content that the content still has from it. From then on nothing
+   * reads it as a repost, and the user can make it again, unless they are banned: the removal
+   * blocks nobody.
+   *
+   * What is left of it is the compactor's to take away: the entries in those indexes, the
+   * hashtags in the content's meta file and summary, and the summary's copy under the day of the
+   * repost. The deleted rows were what said where those are, so the commit leaves a row of
+   * `repost_removals` for each, and the compactor's next run goes by them (see Compactor's
+   * applyRemovals), which is when feeds stop showing the repost.
+   *
+   * The content's row is locked first, as a repost and an update lock it, so the rows deleted are
+   * the ones that are there, and an update that commits after this finds them gone (see write).
+   * Returns the hashtags the repost had given the content and when it was made, or null if the
+   * user has no repost of it. 404 for content that isn't there, or is set for deletion.
+   */
+  async function unrepost({ contentId, userId }: RepostRemoval): Promise<{ tags: string[]; at: number } | null> {
+    const at = now();
+    return db.transaction().execute(async (trx) => {
+      await trx.updateTable('content').set((eb) => ({ ai_generated: eb.ref('ai_generated') })).where('id', '=', contentId).execute();
+      if (!(await isLive(trx, contentId))) throw contentNotFound();
+      const made = (await repostsOf(trx, contentId)).filter((r) => r.user_id === userId);
+      const [first] = made;
+      if (!first) return null;
+      await trx.deleteFrom('reposts').where('content_id', '=', contentId).where('user_id', '=', userId).execute();
+      await trx
+        .insertInto('repost_removals')
+        .values(made.map((r) => ({ id: randomUUID(), content_id: contentId, tag: r.tag, reposted_at: r.created_at, created_at: at })))
+        .execute();
+      return { tags: repostedTags(made), at: Number(first.created_at) };
+    });
+  }
+
+  /**
    * Hides the server's entry for a post on another server, on that server's signed word that it
    * publishes no post at the original's address (see AttestedGone). It says that of a post it
    * deleted and of one that only waits in its moderation queue, and nobody can tell which from
@@ -372,7 +465,7 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
     }
   }
 
-  return { write, publish, repost, withhold };
+  return { write, publish, repost, unrepost, withhold };
 }
 
 export type ContentWriter = ReturnType<typeof contentWriter>;

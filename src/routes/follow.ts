@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
+import { blocksBetween } from '../blocks.js';
 import { isUniqueViolation, lockUser } from '../db/index.js';
 import type { AppDeps } from '../deps.types.js';
 import { requireShownFollows, syncFollowing } from '../follows.js';
@@ -51,7 +52,15 @@ export function followRoutes(app: FastifyInstance, { db, config, follows, now = 
   const findFollow = (followerId: string, followeeId: string) =>
     db.selectFrom('follows').select('created_at').where('follower_id', '=', followerId).where('followee_id', '=', followeeId).executeTakeFirst();
 
-  /** Follows another user. Following them again changes nothing. */
+  /**
+   * Follows another user. Following them again changes nothing.
+   *
+   * Refused (403) while either of the two blocks the other (src/blocks.ts): a block ends the
+   * follows between them, and this is what keeps them ended. The one who blocked is told to
+   * unblock first; the one who was blocked, only that they can't follow this user. The block is
+   * looked for in the transaction, with the follower's row locked, which a block locks too: a
+   * follow that commits before a block is ended by it, and one that comes after finds it.
+   */
   app.put('/users/:userId/following/:followeeId', async (req, reply) => {
     const { userId, followeeId } = PairParams.parse(req.params);
     await caller(req, userId);
@@ -66,6 +75,9 @@ export function followRoutes(app: FastifyInstance, { db, config, follows, now = 
         await db.transaction().execute(async (trx) => {
           // First: the user's follows then take turns, and none gets past the limit.
           await lockUser(trx, config.db.dialect, userId);
+          const blocked = await blocksBetween(trx, userId, followeeId);
+          if (blocked.mine) throw forbidden(msg('follow.you_blocked'));
+          if (blocked.theirs) throw forbidden(msg('follow.not_taken'));
           if (
             Number(
               (

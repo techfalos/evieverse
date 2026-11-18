@@ -12,7 +12,10 @@ RUN npm run build && npm prune --omit=dev
 # trixie, not bookworm: opendal's native binding needs glibc 2.38 or later.
 FROM node:22-trixie-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+# ffmpeg: what the video worker, which runs with the compactor, processes the videos users send with (src/video).
+# The one image runs the API and the compactor, so both have it; a server that processes no videos
+# (VIDEO_PROCESSING=false) needs none.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist

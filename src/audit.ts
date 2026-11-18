@@ -67,9 +67,11 @@ function resultOf(payload: unknown): Record<string, string> {
 /**
  * For a multipart request, which Fastify leaves unread for the route to take apart: its text fields
  * and a description of its file. The file's bytes are not kept, as they are stored as the post's.
+ * A request with several files, the images of an image post, has `file` for the first and
+ * `files` for them all, in the order they were sent.
  */
-export function auditMultipart(req: FastifyRequest, fields: Record<string, string>, file?: { filename: string | null; mimeType: string; size: number }): void {
-  if (req.audit) req.audit.body = { multipart: true, fields: redact(fields), file: file ?? null };
+export function auditMultipart(req: FastifyRequest, fields: Record<string, string>, files: { filename: string | null; mimeType: string; size: number }[] = []): void {
+  if (req.audit) req.audit.body = { multipart: true, fields: redact(fields), file: files[0] ?? null, ...(files.length > 1 && { files }) };
 }
 
 /**

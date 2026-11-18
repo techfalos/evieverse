@@ -209,6 +209,7 @@ for (const target of TARGETS) {
         url: 'https://shop.example/winter?ref=evieverse',
         clicks: 0,
         image_type: null,
+        image_alt: null,
         tags: 'cats dogs',
         starts_at: startsAt,
         ends_at: startsAt + 48 * HOUR,

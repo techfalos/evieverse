@@ -81,6 +81,7 @@ for (const target of TARGETS) {
         { method: 'PUT', url: `/users/${alice.userId}/following/${bob.userId}`, headers: as(alice) },
         { method: 'DELETE', url: `/users/${alice.userId}/following/${bob.userId}`, headers: as(alice) },
         { method: 'POST', url: '/like', payload: { ...bob, contentId } },
+        { method: 'DELETE', url: '/like', payload: { ...bob, contentId } },
         { method: 'DELETE', url: `/content/${contentId}`, headers: as(alice) },
       ] as const;
       for (const call of calls) {
@@ -94,6 +95,8 @@ for (const target of TARGETS) {
       }
       expect(records.find((r) => r.method === 'PATCH')).toMatchObject({ userId: alice.userId, body: { messages: false } });
       expect(records.find((r) => r.method === 'DELETE' && r.route === '/content/:contentId')).toMatchObject({ userId: alice.userId, params: { contentId }, status: 202 });
+      // A like that is taken back says whose it was and of what, and no key.
+      expect(records.find((r) => r.method === 'DELETE' && r.route === '/like')).toMatchObject({ userId: bob.userId, status: 200, body: { userId: bob.userId, apiKey: '[redacted]', contentId }, result: { contentId } });
     });
 
     it('does not write down reads', async () => {

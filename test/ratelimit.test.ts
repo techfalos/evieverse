@@ -182,6 +182,12 @@ for (const target of TARGETS) {
       const bumps = await Promise.all(Array.from({ length: 20 }, () => ctx.hot.bump('tally')));
       expect([...bumps].sort((a, b) => a! - b!)).toEqual(Array.from({ length: 20 }, (_, i) => i + 6));
       expect(await held()).toBe('25');
+      // By another number, which takes from the count if it is negative; a missing count is left missing by that too.
+      expect(await ctx.hot.bump('tally', -1)).toBe(24);
+      expect(await ctx.hot.bump('tally', 3)).toBe(27);
+      expect(await ctx.hot.bump('tally', -2)).toBe(25);
+      expect(await ctx.hot.bump('other', -1)).toBeNull();
+      expect(await held()).toBe('25');
 
       // It keeps the time the count had left: it expires when it would have.
       if (target.hot === 'memory') ctx.clock.now += 250;

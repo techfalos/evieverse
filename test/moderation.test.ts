@@ -170,8 +170,8 @@ for (const target of TARGETS) {
       expect(await profile(carol)).toMatchObject({ admin: false, moderates: ['news', 'sports'] });
       expect(await profile(root)).toMatchObject({ admin: true, moderates: [] });
 
-      // Moderators can't appoint others, or delete content that isn't theirs; admins can delete anyone's.
-      expect((await req(bob, 'PUT', `/tags/news/moderators/${alice.userId}`)).statusCode).toBe(403);
+      // Moderators can't appoint others to a hashtag that isn't theirs (see tagmoderation.test.ts for one that is), or delete content that isn't theirs; admins can delete anyone's.
+      expect((await req(bob, 'PUT', `/tags/sports/moderators/${alice.userId}`)).statusCode).toBe(403);
       const { contentId } = await post(alice, 'hello #news');
       expect((await req(bob, 'DELETE', `/content/${contentId}`)).statusCode).toBe(403);
       expect(ok(await req(root, 'DELETE', `/content/${contentId}`), 202)).toEqual({ contentId, status: 'pending_deletion', requestedAt: now() });
@@ -191,8 +191,8 @@ for (const target of TARGETS) {
       expect((await req(alice, 'PUT', `/tags/news/moderators/${root.userId}`)).statusCode).toBe(201);
     });
 
-    it("refuses posts containing the server's blocked words before any challenge, storing nothing", async () => {
-      ctx = await createTestContext(target, { challenge: { postWindowSeconds: 60 } });
+    it("refuses posts containing the server's blocked words before the limit on posts a minute, storing nothing", async () => {
+      ctx = await createTestContext(target, { postRateLimitPerMinute: 2 });
       const root = await admin();
       const alice = await ctx.register('alice');
       const words = (u: User | null, method: 'GET' | 'POST' | 'DELETE', list?: string[]) => req(u, method, '/moderation/blocked-words', list && { words: list });
@@ -232,10 +232,11 @@ for (const target of TARGETS) {
       expect(await ctx.db.selectFrom('content').select('id').execute()).toEqual([{ id: contentId }]);
       expect(ok(await req(null, 'GET', `/content/${contentId}`), 200)).toMatchObject({ text: 'An honest post about spammers #news' });
       expect(await queued(ctx)).toEqual([`${contentId} @${alice.userId}`, `${contentId} news`]);
-      // None of them was a post, so the run's challenge is still the first.
-      const next = await store(alice, 'A second post #news');
-      expect(next.statusCode).toBe(428);
-      expect(next.json().challenge).toMatchObject({ step: 1, steps: 1 });
+      // None of them was a post, so the minute still has room for its second. Past that, a post with a
+      // blocked word is still told so, and one without is told when to try again.
+      expect((await store(alice, 'A second post #news')).statusCode).toBe(201);
+      expect((await store(alice, 'More spam #news')).json().error).toBe(REFUSED);
+      expect((await store(alice, 'A third post #news')).statusCode).toBe(429);
     });
 
     it("drops a hashtag from posts containing its blocked words, and from posts by users muted on it; a post left with none isn't published", async () => {

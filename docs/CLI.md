@@ -90,20 +90,27 @@ A command exits with:
 | `help`                                                                   | Every command, with the ones your key may use marked.                                                                                                                                                    |
 | `version`                                                                | The CLI's version and build.                                                                                                                                                                             |
 | `update`                                                                 | Replaces the CLI with the one the server ships.                                                                                                                                                          |
+| `repost <post> --tags <tags>`                                            | [Reposts](API.md#post-repost) a post: gives it hashtags it doesn't have, under which it shows as a new post, as it does to those who follow you. Name the post by its id, or a post on another server by its address there (`https://other.example/content/<id>`), which is reposted here as a link to it. Quote the hashtags: `--tags "news, mumbai"`. A repost the server holds back waits for its moderators, and the command says so, as it says which hashtags the post wasn't given and why. |
 | `content delete <contentId>`                                             | Deletes content: your own, or any content if you're an admin.                                                                                                                                            |
 | `content report <contentId> [--comment <commentId>] [--reason <text>]`   | Reports a post to the server's moderators, or with `--comment`, a comment on it, with what's wrong with it if you say. You report a post or a comment once.                                              |
-| `comments list <contentId> [--newest] [--limit <n>] [--cursor <cursor>]` | A post's [comments](API.md#comments), oldest first, or with `--newest`, newest first: each one's id, author, time and text.                                                                              |
-| `comments add <contentId> <text>`                                        | Comments on a post that takes comments (quote the text). A comment the server holds back waits for its moderators, as a post does, and the command says so.                                              |
+| `comments list <contentId> [--newest] [--limit <n>] [--cursor <cursor>]` | A post's [comments](API.md#comments), oldest first, or with `--newest`, newest first: each one's id, author, time and text, and whether its author says it was created with AI.                          |
+| `comments add <contentId> <text> [--file <path>] [--alt <text>] [--reply-to <commentId>] [--ai]` | Comments on a post that takes comments (quote the text), or with `--reply-to`, replies to a comment on it. With `--file`, the comment comes with an image or a video, and its text can be `""`. With `--alt`, an image comes with its [alt text](API.md#alt-text), which describes it to people who can't see it (quote it). With `--ai`, you say that the comment was created with AI. A comment the server holds back waits for its moderators, as a post does, and the command says so. |
+| `comments edit <contentId> <commentId> <text> [--ai \| --no-ai]`         | Gives a comment of yours another text (quote it). With `--ai`, you say that the comment was created with AI, and with `--no-ai`, that it wasn't; with neither, it says what it said. The comment keeps its replies and its likes. An edit the server holds back takes the comment off the post until its moderators accept it, and the command says so. |
+| `comments like <contentId> <commentId>`                                  | Likes a comment, and says how many likes it has. You like a comment once, until you take the like back: liking it again changes nothing.                                                                 |
+| `comments unlike <contentId> <commentId>`                                | Takes back your like of a comment, and says how many likes it has. You can like the comment again afterwards. Taking back a like you hadn't made changes nothing.                                        |
 | `comments delete <contentId> <commentId>`                                | Deletes a comment: your own, one on your post, or any comment if you're an admin.                                                                                                                        |
-| `moderators list <tag>`                                                  | A hashtag's moderators.                                                                                                                                                                                  |
+| `moderators list <tag>`                                                  | A hashtag's moderators, and the [claim](API.md#claiming-a-hashtag) to it that waits, if there is one.                                                                                                    |
+| `claims add <tag>`                                                       | [Claims a hashtag](API.md#claiming-a-hashtag) that has no moderator, to moderate it, on a server where publishers choose their posts' hashtags. The server's admins and server moderators are told, and can refuse the claim until the time the command prints; after that you're the hashtag's moderator, and a notice in your inbox says so. |
+| `claims withdraw <tag>`                                                  | Withdraws your claim to a hashtag, while it waits.                                                                                                                                                       |
+| `tag-rules list <tag>`                                                   | A hashtag's own [rules](API.md#a-hashtags-rules), in their order: what its moderators ask of the posts under it.                                                                                         |
 | `rules list`                                                             | The server's [rules](API.md#rules), in their order, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is. |
-| `inbox list [--unread] [--limit <n>] [--cursor <cursor>]`                | Your [inbox](API.md#inbox), newest first: the messages users sent you, and the notices of what moderators did to your posts and comments and of your mutes. With `--unread`, only what you haven't read. |
+| `inbox list [--unread] [--limit <n>] [--cursor <cursor>]`                | Your [inbox](API.md#inbox), newest first: the messages users sent you, and the notices of what moderators did to your posts and comments, of your mutes, of your claims to hashtags and of the hashtags you were made a moderator of or are one of no more, and of the posts and comments that [mention](API.md#mentions) you. Each row says who sent it: the user who wrote a message or mentioned you, with their id, to answer or block them, and "the server" for any other notice. With `--unread`, only what you haven't read. |
 | `inbox read [--message <messageId>]`                                     | Marks everything in your inbox as read, or with `--message`, one message or notice.                                                                                                                      |
 | `inbox delete <messageId>`                                               | Deletes a message or a notice from your inbox.                                                                                                                                                           |
 | `messages send <userId> <text>`                                          | Sends a user a message (quote the text). Refused if either of you turned messages off or blocked the other.                                                                                              |
 | `messages on`, `messages off`                                            | Turns messages between users on or off for your account. With them off you're sent none and send none. Notices still arrive.                                                                             |
 | `blocks list [--limit <n>] [--cursor <cursor>]`                          | The users you block, most recently blocked first.                                                                                                                                                        |
-| `blocks add <userId>`                                                    | Blocks a user: no message goes between the two of you, either way.                                                                                                                                       |
+| `blocks add <userId>`                                                    | [Blocks](API.md#blocks) a user: no message goes between the two of you, neither follows the other, they can't comment on your posts, and what they wrote is left out of what you're listed.           |
 | `blocks remove <userId>`                                                 | Unblocks a user.                                                                                                                                                                                         |
 
 
@@ -124,7 +131,10 @@ Server moderators and admins can run these on every hashtag.
 | `mute remove <tag> <userId>`                        | Unmutes a user on a hashtag.                                                                                                 |
 | `tag queue <tag> [--limit <n>] [--cursor <cursor>]` | [The hashtag's queue](API.md#a-hashtags-queue): the posts under it that no moderator has approved, or removed it from, yet.  |
 | `tag approve <contentId> <tag>`                     | Approves content under a hashtag, which takes it out of the hashtag's queue until it's updated.                              |
-| `tag remove <contentId> <tag> [--mute]`             | Removes a hashtag from content, for good: updates don't get it back. With `--mute`, also mutes its publisher on the hashtag. |
+| `tag remove <contentId> <tag> [--mute] [--reason <text>]` | Removes a hashtag from content, for good: updates don't get it back. With `--mute`, also mutes its publisher on the hashtag. With `--reason`, says why (quote it): the reason is kept with the post, where anyone who reads the post reads it. |
+| `tag-rules add <tag> <text> [--position <n>]`       | Adds a rule to a hashtag's [rules](API.md#a-hashtags-rules) (quote the text). It goes at the end of the list, or with `--position`, at that place, counted from 1. |
+| `tag-rules update <tag> <ruleId> [--text <text>] [--position <n>]` | Changes one of a hashtag's rules: with `--text`, what it says, and with `--position`, its place in the list. |
+| `tag-rules remove <tag> <ruleId>`                   | Removes one of a hashtag's rules.                                                                                            |
 
 
 
@@ -148,6 +158,8 @@ Both queue and reports contain posts and comments. Each line starts with `post` 
 | `bans list [--limit <n>] [--cursor <cursor>]`                                        | The [banned](API.md#bans) users, most recently banned first: who banned each, when, and why.                                                     |
 | `bans add <userId> [--reason <text>]`                                                | Bans a user: they can't post, comment, like or send messages, and can still read. They're told. Not an admin or a server moderator.              |
 | `bans remove <userId>`                                                               | Ends a ban. The user is told.                                                                                                                    |
+| `claims list [--limit <n>] [--cursor <cursor>]`                                      | The [claims to hashtags](API.md#claiming-a-hashtag) that wait, longest waiting first: who claims which hashtag, and until when the claim can be refused. |
+| `claims refuse <tag>`                                                                | Refuses the claim to a hashtag that waits: its user doesn't become the hashtag's moderator, and is told.                                         |
 
 
 
@@ -164,8 +176,8 @@ Both queue and reports contain posts and comments. Each line starts with `post` 
 | `server-moderators list`                  | Lists the server moderators.                                                                                                                                                                                                                                                    |
 | `server-moderators add <userId>`          | Makes a user a server moderator: they can work through the moderation queue and the report queue, and moderate every hashtag.                                                                                                                                                   |
 | `server-moderators remove <userId>`       | Ends a user's time as a server moderator.                                                                                                                                                                                                                                       |
-| `moderators add <tag> <userId>`           | Appoints a moderator of a hashtag.                                                                                                                                                                                                                                              |
-| `moderators remove <tag> <userId>`        | Ends a user's moderation of a hashtag.                                                                                                                                                                                                                                          |
+| `moderators add <tag> <userId>`           | Appoints a moderator of a hashtag. The user is told. The server takes it from one of the hashtag's own moderators too ([API.md](API.md#a-hashtags-moderators)), though `help` lists the command for admins.                                                                      |
+| `moderators remove <tag> <userId>`        | Ends a user's moderation of a hashtag. The user is told. From one of the hashtag's own moderators, the server takes it for those who became a moderator after them, and for themselves.                                                                                         |
 | `rules add <text> [--position <n>]`       | Adds a rule (quote the text). It goes at the end of the list, or with `--position`, at that place, counted from 1.                                                                                                                                                              |
 | `rules update <ruleId> [--text <text>] [--position <n>]` | Changes a rule: with `--text`, what it says, and with `--position`, its place in the list.                                                                                                                                                                       |
 | `rules remove <ruleId>`                   | Removes a rule.                                                                                                                                                                                                                                                                 |
@@ -218,6 +230,17 @@ Work through a hashtag's queue:
 evieverse tag queue news
 evieverse tag approve 5c06badf-… news
 evieverse tag remove 5c06badf-… news --mute              # and mute its publisher on #news
+evieverse tag remove 5c06badf-… news --reason "Not news" # and say why, on the post
+```
+
+Claim a hashtag nobody moderates, and set its rules once the claim went through:
+
+```bash
+evieverse claims add cars                                # prints until when the claim can be refused
+evieverse claims list                                    # as a server moderator or an admin: the claims that wait
+evieverse claims refuse cars                             # ...to stop one
+evieverse tag-rules add cars "Cars only: no trucks."     # as the hashtag's moderator, a server moderator or an admin
+evieverse tag-rules list cars
 ```
 
 Work through the moderation queue:
@@ -242,6 +265,7 @@ Comment on a post, and decide on comments in the two queues:
 
 ```bash
 evieverse comments add 5c06badf-… "Lovely light."                 # as anyone, on a post that takes comments
+evieverse comments add 5c06badf-… "Same spot." --file harbour.jpg --alt "Fishing boats at low tide"
 evieverse comments list 5c06badf-… --newest
 evieverse content report 5c06badf-… --comment 0199c2f4-… --reason "Unkind"
 evieverse queue list                                              # posts and comments, as a server moderator or an admin

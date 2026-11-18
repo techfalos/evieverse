@@ -18,6 +18,12 @@ import { indexAuthor } from './tagfeed/layout.js';
  * A post on another server is reposted as content of its own here, which is a link to the
  * original with the original's summary (see ContentMeta.origin). The server holds one such entry
  * per original (`content.origin_hash`), and from then on it is reposted like a post written here.
+ *
+ * A repost is taken down on its own by an admin or a server moderator (DELETE
+ * /content/:contentId/reposts/:userId, routes/moderation.ts): its rows of `reposts` are deleted,
+ * and the compactor takes away what it had added, by the rows of `repost_removals` the removal
+ * leaves. The post stays. The first repost of a post on another server is the server's entry
+ * for it, and is taken down by deleting that.
  */
 
 /** The most hashtags reposts can add to one piece of content, beside the ones its publisher gave it. */
@@ -32,6 +38,16 @@ export const repostsOf = (db: Pick<Db, 'selectFrom'>, contentId: string): Promis
 
 /** The hashtags reposts gave the content: its places but for the reposters' own indexes. */
 export const repostedTags = (rows: { tag: string }[]): string[] => rows.filter((r) => indexAuthor(r.tag) === null).map((r) => r.tag);
+
+/**
+ * The hashtags of reposts of the content that were removed, and that the compactor is yet to
+ * take off it (`repost_removals`, see contentWriter's unrepost). Until it has, the content's
+ * meta file may still hold them, and they are nobody's: not a repost's any more, and not its
+ * publisher's. One that another repost gave the content since is among them too, and is that
+ * repost's.
+ */
+export const removedRepostTags = async (db: Pick<Db, 'selectFrom'>, contentId: string): Promise<string[]> =>
+  repostedTags(await db.selectFrom('repost_removals').select('tag').where('content_id', '=', contentId).execute());
 
 /** The reposters' own indexes the content is in. */
 export const reposterIndexes = (rows: { tag: string }[]): string[] => rows.filter((r) => indexAuthor(r.tag) !== null).map((r) => r.tag);

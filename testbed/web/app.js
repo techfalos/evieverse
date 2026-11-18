@@ -1,4 +1,4 @@
-// Evieverse testbed: reads /feed with either algorithm and exercises /store, /like, /repost, DELETE /content and /register.
+// Evieverse testbed: reads /feed with either algorithm and exercises /store, /like (and DELETE /like), /repost, DELETE /content and /register.
 // Everything goes through /api, which nginx proxies to the app on this page's origin.
 
 import { parseFormatted } from './format.js';
@@ -73,23 +73,28 @@ function h(tag, attrs = {}, ...children) {
 
 const MARK_TAGS = { bold: 'strong', italic: 'em', strike: 's' };
 
-/** What is within a block of a formatted text, as nodes. A link's address is http or https: the parser makes a link of nothing else. */
+/**
+ * What is within a block of a formatted text, as nodes. A link's address is http or https: the parser makes a link of
+ * nothing else. A mention links to the profile of the user it names, by their id: the name is what the text has.
+ */
 const inlineNodes = (nodes) =>
   nodes.map((n) => {
     if (n.type === 'text') return n.text;
     if (n.type === 'code') return h('code', {}, n.text);
     if (n.type === 'break') return h('br');
+    if (n.type === 'mention') return h('a', { class: 'mention', href: `${API}/users/${encodeURIComponent(n.userId)}`, target: '_blank' }, `@${n.username}`);
     if (n.type === 'link') return h('a', { href: n.url, target: '_blank', rel: 'noopener noreferrer nofollow' }, inlineNodes(n.children));
     return h(MARK_TAGS[n.type], {}, inlineNodes(n.children));
   });
 
 /**
  * A post's text or caption as elements, with its formatting (format.js): bold, italic, struck through, code, links,
- * quotes and lists. The elements are this page's own, built from what the parser read, so a tag someone posted is
- * still the text it was written with.
+ * quotes and lists, and the users it mentions, which the server gives beside the text as `mentions`: without them an
+ * `@name` is the text it is. The elements are this page's own, built from what the parser read, so a tag someone
+ * posted is still the text it was written with.
  */
-const formatted = (text) =>
-  parseFormatted(text).map((b) => {
+const formatted = (text, mentions = []) =>
+  parseFormatted(text, mentions).map((b) => {
     if (b.type === 'list') return h(b.ordered ? 'ol' : 'ul', b.ordered ? { start: b.start } : {}, b.items.map((item) => h('li', {}, inlineNodes(item))));
     return h(b.type === 'quote' ? 'blockquote' : 'p', {}, inlineNodes(b.children));
   });
@@ -187,7 +192,6 @@ function solveChallenge(challenge, reason) {
   const dialog = $('#challenge');
   const form = $('#challenge-form');
   const status = $('#challenge-status');
-  $('#challenge-title').textContent = challenge.steps > 1 ? `Solve challenge ${challenge.step} of ${challenge.steps}` : 'Solve the challenge';
   $('#challenge-reason').textContent = `The server says: ${reason}.`;
   $('#challenge-img').src = challenge.image;
   // The same characters, read out: fetched only if it's played.
@@ -247,8 +251,9 @@ function solveChallenge(challenge, reason) {
 }
 
 /**
- * Makes a request with `send(solution)`. While the server answers 428 with a challenge, shows it and
- * sends the request again with the solution; a wrong answer comes back with a new challenge.
+ * Makes a request with `send(solution)`, which is how a user is registered. While the server answers
+ * 428 with a challenge, shows it and sends the request again with the solution; a wrong answer comes
+ * back with a new challenge.
  */
 async function withChallenges(send) {
   let solution = {};
@@ -450,14 +455,35 @@ function renderPage(data, asked, page, algorithm) {
 
 function preview(rec) {
   const p = rec.preview;
-  const caption = p.text ? h('div', { class: 'preview' }, formatted(p.text)) : null;
+  const caption = p.text ? h('div', { class: 'preview' }, formatted(p.text, rec.mentions)) : null;
   switch (p.kind) {
     case 'text':
       return caption;
-    case 'image':
-      return [h('a', { href: p.url, target: '_blank' }, h('img', { class: 'media', src: p.url, loading: 'lazy', alt: p.text ?? '' })), caption];
-    case 'video':
-      return [h('video', { class: 'media', src: p.url, controls: true, preload: 'none' }), caption];
+    case 'image': {
+      // An album says how many images it has. The first is at the preview's URL, and each of the others at its place after it: <url>/2, <url>/3 ...
+      const urls = Array.from({ length: p.imageCount ?? 1 }, (_, i) => (i === 0 ? p.url : `${p.url}/${i + 1}`));
+      // What describes each image, where its publisher said: `alt` has one for each, '' for one that has none, which is then shown as an image nobody described.
+      const image = (src, i) =>
+        h('a', { href: src, target: '_blank', title: urls.length > 1 && `${i + 1} of ${urls.length}` }, h('img', { class: 'media', src, loading: 'lazy', alt: p.alt?.[i] ?? '' }));
+      if (urls.length === 1) return [image(urls[0], 0), caption];
+      return [h('div', { class: 'album' }, urls.map(image)), h('div', { class: 'album-count muted' }, `${urls.length} images: scroll sideways`), caption];
+    }
+    case 'video': {
+      // A video stored as it was sent (a server that processes none) is its one file.
+      if (!p.video) return [h('video', { class: 'media', src: p.url, controls: true, preload: 'none' }), caption];
+      // One the server processed has a poster to show before it plays, and two sources. The adaptive stream first, which
+      // Safari plays by itself (any other browser needs a script such as hls.js for it), and then the MP4, which every browser plays.
+      const { poster, hls } = p.video;
+      return [
+        h(
+          'video',
+          { class: 'media', controls: true, preload: 'none', poster, playsinline: true },
+          h('source', { src: hls, type: 'application/vnd.apple.mpegurl' }),
+          h('source', { src: p.url, type: 'video/mp4' }),
+        ),
+        caption,
+      ];
+    }
     case 'audio':
       return [h('audio', { class: 'media', src: p.url, controls: true, preload: 'none' }), caption];
     default:
@@ -511,6 +537,8 @@ function card(rec, via) {
       { class: 'actions' },
       likes,
       h('button', { type: 'button', onclick: (e) => like(rec, e.currentTarget, likes) }, 'Like'),
+      // A feed doesn't say whose likes a post has, so both are offered: taking back a like that isn't there changes nothing.
+      h('button', { type: 'button', title: 'Take your like back', onclick: (e) => like(rec, e.currentTarget, likes, false) }, 'Unlike'),
       // A post is its publisher's to give other hashtags with an update; anyone else reposts it.
       mine ? null : h('button', { type: 'button', onclick: (e) => repost(rec, e.currentTarget) }, 'Repost'),
       h('a', { href: `${API}/content/${rec.contentId}`, target: '_blank' }, 'JSON'),
@@ -557,22 +585,27 @@ function revealHighlight() {
 
 // ---- actions -----------------------------------------------------------------------------------
 
-async function like(rec, btn, likesEl) {
+/** Likes a post (POST /like), or with `liked` false, takes the like back (DELETE /like, which names the post in its query). */
+async function like(rec, btn, likesEl, liked = true) {
   if (!state.actor) return toast('Pick a user to act as first.');
   btn.disabled = true;
   try {
-    const { data } = await api('POST', '/like', { contentId: rec.contentId });
+    const { data } = liked
+      ? await api('POST', '/like', { contentId: rec.contentId })
+      : await api('DELETE', `/like?contentId=${encodeURIComponent(rec.contentId)}`);
+    const after = 'Feeds show the new count after the next compactor run.';
     likesEl.textContent = `♥ ${rec.likes} → ${data.likes} in the database`;
-    likesEl.title = 'Feeds show the new count after the next compactor run.';
-    toast(data.alreadyLiked ? 'Already liked: likes are once per user.' : 'Liked. Feeds show the new count after the next compactor run.');
+    likesEl.title = after;
+    if (liked) toast(data.alreadyLiked ? 'Already liked: a like is once per user, until it is taken back.' : `Liked. ${after}`);
+    else toast(data.wasLiked ? `Like taken back. ${after}` : "You hadn't liked this: nothing to take back.");
   } catch (err) {
-    toast(`Like failed: ${err.message}`);
+    toast(`${liked ? 'Like' : 'Unlike'} failed: ${err.message}`);
   } finally {
     btn.disabled = false;
   }
 }
 
-/** Reposts a post under hashtags it doesn't have: POST /repost, which is a post as far as challenges go. */
+/** Reposts a post under hashtags it doesn't have: POST /repost, which is a post as far as the limit on posts a minute goes. */
 async function repost(rec, btn) {
   if (!state.actor) return toast('Pick a user to act as first.');
   const asked = prompt(`Repost under which hashtags? The post has ${rec.tags.map((t) => `#${t}`).join(' ') || 'none'}; a repost gives it others.`);
@@ -580,7 +613,7 @@ async function repost(rec, btn) {
   if (!tags.length) return;
   btn.disabled = true;
   try {
-    const { data } = await withChallenges((solution) => api('POST', '/repost', { contentId: rec.contentId, tags, ...solution }));
+    const { data } = await api('POST', '/repost', { contentId: rec.contentId, tags });
     const not = (data.removedTags ?? []).map((r) => `#${r.tag} (${r.reason})`).join(', ');
     toast(
       `Reposted under ${data.tags.map((t) => `#${t}`).join(' ')}${not ? `; not ${not}` : ''}. ` +
@@ -591,7 +624,7 @@ async function repost(rec, btn) {
     state.highlight = { contentId: data.contentId, tags: data.tags, tries: 0 };
     loadFeed();
   } catch (err) {
-    toast(err.cancelled ? 'Cancelled the challenge: nothing was reposted.' : `Repost failed: ${err.message}`, 6000);
+    toast(`Repost failed: ${err.message}`, 6000);
   } finally {
     btn.disabled = false;
   }
@@ -621,11 +654,15 @@ async function edit(rec) {
     try {
       const { data } = await api('GET', `/content/${rec.contentId}`, undefined, { auth: false });
       $('#content').value = data.text ?? p.text ?? '';
+      // An update says the post's alt texts again, as it says all of the post: one line for each image.
+      $('#alt').value = (data.preview.alt ?? []).join('\n');
     } catch {
       $('#content').value = p.text ?? '';
     }
   }
-  if (isMedia(p.kind)) toast(`Choose the ${rec.mimeType} file again: an update sends its file, and must keep its content type.`);
+  if (p.kind === 'image' && p.imageCount > 1) {
+    toast(`Choose the post's ${p.imageCount} images again, in their order: an update sends all of them, and the first must keep its content type (${rec.mimeType}).`, 6000);
+  } else if (isMedia(p.kind)) toast(`Choose the ${rec.mimeType} file again: an update sends its file, and must keep its content type.`);
   $('#post-panel').scrollIntoView({ behavior: 'smooth' });
 }
 
@@ -635,8 +672,12 @@ function setKind(k) {
   document.querySelector(`input[name="kind"][value="${k}"]`).checked = true;
   $('#text-fields').hidden = k === 'link';
   $('#file-fields').hidden = !isMedia(k);
+  // Only an image is described by an alt text.
+  $('#alt-fields').hidden = k !== 'image';
   $('#url-fields').hidden = k !== 'link';
   $('#file').accept = isMedia(k) ? `${k}/*` : '';
+  // An image post takes several images, an album, in the order they are chosen; a video or audio post takes one file.
+  $('#file').multiple = k === 'image';
   $('#content').placeholder = k === 'text' ? '' : 'Caption (optional)';
   // The sample text is a text post's; a caption starts empty.
   if (k !== 'text' && isSample($('#content').value)) $('#content').value = '';
@@ -672,22 +713,30 @@ async function post(e) {
   const type = kind();
   const text = $('#content').value;
   const url = $('#url').value.trim();
-  const file = $('#file').files[0];
+  // An image post's images, in the order the browser lists them; any other post's one file.
+  const files = [...$('#file').files].slice(0, type === 'image' ? undefined : 1);
   if (type === 'text' && !text.trim()) return toast('Write something first.');
   if (type === 'link' && !url) return toast('Paste a link first.');
-  if (isMedia(type) && !file) return toast(`Choose ${type === 'audio' ? 'an audio' : `a ${type}`} file first.`);
-  /** The request body, with a challenge's solution when the server asked for one. */
-  const body = (solution) => {
-    if (type === 'text') return { type, text, tags, contentId, aiGenerated, ...solution };
-    if (type === 'link') return { type, url, tags, contentId, aiGenerated, ...solution };
+  if (isMedia(type) && !files.length) return toast(type === 'image' ? 'Choose an image first, or several for an album.' : `Choose ${type === 'audio' ? 'an audio' : 'a video'} file first.`);
+  /** The request body. */
+  const body = () => {
+    if (type === 'text') return { type, text, tags, contentId, aiGenerated };
+    if (type === 'link') return { type, url, tags, contentId, aiGenerated };
     const form = new FormData();
     form.append('type', type);
     if (text.trim()) form.append('text', text);
     if (tags) form.append('tags', tags);
     if (contentId) form.append('contentId', contentId);
     form.append('aiGenerated', String(aiGenerated));
-    for (const [k, v] of Object.entries(solution)) form.append(k, v);
-    form.append('content', file, file.name);
+    // One part named "content" for each file: several are an album, shown in this order.
+    for (const file of files) form.append('content', file, file.name);
+    if (type === 'image') {
+      // What describes each image: a line for each, in their order. An album sends an `alt` field for each of its
+      // images, empty for one that has none, so that each stays with its image; one image sends its own, if it has one.
+      const alts = $('#alt').value.split('\n').map((line) => line.trim());
+      if (files.length > 1) for (const [i] of files.entries()) form.append('alt', alts[i] ?? '');
+      else if (alts.join(' ').trim()) form.append('alt', alts.filter(Boolean).join(' '));
+    }
     return form;
   };
   const btn = $('#post-btn');
@@ -695,7 +744,7 @@ async function post(e) {
   btn.textContent = 'Posting…';
   const out = $('#post-result');
   try {
-    const { data, ms } = await withChallenges((solution) => api('POST', '/store', body(solution)));
+    const { data, ms } = await api('POST', '/store', body());
     out.className = 'result';
     out.textContent = `${Math.round(ms)} ms\n${JSON.stringify(data, null, 2)}`;
     if (data.unchanged) toast('Unchanged: the same post as the one stored, with the same hashtags.');
@@ -704,8 +753,10 @@ async function post(e) {
       $('#content-id').value = '';
       loadFeed();
     } else {
+      // A video is published once the server has processed it: how long that takes goes by its length.
+      if (data.processing) toast('Stored. Its video is being processed: feeds have it, with a video that plays, once that is done.', 7000);
       // An update shows where the post already is at once; a new post, or a new hashtag, after the next compactor run.
-      if (!contentId) toast('Stored. Feeds have it after the next compactor run, a few seconds from now.');
+      else if (!contentId) toast('Stored. Feeds have it after the next compactor run, a few seconds from now.');
       state.highlight = { contentId: data.contentId, tags: data.tags, tries: 0 };
       $('#content-id').value = '';
       if (isSample($('#content').value)) fillSample();
@@ -713,9 +764,7 @@ async function post(e) {
     }
   } catch (err) {
     out.className = 'result bad';
-    out.textContent = err.cancelled
-      ? 'Cancelled the challenge: nothing was posted.'
-      : `${err.status ?? ''} ${err.message}\n${err.data && typeof err.data === 'object' ? JSON.stringify(err.data, null, 2) : ''}`;
+    out.textContent = `${err.status ?? ''} ${err.message}\n${err.data && typeof err.data === 'object' ? JSON.stringify(err.data, null, 2) : ''}`;
   } finally {
     out.hidden = false;
     btn.disabled = false;

@@ -83,8 +83,9 @@ function countPassed<T>(sorted: T[], passed: (v: T) => boolean): number {
  * after the key it stopped at: whatever is at or ahead of those counts as shown. So a record that
  * was shown isn't shown again while it stays where it was listed, and one that has left the lists
  * since is simply not there. What a session can miss is a record that came to be ahead of where it
- * had got to. With `aiGenerated` or `moderated` set, every other record is left out before any of
- * this.
+ * had got to, and what it can be shown twice is one that came to be behind it: in the popular
+ * order, a record that was shown and has lost likes since (DELETE /like). With `aiGenerated` or
+ * `moderated` set, every other record is left out before any of this.
  */
 export function planFeed(perTag: Candidate[][], opts: PlanOptions): FeedPlan {
   const { anchor } = opts;

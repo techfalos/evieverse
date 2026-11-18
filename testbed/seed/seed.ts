@@ -54,8 +54,8 @@ const AI_SHARE = Number(process.env.SEED_AI_SHARE ?? 0.2);
 
 const log = (msg: string) => console.log(`${iso(Date.now())} seed: ${msg}`);
 
-// It posts on clocks set back in time, so no person is there to solve a challenge: the post window and
-// the limit on posts a minute are off. No setting spares a registration its challenge, so the users are
+// It posts as fast as it can, on clocks set back in time, so the limit on posts a minute is off. No
+// setting spares a registration its challenge, which no person is there to solve, so the users are
 // registered by an admin (see below), whose requests the limit on registrations from one address counts
 // like anyone's, so it is set past them. Every post carries its planned hashtags, whatever TAGGING_MODE
 // the app runs with.
@@ -63,7 +63,6 @@ const config = loadConfig({
   logLevel: 'warn',
   registerRateLimitPerHour: 1_000_000,
   postRateLimitPerMinute: 0,
-  challenge: { postWindowSeconds: 0 },
   tagging: { mode: 'user' },
 });
 const clock = new AsyncLocalStorage<number>();
@@ -280,7 +279,7 @@ const remoteReposts = Array.from({ length: REMOTE_REPOSTS }, () => {
 const seedAdminId = randomUUID();
 await db
   .insertInto('users')
-  .values({ id: seedAdminId, username: 'testbed-seed', created_at: registeredAt, updated_at: registeredAt, admin: 1 })
+  .values({ id: seedAdminId, username: 'testbed-seed', username_folded: 'testbed-seed', created_at: registeredAt, updated_at: registeredAt, admin: 1 })
   .execute();
 const asSeedAdmin = { authorization: `Bearer ${await issueApiKey(db, seedAdminId, registeredAt)}`, 'x-user-id': seedAdminId };
 

@@ -1,11 +1,13 @@
 import type { FastifyBaseLogger } from 'fastify';
 import type { AuthUser } from '../auth/apiKey.types.js';
 import type { Db } from '../db/index.js';
+import type { ModeratorRole } from '../db/schema.js';
 import { plainText } from '../format.js';
 import { forbidden, unprocessable } from '../http/errors.js';
 import { msg } from '../language.js';
 import type { Moderated, ModerationDeps, RemovedTag } from './policy.types.js';
 import { routeOf, trustOf, type TrustRoute } from './trust.js';
+import type { TrustImage } from './trust.types.js';
 import { scanTexts } from './words.js';
 
 /**
@@ -24,6 +26,13 @@ export async function moderates(db: Db, user: AuthUser, tag: string): Promise<bo
   if (moderatesServer(user)) return true;
   return (await db.selectFrom('tag_moderators').select('tag').where('tag', '=', tag).where('user_id', '=', user.id).executeTakeFirst()) !== undefined;
 }
+
+/**
+ * As what `user` moderates a hashtag, for one who does (see moderates): an admin, a server
+ * moderator, or with neither role, one of the hashtag's own moderators. It is what a post's record
+ * of a decision says of who made it (`tag_moderation_log`).
+ */
+export const moderatorRole = (user: AuthUser): ModeratorRole => (user.admin ? 'admin' : user.moderator ? 'server_moderator' : 'tag_moderator');
 
 /**
  * Refuses (403) a user who was banned: what writes a post, a comment or a message, likes a post or
@@ -47,16 +56,17 @@ export async function setAdmin(db: Db, user: string, admin: boolean): Promise<{ 
  * Moderation of a new comment by `userId` on the post `contentId`, or of an edit of one. It goes
  * through the gate a post does: the same trust plugins give it a score, each told it is a comment
  * (`commentOn`), and the same thresholds say where the score sends it (see routeOf). What there
- * is of it to read is its text, and the name of the image or video it comes with (`filename`), as
- * a post's caption and filename are. Throws 422 for a comment whose score has it deleted: nothing
- * of it is stored.
+ * is of it to read is its text, the name of the image or video it comes with (`filename`) and
+ * what describes that image (`alt`), as a post's caption, filename and alternative texts are;
+ * `image` is the image it comes with, if it is one, as a post's
+ * are given. Throws 422 for a comment whose score has it deleted: nothing of it is stored.
  *
  * That is all of it. A comment has no hashtags, so what a hashtag's moderators keep (its blocked
  * words, its mutes) doesn't reach the comments on posts under it: they have no say over comments.
  */
 export async function moderateComment(
-  { db, config, trustPlugins, now = Date.now, log }: ModerationDeps,
-  comment: { userId: string; contentId: string; text: string; filename?: string | null },
+  { db, config, trustPlugins, now = Date.now, log, client }: ModerationDeps,
+  comment: { userId: string; contentId: string; text: string; filename?: string | null; alt?: string; image?: TrustImage },
 ): Promise<{ trustScore: number; route: Exclude<TrustRoute, 'delete'> }> {
   const trust = await trustOf(
     trustPlugins,
@@ -65,9 +75,10 @@ export async function moderateComment(
       commentOn: comment.contentId,
       tags: [],
       // Its text as its readers read it: without its formatting, with where its links lead (format.ts).
-      texts: [plainText(comment.text, true), comment.filename].filter((text): text is string => !!text),
+      texts: [plainText(comment.text, true), comment.filename, comment.alt].filter((text): text is string => !!text),
+      ...(comment.image && { images: [comment.image] }),
     },
-    { db, config, now, log },
+    { db, config, now, log, client },
   );
   const route = routeOf(trust.score, config.trust);
   if (route === 'delete') throw unprocessable(trust.reason ?? msg('comment.not_trusted'));
@@ -75,8 +86,42 @@ export async function moderateComment(
 }
 
 /**
+ * Moderation of what `userId` puts on their profile: a bio, links, an avatar, or whichever of them
+ * the request sets. It goes through the gate a post does: the same trust plugins give it a score,
+ * each told it is a profile (`profile`). What there is of it to read is the bio, as its readers
+ * read it, the links, and the name the avatar was sent with (`filename`); `image` is the avatar,
+ * as a post's images are given.
+ *
+ * A profile has no moderation queue to wait in, so the score has one of two outcomes: it is
+ * published, or it is refused. Throws 422 for one whose score doesn't publish it, which is
+ * what a post's would have it deleted for, and what a post's would have it held for: nothing
+ * of it is stored.
+ *
+ * That is all of it. A profile has no hashtags, so no hashtag's moderators have a say over it.
+ */
+export async function moderateProfile(
+  { db, config, trustPlugins, now = Date.now, log, client }: ModerationDeps,
+  profile: { userId: string; bio?: string | null; links?: string[] | null; filename?: string | null; image?: TrustImage },
+): Promise<void> {
+  const trust = await trustOf(
+    trustPlugins,
+    {
+      userId: profile.userId,
+      profile: true,
+      tags: [],
+      // The bio as its readers read it: without its formatting, with where its links lead (format.ts).
+      texts: [profile.bio ? plainText(profile.bio, true) : null, ...(profile.links ?? []), profile.filename].filter((text): text is string => !!text),
+      ...(profile.image && { images: [profile.image] }),
+    },
+    { db, config, now, log, client },
+  );
+  if (routeOf(trust.score, config.trust) !== 'allow') throw unprocessable(trust.reason ?? msg('user.profile_not_trusted'));
+}
+
+/**
  * Moderation of a new post, or of an update of `contentId`, by `userId` with `tags`. `texts` is what
- * there is of it to read: its text or caption, link, and filename.
+ * there is of it to read: its text or caption, link, and filename. `images` is an image post's
+ * images, for the plugins that look at pictures (see trustImage).
  *
  * The post is given a trust score by the trust plugins, each of which may lower it (see trustOf),
  * and the score says where the post goes (see routeOf; `config.trust` holds the thresholds). Throws
@@ -89,13 +134,13 @@ export async function moderateComment(
  * there already, and stays, in no hashtag's feed.
  */
 export async function moderatePost(
-  { db, config, trustPlugins, now = Date.now, log }: ModerationDeps,
-  post: { userId: string; contentId?: string; tags: string[]; texts: (string | null | undefined)[] },
+  { db, config, trustPlugins, now = Date.now, log, client }: ModerationDeps,
+  post: { userId: string; contentId?: string; tags: string[]; texts: (string | null | undefined)[]; images?: TrustImage[] },
 ): Promise<Moderated> {
-  const { userId, contentId, tags } = post;
+  const { userId, contentId, tags, images } = post;
   const texts = post.texts.filter((text): text is string => !!text);
   const [trust, rules] = await Promise.all([
-    trustOf(trustPlugins, { userId, contentId, tags, texts }, { db, config, now, log }),
+    trustOf(trustPlugins, { userId, contentId, tags, texts, ...(images?.length ? { images } : {}) }, { db, config, now, log, client }),
     tagRules(db, { userIds: [userId], contentId, tags }),
   ]);
   const route = routeOf(trust.score, config.trust);

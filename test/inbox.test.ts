@@ -249,7 +249,7 @@ for (const target of TARGETS) {
       expect(await whoami(bob)).toMatchObject({ messages: true });
       ok(await send(alice, bob, 'before'), 201);
 
-      expect(ok(await setMessages(bob, false))).toEqual({ userId: bob.userId, username: 'bob', language: 'en', messages: false, showFollowing: false, showFollowers: false });
+      expect(ok(await setMessages(bob, false))).toEqual({ userId: bob.userId, username: 'bob', language: 'en', messages: false, showFollowing: false, showFollowers: false, bio: null, links: [], avatarUrl: null });
       expect(await whoami(bob)).toMatchObject({ messages: false });
       expect(await whoami(alice)).toMatchObject({ messages: true });
       // It is theirs alone to change, and nobody else's to see.
@@ -432,7 +432,8 @@ for (const target of TARGETS) {
       expect(await notices(bob)).toMatchObject([{ kind: 'tag_muted' }]);
       ok(await req(mod, 'PUT', `/tags/news/muted/${mod.userId}`), 201);
       ok(await req(mod, 'DELETE', `/tags/news/muted/${mod.userId}`));
-      expect(await notices(mod)).toEqual([]);
+      // All they were told is that they moderate the hashtag.
+      expect(await notices(mod)).toEqual([{ kind: 'tag_moderator_added', tag: 'news', text: 'You were made a moderator of #news.' }]);
       expect(await notices(root)).toEqual([]);
     });
 
@@ -482,7 +483,7 @@ for (const target of TARGETS) {
       // A moderator who takes a hashtag off their own post tells nobody.
       const own = ok(await store(mod, 'My own #news #sports'), 201).contentId;
       ok(await req(mod, 'DELETE', `/content/${own}/tags/news`));
-      expect(await notices(mod)).toEqual([]);
+      expect((await notices(mod)).map((n) => n.kind)).toEqual(['tag_moderator_added']);
 
       // The post is still there, with no hashtag, and its publisher can delete it. The notices outlast it.
       await ctx.compact();

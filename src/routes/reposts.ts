@@ -4,7 +4,6 @@ import { z } from 'zod';
 import { MAX_ATTESTATION_CHARS, type AttestedPost } from '../attestation.js';
 import { authenticate } from '../auth/apiKey.js';
 import type { AuthUser } from '../auth/apiKey.types.js';
-import { ChallengeFields } from '../challenge/challenges.js';
 import { loadPublished, ORIGIN_GONE, PENDING_REVIEW, requireMeta } from '../content.js';
 import { isUniqueViolation } from '../db/index.js';
 import type { RouteDeps } from '../deps.types.js';
@@ -15,6 +14,7 @@ import { moderatePost, moderateRepost, refuseBanned } from '../moderation/policy
 import type { RemovedTag } from '../moderation/policy.types.js';
 import { originEntries, originHash } from '../origins.js';
 import { MAX_REPOSTED_TAGS, readableOf, repostedTags, repostsOf } from '../reposts.js';
+import { admitting } from '../sendLimit.js';
 import { authorIndex } from '../tagfeed/layout.js';
 import { allowedTags, parseTagList } from '../tags.js';
 import { DAY, iso, MINUTE } from '../time.js';
@@ -47,8 +47,7 @@ const OriginFields = z.object({ attestation: z.string().min(1).max(MAX_ATTESTATI
 
 /**
  * What POST /repost says: the post to repost, as `contentId` or as `origin` (the route refuses a
- * request with both, or neither), the hashtags the repost gives it, and the solution of a
- * challenge when the request answers one.
+ * request with both, or neither), and the hashtags the repost gives it.
  */
 const Body = Credentials.extend({
   /** The post to repost, on this server. */
@@ -57,7 +56,6 @@ const Body = Credentials.extend({
   origin: OriginFields.optional(),
   /** The hashtags the repost gives the post: a list, or one string of them separated by commas or spaces. */
   tags: z.union([z.array(z.string().max(100)).max(50), z.string().max(5000)]).optional(),
-  ...ChallengeFields,
 });
 type Body = z.infer<typeof Body>;
 
@@ -70,7 +68,7 @@ const RefreshBody = Credentials.extend({ origin: OriginFields });
  * And what keeps such an entry to what its original is (POST /repost/refresh).
  */
 export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
-  const { db, config, content, hot, challenges, writer, trustPlugins, now = Date.now } = deps;
+  const { db, config, content, hot, writer, trustPlugins, now = Date.now } = deps;
   const serverTags = allowedTags(config.tagging);
   const allowed = serverTags && new Set(serverTags);
   /** What checks an attestation, reads a post from it, and brings an entry up to it: the same as the server's own asking does (src/originSweep.ts). */
@@ -127,7 +125,7 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
    * brings it back (POST /repost/refresh), and counted as one: it says the post is there again.
    *
    * Either way the repost has to name the hashtags it gives (400), in server tagging mode from the
-   * server's own. It is a post as far as challenges and the posts-a-minute limit go. A banned user
+   * server's own. It is a post as far as the posts-a-minute limit goes. A banned user
    * is refused (403). REPOSTS=false turns the route off (400), and REPOSTS_REMOTE=false the second
    * kind.
    */
@@ -140,12 +138,12 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
     refuseBanned(user);
     const tags = repostTags(body);
 
-    if (body.contentId !== undefined) return repostHere(req, reply, user, body.contentId, tags, body);
+    if (body.contentId !== undefined) return repostHere(req, reply, user, body.contentId, tags);
     // Checked whatever the server already holds of the original: nothing is reposted on a client's word.
     const origin = await attestedOrigin(user, body.origin!.attestation);
     if ('gone' in origin) throw badRequest(msg('repost.origin_gone'));
     const local = ownContentId(origin.url);
-    if (local !== null) return repostHere(req, reply, user, local, tags, body);
+    if (local !== null) return repostHere(req, reply, user, local, tags);
 
     const hash = originHash(origin.url);
     const entry = await entryOf(hash);
@@ -155,16 +153,16 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
         // What the post now says was held for a moderator: nobody reposts the entry until it is accepted.
         if (back.change !== 'updated' || back.queued) throw conflict(msg('repost.origin_unavailable'));
       }
-      return repostHere(req, reply, user, entry.id, tags, body);
+      return repostHere(req, reply, user, entry.id, tags);
     }
     try {
-      return await repostFrom(req, reply, user, origin, hash, tags, body);
+      return await repostFrom(req, reply, user, origin, hash, tags);
     } catch (err) {
       // Someone else's repost of the same original committed first: theirs is the server's entry for it.
       if (!isUniqueViolation(err)) throw err;
       const first = await entryOf(hash);
       if (first === null) throw err;
-      return repostHere(req, reply, user, first.id, tags, body);
+      return repostHere(req, reply, user, first.id, tags);
     }
   });
 
@@ -267,7 +265,7 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
    * contentWriter's repost): 201 with the hashtags it gave and when. Feeds show it once the
    * compactor has run.
    */
-  async function repostHere(req: FastifyRequest, reply: FastifyReply, user: AuthUser, contentId: string, tags: string[], solution: Body) {
+  async function repostHere(req: FastifyRequest, reply: FastifyReply, user: AuthUser, contentId: string, tags: string[]) {
     const row = await loadPublished(db, contentId);
     if (row.user_id === user.id) throw row.origin_hash !== null ? alreadyReposted() : badRequest(msg('repost.own'));
     const [meta, places] = await Promise.all([requireMeta({ db, content }, contentId), repostsOf(db, contentId)]);
@@ -281,7 +279,7 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (!fresh.length) throw unprocessable(msg('repost.no_tags_left'), { removedTags });
     if (given.length + fresh.length > MAX_REPOSTED_TAGS) throw tooManyReposted();
 
-    const reposted = await challenges.admitting('post', user.id, solution, req.language, () =>
+    const reposted = await admitting(deps, 'post', user.id, () =>
       writer.repost({ contentId, userId: user.id, tags: fresh, carried: meta.tags }),
     );
     // A hashtag another repost gave the post in the meantime.
@@ -311,7 +309,7 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
    * /repost/refresh), and which is told from an earlier one by when this one was signed (see
    * ContentMeta.originAttestedAt).
    */
-  async function repostFrom(req: FastifyRequest, reply: FastifyReply, user: AuthUser, sent: AttestedPost, hash: string, tags: string[], solution: Body) {
+  async function repostFrom(req: FastifyRequest, reply: FastifyReply, user: AuthUser, sent: AttestedPost, hash: string, tags: string[]) {
     const { mimeType, origin, preview, texts } = summarised(sent);
     const moderated = await moderatePost({ db, config, trustPlugins, now, log: req.log }, { userId: user.id, tags, texts });
     const queued = moderated.route === 'queue';
@@ -319,7 +317,7 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
     const contentId = randomUUID();
     const ts = now();
     const { aiGenerated } = sent;
-    await challenges.admitting('post', user.id, solution, req.language, () =>
+    await admitting(deps, 'post', user.id, () =>
       writer.write({
         publisher: { userId: user.id, username: user.username },
         summary: { contentId, createdAt: ts, updatedAt: ts, userId: user.id, mimeType, aiGenerated, comments: false, tags: moderated.tags, preview, origin },

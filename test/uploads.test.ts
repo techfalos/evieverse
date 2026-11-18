@@ -106,6 +106,7 @@ for (const target of TARGETS) {
         user_id: alice.userId,
         ai_generated: 0,
         like_count: 0,
+        unliked_at: null,
         created_at: ctx.clock.now,
         delete_requested_at: null,
         origin_hash: null,
@@ -244,18 +245,19 @@ for (const target of TARGETS) {
       expect(await kept()).toEqual([contentId, `${contentId}.meta.json`]);
     });
 
-    it('keeps an upload for the request to be sent again with its challenge solved', async () => {
-      ctx = await createTestContext(target, { challenge: { postWindowSeconds: 60 } });
+    it('keeps an upload for a request the limit on posts a minute refused, to be sent again', async () => {
+      ctx = await createTestContext(target, { postRateLimitPerMinute: 1 });
       const alice = await ctx.register('alice');
       expect((await store(alice, { type: 'text', text: 'first #pics', tags: ['pics'] })).statusCode).toBe(201);
 
       await put(alice, id(1), PNG);
       const post = { type: 'image', uploadId: id(1), filename: 'pixel.png', tags: ['pics'] };
-      const challenged = await store(alice, post);
-      expect(challenged.statusCode).toBe(428);
+      const limited = await store(alice, post);
+      expect(limited.statusCode).toBe(429);
       expect(await uploads(alice)).toEqual([id(1)]);
-      const solved = await store(alice, { ...post, ...(await ctx.solve(challenged.json().challenge)) });
-      expect(solved.statusCode, solved.body).toBe(201);
+      ctx.clock.now += 60_000;
+      const sent = await store(alice, post);
+      expect(sent.statusCode, sent.body).toBe(201);
       expect(await uploads(alice)).toEqual([]);
     });
   });

@@ -6,6 +6,8 @@ export interface PublishedAd {
   kind: AdKind;
   /** A text ad's text, or an image ad's caption. */
   text?: string;
+  /** An image ad's alternative text: what describes its image to those who can't see it. Absent on one that was given none. */
+  imageAlt?: string;
   /** Where the ad leads when it is followed. Whoever shows the ad only reads whether it leads anywhere: what it sends is adClickUrl. */
   url?: string;
   /** The hashtags it is targeted at; null for one that appears all the time. */
@@ -24,6 +26,8 @@ export interface AdRecord {
   kind: AdKind;
   /** An image ad's image. */
   imageUrl?: string;
+  /** The alternative text to give that image, for those who can't see it. Absent on an ad that was given none: its caption is then all that says what it is. */
+  imageAlt?: string;
   text?: string;
   /** Where the ad is followed, if it leads anywhere: the server's link, which counts the click and redirects to where the ad leads (adClickUrl). */
   url?: string;

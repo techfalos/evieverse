@@ -89,6 +89,47 @@ describe('summary text', () => {
     expect(encodeSummary(summary({ repostedAt: [NOW] }))).toBe(encodeSummary(summary()));
   });
 
+  it('says how many images an image post of several has, in a sixth number, and nothing of it for a post of one', () => {
+    const url = `https://api.example.com/content/${ID}/raw`;
+    const album = summary({ mimeType: 'image/jpeg', preview: { kind: 'image', url, text: 'Three of the bay', imageCount: 3 } });
+    const encoded = encodeSummary(album);
+    expect(encoded).toBe(`${NOW - 1234} ${NOW} 0 0 0 3\n7c9e6679-7425-40de-944b-e07fc1f90ae7\nimage/jpeg\nnews mumbai\nimage\nThree of the bay`);
+    expect(decodeSummary(ID, encoded, 'https://api.example.com')).toEqual(album);
+
+    // A post of one image is written as it was before there were albums, whatever its preview says of one.
+    const one = summary({ mimeType: 'image/jpeg', preview: { kind: 'image', url, text: 'The bay' } });
+    expect(encodeSummary(one).split('\n')[0]).toBe(`${NOW - 1234} ${NOW} 0 0`);
+    expect(encodeSummary({ ...one, preview: { kind: 'image', url, text: 'The bay', imageCount: 1 } })).toBe(encodeSummary(one));
+    expect(decodeSummary(ID, encodeSummary(one), 'https://api.example.com')).toEqual(one);
+
+    // A repost of an album on another server: the original's line is there, and the images are read on its server.
+    const origin = { url: `https://other.example/content/${ID}`, publisher: { userId: '11111111-1111-4111-8111-111111111111', username: 'Dana' } };
+    const reposted = summary({ origin, mimeType: 'image/png', preview: { kind: 'image', url: `${origin.url}/raw`, imageCount: 2 } });
+    expect(encodeSummary(reposted).split('\n')[0]).toBe(`${NOW - 1234} ${NOW} 0 0 1 2`);
+    expect(decodeSummary(ID, encodeSummary(reposted), 'https://api.example.com')).toEqual(reposted);
+  });
+
+  it('keeps whom its preview mentions on a line of its own, and nothing of it for a preview that mentions nobody', () => {
+    const mentions = [
+      { userId: '11111111-1111-4111-8111-111111111111', username: 'Dana of the North' },
+      { userId: '22222222-2222-4222-8222-222222222222', username: 'a "quoted"\\name' },
+    ];
+    const mentioning = summary({ mentions, preview: { kind: 'text', text: 'Thanks @Dana of the North\n\nand @a "quoted"\\\\name' } });
+    const encoded = encodeSummary(mentioning);
+    expect(encoded).toBe(
+      `${NOW - 1234} ${NOW} 0 0 0 0 1\n7c9e6679-7425-40de-944b-e07fc1f90ae7\ntext/plain\nnews mumbai\ntext\n` +
+        `${JSON.stringify({ mentions })}\nThanks @Dana of the North\n\nand @a "quoted"\\\\name`,
+    );
+    expect(decodeSummary(ID, encoded, '')).toEqual(mentioning);
+    expect(encodeSummary(summary({ mentions: [] }))).toBe(encodeSummary(summary()));
+
+    // After the original's line, in the summary of a repost from another server.
+    const origin = { url: `https://other.example/content/${ID}`, publisher: { userId: '11111111-1111-4111-8111-111111111111', username: 'Dana' } };
+    const reposted = summary({ origin, mentions });
+    expect(encodeSummary(reposted).split('\n').slice(5, 7)).toEqual([`${origin.url} ${origin.publisher.userId} Dana`, JSON.stringify({ mentions })]);
+    expect(decodeSummary(ID, encodeSummary(reposted), 'https://api.example.com')).toEqual(reposted);
+  });
+
   it('rejects truncated text and preview kinds it does not know', () => {
     const text = encodeSummary(summary());
     expect(() => decodeSummary(ID, text.slice(0, 20), '')).toThrow(/truncated/);

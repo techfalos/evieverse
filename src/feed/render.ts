@@ -113,11 +113,16 @@ export function* renderFeed(
 /**
  * The records of a following feed's picks, in order; one whose summary is gone is left out. A
  * repost's record says who reposted it: the followed user whose index it was read from.
+ *
+ * `blocked` are the users the feed's reader blocks, of those the page credits (src/blocks.ts):
+ * a post one of them published is left out, as one whose summary is gone is, and so is a post
+ * one of them reposted. The first is what a followed user reposted of theirs; the second is
+ * there only until the reader's list of follows is written without them.
  */
-export function followingRecords(picks: FollowingPick[], bodies: FeedBodies): FeedRecord[] {
+export function followingRecords(picks: FollowingPick[], bodies: FeedBodies, blocked: ReadonlySet<string> = new Set()): FeedRecord[] {
   return picks.flatMap((c) => {
     const s = bodies.summaries.get(refKey(c));
-    if (!s) return [];
+    if (!s || blocked.has(s.userId) || (c.by !== undefined && blocked.has(c.by))) return [];
     return [
       toFeedRecord(
         s,

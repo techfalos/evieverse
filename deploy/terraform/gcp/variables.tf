@@ -85,13 +85,13 @@ variable "redis_memory_gb" {
 }
 
 variable "compactor_cpu" {
-  description = "CPUs of the compactor's instance. The compactor is one instance that is always up; how often it makes a pass is COMPACT_INTERVAL_SECONDS in `environment` (5 by default)."
+  description = "CPUs of the compactor's instance. The compactor is one instance that is always up; how often it makes a pass is COMPACT_INTERVAL_SECONDS in `environment` (5 by default). It also processes the videos users send, with ffmpeg, which is CPU work: where videos are common, give it 2 or more, or set VIDEO_PROCESSING to false in `environment`."
   type        = string
   default     = "1"
 }
 
 variable "compactor_memory" {
-  description = "Memory of the compactor's instance."
+  description = "Memory of the compactor's instance. The files of a video it processes count against it, since Cloud Run keeps an instance's files in memory: the video as it was sent and every size it is made in, so a server that takes large videos needs several times the largest (MAX_UPLOAD_BYTES)."
   type        = string
   default     = "1Gi"
 }

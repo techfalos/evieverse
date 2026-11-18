@@ -36,7 +36,7 @@ export const MAX_OPEN_ADS = 100;
  */
 export const AD_POSITIONS: readonly number[] = [3, 10, 17];
 
-type AdRow = Pick<MonetizationTable, 'id' | 'kind' | 'text' | 'url' | 'tags' | 'starts_at' | 'ends_at'>;
+type AdRow = Pick<MonetizationTable, 'id' | 'kind' | 'text' | 'image_alt' | 'url' | 'tags' | 'starts_at' | 'ends_at'>;
 
 /** The hashtags a row is targeted at, as a list; null for one that appears all the time. */
 export const adTags = (tags: string | null): string[] | null => (tags === null ? null : tags.split(' ').filter(Boolean));
@@ -46,6 +46,7 @@ export const publishedAd = (row: AdRow): PublishedAd => ({
   adId: row.id,
   kind: row.kind,
   ...(row.text !== null && { text: row.text }),
+  ...(row.kind === 'image' && row.image_alt !== null && { imageAlt: row.image_alt }),
   ...(row.url !== null && { url: row.url }),
   tags: adTags(row.tags),
   startsAt: row.starts_at,
@@ -78,12 +79,13 @@ export const adImageUrl = (publicBaseUrl: string, adId: string) => `${publicBase
  */
 const adClickUrl = (publicBaseUrl: string, adId: string) => `${publicBaseUrl}/monetization/ads/${adId}/click`;
 
-/** An ad as a response carries it, under `label`. Its link, where it has one, is the one that counts the click. */
-export const adRecord = (ad: Pick<PublishedAd, 'adId' | 'kind' | 'text' | 'url'>, label: string, publicBaseUrl: string): AdRecord => ({
+/** An ad as a response carries it, under `label`. Its link, where it has one, is the one that counts the click. An image ad that was given an alternative text has it beside its image (`imageAlt`). */
+export const adRecord = (ad: Pick<PublishedAd, 'adId' | 'kind' | 'text' | 'imageAlt' | 'url'>, label: string, publicBaseUrl: string): AdRecord => ({
   adId: ad.adId,
   label,
   kind: ad.kind,
   ...(ad.kind === 'image' && { imageUrl: adImageUrl(publicBaseUrl, ad.adId) }),
+  ...(ad.kind === 'image' && ad.imageAlt !== undefined && { imageAlt: ad.imageAlt }),
   ...(ad.text !== undefined && { text: ad.text }),
   ...(ad.url !== undefined && { url: adClickUrl(publicBaseUrl, ad.adId) }),
 });

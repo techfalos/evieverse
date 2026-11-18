@@ -11,32 +11,30 @@ import { setForDeletion } from '../deletion.js';
 import type { RouteDeps } from '../deps.types.js';
 import { badRequest, conflict, forbidden, notFound } from '../http/errors.js';
 import { listPage, listQuery } from '../http/listCursor.js';
-import { Credentials, Flag, HASHTAG, ListQuery } from '../http/schemas.js';
-import { notify } from '../inbox.js';
-import { messageKey, msg } from '../language.js';
-import { moderates, moderatesServer } from '../moderation/policy.js';
+import { Credentials, Flag, Hashtag, ListQuery } from '../http/schemas.js';
+import { excerpt, excerptOf, notify } from '../inbox.js';
+import { msg } from '../language.js';
+import { notifyMentions } from '../mentions.js';
+import { claimItem, claimTag, closeClaim, endClaim, pendingClaim } from '../moderation/claims.js';
+import { moderates, moderatesServer, moderatorRole } from '../moderation/policy.js';
 import { kindColumn, queueItems } from '../moderation/queues.js';
-import { approveTag, removeTag } from '../moderation/tagDecisions.js';
+import { approveTag, MAX_REASON_CHARS, removeTag } from '../moderation/tagDecisions.js';
 import { isPattern, MAX_LIST_PATTERNS, MAX_LIST_WORDS, MAX_PHRASE_WORDS, MAX_WORD_CHARS, normalizeWord, SERVER_LIST } from '../moderation/words.js';
 import { effectiveComment, insertPending, pendingComment, writePending, type PendingReader } from '../pending.js';
-import { normalizeTag } from '../tags.js';
 import { iso } from '../time.js';
 
-/** A hashtag in a path, as /feed takes them. */
-const Tag = z
-  .string()
-  .regex(HASHTAG, messageKey('tags.invalid'))
-  .transform((t) => normalizeTag(t)!);
-/** The hashtag a path names, for the routes under /tags/:tag: its blocked words, its moderators, and the users muted on it. */
-const TagParams = z.object({ tag: Tag });
+/** The hashtag a path names, for the routes under /tags/:tag: its blocked words, its moderators, the claim to it, and the users muted on it. */
+const TagParams = z.object({ tag: Hashtag });
 /** A hashtag and a user in a path: the user who is made or unmade a moderator of the hashtag, or muted or unmuted on it. */
-const TagUserParams = z.object({ tag: Tag, userId: z.string().uuid() });
+const TagUserParams = z.object({ tag: Hashtag, userId: z.string().uuid() });
 /** The user a path names: the one who is made or unmade an admin or a server moderator, or banned or unbanned. */
 const UserParams = z.object({ userId: z.string().uuid() });
 /** The post a path names in the moderation queue, for the request that accepts or rejects it. */
 const ContentParams = z.object({ contentId: z.string().uuid() });
 /** The content and the hashtag under it that a path names (/content/:contentId/tags/:tag), for a tag's moderator to approve or remove. */
-const ContentTagParams = z.object({ contentId: z.string().uuid(), tag: Tag });
+const ContentTagParams = z.object({ contentId: z.string().uuid(), tag: Hashtag });
+/** The content and the user whose repost of it a path names (/content/:contentId/reposts/:userId), for a server moderator to remove. */
+const RepostParams = z.object({ contentId: z.string().uuid(), userId: z.string().uuid() });
 /** The comment a path names in the moderation queue, by its post's id and its own, for the request that accepts or rejects it. */
 const CommentParams = z.object({ contentId: z.string().uuid(), commentId: z.string().uuid() });
 /** Why a user is banned, which only moderators read. */
@@ -47,8 +45,12 @@ const BanBody = Credentials.extend({ reason: z.string().trim().min(1).max(500).o
  * of each, and whether it can keep it, is for `normalizeWords` to say.
  */
 const WordsBody = Credentials.extend({ words: z.array(z.string().max(1000)).min(1).max(1000) });
-/** What a request that removes a hashtag from content says: with `mute`, its publisher is muted on the hashtag too. Left out: they aren't. */
-const RemoveTagBody = Credentials.extend({ mute: Flag.default(false) });
+/**
+ * What a request that removes a hashtag from content says: with `mute`, its publisher is muted on
+ * the hashtag too. Left out: they aren't. And why (`reason`), if the moderator says: it is kept
+ * with the post, where anyone who reads the post reads it.
+ */
+const RemoveTagBody = Credentials.extend({ mute: Flag.default(false), reason: z.string().trim().min(1).max(MAX_REASON_CHARS).optional() });
 /** A page of the moderation queue: smaller than other lists', as each post's meta file, or each comment, is read for it. */
 const QueueQuery = ListQuery.extend({ limit: z.coerce.number().int().min(1).max(100).default(50) });
 
@@ -63,16 +65,22 @@ const adminOnly = () => forbidden(msg('moderation.admin_only'));
 /**
  * Moderation: admins make and revoke admins, appoint server moderators and tag moderators, and keep
  * the server's blocked words; server moderators and admins ban users; server moderators (and admins) accept or reject the posts and the
- * comments their trust score sent to the moderation queue; a tag's moderators (and server moderators
+ * comments their trust score sent to the moderation queue, and remove a user's repost of a post; a tag's moderators (and server moderators
  * and admins, on every tag) keep its blocked words, mute users on it, and approve the content under
- * it or remove it from content.
+ * it or remove it from content. Where publishers choose their posts' hashtags, a user claims a
+ * hashtag that has no moderator, and moderates it unless an admin or a server moderator refuses
+ * the claim (src/moderation/claims.ts). A hashtag's own moderators appoint its other moderators,
+ * as an admin does, and remove the ones who became one after them. A hashtag's rules are its
+ * moderators' to set too (routes/rules.ts).
  * Mutes and blocked words apply to what is written from then on; what a tag's moderator decides
  * about content shows in the tag's feeds at once, and the compactor applies it. A tag's moderators
  * have no say over comments.
  *
  * Whoever it is done to is told: a notice goes to the inbox (src/inbox.ts) of a user who is muted
- * or unmuted, of the publisher of a post that loses a hashtag, or is accepted or rejected in the
- * moderation queue, and of the author of a comment that is accepted or rejected there.
+ * or unmuted, of one who is made a hashtag's moderator or is one no more, of one whose repost is removed, of the publisher of a post that loses a hashtag, or is accepted or rejected in the
+ * moderation queue, and of the author of a comment that is accepted or rejected there. And what a
+ * tag's moderator decides about a post is written down on the post, for its readers
+ * (src/moderation/tagDecisions.ts).
  */
 export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   const { db, config, comments, writer, now = Date.now } = deps;
@@ -95,6 +103,19 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     const user = await authenticate(db, req, body);
     if (!(await moderates(db, user, tag))) throw forbidden(msg('moderation.tag_moderator_only', { tag }));
     return user;
+  }
+
+  /**
+   * For who says who moderates a hashtag: an admin, or one of the hashtag's own moderators, with
+   * since when they are one (`since`; null for an admin, who needs no row for it). Not a server
+   * moderator as such: they moderate every hashtag, and appoint to none.
+   */
+  async function asAppointer(req: FastifyRequest, tag: string, body: Credentials): Promise<{ user: AuthUser; since: number | null }> {
+    const user = await authenticate(db, req, body);
+    if (user.admin) return { user, since: null };
+    const own = await db.selectFrom('tag_moderators').select('created_at').where('tag', '=', tag).where('user_id', '=', user.id).executeTakeFirst();
+    if (!own) throw forbidden(msg('moderation.own_moderator_only', { tag }));
+    return { user, since: own.created_at };
   }
 
   /** A user who is there: one whose account was deleted isn't, though its row may be for a while. */
@@ -381,45 +402,107 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
 
   // Tag moderators.
 
-  /** Who moderates a hashtag. Public, like posts. */
+  /** Who moderates a hashtag, and the claim to it that waits (`claim`), if there is one. Public, like posts. */
   app.get('/tags/:tag/moderators', async (req) => {
     const { tag } = TagParams.parse(req.params);
+    const [moderators, claim] = await Promise.all([
+      db
+        .selectFrom('tag_moderators')
+        .innerJoin('users', 'users.id', 'tag_moderators.user_id')
+        .select(['users.id', 'users.username', 'tag_moderators.created_at'])
+        .where('tag_moderators.tag', '=', tag)
+        .orderBy('tag_moderators.created_at')
+        .orderBy('tag_moderators.user_id')
+        .execute(),
+      pendingClaim(db, tag),
+    ]);
     return {
       tag,
-      moderators: (
-        await db
-          .selectFrom('tag_moderators')
-          .innerJoin('users', 'users.id', 'tag_moderators.user_id')
-          .select(['users.id', 'users.username', 'tag_moderators.created_at'])
-          .where('tag_moderators.tag', '=', tag)
-          .orderBy('tag_moderators.created_at')
-          .orderBy('tag_moderators.user_id')
-          .execute()
-      ).map((r) => ({ userId: r.id, username: r.username, since: iso(r.created_at) })),
+      moderators: moderators.map((r) => ({ userId: r.id, username: r.username, since: iso(r.created_at) })),
+      ...(claim && { claim: claimItem(claim) }),
     };
   });
 
-  /** Makes a user a moderator of a hashtag. Admins only. */
+  /**
+   * Makes a user a moderator of a hashtag. An admin's to do, and the hashtag's own moderators'.
+   * A claim to the hashtag that waits is over with it (see closeClaim): the hashtag has a
+   * moderator, who appoints its others. The user is told (`tag_moderator_added`), unless they
+   * were one already.
+   */
   app.put('/tags/:tag/moderators/:userId', async (req, reply) => {
     const { tag, userId } = TagUserParams.parse(req.params);
-    await asAdmin(req, Credentials.parse(req.body ?? {}));
+    const { user } = await asAppointer(req, tag, Credentials.parse(req.body ?? {}));
     await findUser(userId);
     const { at, already } = await addOnce(
       now,
       () => db.selectFrom('tag_moderators').select('created_at').where('tag', '=', tag).where('user_id', '=', userId).executeTakeFirst(),
       (createdAt) => db.insertInto('tag_moderators').values({ tag, user_id: userId, created_at: createdAt }).execute(),
     );
+    await closeClaim(deps, tag, userId, user, req.log);
+    if (!already) await notify(deps, { userId, kind: 'tag_moderator_added', tag, by: user.id }, req.log);
     return reply.status(already ? 200 : 201).send({ tag, userId, since: iso(at), alreadyModerator: already });
   });
 
+  /**
+   * Ends a user's time as a moderator of a hashtag. An admin ends anyone's. One of the hashtag's
+   * own moderators ends that of those who became one after them, and their own: so whoever a
+   * moderator brought in can't turn them out, and the one who was there first stays until they
+   * leave or an admin says so. `403` for one who was there before the caller, or since the same
+   * moment. Whoever is a moderator no more is told (`tag_moderator_removed`), unless they left
+   * themselves.
+   */
   app.delete('/tags/:tag/moderators/:userId', async (req) => {
     const { tag, userId } = TagUserParams.parse(req.params);
-    await asAdmin(req, Credentials.parse(req.body ?? {}));
-    return {
-      tag,
-      userId,
-      wasModerator: Number((await db.deleteFrom('tag_moderators').where('tag', '=', tag).where('user_id', '=', userId).executeTakeFirst()).numDeletedRows) > 0,
-    };
+    const { user, since } = await asAppointer(req, tag, Credentials.parse(req.body ?? {}));
+    if (since !== null && userId !== user.id) {
+      const other = await db.selectFrom('tag_moderators').select('created_at').where('tag', '=', tag).where('user_id', '=', userId).executeTakeFirst();
+      if (other && other.created_at <= since) throw forbidden(msg('moderation.joined_before', { tag }));
+    }
+    const wasModerator = Number((await db.deleteFrom('tag_moderators').where('tag', '=', tag).where('user_id', '=', userId).executeTakeFirst()).numDeletedRows) > 0;
+    if (wasModerator) await notify(deps, { userId, kind: 'tag_moderator_removed', tag, by: user.id }, req.log);
+    return { tag, userId, wasModerator };
+  });
+
+  // Claims: where publishers choose their posts' hashtags, how a hashtag that has no moderator gets its first (src/moderation/claims.ts).
+
+  /**
+   * Claims a hashtag for the caller, to moderate it (see claimTag). The claim waits
+   * (`reviewUntil`) for an admin or a server moderator to refuse it, each of whom is told of it,
+   * and is granted if none does: the caller is a moderator of the hashtag from then on. `201`, or
+   * `200` with `alreadyClaimed` for a hashtag the caller's claim already waits on.
+   */
+  app.post('/tags/:tag/claim', async (req, reply) => {
+    const { tag } = TagParams.parse(req.params);
+    const user = await authenticate(db, req, Credentials.parse(req.body ?? {}));
+    const { claim, already } = await claimTag(deps, user, tag, req.log);
+    return reply.status(already ? 200 : 201).send({ ...claimItem(claim), alreadyClaimed: already });
+  });
+
+  /**
+   * Ends the claim to a hashtag that waits (see endClaim): an admin or a server moderator refuses
+   * it, which its user is told of, or its own user withdraws it. `refused` says which.
+   */
+  app.delete('/tags/:tag/claim', async (req) => {
+    const { tag } = TagParams.parse(req.params);
+    const user = await authenticate(db, req, Credentials.parse(req.body ?? {}));
+    return { tag, ...(await endClaim(deps, user, tag, req.log)) };
+  });
+
+  /** The claims to hashtags that wait, longest waiting first, a page at a time: what an admin or a server moderator has to look at. Server moderators and admins. */
+  app.get('/moderation/tag-claims', async (req) => {
+    const page = listQuery(req.query);
+    await asServerModerator(req, Credentials.parse(req.body ?? {}));
+    const { rows, nextCursor } = await listPage(
+      db
+        .selectFrom('tag_claims')
+        .innerJoin('users', 'users.id', 'tag_claims.user_id')
+        // A hashtag has one claim, so its name tells two claims of one instant apart.
+        .select(['tag_claims.tag as id', 'tag_claims.tag', 'tag_claims.user_id', 'users.username', 'tag_claims.created_at', 'tag_claims.review_until']),
+      { createdAt: 'tag_claims.created_at', userId: 'tag_claims.tag' },
+      page,
+      'oldest',
+    );
+    return { claims: rows.map(claimItem), nextCursor };
   });
 
   // Mutes.
@@ -470,27 +553,73 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   // A hashtag's moderation queue: every post under the hashtag that none of its moderators has decided on.
   // It is read from the feed (GET /feed?tags=<tag>&moderated=false); these two routes are the decisions.
 
+  // Each is written down on the post, which GET /content/:contentId gives with it (`moderation`): what was done, as what, and for a removal why.
+
   /** Approves content under a hashtag (see approveTag), which takes it out of the hashtag's queue. Its moderators, server moderators and admins. */
   app.put('/content/:contentId/tags/:tag', async (req, reply) => {
     const { contentId, tag } = ContentTagParams.parse(req.params);
-    const { alreadyApproved } = await approveTag(deps, contentId, tag, (await asModerator(req, tag, Credentials.parse(req.body ?? {}))).id);
+    const moderator = await asModerator(req, tag, Credentials.parse(req.body ?? {}));
+    const { alreadyApproved } = await approveTag(deps, contentId, tag, { id: moderator.id, role: moderatorRole(moderator) });
     return reply.status(alreadyApproved ? 200 : 201).send({ contentId, tag, moderated: true, alreadyApproved });
   });
 
   /**
    * Removes a hashtag from content (see removeTag), and with `mute`, mutes its publisher on it too.
    * Its moderators, server moderators and admins. The publisher is told of the removal, which may have left the post
-   * with no hashtag and so in no hashtag's feed, and of a mute it brought them.
+   * with no hashtag and so in no hashtag's feed, and of a mute it brought them. With `reason`, the
+   * post says why to whoever reads it.
    */
   app.delete('/content/:contentId/tags/:tag', async (req) => {
     const { contentId, tag } = ContentTagParams.parse(req.params);
     const body = RemoveTagBody.parse(req.body ?? {});
     const moderator = await asModerator(req, tag, body);
-    const { userId, tags } = await removeTag(deps, contentId, tag, moderator.id);
+    const { userId, tags } = await removeTag(deps, contentId, tag, { id: moderator.id, role: moderatorRole(moderator) }, body.reason);
     const muted = body.mute ? await mute(tag, userId) : null;
     await notify(deps, { userId, kind: tags.length ? 'tag_removed' : 'last_tag_removed', contentId, tag, by: moderator.id }, req.log);
     if (muted && !muted.already) await notify(deps, { userId, kind: 'tag_muted', tag, by: moderator.id }, req.log);
     return { contentId, tag, tags, muted: body.mute };
+  });
+
+  // A repost is a server moderator's to take down, on its own: the post it is of stays.
+
+  /**
+   * Removes one user's repost of a post from this server (see contentWriter's unrepost). Server
+   * moderators and admins. What the repost added goes: the post's place in the reposter's own
+   * index, where those who follow them saw it as new, and the hashtags the repost gave it, with
+   * its places under them. The post stays, with its likes and comments, where its publisher and
+   * its other reposts put it: `status: "removed"`, with the hashtags that go (`tags`) and when
+   * the repost was made. Feeds stop showing it once the compactor has run.
+   *
+   * The server's entry for a post on another server is the repost of the user who first
+   * reposted it: it is theirs, and there is nothing of it but the repost. Removing that one
+   * sets the entry for deletion, as deleting it does (202, `status: "pending_deletion"`), and
+   * the reposts others made of the entry go with it. The original, on its own server, is as it
+   * was: this server only stops showing it. A later repost of such an entry is removed on its
+   * own, like a repost of a post written here.
+   *
+   * Nothing is blocked by it: the original, or the post, can be reposted again, by that user
+   * too. A user who shouldn't is banned (PUT /banned/:userId), and reposts nothing; one whose
+   * hashtags were the trouble is muted on them (PUT /tags/:tag/muted/:userId), and gives them to
+   * nothing.
+   *
+   * The reposter is told. 404 for content that isn't there or is set for deletion, and where
+   * the user has no repost of it.
+   */
+  app.delete('/content/:contentId/reposts/:userId', async (req, reply) => {
+    const { contentId, userId } = RepostParams.parse(req.params);
+    const moderator = await asServerModerator(req, Credentials.parse(req.body ?? {}));
+    const row = await loadContent(db, contentId);
+    if (row.origin_hash !== null && row.user_id === userId) {
+      const requestedAt = await setForDeletion(deps, row);
+      req.log.info({ contentId, userId, moderator: moderator.id }, 'removed a repost of a post on another server: its entry is set for deletion');
+      await notify(deps, { userId, kind: 'repost_removed', contentId, by: moderator.id }, req.log);
+      return reply.status(202).send({ contentId, userId, status: 'pending_deletion', requestedAt: iso(requestedAt) });
+    }
+    const removed = await writer.unrepost({ contentId, userId });
+    if (!removed) throw notFound(msg('repost.not_reposted'));
+    req.log.info({ contentId, userId, moderator: moderator.id }, 'removed a repost');
+    await notify(deps, { userId, kind: 'repost_removed', contentId, by: moderator.id }, req.log);
+    return { contentId, userId, status: 'removed', tags: removed.tags, repostedAt: iso(removed.at) };
   });
 
   // The moderation queue: the posts, under any hashtag, and the comments, whose trust score neither had them refused nor published.
@@ -540,17 +669,19 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
 
   /**
    * Accepts a post from the moderation queue: it is published under its hashtags (see
-   * ContentWriter.publish). Server moderators and admins. Its publisher is told.
+   * ContentWriter.publish). Server moderators and admins. Its publisher is told, and so are the
+   * users it mentions, who weren't while it waited (see notifyMentions).
    */
   app.post('/moderation/queue/:contentId/accept', async (req) => {
     const { contentId } = ContentParams.parse(req.params);
     const moderator = await asServerModerator(req, Credentials.parse(req.body ?? {}));
     const row = await loadContent(db, contentId);
-    const tags = row.queued ? await writer.publish(row) : null;
-    if (!tags) throw notQueued();
+    const meta = row.queued ? await writer.publish(row) : null;
+    if (!meta) throw notQueued();
     req.log.info({ contentId, moderator: moderator.id }, 'accepted from the moderation queue');
     await notify(deps, { userId: row.user_id, kind: 'post_accepted', contentId, by: moderator.id }, req.log);
-    return { contentId, status: 'published', tags };
+    await notifyMentions(deps, { by: row.user_id, contentId, mentions: meta.mentions, excerpt: excerptOf(meta) }, req.log);
+    return { contentId, status: 'published', tags: meta.tags };
   });
 
   /**
@@ -585,7 +716,8 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
    * Accepts a comment from the moderation queue: it is published among its post's comments, or
    * among the replies to the comment it replies to (see CommentStore.publish), where it was sent,
    * not where it was accepted. A comment that an edit took back to the queue is published as
-   * edited, with the replies and the likes it had. Server moderators and admins. Its author is told.
+   * edited, with the replies and the likes it had. Server moderators and admins. Its author is told,
+   * and so are the users it mentions, who weren't while it waited (see notifyMentions).
    *
    * It is one commit: the comment's row leaves the queue, and a write of the comment, published,
    * is added to its post's (`pending_writes`), which the compactor's next run applies. The comment
@@ -622,6 +754,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     const { comment } = accepted;
     req.log.info({ contentId, commentId, moderator: moderator.id }, 'accepted a comment from the moderation queue');
     await notify(deps, { userId: comment.userId, kind: 'comment_accepted', contentId, comment: comment.text, by: moderator.id }, req.log);
+    await notifyMentions(deps, { by: comment.userId, contentId, commentId, mentions: comment.mentions, excerpt: excerpt(comment.text) }, req.log);
     return { contentId, commentId, status: 'published' };
   });
 

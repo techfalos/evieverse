@@ -24,12 +24,12 @@ if left < 0 then
 end
 return {count, left}`;
 
-/** INCR of a key that is there, which keeps its expiry. A missing key is left missing: false, which a client reads as null. */
+/** INCRBY of a key that is there, which keeps its expiry. ARGV: what to add. A missing key is left missing: false, which a client reads as null. */
 const BUMP = `
 if redis.call('EXISTS', KEYS[1]) == 0 then
   return false
 end
-return redis.call('INCR', KEYS[1])`;
+return redis.call('INCRBY', KEYS[1], ARGV[1])`;
 
 /**
  * Compare-and-set. ARGV: whether a value is expected ('1') and the value; whether one is set ('1') and
@@ -144,8 +144,8 @@ class RedisHotStore implements HotStore {
     return { count, ttlMs: left };
   }
 
-  async bump(key: string) {
-    return (await this.redis.eval(BUMP, 1, this.k(key))) as number | null;
+  async bump(key: string, by = 1) {
+    return (await this.redis.eval(BUMP, 1, this.k(key), by)) as number | null;
   }
 
   async swap(key: string, expected: string | null, next: string | null, ttlMs?: number) {
@@ -289,11 +289,11 @@ export class MemoryHotStore implements HotStore {
     return { count, ttlMs: exp - this.now() };
   }
 
-  async bump(key: string) {
+  async bump(key: string, by = 1) {
     const e = this.live(key);
     if (!e) return null;
     if (!Buffer.isBuffer(e.v)) throw new Error(`WRONGTYPE ${key}`);
-    const count = Number(e.v) + 1;
+    const count = Number(e.v) + by;
     e.v = Buffer.from(String(count));
     return count;
   }

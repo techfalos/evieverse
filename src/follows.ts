@@ -1,5 +1,6 @@
 import type { FastifyRequest } from 'fastify';
 import { authenticateIfNamed } from './auth/apiKey.js';
+import type { AuthUser } from './auth/apiKey.types.js';
 import type { Db } from './db/index.js';
 import { forbidden, notFound } from './http/errors.js';
 import { msg } from './language.js';
@@ -30,11 +31,16 @@ export async function syncFollowing(db: Db, follows: FollowStore, userIds: strin
  *
  * 404 for a user who isn't there, 403 for anyone else asking for what the user doesn't show, with
  * a key of their own or without one, and 401 for a wrong key. What is shown looks no key up.
+ *
+ * Returns the user whose key it looked up, who is then `userId`, and null where it looked none
+ * up: a caller that goes on to ask who is reading needn't look the same key up again.
  */
-export async function requireShownFollows(db: Db, req: FastifyRequest, userId: string, side: keyof typeof SIDE_SETTINGS): Promise<void> {
+export async function requireShownFollows(db: Db, req: FastifyRequest, userId: string, side: keyof typeof SIDE_SETTINGS): Promise<AuthUser | null> {
   const user = await db.selectFrom('users').select(['id', 'show_following', 'show_followers']).where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
   if (!user) throw notFound(msg('user.not_found'));
   const { shown, hidden } = SIDE_SETTINGS[side];
-  if (user[shown] === 1) return;
-  if ((await authenticateIfNamed(db, req))?.id !== userId) throw forbidden(msg(hidden));
+  if (user[shown] === 1) return null;
+  const caller = await authenticateIfNamed(db, req);
+  if (caller?.id !== userId) throw forbidden(msg(hidden));
+  return caller;
 }

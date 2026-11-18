@@ -1,4 +1,5 @@
-import type { Origin, Preview } from './contentStore.types.js';
+import type { Mention } from '../mentions.types.js';
+import type { Origin, Preview, StoredVideo } from './contentStore.types.js';
 
 /** Everything a feed record holds except its likes and the publisher's name. */
 export interface Summary {
@@ -17,11 +18,29 @@ export interface Summary {
   /** On a repost of a post on another server: the original, which the preview is of. */
   origin?: Origin;
   /**
+   * The users the preview's text mentions: those of the post's mentions (see ContentMeta.mentions)
+   * that its preview has, which is what the preview is read with. Absent where it mentions nobody.
+   */
+  mentions?: Mention[];
+  /**
    * When the content was reposted, once for each repost of it. It isn't part of what a summary
    * says, and a summary that is read has none: it says where one that is written is kept (see
    * SummaryRef).
    */
   repostedAt?: number[];
+}
+
+/**
+ * What a summary keeps of its preview beside the text, where its post has any of it (see
+ * encodeSummary): written as JSON on a header line of its own.
+ */
+export interface SummaryExtras {
+  /** An image post's alternative texts, one for each image in their order (see Preview.alt). */
+  alt?: string[];
+  /** What a processed video is (see Preview.video). */
+  video?: StoredVideo;
+  /** The users the preview's text mentions (see Summary.mentions). */
+  mentions?: Mention[];
 }
 
 /**

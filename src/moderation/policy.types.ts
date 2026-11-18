@@ -2,7 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config.js';
 import type { Db } from '../db/index.js';
 import type { TrustRoute } from './trust.js';
-import type { TrustPlugin } from './trust.types.js';
+import type { TrustClient, TrustPlugin } from './trust.types.js';
 
 /**
  * Why a post didn't get a hashtag: the publisher is muted on it (or, for a repost, the reposter is),
@@ -29,6 +29,8 @@ export interface ModerationDeps {
   now?: () => number;
   /** The request's log, which is told of a blocked pattern that took too long to read the post (see scanTexts). */
   log?: FastifyBaseLogger;
+  /** Who sent the request, for the trust plugins that keep it with what they tell an admin of (see TrustContext.client). */
+  client?: TrustClient;
 }
 
 /**

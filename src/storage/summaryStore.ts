@@ -1,13 +1,14 @@
 import { promisify } from 'node:util';
 import { brotliCompress, brotliDecompressSync, constants } from 'node:zlib';
 import type { Operator } from 'opendal';
-import { mediaUrl, originMediaUrl, readPreview, type StoredPreview } from '../posts.js';
+import { altsOf, mediaUrl, originMediaUrl, readPreview, type StoredPreview } from '../posts.js';
 import { DAY, utcDay } from '../time.js';
 import { Lru, mapLimit } from '../util.js';
+import type { Mention } from '../mentions.types.js';
 import type { Origin } from './contentStore.types.js';
 import type { HotStore } from './hotStore.types.js';
 import { createOperator, isNotFound, readObject } from './opendal.js';
-import type { Summary, SummaryRef, SummaryStoreOptions } from './summaryStore.types.js';
+import type { Summary, SummaryExtras, SummaryRef, SummaryStoreOptions } from './summaryStore.types.js';
 
 /** zlib's `brotliCompress` as a promise: what SummaryStore.compress compresses a summary's text with. */
 const compress = promisify(brotliCompress);
@@ -31,10 +32,49 @@ const summaryObjectKeys = (r: SummaryRef) => [...new Set([r.createdAt, ...(r.rep
 /** The latest time a summary is found by: for as long as that is young, Redis keeps the summary. */
 const latest = (r: SummaryRef) => Math.max(r.createdAt, ...(r.repostedAt ?? []));
 
-/** The preview a summary's kind line and body hold. */
-function storedPreview(contentId: string, kind: string, text: string): StoredPreview {
+/** How many images a summary's post has, if it is an image post of more than one: what its first line then ends with. */
+const imageCountOf = ({ preview }: Summary): number | undefined => (preview.kind === 'image' && preview.imageCount !== undefined && preview.imageCount > 1 ? preview.imageCount : undefined);
+
+/**
+ * What a summary keeps of its preview beside the text, on a header line of its own, as JSON: the
+ * alternative texts of an image post's images, and what a processed video is. With them, the
+ * users the preview's text mentions (see Summary.mentions), which are of the text and not of the
+ * preview's kind. None of a summary whose post has none of the three, which has no such line.
+ */
+function extrasOf({ preview, mentions }: Summary): SummaryExtras | undefined {
+  const mentioned = mentions?.length ? { mentions } : undefined;
+  if (preview.kind === 'image') {
+    const alt = altsOf(preview);
+    return alt ? { alt, ...mentioned } : mentioned;
+  }
+  if (preview.kind !== 'video' || !preview.video) return mentioned;
+  const { id, width, height, duration } = preview.video;
+  return { video: { id, width, height, duration }, ...mentioned };
+}
+
+/** The mentions a summary's line of extras holds: each of them that names a user. Undefined where it holds none. */
+function storedMentions(extras: SummaryExtras | undefined): Mention[] | undefined {
+  if (!Array.isArray(extras?.mentions)) return undefined;
+  const mentions = extras.mentions.flatMap((m: Partial<Mention> | null) => (typeof m?.userId === 'string' && typeof m.username === 'string' ? [{ userId: m.userId, username: m.username }] : []));
+  return mentions.length > 0 ? mentions : undefined;
+}
+
+/** What a summary's line of extras holds (see extrasOf). Throws for one that is no JSON object. */
+function storedExtras(contentId: string, line: string): SummaryExtras {
+  const extras: unknown = JSON.parse(line);
+  if (typeof extras !== 'object' || extras === null || Array.isArray(extras)) throw new Error(`summary of ${contentId} has extras that are no object`);
+  return extras as SummaryExtras;
+}
+
+/**
+ * The preview a summary's kind line and body hold, and for an image post of several images, how
+ * many its first line says it has; with what its line of extras holds of it, if it has one.
+ */
+function storedPreview(contentId: string, kind: string, text: string, imageCount?: number, extras: SummaryExtras = {}): StoredPreview {
   if (kind === 'link') return { kind, url: text };
-  if (kind === 'text' || kind === 'image' || kind === 'video' || kind === 'audio') return { kind, text };
+  if (kind === 'image') return { kind, text, ...(imageCount !== undefined && imageCount > 1 && { imageCount }), ...(Array.isArray(extras.alt) && { alt: extras.alt.map(String) }) };
+  if (kind === 'video') return { kind, text, ...(extras.video && { video: extras.video }) };
+  if (kind === 'text' || kind === 'audio') return { kind, text };
   throw new Error(`summary of ${contentId} has an unknown preview kind`);
 }
 
@@ -51,15 +91,31 @@ function storedPreview(contentId: string, kind: string, text: string): StoredPre
  * header line, for the original: its address, then its publisher's id and username there,
  * separated by single spaces (neither of the first two holds one). Its image's, video's or audio's
  * URL is built from that address. Any other summary is as it was before there were reposts.
+ *
+ * The summary of an image post of more than one image has a sixth number: how many images it
+ * has. The fifth is then written whatever it is, 0 for a post that is no such repost. Each
+ * image's URL is built when read, from the first's (see imageUrl).
+ *
+ * The summary of an image post whose images are described, of a video the server has
+ * processed, and of a post whose preview mentions users, has a seventh number, 1, and with it
+ * one more header line, after the original's if there is one: what it keeps of the preview
+ * beside the text, as JSON on one line (see extrasOf). The fifth and sixth numbers are then written whatever they are, the sixth 0 for a
+ * post that is no album. The addresses of a video's poster and stream are built when read.
  */
 export function encodeSummary(s: Summary): string {
+  const images = imageCountOf(s);
+  const extras = extrasOf(s);
+  const numbers = [s.createdAt, s.updatedAt, s.aiGenerated ? 1 : 0, s.comments ? 1 : 0, s.origin ? 1 : 0, images ?? 0, extras ? 1 : 0];
+  // As few of them as say it all: a summary with nothing new to say is written as it always was.
+  const said = extras ? 7 : images !== undefined ? 6 : s.origin ? 5 : 4;
   return [
-    `${s.createdAt} ${s.updatedAt} ${s.aiGenerated ? 1 : 0} ${s.comments ? 1 : 0}${s.origin ? ' 1' : ''}`,
+    numbers.slice(0, said).join(' '),
     s.userId,
     s.mimeType,
     s.tags.join(' '),
     s.preview.kind,
     ...(s.origin ? [`${s.origin.url} ${s.origin.publisher.userId} ${s.origin.publisher.username}`] : []),
+    ...(extras ? [JSON.stringify(extras)] : []),
     // What a summary holds after its header: a text post's text or a caption, or a link's URL.
     s.preview.kind === 'link' ? s.preview.url : (s.preview.text ?? ''),
   ].join('\n');
@@ -89,9 +145,12 @@ export function decodeSummary(contentId: string, text: string, publicBaseUrl: st
     pos = nl + 1;
   };
   for (let i = 0; i < 5; i++) line(); // the header's lines (see encodeSummary)
-  const [createdAt, updatedAt, ai, comments, reposted] = lines[0]!.split(' ').map(Number);
+  const [createdAt, updatedAt, ai, comments, reposted, images, more] = lines[0]!.split(' ').map(Number);
   if (reposted === 1) line();
   const origin = reposted === 1 ? storedOrigin(contentId, lines[5]!) : undefined;
+  if (more === 1) line();
+  const extras = more === 1 ? storedExtras(contentId, lines.at(-1)!) : undefined;
+  const mentions = storedMentions(extras);
   return {
     contentId,
     createdAt: createdAt!,
@@ -101,8 +160,9 @@ export function decodeSummary(contentId: string, text: string, publicBaseUrl: st
     aiGenerated: ai === 1,
     comments: comments === 1,
     tags: lines[3] ? lines[3].split(' ') : [],
-    preview: readPreview(storedPreview(contentId, lines[4]!, text.slice(pos)), origin ? originMediaUrl(origin) : mediaUrl(publicBaseUrl, contentId)),
+    preview: readPreview(storedPreview(contentId, lines[4]!, text.slice(pos), images, extras), origin ? originMediaUrl(origin) : mediaUrl(publicBaseUrl, contentId)),
     ...(origin && { origin }),
+    ...(mentions && { mentions }),
   };
 }
 
@@ -246,6 +306,24 @@ export class SummaryStore {
       await this.op.delete(key);
     }
     await this.hot.del([summaryKey(r)]);
+  }
+
+  /**
+   * Erases the copies of a summary that are under the days of reposts that are no more (`gone`,
+   * when each was made), and fails if it can't: a repost that was removed leaves its day's
+   * copy behind, which no write of the summary reaches from then on, and which would outlast the
+   * content's own deletion. `r` is the summary as it is kept now, and a copy under one of its
+   * days stays, whichever repost put it there. Redis has one copy, which goes if none of the
+   * times the summary is still found by keeps it there. One that isn't there is no error.
+   */
+  async eraseCopies(r: SummaryRef, gone: number[]): Promise<void> {
+    const kept = new Set(summaryObjectKeys(r));
+    for (const key of new Set(gone.map((at) => objectKey(r.contentId, utcDay(at))))) {
+      if (kept.has(key)) continue;
+      this.cache.delete(key);
+      await this.op.delete(key);
+    }
+    if (this.hotTtl(latest(r)) <= 0) await this.hot.del([summaryKey(r)]);
   }
 
   /** Erases the summaries from both tiers, every copy of each, as far as it can: one it couldn't is left behind. */

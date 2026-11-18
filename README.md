@@ -1,4 +1,4 @@
-# Evieverse: An Open Source Cloud-Based Social Media Framework
+# Evieverse: An Open Source Social Media Framework
 
 ## Mission
 
@@ -12,14 +12,17 @@ Provide an open source alternative to traditional social media that allows for:
 6. Built-in robot detection and rate limiting.
 7. Plugin-based content trust analysis for auto-moderation.
 8. Support for multiple languages (English is default)
-9. Pay-as-you-go architecture that scales effortlessly.
-10. Easy infrastructure-as-code cloud deployment, setup, database migrations, and updates.
+9. Low-cost self-hosting: a whole instance runs in one Docker container, on a laptop or a small server.
+10. Pay-as-you-go architecture that scales effortlessly.
+11. Easy infrastructure-as-code cloud deployment, setup, database migrations, and updates.
 
-Evieverse is designed with the idea that clients will enable users to connect to multiple different Evieverse instances. Content is not federated from server-to-server, but from client to servers they have subscribed to. An instance asks another for two things only, both for reposts: the public key that instance signs its posts with, to check a repost, and, about once a day, whether a post it holds a repost of has changed or gone.
+Evieverse is designed with the idea that clients will enable users to connect to multiple different Evieverse instances. Content is not federated from server-to-server, but from client to servers they have subscribed to. 
 
 
 | To                                               | Read                                           |
 | ------------------------------------------------ | ---------------------------------------------- |
+| Run an instance in Docker, or from source        | [Getting started](#getting-started)            |
+| Put a Docker instance on the internet            | [Deploy with Docker](#deploying-with-docker)   |
 | Deploy an instance to AWS, Google Cloud or Azure | [docs/DEPLOY.md](docs/DEPLOY.md)               |
 | Configure an instance, and deploy a change       | [docs/CONFIG.md](docs/CONFIG.md)               |
 | Administer or moderate an instance               | [docs/CLI.md](docs/CLI.md)                     |
@@ -34,9 +37,37 @@ Evieverse is designed with the idea that clients will enable users to connect to
 
 ## Getting started
 
-You need Terraform 1.5 or newer, your cloud's CLI signed in, Docker (for AWS and Google Cloud), and Node.js 20 or newer for the Evieverse CLI.
+An instance runs in one of three ways. It's the same server and the same API in each:
 
-### 1. Deploy (or see [Running a Local Instance](#running-an-instance-locally))
+| Way             | What runs                                                                              | You need                                                                                  |
+| --------------- | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| **Docker**      | One container, on your own machine or a small server, with the whole instance in it    | Docker                                                                                    |
+| **From source** | One Node.js process                                                                    | Node.js 22 or newer, and ffmpeg                                                           |
+| **Cloud**       | Functions and managed services on AWS, Google Cloud or Azure, which scale with traffic | Terraform 1.5 or newer, your cloud's CLI signed in, and Docker (for AWS and Google Cloud) |
+
+Each also needs Node.js 20 or newer on your machine, for the Evieverse CLI.
+
+### 1. Start an instance
+
+**In Docker.** From a clone of this repository:
+
+```sh
+docker build -t evieverse .
+docker run -d --name evieverse --restart unless-stopped -p 3000:3000 -v evieverse:/app/data evieverse
+curl http://localhost:3000/health         # {"ok":true}
+```
+
+That one container is a whole instance, at `http://localhost:3000`. Its database (SQLite) and its posts' files are on the `evieverse` volume, and its feed index is in memory, rebuilt on each start. [Deploying with Docker](#deploying-with-docker) has what to add to put it on the internet.
+
+**From source.** With ffmpeg installed (`brew install ffmpeg`, `apt install ffmpeg`), or with `VIDEO_PROCESSING=false`, which stores videos as they're sent:
+
+```sh
+npm install
+npm run build
+npm start                  # the same instance, with its data in ./data
+```
+
+**In the cloud.**
 
 ```sh
 cd deploy/terraform/aws        # or gcp, or azure
@@ -44,27 +75,48 @@ terraform init
 terraform apply                # gcp: add -var project_id=<project>    azure: add -var subscription_id=<subscription>
 ```
 
-The apply builds the server, provisions everything it runs on, and prints the instance's HTTPS address as `url`. It also creates the instance's first admin account, and saves that account's API key on your machine, where the CLI reads it. [DEPLOY.md](docs/DEPLOY.md) covers the variables, what each cloud provisions and what it costs.
+The apply builds the server and prints the instance's HTTPS address as `url`. It also creates the instance's first admin account and saves that account's API key on your machine for use by the CLI, so step 2 is done. See [DEPLOY.md](docs/DEPLOY.md)
 
-### 2. Install the CLI
+### 2. Create the first admin
+
+In Docker and from source, you make the admin's id and API key yourself, and give the server the key's hash:
+
+```sh
+USER_ID="$(node -p 'crypto.randomUUID()')"
+KEY="ev_$(node -p 'crypto.randomBytes(6).toString("hex") + "_" + crypto.randomBytes(32).toString("base64url")')"
+HASH="$(node -p 'crypto.createHash("sha256").update(process.argv[1]).digest("hex")' "$KEY")"
+ADMIN="{\"userId\":\"$USER_ID\",\"username\":\"admin\",\"keyHash\":\"$HASH\"}"
+
+docker exec -e BOOTSTRAP_ADMIN="$ADMIN" evieverse node dist/db/migrate.js     # from source: BOOTSTRAP_ADMIN="$ADMIN" npm run migrate
+```
+
+```
+Migrations complete (sqlite).
+Admin account admin (10e57144-…) created.
+```
+
+`$KEY` is the admin's API key. The server keeps only its hash, so the key exists nowhere else until step 3 saves it. See [CONFIG.md](docs/CONFIG.md#bootstrap_admin).
+
+### 3. Install the CLI
 
 Every instance ships its own CLI, `evieverse`:
 
 ```sh
-URL="$(terraform output -raw url)"
+URL=http://localhost:3000                   # cloud: URL="$(terraform output -raw url)"
 curl -fsSL "$URL/cli/install.sh" | sh       # Windows, in PowerShell: irm <url>/cli/install.ps1 | iex
+EVIEVERSE_API_KEY="$KEY" evieverse --profile evieverse login "$URL" "$USER_ID"     # skip in the cloud: the apply saved this profile
 evieverse whoami
 ```
 
 ```
-admin (10e57144-…) on https://d1234abcd.cloudfront.net: an admin
+admin (10e57144-…) on http://localhost:3000: an admin
 ```
 
-The script says how to add `evieverse` to your `PATH` if it isn't there. `evieverse help` lists what it can do, such as appointing moderators, blocking words and working through the moderation queues, and [CLI.md](docs/CLI.md) is its reference.
+The script says how to add `evieverse` to your `PATH` if it isn't there. `evieverse help` lists what it can do, and [CLI.md](docs/CLI.md) is its reference.
 
-### 3. Create another user
+### 4. Create another user
 
-To keep bots out, registering requires solving a challenge, but not when an admin registers the user. So to register your account as the deployment's admin you can do:
+Registering requires solving a challenge unless it's an admin account registering the user. To register another account:
 
 ```sh
 evieverse register <username>  #e.g. evelynn
@@ -83,47 +135,161 @@ evieverse --profile alice login "$URL" <userId>         # asks for the API key, 
 evieverse --profile alice whoami
 ```
 
-The machine now has two profiles, so each command names the one it's for: `--profile alice` for your account, and `--profile evieverse` for the deployment's admin.
+The machine now has two profiles: `--profile alice` for your account, and `--profile evieverse` for the deployment's admin.
+
+## Deploying with Docker
+
+One image runs every role of an instance ([`Dockerfile`](Dockerfile)), and has ffmpeg for videos. It isn't published to a registry, so build it from a clone. With no settings it's a whole instance in one container, and each piece moves out of that container with a setting ([CONFIG.md](docs/CONFIG.md)):
+
+| Piece                                  | With no settings                                                                                   | To change it                                                                                                                                         |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Database                               | SQLite, a file on the volume (`/app/data`)                                                         | `DB_DIALECT` and `DATABASE_URL`: Postgres or MySQL, in a container or anywhere else                                                                  |
+| Feed index                             | In the server's memory, rebuilt from the database and the files on each start. One server only     | `REDIS_URL`: Valkey or Redis, not in cluster mode. The index then outlasts a restart                                                                 |
+| Posts' files                           | Files on the volume (`/app/data/content`)                                                          | `CONTENT_SCHEME` and `CONTENT_OPTIONS`: an S3-compatible store ([Where the files go](#where-the-files-go))                                           |
+| Compactor, which also processes videos | Inside the server                                                                                  | `COMPACT_IN_PROCESS=false`, and a second container with the same image, settings and volumes that runs `node dist/compact/main.js`. Needs `REDIS_URL` |
+| HTTPS                                  | None: plain HTTP on port 3000                                                                      | A reverse proxy in front, with `PUBLIC_BASE_URL` and `TRUST_PROXY`                                                                                   |
+
+### A server on the internet
+
+What follows puts an instance on one server that a domain name points at: the server on Postgres and Valkey, posts' files on a volume, and [Caddy](https://caddyserver.com) in front, which gets the HTTPS certificate. Save it beside the `Dockerfile` as `docker-compose.prod.yml`:
+
+```yaml
+name: evieverse
+
+services:
+  postgres:
+    extends: { file: compose.base.yml, service: postgres }
+    restart: unless-stopped
+    environment: { POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:?set it in .env}' }
+    volumes: [postgres:/var/lib/postgresql/data]
+
+  redis:
+    extends: { file: compose.base.yml, service: redis }
+    restart: unless-stopped
+    volumes: [redis:/data]
+
+  app:
+    extends: { file: compose.base.yml, service: app }
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgres://evieverse:${POSTGRES_PASSWORD}@postgres:5432/evieverse
+      PUBLIC_BASE_URL: https://${DOMAIN}
+      TRUST_PROXY: '1'
+      SUPPORT_EMAIL: ${SUPPORT_EMAIL}
+    volumes: [content:/app/data]
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [app]
+    command: caddy reverse-proxy --from ${DOMAIN} --to app:3000
+    ports: ['80:80', '443:443']
+    volumes: [caddy:/data]
+
+volumes:
+  postgres:
+  redis:
+  content:
+  caddy:
+```
+
+Its three values go in `.env`, in the same directory, which git ignores:
+
+```sh
+DOMAIN=social.example.com
+SUPPORT_EMAIL=you@example.com
+POSTGRES_PASSWORD=<what `openssl rand -hex 24` prints>
+```
+
+```sh
+docker compose -f docker-compose.prod.yml up -d --build
+curl https://social.example.com/health
+```
+
+Then create the first admin and install the CLI as in [Getting started](#2-create-the-first-admin), with `docker compose -f docker-compose.prod.yml exec -e BOOTSTRAP_ADMIN="$ADMIN" app node dist/db/migrate.js` in place of the `docker exec`, and `URL=https://social.example.com`.
+
+Things to know:
+
+- **Only Caddy publishes ports:** 80 and 443, which is also how it gets its certificate. The server, Postgres and Valkey are reached from inside the stack alone. That's what makes `TRUST_PROXY: '1'` right: the server takes each client's address, which it limits requests by, from the one proxy in front of it, and nothing reaches it any other way.
+- **`PUBLIC_BASE_URL`** is what the links to media in feeds are made from, and the address the CLI installs from.
+- **Postgres takes its password when its volume is first made.** Changing `POSTGRES_PASSWORD` afterwards changes only what the server sends.
+- **More settings go in the `environment` of `app`.** A browser client on another origin needs `CORS_ORIGINS`. For the instance's posts to be reposted on other instances, it needs `REPOSTS_SIGNING_KEYS` (`openssl rand -base64 32`).
+- **Files are uploaded through the proxy,** in the request to `POST /store`, up to `MAX_UPLOAD_BYTES` (5 GiB). Caddy sets no limit on a request's size. Another proxy may: nginx's is 1 MB until you raise it.
+- **Videos are the CPU work.** Where they're common, the server wants 2 CPUs and 2 GB of memory. On a smaller one, `VIDEO_PROCESSING: 'false'` stores them as they're sent, and fewer `VIDEO_HEIGHTS` cut the work.
+- **Memory:** idle, the four containers took about 130 MB between them when this was tried. Valkey grows to 512 MB at most, as `compose.base.yml` sets it ([how much it needs](docs/DEPLOY.md#redis)).
+- **Back up the database and the `content` volume:** they are the instance. Valkey holds nothing that can't be made again: `docker compose -f docker-compose.prod.yml exec app node dist/compact/main.js --rebuild --once`.
+- **To upgrade,** `git pull`, then `docker compose -f docker-compose.prod.yml up -d --build`. The server brings the database up to date as it starts.
+- **More than one server container** needs Valkey, the compactor in one container only, and a content store they all reach ([APP.md](docs/APP.md#13-deployment-topology)).
+
+### Where the files go
+
+A cloud deployment keeps posts' files in a bucket. A container needs none: where files are kept is a setting (`CONTENT_SCHEME`, `CONTENT_OPTIONS`), and it decides how they travel between clients and the instance.
+
+**On a volume** (`CONTENT_SCHEME=fs`, the default):
+
+- A file is read through the server: `GET /content/:id/raw` answers with its bytes.
+- A file is sent in the request to `POST /store`. There are no upload links: `POST /uploads` answers `501`.
+- Every container that runs the server or the compactor mounts the same volume. The server puts a new file there, and the compactor publishes it from there.
+
+**In an S3-compatible store** (`CONTENT_SCHEME=s3`): a bucket at a storage provider, or a store in a container of its own, such as the RustFS this repo's other compose files run.
+
+```sh
+CONTENT_SCHEME=s3
+CONTENT_OPTIONS='{"bucket":"evieverse","region":"us-east-1","endpoint":"https://files.example.com","access_key_id":"…","secret_access_key":"…"}'
+```
+
+- Files can go between clients and the store directly: `GET /content/:id/raw` redirects to a signed link to the file, and `POST /uploads` gives a signed link to upload one with.
+- **`endpoint` must be an address clients reach too,** since the links are signed for it. With a name that only the containers resolve, such as `http://s3:9000`, the server itself works, and every link it gives fails outside the Docker network.
+- The bucket needs what the cloud deployments give theirs ([DEPLOY.md](docs/DEPLOY.md#uploads)): CORS, for clients in a browser, and rules that delete what's under `uploads/` after a day and under `staged/` after a week.
+- Changing the store doesn't move the files to it.
 
 ## Evieverse clients
 
-Apart from its admin CLI, an instance has no client of its own. It's designed for clients, such as single-page apps, that each work with several instances at once. A client should:
+Evieverse does not ship with a client apart from the admin CLI. It's designed for single-page apps that each work with several instances at once. A client should:
 
-1. **Allow the user to register on several instances,** and give them one interface to all of them.
-2. **Keep one set of credentials** that unlocks the user's API key for each instance, so the client is the layer between the user and the instances they've registered on.
-3. **Let the user set the parameters of each request,** such as a feed's tags, window and algorithm, so the experience is theirs.
-4. **Syndicate a post to several instances** by posting it to each one. Instances don't pass posts on to each other, so a user's key for one instance never goes to another.
-
+1. Allow the user to register on several instances with a single interface.
+2. Keep one set of credentials that unlocks the user's API key for each instance.
+3. Let the user set the parameters of each request, such as a feed's tags, window and algorithm.
+4. Syndicate a post to several instances by reposting it appropriately. 
 
 
 ## Bring your own client
 
-Every instance serves the same API, so anyone can register on an instance directly, keep their own key, and use whatever client they like, including one they wrote. [API.md](docs/API.md) is the contract: every endpoint, what it takes and what it returns.
+Every instance serves the same API, so anyone can register on an instance directly, keep their own key, and use whatever client they like. See [API.md](docs/API.md)
 
 ## User registration and API keys
 
-When a user registers using the register endpoint(`POST /register`), unless pre-existing admin credentials are supplied (the CLI does this automatically), the instance responds with a challenge. Once the challenge is solved, the instance returns the user's id and an API key. The key is shown once, and an instance has no way to show it again, so it's the client's job to keep it safe. A user who still has their key can replace it (`POST /users/:userId/key`, or `evieverse key rotate`): the old key stops working at once and a new one comes back, which is what to do when a key may have leaked. The details are in [API.md](docs/API.md#post-usersuseridkey).
+When a user registers using the register endpoint(`POST /register`), unless pre-existing admin credentials are supplied (the CLI does this automatically), the instance responds with a challenge. Once the challenge is solved, the instance returns the user's id and an API key. The key is shown only once, so must be stored and kept safe. A user who still has their key can replace it with (`POST /users/:userId/key`, or `evieverse key rotate`). The details are in [API.md](docs/API.md#post-usersuseridkey).
 
 ## Content organization and moderation
 
 As on most social media, content is organized by tags (hashtags). An instance is deployed in one of two tagging modes:
 
-- **User-supplied tags** (the default): a post carries the tags its publisher gives it, up to 10.
-- **Server-enforced tags:** the instance's operator sets the tags a post is allowed to have, and a publisher gives each post up to 10 of them. A post with any other tag is rejected. Clients get the list of allowed tags from the instance (`GET /tagging`), so they can offer them to choose from.
+- User-supplied tags (the default): a post gets up to 10 tags supplied by the user.
+- Server-enforced tags: the instance's operator sets the tags a post is allowed to have. Clients get the list of allowed tags from the instance (`GET /tagging`).
 
 In both modes, a post with no valid tags is rejected.
 
-**Auto-moderation.** Every new post and update gets a trust score when it arrives. Depending on the score, the post is published, held in the moderation queue until someone accepts or rejects it, or rejected outright. Out of the box, the score comes from the instance's list of blocked words. A post containing a blocked word is assigned a trust score of zero. Additional [trust plugins](docs/TRUST_PLUGINS.md) may be used to modified the trust score further. 
+**Auto-moderation.** Every new post and update gets a trust score when it arrives. Depending on the score, the post is published, held in the moderation queue until someone reviews it, or rejected outright. Out of the box, a post containing a blocked word is assigned a trust score of zero. Additional [trust plugins](docs/TRUST_PLUGINS.md) may be used to modify the trust score further. Two optional plugins ship with the server: `urlhaus` refuses posts and comments with a link that spreads malware, and `pdq` gives a trust score of zero to one with an image that matches a list of known child sexual abuse material, and notifies the admins.
 
 **Moderators** 
 
-- **Admins** can delete any post, comment or account, ban users, accept or reject held posts and comments, keep the instance's blocked words, and appoint the other two roles.
-- **Server moderators** accept or reject the posts and comments held in the moderation queue, accept or delete the posts and comments users reported, perform any operations a tag moderator could on any tag, and ban users.
-- **Tag moderators** look after one or more tags. Under their tag, they can remove a tag from a post and mute a user, whose later posts then don't get the tag. They have no say over comments.
+- **Admins** can delete any post, comment or account, ban users, accept or reject held posts and comments, keep the instance's blocked words, and appoint and remove server moderators and tag moderators.
+- **Server moderators** accept or reject the posts and comments held in the moderation queue, accept or delete the posts and comments users reported, perform any operations a tag moderator could on any tag except appointing and removing its moderators, refuse claims to tags, and ban users.
+- **Tag moderators** look after one or more tags. Under their tag, they can remove a tag from a post (with a reason, if they give one), mute a user, whose later posts then don't get the tag, and set the tag's rules. They can appoint other moderators of their tag, and remove the ones who became a moderator after them. They have no say over comments.
 
-**Bans.** A server moderator or an admin can ban a user (`evieverse bans add <userId>`). A banned user can't post, comment or send messages, but can still read, receive messages, and delete their own posts and account. The user is told, with a notice, and again when the ban ends. Admins and server moderators can't be banned until their role ends. See [API.md](docs/API.md#bans).
+**Claiming a tag.** In the user-supplied tagging mode, a user can claim a tag that has no moderator (`evieverse claims add <tag>`). The admins and server moderators are notified in their inbox, and any of them can refuse the claim within 24 hours (`TAG_CLAIM_REVIEW_HOURS`). A claim nobody refused is granted, and the user becomes the tag's moderator. Users are notified when their claim is granted or refused, and when they are made a tag's moderator or removed as one. See [API.md](docs/API.md#claiming-a-hashtag).
 
-**Deleting accounts.** A user can delete their own account (`evieverse account delete --yes`), and an admin can delete any (`evieverse users delete <userId> --yes`) unless it's the only admin account. Posts are deleted with the account, comments stay. The account is gone to everyone at once, but its username is free again only when its posts have been removed, which the compactor does. See [API.md](docs/API.md#delete-usersuserid).
+**Moderation record.** When a tag moderator approves a post under a tag or removes a tag from it, that is recorded on the post, and anyone reading the post (`GET /content/:contentId`) gets it: which tag, whether a tag moderator, a server moderator or an admin did it (never who), when, and the reason a removal was given. See [API.md](docs/API.md#get-contentcontentid).
+
+**Bans.** A server moderator or an admin can ban a user (`evieverse bans add <userId>`). A banned user can't post, comment or send messages, but can still read, receive messages, and delete their own posts and account. The user is notified of being banned and unbanned in their inbox. Admins and server moderators can't be banned until their role ends. See [API.md](docs/API.md#bans).
+
+**Deleting accounts.** A user can delete their own account (`evieverse account delete --yes`), and an admin can delete any (`evieverse users delete <userId> --yes`) unless it's the only admin account. Posts are deleted with the account, comments stay. See [API.md](docs/API.md#delete-usersuserid).
+
+**Data export.** A user can export everything the instance holds of them, a page at a time (`GET /users/:userId/export`). See [API.md](docs/API.md#get-usersuseridexport).
 
 **Reports.** Any user can report a published post or comment. Reported posts and comments stay published and wait in the report queue, where a server moderator or an admin accepts or deletes it.
 
@@ -133,21 +299,30 @@ All of the moderation functions are available via the CLI [CLI](docs/CLI.md).
 
 The CLI (and API) allows the admin to set the server rules, which come back in the public `GET /rules` endpoint. The rules also send the modification disclosure clause as appropriate. 
 
+A tag can have rules of its own, which its moderators set (`evieverse tag-rules add <tag> <text>`) and anyone can read (`GET /tags/:tag/rules`).
+
 The details are in [API.md](docs/API.md#rules) and [CONFIG.md](docs/CONFIG.md).
 
 ## Posts
 
 A post is one of five types:
 
-- an image, a video or an audio file, each with an optional caption;
+- an image, a video or an audio file, each with an optional caption. An image post can be an album of up to 10 images;
 - text, of up to 40,000 characters;
 - a link, which is also how any other kind of file, such as a PDF, is shared.
 
-A text post's text, a caption and a comment's text can be formatted: bold, italic, struck through, code, links, quotes and lists, written in a small subset of Markdown. There's no HTML: a tag is shown as the characters it is. [TEXT_EDITORS.md](docs/TEXT_EDITORS.md) has the format, and how a client writes and shows it.
+Post and comment text can be formatted. See [TEXT_EDITORS.md](docs/TEXT_EDITORS.md).
 
-With each post, its publisher declares whether it was created with AI, and readers can filter feeds on that. 
+**Mentions.** A post or a comment mentions a user with `@` and their username. The user is notified in their inbox, and the mention links to their profile. See [API.md](docs/API.md#mentions).
 
-To keep bots from flooding an instance, a user who posts or comments again within a minute first solves a challenge, or two if they keep posting. By default nobody posts more than 3 times a minute.
+**Alt text.** Every image can have an alt text, which describes it to people who can't see it: each image of a post, a comment's image, and an ad's. Clients get it wherever they get the image. See [API.md](docs/API.md#alt-text).
+
+**Video.** The server processes the videos it's sent, with ffmpeg, before it publishes them. See [API.md](docs/API.md#videos).
+
+- A video is made an MP4 that plays on any device, with a poster image and an adaptive stream (HLS) in several sizes, so it plays on slow connections.
+- Its metadata is removed, as an image's is: where and when it was filmed, and on what.
+- The post is published once that's done, and says `processing` until then.
+- `VIDEO_PROCESSING=false` turns it off: videos are then stored and served as they're sent.
 
 ## Reposts
 
@@ -157,15 +332,14 @@ Any content can be reposted to this server or to another server with additional 
 - A user cannot repost their own posts (but can change the tags by editing the post)
 - A repost still goes through tag moderation for its new tags
 - A repost to another server is signed by this instance, and the other server checks the signature before it takes the repost. 
-- An instance can turn reposts off, or only those of posts on other instances (`REPOSTS`, `REPOSTS_REMOTE`). For its posts to be reposted elsewhere it needs a signing key (`REPOSTS_SIGNING_KEYS`), which the Terraform modules make.
-
+- An instance can turn reposts off, or only those of posts on other instances (`REPOSTS`, `REPOSTS_REMOTE`). For its posts to be reposted elsewhere it needs a signing key (`REPOSTS_SIGNING_KEYS`), which the Terraform modules make, and which you make yourself anywhere else (`openssl rand -base64 32`).
 
 
 ## Comments
 
-A post takes comments if its publisher turns them on, which they do post by post, and can change later. They're off unless the publisher says.
+A post takes comments if its publisher turns them on, which is done on a post-by-post basis.
 
-- A comment can consist of text, an image, or a video
+- A comment can consist of text, an image, or a video. A comment's video is processed as a post's is, into one MP4 without its metadata
 - Comments are stored in a tree form on each post (users may respond to other users comments)
 - Anyone can read a post's comments, oldest or newest first, and any user can add one, up to 10 a minute by default.
 - Comments are moderated as posts are. Each gets a trust score from the same checks, and by the same thresholds is published, held in the moderation queue or rejected outright. Held comments wait in the same queue as held posts, for a server moderator or an admin.
@@ -179,15 +353,19 @@ The details are in [API.md](docs/API.md#comments).
 
 ## Likes
 
-A user can like any post once and cannot be taken back. A post's likes are shown wherever the post is, in feeds and on the post itself, and they're what the `popular` feed algorithm orders posts by.
+A user can like any post once, and can take the like back, after which they can like the post again. A post's likes are shown wherever the post is, in feeds and on the post itself, and they're what the `popular` feed algorithm orders posts by.
 
 ## Following
 
 A user can follow any other user, up to 1,000 of them by default. Followers and whom one follows can be optionally hidden by the user.
 
+## Blocks
+
+A user can block another user. No message goes between the two, neither follows the other, and the blocked user can't comment on the blocker's posts. See [API.md](docs/API.md#blocks).
+
 ## Inbox
 
-Users receive notices and messages from other users in their inbox. Notices include server messages (e.g. moderated posts, bans).
+Users receive notices and messages from other users in their inbox. Notices include server messages (e.g. moderated posts, bans) and mentions.
 
 ## Feed
 
@@ -200,11 +378,19 @@ A feed is what the reader asks for. The reader chooses:
   - `chronological` returns the window's posts in order of time, newest first.
 - Filters: AI-usage content filter. There is also a filter for only posts a tag's moderators have approved, or only posts they haven't.
 
+## Search
+
+Anyone can search an instance (`GET /search`) for users, by the start of their username, or for posts, by the words of their text and by their tags. See [API.md](docs/API.md#search).
+
+An instance that had posts before it had search indexes them once after the upgrade (`npm run reindex`). See [DEPLOY.md](docs/DEPLOY.md#upgrading-to-search).
+
 
 
 ## Running an instance locally
 
-Requires Node 22+.
+[Getting started](#getting-started) runs an instance to use. These are the setups for working on the server, or on a client for it.
+
+Requires Node 22+, and ffmpeg to process videos with (`brew install ffmpeg`, `apt install ffmpeg`). Without ffmpeg, run it with `VIDEO_PROCESSING=false`, which stores videos as they're sent: the server doesn't start otherwise, and says so. The Docker images have ffmpeg.
 
 ```bash
 npm install
@@ -223,9 +409,10 @@ The server listens on `http://localhost:3000`. Other ways to run it:
 
 Things to know:
 
-- `curl -fsSL http://localhost:3000/cli/install.sh | sh` downloads and installs the CLI.
+- `curl -fsSL http://localhost:3000/cli/install.sh | sh` downloads and installs the CLI, from an instance in Docker or one that was built (`npm run build`, then `npm start`). `npm run dev` ships none.
+- The full stack gives links to its S3-compatible store by the name its containers know it by, `http://s3:9000`. So from the host, `GET /content/:id/raw` redirects to an address that doesn't resolve, and upload links point to it too ([Where the files go](#where-the-files-go)). The testbed has nginx in front, which sends the redirects on to the store.
 - Without `REDIS_URL`, the feed index lives inside the process, and the server rebuilds it from the database and the content store each time it starts. To keep it across restarts, point `REDIS_URL` at a local Redis or Valkey (`docker compose up -d redis`, then `REDIS_URL=redis://127.0.0.1:6379`).
-- The API in Docker (`docker-compose.server.yml`) accepts browser requests from any origin. Set `CORS_ORIGINS` (e.g. `CORS_ORIGINS=http://localhost:5173`) to allow only your frontend's.
+- The API in Docker (`docker-compose.server.yml`) accepts browser requests from any origin. Set `CORS_ORIGINS` (e.g. `CORS_ORIGINS=http://localhost:5173`) to allow only your frontend's. It's set up for development in other ways too: it raises the limits on registrations and feeds, and publishes Postgres (with the password in `compose.base.yml`) and Valkey (with none) on the host. For an instance on the internet, use [A server on the internet](#a-server-on-the-internet).
 
 
 

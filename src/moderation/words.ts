@@ -47,8 +47,8 @@ const RUN_PATTERNS = new Script(`{
  */
 const plain = (text: string) => text.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').normalize('NFC');
 
-/** Lowercase, without the accents of Latin letters, as hashtags are normalised. */
-const fold = (text: string) => text.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+/** Lowercase, without the accents of Latin letters, as hashtags are normalised. A search reads the words of a post and of a query the same way (src/search/keywords.ts). */
+export const fold = (text: string) => text.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 
 /**
  * Whether an entry is a pattern, a regular expression written between slashes, and not a word or

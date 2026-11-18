@@ -51,9 +51,28 @@ export const ATTESTATION_SKEW_MS = MINUTE;
 /**
  * The longest attestation a request can carry, in characters. A payload is little beside its
  * preview's text, which is at most MAX_TEXT_CHARS UTF-16 code units: up to six bytes each as JSON
- * writes the ones it escapes, and a third more in base64.
+ * writes the ones it escapes, and a third more in base64. The alternative texts of an album's
+ * images, of a server that takes what this one does, come to less than half as much again.
  */
-export const MAX_ATTESTATION_CHARS = 400_000;
+export const MAX_ATTESTATION_CHARS = 600_000;
+
+/**
+ * The most images an attestation can say an image post has. More than this server's own posts
+ * take (MAX_POST_IMAGES): how many a post has is its own server's to decide, within reason.
+ */
+const MAX_ATTESTED_IMAGES = 100;
+
+/**
+ * The longest alternative text an attestation can give one image. More than this server's own
+ * images take (MAX_ALT_CHARS), as with how many images a post has.
+ */
+const MAX_ATTESTED_ALT_CHARS = 5000;
+
+/** The most an attestation can say a video measures along one side, in pixels: within reason, as above. */
+const MAX_ATTESTED_PIXELS = 16_384;
+
+/** The longest an attestation can say a video is, in seconds: a week. */
+const MAX_ATTESTED_SECONDS = 7 * 24 * 3600;
 
 /** What is signed starts with this: a signature made with the same key for anything else is no attestation's. */
 const CONTEXT = 'evieverse-repost-attestation-v1.';
@@ -114,11 +133,36 @@ export const AttestedPost = z.object({
   aiGenerated: z.boolean(),
   /**
    * Its summary, as feeds show it there. An image's, video's or audio's has no `url`: the bytes
-   * are read at the post's address.
+   * are read at the post's address. An image post of several images says how many
+   * (`imageCount`): each after the first is read at the address of the bytes and its place
+   * among them, counted from 1 (see imageUrl). One whose images are described says how
+   * (`alt`): the alternative text of each, in their order, '' for one that has none.
+   *
+   * A video the post's server has processed says what it is (`video`, see StoredVideo): its
+   * poster and its stream are read on that server, beside the post's bytes, under the id it
+   * gives (see videoFileUrl).
    */
   preview: z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('text'), text: z.string().trim().min(1).max(MAX_TEXT_CHARS) }),
-    z.object({ kind: z.enum(['image', 'video', 'audio']), text: z.string().trim().max(MAX_TEXT_CHARS).optional() }),
+    z.object({
+      kind: z.literal('image'),
+      text: z.string().trim().max(MAX_TEXT_CHARS).optional(),
+      imageCount: z.number().int().min(2).max(MAX_ATTESTED_IMAGES).optional(),
+      alt: z.array(z.string().max(MAX_ATTESTED_ALT_CHARS)).min(1).max(MAX_ATTESTED_IMAGES).optional(),
+    }),
+    z.object({
+      kind: z.literal('video'),
+      text: z.string().trim().max(MAX_TEXT_CHARS).optional(),
+      video: z
+        .object({
+          id: z.string().uuid(),
+          width: z.number().int().min(1).max(MAX_ATTESTED_PIXELS),
+          height: z.number().int().min(1).max(MAX_ATTESTED_PIXELS),
+          duration: z.number().min(0).max(MAX_ATTESTED_SECONDS),
+        })
+        .optional(),
+    }),
+    z.object({ kind: z.literal('audio'), text: z.string().trim().max(MAX_TEXT_CHARS).optional() }),
     z.object({ kind: z.literal('link'), url: LinkUrl }),
   ]),
 });

@@ -1,7 +1,7 @@
 /**
  * The answer to a challenge as a request sends it (see `ChallengeFields`): the challenge's id, the
  * characters of its image, and the nonce of its proof of work. A request that answers none has
- * none of them. The routes parse it, and `Challenges` checks it.
+ * none of them. The route parses it, and `Challenges` checks it.
  */
 export interface ChallengeSolution {
   challengeId?: string;
@@ -18,9 +18,6 @@ export interface Challenge {
   audio: string;
   expiresAt: string;
   expiresInSeconds: number;
-  /** This is challenge `step` of the `steps` the request needs, solved one after another. */
-  step: number;
-  steps: number;
   /** The nonce is any string that makes the SHA-256 of `prefix + nonce` start with `bits` zero bits. */
   proofOfWork: { algorithm: 'SHA-256'; prefix: string; bits: number };
 }

@@ -2,6 +2,7 @@ import { randomInt } from 'node:crypto';
 import { Readable } from 'node:stream';
 import type { FastifyInstance, RouteShorthandOptions } from 'fastify';
 import { z } from 'zod';
+import { blockedAmong, readerOf } from '../blocks.js';
 import type { Config } from '../config.js';
 import type { AppDeps } from '../deps.types.js';
 import { decodeCursor, decodeFollowingCursor, encodeCursor, encodeFollowingCursor } from '../feed/cursor.js';
@@ -227,6 +228,12 @@ export function followingFeedRoutes(app: FastifyInstance, { db, config, authorRe
    * requireShownFollows). That is all it asks the database: whom they follow, and the posts, come
    * from Redis and the summary store, as a hashtag feed's do.
    *
+   * A reader who sends their credentials is shown nothing of the users they block (src/blocks.ts):
+   * a post one of them published, which a followed user reposted, is left out of the page, which
+   * is then shorter than was asked for. That is the reader's own blocks, whoever's feed it is,
+   * and asks the database once more: which of the page's publishers they block. A request with
+   * no credentials is answered as before.
+   *
    * One address gets `feed.followingRateLimitPerMinute` requests a minute, counted apart from
    * its hashtag feeds, and is refused past that (429) before anything is read for it: a page
    * here asks the database, and reads an index for every user followed, which a hashtag feed
@@ -236,7 +243,7 @@ export function followingFeedRoutes(app: FastifyInstance, { db, config, authorRe
     const q = FollowingQuery.parse(req.query);
     const limit = pageLimit(config, q.limit);
     const after = q.cursor ? decodeFollowingCursor(q.cursor) : undefined;
-    await requireShownFollows(db, req, q.userId, 'following');
+    const owner = await requireShownFollows(db, req, q.userId, 'following');
     const t = now();
 
     const plan = await planFollowing(authorReader, await Promise.all((await follows.get(q.userId)).map((id) => authorReader.open(authorIndex(id)))), {
@@ -246,7 +253,11 @@ export function followingFeedRoutes(app: FastifyInstance, { db, config, authorRe
       oldest: t - config.feed.maxLookbackDays * DAY,
     });
     const last = plan.picks.at(-1);
-    const records = followingRecords(plan.picks, await loadBodies(plan.picks, summaries, publishers));
+    const bodies = await loadBodies(plan.picks, summaries, publishers);
+    // Who is reading, where the request says: the user the check above looked up, or whoever the headers name. Not asked for an empty page.
+    const reader = bodies.publishers.size > 0 ? (owner ?? (await readerOf(db, req))) : null;
+    // Its keys are the page's publishers, and those who reposted what it shows.
+    const records = followingRecords(plan.picks, bodies, reader ? await blockedAmong(db, reader.id, bodies.publishers.keys()) : undefined);
     return { count: records.length, truncated: plan.truncated, nextCursor: plan.truncated && last ? encodeFollowingCursor(last) : null, records };
   });
 }

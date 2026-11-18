@@ -12,7 +12,9 @@ import { iso } from './time.js';
  * Comments on posts: a text, an image or a video, or a text with one of the two. A post takes them
  * if its publisher said so (the `comments` flag of /store, in the post's meta file). A comment is
  * on the post or replies to another comment on it, so a post's comments are a tree, of any depth.
- * Its author can edit its text, and any user can like it, once.
+ * Its author can edit its text, and any user can like it, once. Its author says whether it was
+ * created with AI (`aiGenerated`), as a post's publisher says of a post: nothing detects or
+ * checks it.
  *
  * A comment goes alone. Deleting one deletes that comment and none of the comments that reply to
  * it, and so does rejecting it in the moderation queue, or deleting it from the report queue; and
@@ -77,8 +79,8 @@ const commentMediaUrl = (publicBaseUrl: string, postId: string, commentId: strin
 
 /**
  * A comment as responses give it: with `author` as its credit, and the link to its image or video
- * built from `publicBaseUrl`. A placeholder is given without author, text, media or likes, and
- * with the `status` that says why the comment isn't there. Without counts, it has no likes and no
+ * built from `publicBaseUrl`. A placeholder is given without author, text, media or likes, with
+ * no declaration of AI, and with the `status` that says why the comment isn't there. Without counts, it has no likes and no
  * replies, as a comment just sent has.
  */
 export function toCommentRecord(comment: Comment, author: Publisher, publicBaseUrl: string, { likes, replies }: CommentCounts = { likes: 0, replies: 0 }): CommentRecord {
@@ -86,14 +88,25 @@ export function toCommentRecord(comment: Comment, author: Publisher, publicBaseU
   const createdAt = iso(comment.createdAt);
   // A placeholder: where the comment was, how many reply to it, and why it isn't there.
   if (comment.gone) {
-    return { ...place, author: null, text: '', media: null, likes: 0, replies, createdAt, editedAt: null, status: comment.gone === 'deleted' ? 'deleted' : 'pending_review' };
+    return { ...place, author: null, text: '', aiGenerated: false, media: null, likes: 0, replies, createdAt, editedAt: null, status: comment.gone === 'deleted' ? 'deleted' : 'pending_review' };
   }
   return {
     ...place,
     author,
     text: comment.text,
+    ...(comment.mentions?.length && { mentions: comment.mentions }),
+    // Kept only where it was declared: a comment without it wasn't.
+    aiGenerated: comment.aiGenerated === true,
     // The link isn't stored: it is built when read, as a post's is.
-    media: comment.media ? { kind: comment.media.kind, url: commentMediaUrl(publicBaseUrl, comment.contentId, comment.commentId), mimeType: comment.media.mimeType, size: comment.media.size } : null,
+    media: comment.media
+      ? {
+          kind: comment.media.kind,
+          url: commentMediaUrl(publicBaseUrl, comment.contentId, comment.commentId),
+          mimeType: comment.media.mimeType,
+          size: comment.media.size,
+          ...(comment.media.alt && { alt: comment.media.alt }),
+        }
+      : null,
     likes,
     replies,
     createdAt,
@@ -125,6 +138,23 @@ export async function toCommentRecords({ config, publishers, comments: store }: 
     }),
   ]);
   return comments.map((comment) => toCommentRecord(comment, authors.get(comment.userId) ?? { userId: comment.userId, username: '' }, config.publicBaseUrl, counts.get(comment.commentId)));
+}
+
+/**
+ * The records of a list as a reader who blocks `blocked` gets them (src/blocks.ts): a comment by
+ * one of those users is a placeholder, with `status: "blocked"`. Like the placeholder of a
+ * deleted comment it has no author, text, media, likes or declaration of AI, and keeps the
+ * comment's place, its time and how many reply to it, so the tree is the one everyone else reads.
+ * Nothing is stored for it: it is made as the list is answered, for that reader alone.
+ */
+export function hideBlocked(records: CommentRecord[], blocked: ReadonlySet<string>): CommentRecord[] {
+  if (blocked.size === 0) return records;
+  return records.map((record): CommentRecord => {
+    if (record.author === null || !blocked.has(record.author.userId)) return record;
+    // Nor whom it mentions, which is of its text.
+    const { mentions, ...place } = record;
+    return { ...place, author: null, text: '', aiGenerated: false, media: null, likes: 0, editedAt: null, status: 'blocked' };
+  });
 }
 
 type RemovalDeps = Pick<AppDeps, 'db' | 'comments'>;

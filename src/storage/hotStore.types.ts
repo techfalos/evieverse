@@ -30,11 +30,12 @@ export interface HotStore {
    */
   incr(key: string, ttlMs: number): Promise<{ count: number; ttlMs: number }>;
   /**
-   * Adds one to a counter that is there, which keeps its expiry, and returns the count. A counter
-   * that isn't there is left missing, and null returned: a count somebody cached is kept up, and
-   * one nobody cached isn't begun at 1. Atomic.
+   * Adds one to a counter that is there, or `by`, which takes from it if it is negative. The
+   * counter keeps its expiry, and the count is returned. A counter that isn't there is left
+   * missing, and null returned: a count somebody cached is kept up, and one nobody cached isn't
+   * begun at 1. Atomic.
    */
-  bump(key: string): Promise<number | null>;
+  bump(key: string, by?: number): Promise<number | null>;
   /**
    * Sets a key to `next` (or deletes it, if null), but only if it holds `expected` (null: if it is
    * missing), and returns whether it did. Atomic, so of concurrent callers that read the same value

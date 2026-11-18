@@ -1,3 +1,5 @@
+import type { Mention } from './mentions.types.js';
+
 /**
  * The formatting of the text users write: a text post's text, a caption, and a comment's text.
  * It is a small subset of Markdown and no HTML. A tag is the characters it is written with, as in
@@ -21,7 +23,14 @@
  * - `` `code` ``, on one line, in which nothing else is read;
  * - `[label](https://address)`, and an address written out on its own (https://example.com),
  *   are links. An address is http or https and nothing else, with no space in it;
- * - a backslash before a punctuation character makes it that character: `\*`.
+ * - `@name` mentions a user, where the name is one of the text's mentions: the users the server
+ *   found by the names written in it when it was sent, which it keeps beside the text and gives
+ *   with it (src/mentions.ts). A name is as its user has it, with its spaces: nothing here
+ *   says what a name is made of, and a text read without its mentions has none. The `@` doesn't
+ *   follow a letter or a digit, so an address such as ann@example.com mentions nobody, and the
+ *   name isn't followed by one, nor by a `_` within a word. Of two names that fit, the longer
+ *   is the one. Nothing is a mention in code, or in the label of a link;
+ * - a backslash before a punctuation character makes it that character: `\*`, and `\@`.
  *
  * Whatever doesn't fit these is the text it is written with: there is no text the format refuses.
  */
@@ -33,7 +42,9 @@ export type Inline =
   | { type: 'code'; text: string }
   | { type: 'break' }
   | { type: Mark; children: Inline[] }
-  | { type: 'link'; url: string; children: Inline[] };
+  | { type: 'link'; url: string; children: Inline[] }
+  /** Shown as `@username`, and leads to the user's profile: `userId` is whose it is. */
+  | { type: 'mention'; userId: string; username: string };
 
 export type Block =
   | { type: 'paragraph' | 'quote'; children: Inline[] }
@@ -50,6 +61,10 @@ const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
 const ADDRESS = /https?:\/\/[^\s<>[\]`"\\]+/iy;
 /** A character no address has, which is what ADDRESS ends before: with one in its `(address)`, a `[label](address)` is no link. */
 const NOT_IN_ADDRESS = /[\s<>[\]`"\\]/;
+/** What says, right after a name, that the word goes on, so that the name isn't the one written: a letter or a digit, or a `_` (with its backslash or without) before one. `@ann_marie` doesn't mention ann. */
+const WORD_GOES_ON = /(?:\\?_)*[\p{L}\p{N}]/uy;
+/** A line break, which no name that is mentioned has: a mention is on one line. */
+const LINE_BREAK = /[\r\n]/;
 
 /** Whether `c` is a space, or isn't there at all (undefined): the start and the end of a text count as one. */
 const isSpace = (c: string | undefined) => c === undefined || SPACE.test(c);
@@ -58,11 +73,13 @@ const isWord = (c: string | undefined) => c !== undefined && LETTER_OR_DIGIT.tes
 
 /** What a block's text is made of, in order: its `src` joined is the text. */
 interface Token {
-  kind: 'text' | 'literal' | 'code' | 'url' | 'break' | 'open' | 'close';
+  kind: 'text' | 'literal' | 'code' | 'url' | 'mention' | 'break' | 'open' | 'close';
   /** As written. */
   src: string;
-  /** What a reader reads of it: a text without its backslashes, a code's content. */
+  /** What a reader reads of it: a text without its backslashes, a code's content, a mention's `@` and name. */
   text: string;
+  /** Of a `mention`: who it mentions. */
+  user?: Mention;
   /** Of an `open` and a `close`: what it opens or closes. */
   mark?: Mark | 'link';
   /** Of an `open`: what closes it, as written. */
@@ -126,8 +143,41 @@ function linkEnd(src: string, i: number): { url: string; end: number } | null {
   return null;
 }
 
+/**
+ * Where the name written at `i` ends, if it is `name` and ends there (see WORD_GOES_ON); null if
+ * it isn't. It is the name character for character, or with a backslash before a punctuation
+ * character of it, which is how an editor that escapes what its user types sends it:
+ * `@snake\_case` names snake_case.
+ */
+function nameEnd(src: string, i: number, name: string): number | null {
+  let end = i;
+  for (const c of name.split('')) {
+    if (src[end] === '\\' && src[end + 1] === c && PUNCTUATION.test(c)) end += 2;
+    else if (src[end] === c) end++;
+    else return null;
+  }
+  WORD_GOES_ON.lastIndex = end;
+  return WORD_GOES_ON.test(src) ? null : end;
+}
+
+/** The mention the `@` at `i` starts, and where it ends: of the first of `names` that is written after it, which is the longest (see `known`). Null if none is. */
+function mentionAt(src: string, i: number, names: Mention[]): { user: Mention; end: number } | null {
+  for (const user of names) {
+    const end = nameEnd(src, i + 1, user.username);
+    if (end !== null) return { user, end };
+  }
+  return null;
+}
+
+/**
+ * The mentions a text is read with, as `scan` goes through them: the longest name first, so that
+ * `@Ann Lee` is Ann Lee where there is an Ann too. One with no name, or with a name of more than
+ * one line, is none a text can make.
+ */
+const known = (mentions: readonly Mention[]): Mention[] => mentions.filter((m) => m.username !== '' && !LINE_BREAK.test(m.username)).sort((a, b) => b.username.length - a.username.length);
+
 /** Text in which nothing formats anything: each character the format reads gets a backslash. */
-const escaped = (src: string) => src.replace(/[\\*_~`[\]]/g, '\\$&');
+const escaped = (src: string) => src.replace(/[\\*_~`[\]@]/g, '\\$&');
 
 /**
  * Reads a block's text into tokens, from left to right, once. What is open is a stack, and what
@@ -135,8 +185,12 @@ const escaped = (src: string) => src.replace(/[\\*_~`[\]]/g, '\\$&');
  * opened inside and not closed by then is the characters it was written with (`[a *b](…)`).
  *
  * At most one of each mark is open, and one `[`, so nothing nests deeper than four.
+ *
+ * `names` is who the text can mention (see `known`). Where there are any, an `@` that could
+ * start a mention and starts none is a literal of its own, so that the start of the text is
+ * written with it as the `@` it is (see cutFormatted).
  */
-function scan(src: string): Token[] {
+function scan(src: string, names: Mention[] = []): Token[] {
   const tokens: Token[] = [];
   const stack: Open[] = [];
   let raw = '';
@@ -239,12 +293,24 @@ function scan(src: string): Token[] {
         // An address written out in a label is the label's text, not a link of its own.
         for (const token of tokens.slice(stack[at]!.index)) {
           if (token.kind === 'url') Object.assign(token, { kind: 'text', src: escaped(token.src) });
+          // And so is a name written in one: it leads where the label does.
+          else if (token.kind === 'mention') Object.assign(token, { kind: 'text', src: escaped(token.text) });
         }
         close(at, src.slice(i, link.end), link.url);
         i = link.end;
       } else {
         if (at >= 0) drop(stack.splice(at, 1)[0]!);
         literal(ch, !link);
+        i++;
+      }
+    } else if (ch === '@' && names.length > 0 && !isWord(src[i - 1])) {
+      const mention = mentionAt(src, i, names);
+      if (mention) {
+        flush();
+        tokens.push({ kind: 'mention', src: src.slice(i, mention.end), text: `@${mention.user.username}`, user: mention.user });
+        i = mention.end;
+      } else {
+        literal(ch, false);
         i++;
       }
     } else {
@@ -312,6 +378,8 @@ function tree(tokens: Token[]): Inline[] {
       into.push({ type: 'break' });
     } else if (token.kind === 'url') {
       into.push({ type: 'link', url: token.src, children: [{ type: 'text', text: token.src }] });
+    } else if (token.kind === 'mention') {
+      into.push({ type: 'mention', userId: token.user!.userId, username: token.user!.username });
     } else {
       const before = into.at(-1);
       if (before?.type === 'text') before.text += token.text;
@@ -321,12 +389,70 @@ function tree(tokens: Token[]): Inline[] {
   return root;
 }
 
-/** A formatted text as what it says to show: its blocks, and within each what is bold, a link, and so on. */
-export function parseFormatted(text: string): Block[] {
+/**
+ * A formatted text as what it says to show: its blocks, and within each what is bold, a link, and
+ * so on. `mentions` is who the text mentions, as the server gives them with it: each `@name` of
+ * theirs is a mention, and without them the text has none.
+ */
+export function parseFormatted(text: string, mentions: readonly Mention[] = []): Block[] {
+  const names = known(mentions);
   return blocksOf(text).map((block): Block => {
-    if (block.type !== 'list') return { type: block.type, children: tree(scan(block.src)) };
-    return { ...block, items: block.items.map((item) => tree(scan(item))) };
+    if (block.type !== 'list') return { type: block.type, children: tree(scan(block.src, names)) };
+    return { ...block, items: block.items.map((item) => tree(scan(item, names))) };
   });
+}
+
+/**
+ * Whom of `mentions` a text mentions, each name once, in the order the text first has them. A
+ * user who is there under two names, an old one and a new, is there twice if the text has both:
+ * each `@name` of the text is read by its name.
+ */
+export function mentionsIn(text: string, mentions: readonly Mention[]): Mention[] {
+  if (!mentions.length || !text.includes('@')) return [];
+  const found = new Map<string, Mention>();
+  const read = (nodes: Inline[]) => {
+    for (const node of nodes) {
+      if (node.type === 'mention') found.set(node.username, found.get(node.username) ?? { userId: node.userId, username: node.username });
+      else if ('children' in node) read(node.children);
+    }
+  };
+  for (const block of parseFormatted(text, mentions)) (block.type === 'list' ? block.items : [block.children]).forEach(read);
+  return [...found.values()];
+}
+
+/**
+ * Every name a text could mention: what follows each `@` that could start a mention, up to each
+ * place a name could end, on its line, both as it is written and as it reads without the
+ * backslashes of an editor that escapes (see nameEnd). That is more than the names it does
+ * mention, which only whoever knows the users can tell (src/mentions.ts): it is what to look
+ * for. `sites` is how many such `@` are read, from the start of the text, and `chars` how long a
+ * name can be.
+ */
+export function mentionable(text: string, { sites, chars }: { sites: number; chars: number }): Set<string> {
+  const names = new Set<string>();
+  let read = 0;
+  for (let at = text.indexOf('@'); at >= 0 && read < sites; at = text.indexOf('@', at + 1)) {
+    if (isWord(text[at - 1])) continue;
+    read++;
+    let written = '';
+    let name = '';
+    for (let i = at + 1; i < text.length && name.length < chars; ) {
+      const ch = text[i]!;
+      // A name is on one line, and starts with no space.
+      if (LINE_BREAK.test(ch) || (name === '' && SPACE.test(ch))) break;
+      const next = text[i + 1];
+      const pair = ch === '\\' && next !== undefined && PUNCTUATION.test(next);
+      written += pair ? ch + next : ch;
+      name += pair ? next : ch;
+      i += pair ? 2 : 1;
+      WORD_GOES_ON.lastIndex = i;
+      // Nor does it end with one, or where the word goes on.
+      if (SPACE.test(ch) || WORD_GOES_ON.test(text)) continue;
+      names.add(name);
+      if (written.length <= chars) names.add(written);
+    }
+  }
+  return names;
 }
 
 /**
@@ -335,6 +461,9 @@ export function parseFormatted(text: string): Block[] {
  * address follows its label, so that whoever reads the text for what it says reads where it
  * leads too. The address ends where it ends: a space follows it if the text goes on right after
  * the link, as in `[here](http://example.com)now`, which would otherwise read as one address.
+ *
+ * It is read without its mentions, which it needs none of: a name reads as it is written, `@`
+ * and all, whether it mentions someone or not.
  */
 export function plainText(text: string, addresses = false): string {
   const line = (nodes: Inline[]): string => {
@@ -351,6 +480,7 @@ export function plainText(text: string, addresses = false): string {
       for (const node of nodes) {
         if (node.type === 'text' || node.type === 'code') write(node.text);
         else if (node.type === 'break') write('\n');
+        else if (node.type === 'mention') write(`@${node.username}`);
         else {
           const from = out.length;
           read(node.children);
@@ -388,8 +518,15 @@ function asParagraph(text: string): string {
  * `maxChars`: a link is cut before it starts if its address has no room. And what formed nothing
  * in the text is written so that it forms nothing in the start either, where it has other
  * neighbours: a `**` nothing closed gets its backslashes.
+ *
+ * `mentions` is who the text mentions (see parseFormatted), and its start is to be read with
+ * them too. A mention is written whole, as many words as its name has, or the text is cut before
+ * it. And an `@` that mentions nobody gets its backslash, so that it mentions nobody in the
+ * start, where a name may end that went on in the text: "@Ann Lee" isn't the start of
+ * "@Ann Leeds".
  */
-export function cutFormatted(text: string, maxWords: number, maxChars: number): string {
+export function cutFormatted(text: string, maxWords: number, maxChars: number, mentions: readonly Mention[] = []): string {
+  const names = known(mentions);
   let out = '';
   let words = 0;
   let inWord = false;
@@ -454,7 +591,7 @@ export function cutFormatted(text: string, maxWords: number, maxChars: number): 
     space();
     if (marker !== undefined && !writeText(marker)) return false;
     space();
-    return scan(src).every((token: Token): boolean => {
+    return scan(src, names).every((token: Token): boolean => {
       switch (token.kind) {
         case 'text':
           return writeText(token.src);
@@ -466,6 +603,14 @@ export function cutFormatted(text: string, maxWords: number, maxChars: number): 
           // It has no room. An address that is cut leads elsewhere, so it is written as text, as far as it goes.
           cut = false;
           return writeText(escaped(token.src).replace('://', '\\://'));
+        case 'mention': {
+          // Whole, each word of the name counted, or not at all: the start of a name is nobody's.
+          const more = token.text.split(/\s+/).length - 1;
+          if (words + (inWord ? 0 : 1) + more > maxWords) return !(cut = true);
+          if (!write(token.src)) return false;
+          words += more;
+          return true;
+        }
         case 'code':
           waiting.push({ kind: 'open', src: '`', text: '', closer: '`' });
           if (!writeText(token.text, true)) return false;

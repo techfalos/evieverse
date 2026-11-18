@@ -3,13 +3,15 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
 import type { AuthUser } from '../auth/apiKey.types.js';
-import { addOnce } from '../db/index.js';
+import { blocksBetween } from '../blocks.js';
+import { lockUser } from '../db/index.js';
 import type { AppDeps } from '../deps.types.js';
-import { badRequest, forbidden, notFound, tooManyRequests } from '../http/errors.js';
+import { syncFollowing } from '../follows.js';
+import { badRequest, forbidden, HttpError, notFound, tooManyRequests } from '../http/errors.js';
 import { say } from '../http/language.js';
 import { listPage, listQuery } from '../http/listCursor.js';
 import { Credentials, Flag, ListQuery } from '../http/schemas.js';
-import { isNotice, MAX_MESSAGE_CHARS, MESSAGE, NOTICES } from '../inbox.js';
+import { inboxItem, MAX_MESSAGE_CHARS, MESSAGE } from '../inbox.js';
 import { msg } from '../language.js';
 import type { Message } from '../language.types.js';
 import { refuseBanned } from '../moderation/policy.js';
@@ -47,8 +49,10 @@ const UnreadQuery = z.object({ unread: Flag.optional() });
  * whom they choose (`user_blocks`), and no message then goes between the two, either way. Neither
  * touches notices, which every user gets. A banned user sends no messages (see refuseBanned), but is
  * sent them, and reads their inbox.
+ *
+ * Messages are one of the things a block stops: what else it does is in src/blocks.ts.
  */
-export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.now }: AppDeps) {
+export function inboxRoutes(app: FastifyInstance, { db, config, hot, follows, now = Date.now }: AppDeps) {
   /** The caller, who must be the user named in the path: `refusal` is what anyone else is told. */
   async function owner(req: FastifyRequest, userId: string, refusal: Message, body: Credentials = Credentials.parse(req.body ?? {})): Promise<AuthUser> {
     const user = await authenticate(db, req, body);
@@ -89,23 +93,14 @@ export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.
     refuseBanned(sender);
     if (body.to === sender.id) throw badRequest(msg('message.yourself'));
     if (!sender.messages) throw forbidden(msg('message.turned_off'));
-    const [recipient, blocks] = await Promise.all([
+    const [recipient, blocked] = await Promise.all([
       db.selectFrom('users').select(['id', 'username', 'messages']).where('id', '=', body.to).where('deleted_at', 'is', null).executeTakeFirst(),
-      // Either way round: each is one lookup by the primary key.
-      db
-        .selectFrom('user_blocks')
-        .select('user_id')
-        .where((eb) =>
-          eb.or([
-            eb.and([eb('user_id', '=', sender.id), eb('blocked_id', '=', body.to)]),
-            eb.and([eb('user_id', '=', body.to), eb('blocked_id', '=', sender.id)]),
-          ]),
-        )
-        .execute(),
+      // Either way round.
+      blocksBetween(db, sender.id, body.to),
     ]);
     if (!recipient) throw notFound(msg('user.not_found'));
-    if (blocks.some((block) => block.user_id === sender.id)) throw forbidden(msg('message.you_blocked'));
-    if (recipient.messages !== 1 || blocks.length > 0) throw forbidden(msg('message.not_taken'));
+    if (blocked.mine) throw forbidden(msg('message.you_blocked'));
+    if (recipient.messages !== 1 || blocked.theirs) throw forbidden(msg('message.not_taken'));
 
     const { messagesPerMinute } = config.inbox;
     if (messagesPerMinute > 0) {
@@ -127,8 +122,10 @@ export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.
   /**
    * The caller's inbox, newest first, a page at a time, with how many of all of it are unread. A
    * message has who wrote it and its text. A notice has its kind, the post and hashtag it is about,
-   * the start of that post, and what it says in the reader's language. Reading the list marks
-   * nothing as read: POST /users/:userId/inbox/read does.
+   * the start of that post, and what it says in the reader's language. The notice of a mention
+   * has who mentioned the user too, the comment it is in if it is in one, and the start of the
+   * text that mentions them (see inboxItem). Reading the list marks nothing as read:
+   * POST /users/:userId/inbox/read does.
    */
   app.get('/users/:userId/inbox', async (req) => {
     const { userId } = Params.parse(req.params);
@@ -138,7 +135,7 @@ export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.
     let query = db
       .selectFrom('inbox')
       .leftJoin('users', 'users.id', 'inbox.sender_id')
-      .select(['inbox.id', 'inbox.kind', 'inbox.sender_id', 'users.username', 'inbox.content_id', 'inbox.tag', 'inbox.body', 'inbox.created_at', 'inbox.read_at'])
+      .select(['inbox.id', 'inbox.kind', 'inbox.sender_id', 'users.username', 'inbox.content_id', 'inbox.comment_id', 'inbox.tag', 'inbox.body', 'inbox.created_at', 'inbox.read_at'])
       .where('inbox.user_id', '=', userId);
     if (unread !== undefined) query = query.where('inbox.read_at', unread ? 'is' : 'is not', null);
     const [{ rows, nextCursor }, unreadCount] = await Promise.all([
@@ -148,29 +145,7 @@ export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.
     return {
       userId,
       unread: unreadCount,
-      inbox: rows.map((r) => {
-        const times = { sentAt: iso(r.created_at), readAt: r.read_at === null ? null : iso(r.read_at) };
-        if (r.kind === MESSAGE) {
-          return {
-            messageId: r.id,
-            kind: r.kind,
-            // No sender: their account is gone.
-            from: r.sender_id !== null && r.username !== null ? { userId: r.sender_id, username: r.username } : null,
-            text: r.body ?? '',
-            ...times,
-          };
-        }
-        return {
-          messageId: r.id,
-          kind: r.kind,
-          ...(r.content_id !== null && { contentId: r.content_id }),
-          ...(r.tag !== null && { tag: r.tag }),
-          ...(r.body !== null && { excerpt: r.body }),
-          // A kind this build doesn't know (left by a newer one) is shown by its name.
-          text: isNotice(r.kind) ? say(req, msg(NOTICES[r.kind], { tag: r.tag ?? '' })) : r.kind,
-          ...times,
-        };
-      }),
+      inbox: rows.map((r) => inboxItem(r, (text) => say(req, text))),
       nextCursor,
     };
   });
@@ -195,23 +170,53 @@ export function inboxRoutes(app: FastifyInstance, { db, config, hot, now = Date.
   // Blocks.
 
   /**
-   * Blocks a user: no message goes between the two from then on, either way. Blocking them again
-   * changes nothing. What they already sent stays in the inbox, and follows and feeds go on as they were.
+   * Blocks a user (see src/blocks.ts for all a block does). From then on no message goes between
+   * the two, either way; the blocked user comments on none of the blocker's posts; and what they
+   * wrote is left out of what the blocker is listed. What they already sent stays in the inbox,
+   * and the comments they already made stay on the posts, for the publisher to delete.
+   *
+   * And neither follows the other. The follows there are between the two end with the block, in
+   * its transaction, and none is made while it stands. Both users' rows are locked first, in the
+   * order of their ids, so two blocks can't deadlock. A follow locks its follower's row, and looks
+   * for a block with the lock held (routes/follow.ts): it commits before the block, which then
+   * ends it, or after, and is refused.
+   *
+   * Following feeds read whom a user follows from Redis, so both users' lists are then written
+   * again, as an unfollow writes its user's. Blocking a user again leaves the block as it was,
+   * ends any follow still there between the two, and writes the lists again: that is what repairs
+   * a write that failed, which is answered 503 though the block is made, as an unfollow's is.
    */
   app.put('/users/:userId/blocked/:blockedId', async (req, reply) => {
     const { userId, blockedId } = BlockParams.parse(req.params);
     await blocker(req, userId);
     if (blockedId === userId) throw badRequest(msg('block.yourself'));
     if (!(await db.selectFrom('users').select('id').where('id', '=', blockedId).where('deleted_at', 'is', null).executeTakeFirst())) throw notFound(msg('user.not_found'));
-    const { at, already } = await addOnce(
-      now,
-      () => db.selectFrom('user_blocks').select('created_at').where('user_id', '=', userId).where('blocked_id', '=', blockedId).executeTakeFirst(),
-      (createdAt) => db.insertInto('user_blocks').values({ user_id: userId, blocked_id: blockedId, created_at: createdAt }).execute(),
-    );
+    const { at, already } = await db.transaction().execute(async (trx) => {
+      for (const id of [userId, blockedId].sort()) await lockUser(trx, config.db.dialect, id);
+      // Also for a block that is there already: one made when a block ended no follow may have left some.
+      await trx
+        .deleteFrom('follows')
+        .where((eb) =>
+          eb.or([
+            eb.and([eb('follower_id', '=', userId), eb('followee_id', '=', blockedId)]),
+            eb.and([eb('follower_id', '=', blockedId), eb('followee_id', '=', userId)]),
+          ]),
+        )
+        .execute();
+      const found = await trx.selectFrom('user_blocks').select('created_at').where('user_id', '=', userId).where('blocked_id', '=', blockedId).executeTakeFirst();
+      if (found) return { at: found.created_at, already: true };
+      const createdAt = now();
+      await trx.insertInto('user_blocks').values({ user_id: userId, blocked_id: blockedId, created_at: createdAt }).execute();
+      return { at: createdAt, already: false };
+    });
+    await syncFollowing(db, follows, [userId, blockedId]).catch((err) => {
+      req.log.warn({ err, userId, blockedId }, 'could not write the follows to Redis after a block');
+      throw new HttpError(503, msg('block.feeds_not_updated'));
+    });
     return reply.status(already ? 200 : 201).send({ userId, blockedId, blockedAt: iso(at), alreadyBlocked: already });
   });
 
-  /** Ends a block. Unblocking someone who isn't blocked changes nothing. */
+  /** Ends a block, and all it did, from then on. It brings back no follow that the block ended. Unblocking someone who isn't blocked changes nothing. */
   app.delete('/users/:userId/blocked/:blockedId', async (req) => {
     const { userId, blockedId } = BlockParams.parse(req.params);
     await blocker(req, userId);

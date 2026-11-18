@@ -231,11 +231,13 @@ resource "aws_s3_bucket_public_access_block" "content" {
 
 # Summaries share the content bucket, under summaries/<UTC day>/; the compactor deletes days past retention.
 
-# Browsers send files straight to the bucket, with the link POST /uploads signs.
+# Browsers send files straight to the bucket, with the link POST /uploads signs. And they read from it
+# the pieces of a processed video's stream, which the server redirects to with a signed link: a player
+# that fetches them by script (hls.js) is refused them without GET here.
 resource "aws_s3_bucket_cors_configuration" "content" {
   bucket = aws_s3_bucket.content.id
   cors_rule {
-    allowed_methods = ["PUT"]
+    allowed_methods = ["PUT", "GET", "HEAD"]
     allowed_origins = var.upload_origins
     allowed_headers = ["*"]
     expose_headers  = ["ETag"]
@@ -868,6 +870,11 @@ resource "aws_lambda_invocation" "migrate" {
     precondition {
       condition     = !contains(local.optional_plugins, "urlhaus") || trimspace(lookup(local.settings, "URLHAUS_AUTH_KEY", "")) != ""
       error_message = "TRUST_OPTIONAL_PLUGINS turns on urlhaus, which needs URLHAUS_AUTH_KEY in `secrets`: the Auth-Key of an abuse.ch account, which is free (https://auth.abuse.ch). Without it no function and no compactor would start."
+    }
+    # The same for pdq and its list of hashes.
+    precondition {
+      condition     = !contains(local.optional_plugins, "pdq") || trimspace(lookup(local.settings, "PDQ_HASH_LIST", "")) != ""
+      error_message = "TRUST_OPTIONAL_PLUGINS turns on pdq, which needs PDQ_HASH_LIST in `environment` or `secrets`: the address of the list of PDQ hashes it matches images against. Without it no function and no compactor would start."
     }
   }
 }

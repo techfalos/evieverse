@@ -181,10 +181,12 @@ resource "azurerm_storage_account" "main" {
   shared_access_key_enabled       = false
   default_to_oauth_authentication = true
 
-  # Browsers send files straight to the container, with the link POST /uploads signs.
+  # Browsers send files straight to the container, with the link POST /uploads signs. And they read from it
+  # the pieces of a processed video's stream, which the server redirects to with a signed link: a player
+  # that fetches them by script (hls.js) is refused them without GET here.
   blob_properties {
     cors_rule {
-      allowed_methods    = ["PUT"]
+      allowed_methods    = ["PUT", "GET", "HEAD"]
       allowed_origins    = var.upload_origins
       allowed_headers    = ["*"]
       exposed_headers    = ["ETag"]
@@ -625,6 +627,11 @@ resource "terraform_data" "migrate" {
     precondition {
       condition     = !contains(local.optional_plugins, "urlhaus") || trimspace(lookup(local.settings, "URLHAUS_AUTH_KEY", "")) != ""
       error_message = "TRUST_OPTIONAL_PLUGINS turns on urlhaus, which needs URLHAUS_AUTH_KEY in `secrets`: the Auth-Key of an abuse.ch account, which is free (https://auth.abuse.ch). Without it no app and no compactor would start."
+    }
+    # The same for pdq and its list of hashes.
+    precondition {
+      condition     = !contains(local.optional_plugins, "pdq") || trimspace(lookup(local.settings, "PDQ_HASH_LIST", "")) != ""
+      error_message = "TRUST_OPTIONAL_PLUGINS turns on pdq, which needs PDQ_HASH_LIST in `environment` or `secrets`: the address of the list of PDQ hashes it matches images against. Without it no app and no compactor would start."
     }
   }
 }

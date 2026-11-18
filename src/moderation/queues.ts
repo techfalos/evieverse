@@ -14,7 +14,7 @@ import type { QueueKind, QueueRow } from './queues.types.js';
  */
 export const kindColumn = (kind: QueueKind) => (kind === 'post' ? sql<QueueKind>`'post'` : sql<QueueKind>`'comment'`).as('kind');
 
-/** A post in a queue: its feed record, with its whole text or caption. */
+/** A post in a queue: its feed record, with its whole text or caption, and with everyone that text mentions. */
 type QueuedPost = { kind: 'post' } & FeedRecord & { text?: string };
 /** A comment in a queue: as GET /content/:contentId/comments gives it. */
 type QueuedComment = { kind: 'comment' } & CommentRecord;
@@ -69,6 +69,8 @@ export async function queueItems(
       kind: 'post' as const,
       ...toFeedRecord(summaryOf(post, meta, config.publicBaseUrl), post.like_count, publisherOf(post)),
       ...(meta.text !== undefined && { text: meta.text }),
+      // All of them, as the whole text is read with them: the record's own are those of its preview.
+      ...(meta.mentions?.length && { mentions: meta.mentions }),
     };
   });
 }

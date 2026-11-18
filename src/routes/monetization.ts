@@ -11,10 +11,10 @@ import { listPage, listQuery } from '../http/listCursor.js';
 import { Credentials } from '../http/schemas.js';
 import { msg } from '../language.js';
 import { AD_KINDS, adImageUrl, adStatus, adTags, MAX_AD_IMAGE_BYTES, MAX_AD_TAGS, MAX_AD_TEXT_CHARS, MAX_OPEN_ADS } from '../monetization.js';
-import { LinkUrl } from '../posts.js';
+import { LinkUrl, MAX_ALT_CHARS } from '../posts.js';
 import { parseTagList } from '../tags.js';
 import { iso } from '../time.js';
-import { readMultipart, readPost } from '../upload.js';
+import { oneFile, readMultipart, readPost } from '../upload.js';
 import type { PostBytes, Upload } from '../upload.types.js';
 import { rawHeaders } from './content.js';
 
@@ -36,6 +36,8 @@ const Fields = Credentials.extend({
   kind: z.enum(AD_KINDS).optional(),
   /** A text ad's text, or an image ad's caption. */
   text: clearable(z.string().trim().max(MAX_AD_TEXT_CHARS)),
+  /** An image ad's alternative text: what describes its image to those who can't see it. Only an image ad has one. */
+  alt: clearable(z.string().trim().max(MAX_ALT_CHARS)),
   /** Where the ad leads when it is followed. */
   url: clearable(LinkUrl),
   /** The hashtags the ad is targeted at: a list, or one string of them separated by commas or spaces. None: it appears all the time. */
@@ -81,7 +83,10 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
   /** A request's fields and its file, if it sends one as a multipart part. */
   async function readRequest(req: FastifyRequest): Promise<{ raw: Record<string, unknown>; upload?: Upload }> {
     if (!req.isMultipart()) return { raw: (req.body as Record<string, unknown>) ?? {} };
-    const { fields, upload } = await readMultipart(req, limits);
+    const {
+      fields,
+      uploads: [upload],
+    } = await readMultipart(req, limits);
     return { raw: fields, upload };
   }
 
@@ -94,7 +99,7 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
     if (upload && fields.content !== undefined) throw badRequest(msg('post.file_or_field'));
     try {
       // Whatever type the file was sent as, its bytes say which image it is.
-      const post = await readPost({ type: 'image', content: fields.content, contentEncoding: 'base64', contentType: 'image/*' }, upload, limits);
+      const post = await readPost({ type: 'image' }, oneFile({ content: fields.content, contentEncoding: 'base64', contentType: 'image/*' }, upload), limits);
       return { file: post.file, type: post.mimeType };
     } catch (err) {
       if (err instanceof HttpError && err.message === 'post.image_unsupported') throw badRequest(msg('ad.image_unsupported'));
@@ -140,6 +145,7 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
     adId: row.id,
     kind: row.kind,
     ...(row.kind === 'image' && { imageUrl: adImageUrl(config.publicBaseUrl, row.id) }),
+    ...(row.kind === 'image' && row.image_alt !== null && { imageAlt: row.image_alt }),
     ...(row.text !== null && { text: row.text }),
     ...(row.url !== null && { url: row.url }),
     tags: adTags(row.tags),
@@ -154,7 +160,9 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
 
   /**
    * Creates an ad. Admins only. JSON, or multipart with the image as its file part, as /store takes
-   * a file. A text ad needs `text`; an image ad needs its image, and can have a caption in `text`.
+   * a file. A text ad needs `text`; an image ad needs its image, and can have a caption in `text`
+   * and an alternative text in `alt`, which describes the image to those who can't see it and
+   * goes out with it wherever the ad is shown (`imageAlt`). Only an image ad has one (400).
    */
   app.post('/monetization/ads', { bodyLimit: BODY_LIMIT }, async (req, reply) => {
     const { raw, upload } = await readRequest(req);
@@ -169,6 +177,7 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
       const sendsImage = upload !== undefined || fields.content !== undefined;
       if (kind === 'text' && sendsImage) throw badRequest(msg('ad.no_image'));
       if (kind === 'text' && !text) throw badRequest(msg('ad.text_required'));
+      if (kind === 'text' && fields.alt) throw badRequest(msg('post.alt_only_for_images'));
       if (kind === 'image' && !sendsImage) throw badRequest(msg('ad.image_required'));
       const startsAt = fields.startsAt ?? t;
       const endsAt = fields.endsAt ?? null;
@@ -184,6 +193,7 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
         url: fields.url ?? null,
         clicks: 0,
         image_type: image?.type ?? null,
+        image_alt: fields.alt || null,
         tags,
         starts_at: startsAt,
         ends_at: endsAt,
@@ -227,8 +237,10 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
 
   /**
    * Changes an ad: what the request names, and nothing else of it. Admins only. `text` (an image
-   * ad's caption only: a text ad is its text), `url`, `tags` and `endsAt` are cleared by null or
-   * an empty string. An image ad's image is replaced by the one sent. An ad keeps its kind.
+   * ad's caption only: a text ad is its text), `alt` (an image ad's alternative text), `url`,
+   * `tags` and `endsAt` are cleared by null or an empty string. An image ad's image is replaced
+   * by the one sent, and keeps the alternative text it had unless the request gives another,
+   * which one that sends another image should. An ad keeps its kind.
    */
   app.patch('/monetization/ads/:adId', { bodyLimit: BODY_LIMIT }, async (req) => {
     const { adId } = Params.parse(req.params);
@@ -244,7 +256,8 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
       if (fields.kind !== undefined && fields.kind !== row.kind) throw badRequest(msg('ad.kind_fixed', { kind: row.kind }));
       const sendsImage = upload !== undefined || fields.content !== undefined;
       if (row.kind === 'text' && sendsImage) throw badRequest(msg('ad.no_image'));
-      if (![fields.text, fields.url, fields.tags, fields.startsAt, fields.endsAt].some((field) => field !== undefined) && !sendsImage) {
+      if (row.kind === 'text' && fields.alt) throw badRequest(msg('post.alt_only_for_images'));
+      if (![fields.text, fields.alt, fields.url, fields.tags, fields.startsAt, fields.endsAt].some((field) => field !== undefined) && !sendsImage) {
         throw badRequest(msg('ad.nothing_to_update'));
       }
 
@@ -263,6 +276,7 @@ export function monetizationRoutes(app: FastifyInstance, { db, config, content, 
         text,
         url: fields.url === undefined ? row.url : fields.url,
         image_type: image?.type ?? row.image_type,
+        image_alt: fields.alt === undefined ? row.image_alt : fields.alt || null,
         tags,
         starts_at: startsAt,
         ends_at: endsAt,

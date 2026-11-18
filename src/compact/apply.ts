@@ -4,7 +4,8 @@ import type { PendingKind } from '../db/schema.js';
 import type { AppDeps } from '../deps.types.js';
 import { awaitReplies, payloadBytes, payloadOf, UNNUMBERED } from '../pending.js';
 import type { CommentLikePayload, CommentPutPayload, CommentRemovePayload, PostPayload } from '../pending.types.js';
-import { repostedTags, repostTimes, type Repost } from '../reposts.js';
+import { removedRepostTags, repostedTags, repostTimes, type Repost } from '../reposts.js';
+import { indexContent } from '../search/index.js';
 import { commentPlaceholder, type Comment, type ContentMeta } from '../storage/index.js';
 import { isNotFound } from '../storage/opendal.js';
 import { MINUTE } from '../time.js';
@@ -50,6 +51,14 @@ interface PendingRow {
   comment_id: string | null;
   payload: unknown;
   staged_key: string | null;
+  /** On a comment's like: what it adds to the number of likes the store has of the comment (see `pending_writes.net`). */
+  net: number | null;
+}
+
+/** A row of a comment's like that was applied, with what it asked for when it was: the like, or its taking back (`unlike`). */
+interface AppliedLike {
+  row: PendingRow;
+  unlike: boolean;
 }
 
 /** The post a pending write is of, as the database has it when the write is applied. */
@@ -70,6 +79,7 @@ interface CommentWrites {
   commentId: string;
   /** What made the comment what it is, in turn: new, edited, held, accepted. The newest is what it is now. */
   puts: PendingRow[];
+  /** The likes of it, and the takings back of likes: a row for each user who has one waiting, which says what they last asked. */
   likes: PendingRow[];
   /** What removes it. The last of its writes: nothing commits to a comment once its removal has. */
   removal: PendingRow | null;
@@ -93,14 +103,19 @@ interface CommentWrites {
  * Of a post's own writes (`post`) only the newest is applied, since each is the whole post:
  *
  * 1. its bytes: the staged file is copied to where the post's bytes are kept, or for a text or
- *    a link, written from the row;
+ *    a link, written from the row. An image post of several images has a staged file for each,
+ *    the ones after the first named by rows of their own (`post_file`): each is copied to its
+ *    place, and the images the post had past those, before an update with fewer, are deleted;
  * 2. its summary, or for content that is withheld, none: the one it had is erased, which is what
  *    takes a held update out of the feeds, and an entry whose original is gone from its own
  *    server (see `withheld`);
- * 3. its meta file, last, as what it says is there, with its hashtags settled: without the ones
- *    moderators removed from the content, and with the ones reposts gave it, whatever the write
- *    knew of either;
- * 4. the rows, this one and the ones it superseded, and then the files they staged.
+ * 3. the terms a search finds it by, which are rows of `search_terms` (see indexContent): those
+ *    of the meta file as it is about to be written, withheld or not;
+ * 4. its meta file, last, as what it says is there, with its hashtags settled: without the ones
+ *    moderators removed from the content, without the ones of a repost that was removed and is
+ *    yet to be taken off it, and with the ones reposts gave it, whatever the write knew of any
+ *    of them;
+ * 5. the rows, this one and the ones it superseded, and then the files they staged.
  *
  * Every step can be made again, so a run that stops anywhere leaves the row, and the next run
  * applies it. A staged file goes only after its row has: a row never names a file that is gone.
@@ -111,12 +126,19 @@ interface CommentWrites {
  * comment at a time, all the writes of one comment together (see applyComments). They don't wait
  * for the post's own write, nor it for them.
  *
+ * A write that came with a video the server processes (src/video) says so until the video
+ * worker has made the staged file what is published (see PostPayload.process). Such a write is
+ * left as it is, and so is every older write of its post: the run that finds it processed
+ * applies it. A comment's is left the same way, with every other write of that comment and of
+ * its replies (see applyComments). The worker changes the row in one commit, so a run reads a
+ * write either as it waits or as it is to be applied, and never half of each.
+ *
  * A failure is logged and left for the next run, and fails nothing else. Returns the meta files
- * written and the posts whose own write failed.
+ * written, the posts whose own write failed, and the ones whose write waits for its video.
  */
 export async function applyPending(deps: ApplyDeps): Promise<Applied> {
   const { db, lease, log } = deps;
-  const applied: Applied = { metas: new Map(), failed: new Set() };
+  const applied: Applied = { metas: new Map(), failed: new Set(), waiting: new Set() };
   await removeKept(deps);
   const ids = (await db.selectFrom('pending_writes').select('content_id').distinct().execute()).map((r) => r.content_id);
   if (!ids.length) return applied;
@@ -129,12 +151,23 @@ export async function applyPending(deps: ApplyDeps): Promise<Applied> {
     // Gone, and its rows with it; or set for deletion, when the run deletes it with what its rows staged.
     if (!post || post.delete_requested_at !== null) return;
     // The ones that took no number first, in whatever order: new comments and likes, which are before the numbered writes of what they are of.
-    const rows = await db.selectFrom('pending_writes').select(['seq', 'write_key', 'kind', 'comment_id', 'payload', 'staged_key']).where('content_id', '=', id).orderBy('seq').orderBy('write_key').execute();
+    const rows = await db.selectFrom('pending_writes').select(['seq', 'write_key', 'kind', 'comment_id', 'payload', 'staged_key', 'net']).where('content_id', '=', id).orderBy('seq').orderBy('write_key').execute();
 
     const writes = rows.filter((r) => r.kind === 'post');
-    if (writes.length) {
+    // A video that is yet to be processed: the write waits for the video worker, and with it the rows it queued (see Applied.waiting).
+    if (writes.length && payloadOf<PostPayload>(writes.at(-1)!.payload).process) {
+      applied.waiting.add(id);
+    } else if (writes.length) {
       try {
-        applied.metas.set(id, await applyPost(deps, post, writes));
+        applied.metas.set(
+          id,
+          await applyPost(
+            deps,
+            post,
+            writes,
+            rows.filter((r) => r.kind === 'post_file'),
+          ),
+        );
       } catch (err) {
         if (err instanceof LeaseLostError) throw err;
         applied.failed.add(id);
@@ -146,7 +179,7 @@ export async function applyPending(deps: ApplyDeps): Promise<Applied> {
       await applyComments(
         deps,
         id,
-        rows.filter((r) => r.kind !== 'post'),
+        rows.filter((r) => r.kind !== 'post' && r.kind !== 'post_file'),
         slot,
       );
     } catch (err) {
@@ -255,37 +288,72 @@ async function removeKept({ db, config, content, lease, log, now = Date.now }: A
   }
 }
 
-/** Applies the newest of a post's own writes (see applyPending), and returns the meta file it wrote. `writes` are the post's, oldest first. */
-async function applyPost(deps: ApplyDeps, post: PostRow, writes: PendingRow[]): Promise<ContentMeta> {
+/** The id of the version of its video that a meta file names, of a video post whose video the server processed (see StoredVideo.id). */
+const videoOf = ({ preview }: ContentMeta): string | undefined => (preview.kind === 'video' ? preview.video?.id : undefined);
+
+/**
+ * Applies the newest of a post's own writes (see applyPending), and returns the meta file it
+ * wrote. `writes` are the post's, oldest first, and `files` the rows that name the images after
+ * the first of those that are of several images (`post_file`), each under its write's number.
+ */
+async function applyPost(deps: ApplyDeps, post: PostRow, writes: PendingRow[], files: PendingRow[]): Promise<ContentMeta> {
   const { db, config, content, summaries, places } = deps;
   const newest = writes.at(-1)!;
-  const { meta } = payloadOf<PostPayload>(newest.payload);
+  const { meta, keepBytes } = payloadOf<PostPayload>(newest.payload);
 
   // The bytes first: the meta file, which says what they are, is written once they are there.
   if (newest.staged_key !== null) {
     await content.adopt(newest.staged_key, post.id, meta.mimeType);
-  } else {
+  } else if (!keepBytes) {
+    // Not for an update that keeps the bytes the post has: one whose new video couldn't be processed (see PostPayload.keepBytes).
     const { bytes, mimeType } = payloadBytes(meta);
     await content.putBytes(post.id, bytes, mimeType);
   }
+  // The images after the first, of an image post of several: each to its place among the post's (see `pending_writes.write_key`).
+  for (const file of files) {
+    if (Number(file.seq) !== Number(newest.seq) || file.staged_key === null) continue;
+    const image = Number(file.write_key);
+    await content.adopt(file.staged_key, { contentId: post.id, image }, meta.images?.[image - 1]?.mimeType ?? meta.mimeType);
+  }
+  // The images the post had past the ones it has now, which an update with fewer left behind. Before the meta file, which is
+  // what says how many there are to delete: a run that stops here finds it as it was, and deletes them again.
+  const before = Number(newest.seq) > 1 ? await content.getMeta(post.id) : null;
+  if (before) {
+    const had = before.images?.length ?? 1;
+    for (let image = Math.max(meta.images?.length ?? 1, 1) + 1; image <= had; image++) await content.removeImage(post.id, image);
+  }
+  // The poster and the stream of the versions of its video that this write leaves behind: the one the post had, and those
+  // of the writes this one superseded, which were never the post's. Before the meta file, for the same reason.
+  const video = videoOf(meta);
+  const left = new Set([before, ...writes.slice(0, -1).map((write) => payloadOf<PostPayload>(write.payload).meta)].map((had) => had && videoOf(had)));
+  for (const id of left) if (id && id !== video) await content.removeMedia(post.id, id);
 
   // The hashtags as they are now, whatever the write knew: a moderator's removal stays, and so does what a repost gave.
-  const [removals, placed] = await Promise.all([
+  // What a repost that was removed had given goes, while the run is yet to take it off the post (see Compactor's
+  // applyRemovals): the write may hold it as the post had it, and nothing else says it isn't the publisher's own.
+  const [removals, placed, taken] = await Promise.all([
     db.selectFrom('tag_moderation').select('tag').where('content_id', '=', post.id).where('decision', '=', 'removed').execute(),
     places(post.id),
+    removedRepostTags(db, post.id),
   ]);
   const removed = new Set(removals.map((r) => r.tag));
-  const own = meta.tags.filter((tag) => !removed.has(tag));
-  const next: ContentMeta = { ...meta, tags: [...own, ...repostedTags(placed).filter((tag) => !own.includes(tag) && !removed.has(tag))] };
+  const given = repostedTags(placed);
+  const own = meta.tags.filter((tag) => !removed.has(tag) && !taken.includes(tag));
+  const next: ContentMeta = { ...meta, tags: [...own, ...given.filter((tag) => !own.includes(tag) && !removed.has(tag))] };
 
   // Content that is withheld has no summary: an update that was held loses the one it had, and so does an entry whose original is gone.
   const repostedAt = repostTimes(placed);
   if (withheld(post)) await summaries.erase({ contentId: post.id, createdAt: post.created_at, repostedAt });
   else await summaries.put(summaryOf(post, next, config.publicBaseUrl, repostedAt));
 
+  // What a search finds the post by (`search_terms`), from the meta file as it is about to be written: a run that stops
+  // between the two applies the write again. Withheld content has its terms too, and a search leaves it out by its row.
+  await indexContent(db, config.db.dialect, post, next, config.search.maxKeywords);
+
   // The meta file last, as for any write: what it says is there.
   await content.putMeta(next);
-  await settle(deps, post.id, writes);
+  // With the rows of the images: of this write, and of the ones it superseded, whose files were never the post's.
+  await settle(deps, post.id, [...writes, ...files]);
   return next;
 }
 
@@ -297,7 +365,8 @@ async function applyPost(deps: ApplyDeps, post: PostRow, writes: PendingRow[]): 
  *
  * - Its puts are one write, of the comment as the newest of them has it: each is the whole
  *   comment, so the ones before it are superseded, as a post's are (see applyPuts).
- * - Its likes are made after that, each an object of its own, several at a time.
+ * - Its likes are applied after that, several at a time: each is an object of its own, which
+ *   a like makes and its taking back deletes (see applyLikes).
  * - Its removal is last, as it committed last: nothing commits to a comment once its removal
  *   has. A comment that is removed is given no likes first.
  *
@@ -319,6 +388,11 @@ async function applyPost(deps: ApplyDeps, post: PostRow, writes: PendingRow[]): 
  * the post is applied. What is left is applied by a later run as it would have been by this one:
  * each step looks at what the store has, and can be made again.
  *
+ * A comment that came with a video the server is yet to process (see CommentPutPayload.process)
+ * is left for a later run, with every write of it and of the comments that reply to it, until
+ * the video worker has made its file what is published. A video that can't be processed is
+ * deleted from where it was staged, and the comment is then one whose file is gone:
+ *
  * A comment whose image or video is gone from where it was staged can never be applied as it
  * is: the bucket expired the file, after a week, or somebody deleted it. It is then published
  * with its text alone, or if the file was all of it, removed as a removal would remove it, so
@@ -338,7 +412,9 @@ async function applyComments(deps: ApplyDeps, postId: string, rows: PendingRow[]
       of.puts.push(row);
       of.parentId = payloadOf<CommentPutPayload>(row.payload).comment.parentId;
     } else if (row.kind === 'comment_like') of.likes.push(row);
-    else of.removal = row;
+    else if (row.kind === 'comment_remove') of.removal = row;
+    // A kind this version doesn't know, from a server that is newer: left for a compactor that does, and never taken for a removal.
+    else log?.error({ contentId: postId, commentId: row.comment_id, seq: Number(row.seq), kind: row.kind }, 'a pending write of a comment is of a kind this compactor does not know; it is left as it is');
   }
 
   /** The comments with a put that isn't written yet: what their replies wait for. */
@@ -352,6 +428,11 @@ async function applyComments(deps: ApplyDeps, postId: string, rows: PendingRow[]
 
   let waiting = [...byComment.values()].filter((of) => of.puts.length || (of.likes.length && !of.removal));
   for (const of of waiting) if (of.puts.length) unwritten.add(of.commentId);
+  // A comment whose video is yet to be processed waits for the video worker, with all of its writes: it stays unwritten,
+  // so its replies wait with it, and counts as stuck, so its removal does too. Nothing is logged of it: it is no failure.
+  const processing = new Set(waiting.filter((of) => of.puts.some((put) => payloadOf<CommentPutPayload>(put.payload).process)).map((of) => of.commentId));
+  for (const commentId of processing) stuck.add(commentId);
+  waiting = waiting.filter((of) => !processing.has(of.commentId));
   while (waiting.length) {
     const ready = waiting.filter((of) => of.parentId === undefined || !unwritten.has(of.parentId));
     // The rest reply to a comment that couldn't be written, or to one of its replies.
@@ -486,39 +567,77 @@ async function applyPuts(deps: ApplyDeps, postId: string, { commentId, puts, lik
 }
 
 /**
- * Applies the likes of a comment (see applyComments), each user's once, and deletes their rows:
- * those of the likes that were made, if one fails. A comment's likes are a comment's that is
- * there, or that an edit took back to the queue; not a deleted one's, nor those of one that was
- * never published, whose rows are deleted with nothing made.
+ * Applies the likes of a comment (see applyComments), and settles their rows: those of the
+ * likes that were applied, if one fails. A row is a user's like of the comment, or the taking
+ * back of it (`unlike`), and a user has one for a comment: the like is made in the store, or
+ * taken away from it. A comment's likes are a comment's that is there, or that an edit took back
+ * to the queue; not a deleted one's, nor those of one that was never published, whose rows are
+ * deleted with nothing done.
+ *
+ * A row that leaves the store as it is (`net` 0: a like taken back before it was made, or one
+ * given again before its taking back was applied) is checked against the store, and applied
+ * only if the store isn't as the row says: that is so after a run that stopped half way.
  */
 async function applyLikes(deps: ApplyDeps, postId: string, { commentId, likes }: CommentWrites, slot: Slot): Promise<void> {
   const { comments, lease } = deps;
   const liked = await comments.find(postId, commentId);
   if (!liked || liked.gone === 'deleted') return settle(deps, postId, likes);
-  const byUser = new Map<string, PendingRow[]>();
-  for (const row of likes) {
-    const { userId } = payloadOf<CommentLikePayload>(row.payload);
-    byUser.set(userId, [...(byUser.get(userId) ?? []), row]);
-  }
-  const made: PendingRow[] = [];
-  // From the first like made to the last row deleted, a like is both in the store and a row: the
+  const applied: AppliedLike[] = [];
+  // From the first like applied to the last row settled, what a row asks is both in the store and a row: the
   // requests that count the two are told, and count again once this is over (see CommentStore.likesWith).
   const done = await comments.makingLikes(commentId);
   try {
     await allDone(
-      [...byUser].map(([userId, rows]) =>
+      likes.map((row) =>
         slot(async () => {
           await lease.check();
-          await comments.addLike(postId, commentId, userId);
-          made.push(...rows);
+          const { userId, unlike = false } = payloadOf<CommentLikePayload>(row.payload);
+          if (row.net !== 0 || (await comments.liked(postId, commentId, userId)) === unlike) {
+            if (unlike) await comments.removeLike(postId, commentId, userId);
+            else await comments.addLike(postId, commentId, userId);
+          }
+          applied.push({ row, unlike });
         }),
       ),
     );
   } finally {
-    await settle(deps, postId, made);
+    await settleLikes(deps, postId, applied);
   }
   // Not after a failure: a like may then be in the store with its row still there, until the next run, which is over when it says so.
   await done();
+}
+
+/**
+ * Settles the rows of a comment's likes that were applied (see applyLikes). A row that still
+ * says what was applied is deleted. One that the user changed meanwhile (see flipLike) stays,
+ * for the next run, and is made to count for what it now is against the store, which has what
+ * this run applied: a like the store lacks, or the taking back of one it has
+ * (`pending_writes.net`).
+ *
+ * The rows are locked as they are read, and a request locks the row it changes, so each row is
+ * either deleted as it was applied or left as the request made it, and never deleted with a
+ * change the run didn't apply.
+ */
+async function settleLikes({ db, config }: ApplyDeps, postId: string, applied: AppliedLike[]): Promise<void> {
+  for (let i = 0; i < applied.length; i += BATCH) {
+    const batch = new Map(applied.slice(i, i + BATCH).map(({ row, unlike }) => [row.write_key, unlike]));
+    await db.transaction().execute(async (trx) => {
+      const rows = trx.selectFrom('pending_writes').select(['write_key', 'payload']).where('content_id', '=', postId).where('seq', '=', UNNUMBERED).where('write_key', 'in', [...batch.keys()]);
+      // SQLite runs one transaction at a time, and has no rows to lock.
+      const now = await (config.db.dialect === 'sqlite' ? rows : rows.forUpdate()).execute();
+      const of = (keys: string[]) => trx.updateTable('pending_writes').where('content_id', '=', postId).where('seq', '=', UNNUMBERED).where('write_key', 'in', keys);
+      const same: string[] = [];
+      const likes: string[] = [];
+      const unlikes: string[] = [];
+      for (const { write_key: key, payload } of now) {
+        const unlike = payloadOf<CommentLikePayload | null>(payload)?.unlike === true;
+        (unlike === batch.get(key) ? same : unlike ? unlikes : likes).push(key);
+      }
+      if (same.length) await trx.deleteFrom('pending_writes').where('content_id', '=', postId).where('seq', '=', UNNUMBERED).where('write_key', 'in', same).execute();
+      if (likes.length) await of(likes).set({ net: 1 }).execute();
+      if (unlikes.length) await of(unlikes).set({ net: -1 }).execute();
+    });
+  }
 }
 
 /**

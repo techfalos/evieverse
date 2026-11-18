@@ -3,22 +3,27 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Transaction } from 'kysely';
 import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
-import { ChallengeFields } from '../challenge/challenges.js';
-import { MAX_COMMENT_CHARS, newCommentId, removeComment, toCommentRecord, toCommentRecords } from '../comments.js';
-import { loadContent, loadPublished, loadReadable, PENDING_REVIEW, readsHeld, requireMeta, takesComments } from '../content.js';
+import { blockedAmong, blocks, readerOf } from '../blocks.js';
+import { hideBlocked, MAX_COMMENT_CHARS, newCommentId, removeComment, toCommentRecord, toCommentRecords } from '../comments.js';
+import type { CommentRecord } from '../comments.types.js';
+import { loadContent, loadPublished, loadReadable, PENDING_REVIEW, PROCESSING, readsHeld, requireMeta, takesComments, videoProcessing } from '../content.js';
 import { updateOnConflict } from '../db/index.js';
 import type { Database } from '../db/schema.js';
 import type { AppDeps, RouteDeps } from '../deps.types.js';
 import { badRequest, forbidden, notFound } from '../http/errors.js';
 import { perMinute } from '../http/rateLimitStore.js';
-import { Credentials } from '../http/schemas.js';
-import { notify } from '../inbox.js';
+import { Credentials, Flag } from '../http/schemas.js';
+import { excerpt, notify } from '../inbox.js';
 import { msg } from '../language.js';
+import { notifyMentions, resolveMentions } from '../mentions.js';
 import { moderateComment, moderatesServer, refuseBanned } from '../moderation/policy.js';
-import { effectiveComment, insertPending, pendingComment, pendingCommentFile, writePending, writeUnnumbered, type PendingReader } from '../pending.js';
+import { effectiveComment, insertPending, pendingComment, pendingCommentFile, UNNUMBERED, writePending, writeUnnumbered, type PendingReader } from '../pending.js';
+import { MAX_ALT_CHARS } from '../posts.js';
+import { admitting } from '../sendLimit.js';
 import { commentPlaceholder, type Comment, type CommentMedia } from '../storage/index.js';
-import { readCommentFile, readMultipart, readUploaded } from '../upload.js';
+import { readCommentFile, readMultipart, readUploaded, trustImage } from '../upload.js';
 import type { CommentFile, Upload } from '../upload.types.js';
+import { addVideoJob } from '../video/jobs.js';
 import { sendBytes } from './content.js';
 
 /** The path of a post's comments: the post's id. */
@@ -40,12 +45,14 @@ const PageQuery = z.object({
 const Text = z.string().trim().max(MAX_COMMENT_CHARS);
 /**
  * The body of POST /content/:contentId/comments, as JSON or as the fields of a multipart form:
- * who's asking, what the comment says and which comment it replies to, the image or video it comes
- * with, and the solution of a challenge.
+ * who's asking, what the comment says and which comment it replies to, whether it was created
+ * with AI, and the image or video it comes with.
  */
 const CommentBody = Credentials.extend({
   /** What it says. A comment that comes with an image or a video needs none. */
   text: Text.optional(),
+  /** Its author's declaration that the comment was created with AI, as /store takes a post's. Omitted: false. */
+  aiGenerated: Flag.optional(),
   /** The comment, on the same post, that this one replies to. Left out: it is a comment on the post itself. */
   parentId: z.string().uuid().optional(),
   // The image or video it comes with, sent as a post's file is (routes/store.ts).
@@ -55,11 +62,15 @@ const CommentBody = Credentials.extend({
   content: z.string().optional(),
   /** The file, already sent to the link POST /uploads gave: the id it came with. */
   uploadId: z.string().uuid().optional(),
+  /** The alternative text of the image it comes with: what describes it to those who can't see it. Only an image has one. */
+  alt: z.string().trim().max(MAX_ALT_CHARS).optional(),
   contentEncoding: z.enum(['utf8', 'base64']).default('utf8'),
-  ...ChallengeFields,
 });
-/** An edit's text, which may be empty for a comment that has an image or a video. */
-const EditBody = Credentials.extend({ text: Text, ...ChallengeFields });
+/**
+ * An edit: the comment's text, which may be empty for a comment that has an image or a video, and
+ * its author's declaration that it was created with AI. Omitted: what the comment declared.
+ */
+const EditBody = Credentials.extend({ text: Text, aiGenerated: Flag.optional() });
 
 /** The 404 for a comment that isn't there, which a comment its reader may not read is answered with too. It is returned, not thrown. */
 const commentNotFound = () => notFound(msg('comment.not_found'));
@@ -82,6 +93,10 @@ const commentNotFound = () => notFound(msg('comment.not_found'));
  * A post whose publisher didn't turn comments on, or turned them off, has none to read: 404, as for
  * a post that isn't there, though in other words. The comments it had are kept, and are back when
  * comments are turned on again.
+ *
+ * The two lists leave out what a user the reader blocks wrote (src/blocks.ts), for a reader who
+ * sends their credentials: such a comment is listed as a placeholder (see `listed`). A comment
+ * read by its id is given as it is.
  */
 export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
   const { db, content, comments } = deps;
@@ -98,6 +113,20 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
     const row = await loadReadable(db, req, contentId);
     if (!takesComments(await requireMeta({ db, content }, contentId))) throw notFound(msg('comment.off'));
     return row;
+  }
+
+  /**
+   * A page of a list, as records, for whoever asks. To a reader who sends their credentials, a
+   * comment by a user they block is a placeholder (`status: "blocked"`, see hideBlocked): it
+   * keeps its place and its replies, and says nothing of the comment. A request with no
+   * credentials, or wrong ones, is listed every comment, as before: it costs the database nothing
+   * more. One with them costs the key's lookup, and one more for the blocks among the page's authors.
+   */
+  async function listed(req: FastifyRequest, page: Comment[]): Promise<CommentRecord[]> {
+    const records = await toCommentRecords(deps, page);
+    const reader = records.some((record) => record.author !== null) ? await readerOf(db, req) : null;
+    if (!reader) return records;
+    return hideBlocked(records, await blockedAmong(db, reader.id, records.flatMap((record) => (record.author ? [record.author.userId] : []))));
   }
 
   /**
@@ -140,14 +169,15 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
    * many comments the post has in all, replies included. A comment that waits in the moderation
    * queue is in neither, unless it was published before: an edit that is held leaves a placeholder
    * in its place, as deleting a comment that has replies does (see comments.ts). A placeholder is
-   * listed, and counted, as the comment it stands for. Limited by address (see `listLimit`).
+   * listed, and counted, as the comment it stands for, and so is the one a reader gets for a
+   * comment by a user they block (see `listed`). Limited by address (see `listLimit`).
    */
   app.get('/content/:contentId/comments', listLimit, async (req) => {
     const { contentId } = Params.parse(req.params);
     const query = PageQuery.parse(req.query);
     await commented(req, contentId);
     const [page, count] = await Promise.all([comments.page(contentId, query), comments.count(contentId)]);
-    return { contentId, count, comments: await toCommentRecords(deps, page.comments), nextCursor: page.nextCursor };
+    return { contentId, count, comments: await listed(req, page.comments), nextCursor: page.nextCursor };
   });
 
   /**
@@ -163,7 +193,7 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
     await commented(req, contentId);
     if (!(await comments.find(contentId, commentId))) throw commentNotFound();
     const [page, count] = await Promise.all([comments.page(contentId, { ...query, parentId: commentId }), comments.count(contentId, commentId)]);
-    return { contentId, commentId, count, comments: await toCommentRecords(deps, page.comments), nextCursor: page.nextCursor };
+    return { contentId, commentId, count, comments: await listed(req, page.comments), nextCursor: page.nextCursor };
   });
 
   /**
@@ -171,13 +201,17 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
    * its author and those who decide on it there can read (see `readable`); anyone else gets the
    * placeholder of one that was published before, which has that status too, and nothing of the
    * comment. `status: "deleted"` on the placeholder of a deleted comment that has replies.
+   * `processing: true` on one whose video the server is still processing (src/video): it is in
+   * no list yet, and its video isn't there to play.
    */
   app.get('/content/:contentId/comments/:commentId', async (req) => {
     const { contentId, commentId } = CommentParams.parse(req.params);
     await commented(req, contentId);
     const { comment, held } = await readable(req, contentId, commentId);
     const [record] = await toCommentRecords(deps, [comment]);
-    return held ? { ...record, ...PENDING_REVIEW } : record;
+    // Only a comment with a video can be waiting for one: no other is asked about.
+    const processing = comment.media?.kind === 'video' && !comment.gone && (await pendingCommentFile(db, contentId, commentId))?.processing === true;
+    return { ...record, ...(held && PENDING_REVIEW), ...(processing && PROCESSING) };
   });
 
   /**
@@ -188,6 +222,7 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
    *
    * The file of a comment the compactor has yet to write is where its request staged it, and is
    * served from there; once the compactor has it where comments' files are kept, from there.
+   * 404 for a video the server is still processing (src/video), which says so.
    */
   app.get('/content/:contentId/comments/:commentId/raw', { compress: false }, async (req, reply) => {
     const { contentId, commentId } = CommentParams.parse(req.params);
@@ -198,8 +233,10 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
     const { mimeType } = comment.media;
 
     const staged = await pendingCommentFile(db, contentId, commentId);
+    // A video as it was sent is never served (see GET /content/:contentId/raw): it is there once it is processed.
+    if (staged?.processing) throw videoProcessing();
     // Gone from there: the compactor applied the write meanwhile, and the file is the comment's own.
-    if (staged !== null && (await sendBytes(reply, content, { staged }, () => mimeType, { staged: true }))) return reply;
+    if (staged !== null && (await sendBytes(reply, content, { staged: staged.stagedKey }, () => mimeType, { staged: true }))) return reply;
     await sendBytes(reply, content, { postId: contentId, commentId }, () => mimeType);
     return reply;
   });
@@ -214,6 +251,12 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
  * as an update of a post does: its trust score has it refused, held in the moderation queue for a
  * server moderator or an admin, or published.
  *
+ * A comment's text mentions users as a post's does, by `@` and their name (src/mentions.ts): whom
+ * it mentions is found as it is written, kept in the comment, and given with it as `mentions`,
+ * which its text is read with. Each of them is told, by a notice in their inbox, once the comment
+ * is published: as it is sent or edited, or when it is accepted from the moderation queue. An
+ * edit tells those it newly mentions.
+ *
  * None of them writes the comment store. Each is one commit to the database: a row of
  * `pending_writes` under the comment's post, and with it the comment's row in the moderation
  * queue where it is held (see src/pending.ts). The compactor's next run writes the comment store
@@ -225,15 +268,12 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
  * commentReadRoutes), and is in no list.
  *
  * A comment, and an edit of one, is then limited as a post is, by the code that limits posts
- * (Challenges.admitting), with settings of its own. A user's first `challenge.commentsPerMinute`
- * in any minute go through as they are. Each one past them is answered with a challenge (428), or
- * two from the third such comment in a row, to be sent again with the solution. One past
- * `comments.perMinute` in any minute is refused outright (429), before any challenge. All of it
- * comes after the gate and before anything is stored, so a comment the gate refuses costs no
- * challenge and counts for nothing, and neither does one whose write fails.
+ * (src/sendLimit.ts), with a setting of its own: one past `comments.perMinute` in any minute is
+ * refused (429). It comes after the gate and before anything is stored, so a comment the gate
+ * refuses counts for nothing, and neither does one whose write fails.
  */
 export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
-  const { db, config, content, comments, challenges, trustPlugins, now = Date.now } = deps;
+  const { db, config, content, comments, trustPlugins, now = Date.now } = deps;
 
   /**
    * The published post, if it takes comments: what is set for deletion, or waits in the moderation
@@ -263,6 +303,16 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
   const current = (reader: PendingReader, contentId: string, commentId: string) => effectiveComment(reader, comments, contentId, commentId);
 
   /**
+   * Refuses (403) a comment, or an edit of one, by a user the post's publisher blocks
+   * (src/blocks.ts): they write nothing more under that publisher's posts. What they wrote there
+   * before the block stays, theirs to delete, and the publisher's. A block made while a comment
+   * is being sent may not stop it: it applies to the ones sent after it.
+   */
+  async function refuseBlocked(post: { user_id: string }, user: { id: string }): Promise<void> {
+    if (post.user_id !== user.id && (await blocks(db, post.user_id, user.id))) throw forbidden(msg('comment.not_taken'));
+  }
+
+  /**
    * Comments on a post, or with `parentId`, replies to a comment on it, which must be published:
    * 201 with the comment, or 202 with `status: "pending_review"` for one that waits in the
    * moderation queue, which nobody but its author and the queue's moderators reads until it is
@@ -275,12 +325,27 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
    * server that has turned image or video posts off (POST_TYPE_IMAGE, POST_TYPE_VIDEO) takes no
    * file of that type with a comment either (400).
    *
-   * A banned user is refused (403).
+   * An image can come with its alternative text (`alt`), which describes it to those who can't
+   * see it: it is kept with the comment, given wherever the comment's image is, and read by
+   * moderation as the comment's text is. It is said of an image only (400).
    *
-   * 428 with a challenge for a comment past the ones a user sends in a minute without one, and 429
-   * past the most they send in a minute (see commentWriteRoutes). Only the comments that are
-   * stored count. One answered with a challenge is sent again with its solution, and with the same
-   * `uploadId` if it has one: the upload is kept for it.
+   * `aiGenerated` is its author's declaration that the comment was created with AI, as a post's
+   * publisher makes one of a post: false unless they say so. Nothing detects or checks it. It is
+   * kept in the comment and given wherever the comment is, and its author can change it with an
+   * edit.
+   *
+   * A video is not published as it was sent, where the server processes videos
+   * (`video.processing`, src/video): the answer says `processing: true`, and the comment is
+   * listed, with a video that plays anywhere and says nothing of where it was filmed, once the
+   * video worker has made it one. Until then it is read by its id, and its video isn't served.
+   * One that can't be processed is told to its author by a notice, and the comment is
+   * published with its text alone, or not at all if the video was all of it.
+   *
+   * A banned user is refused (403), and so is one the post's publisher blocks (see refuseBlocked).
+   *
+   * 429 for a comment past the most a user sends in a minute (see commentWriteRoutes). Only the
+   * comments that are stored count. One that was refused is sent again with the same `uploadId`
+   * if it has one: the upload is kept for it.
    */
   // The body limit is the largest JSON body a comment is sent in, which holds its file when the file is inline: what /store takes.
   app.post('/content/:contentId/comments', { bodyLimit: 32 * 1024 * 1024 }, async (req, reply) => {
@@ -288,7 +353,10 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
     let upload: Upload | undefined;
     let file: CommentFile | undefined;
     if (req.isMultipart()) {
-      ({ fields: raw, upload } = await readMultipart(req, config.storage));
+      ({
+        fields: raw,
+        uploads: [upload],
+      } = await readMultipart(req, config.storage));
     } else {
       raw = (req.body as Record<string, unknown>) ?? {};
     }
@@ -306,7 +374,7 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
 
       const user = await authenticate(db, req, body);
       refuseBanned(user);
-      await commentable(contentId);
+      await refuseBlocked(await commentable(contentId), user);
       // A reply is to a comment anyone can read: not to one that waits in the moderation queue, or was deleted.
       const answerable = async (reader: PendingReader) => parentId === undefined || (await current(reader, contentId, parentId))?.held === false;
       if (!(await answerable(db))) throw commentNotFound();
@@ -314,18 +382,35 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
       if (uploadId) upload = await readUploaded(content, user.id, uploadId, config.storage);
       file = await readCommentFile(body, upload, config.storage, config.postTypes);
 
-      // Before the limit and any challenge, so nobody solves one for a comment that isn't stored, and a refused one doesn't count.
-      const { route, trustScore } = await moderateComment({ db, config, trustPlugins, now, log: req.log }, { userId: user.id, contentId, text, filename: file?.filename });
+      // Before the limit, so a refused one doesn't count.
+      const { route, trustScore } = await moderateComment(
+        { db, config, trustPlugins, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } },
+        // Its image is given to the trust plugins that look at pictures, as a post's are (see trustImage). A video isn't.
+        { userId: user.id, contentId, text, filename: file?.filename, alt: file?.alt, ...(file?.kind === 'image' && { image: trustImage(file) }) },
+      );
       const held = route === 'queue';
       const attached = file;
+      const mentions = await resolveMentions(db, text);
 
-      const record = await challenges.admitting('comment', user.id, body, req.language, async () => {
+      const record = await admitting(deps, 'comment', user.id, async () => {
         const createdAt = now();
         const commentId = newCommentId(createdAt);
         // The file first, where only this write knows of it: the commit below is what makes it the comment's.
         const staged = attached && (await attached.file.stage(content, randomUUID(), attached.mimeType));
-        const media: CommentMedia | undefined = attached && staged && { kind: attached.kind, mimeType: attached.mimeType, size: staged.size };
-        const comment: Comment = { commentId, contentId, ...(parentId !== undefined && { parentId }), userId: user.id, text, ...(media && { media }), createdAt };
+        const media: CommentMedia | undefined = attached && staged && { kind: attached.kind, mimeType: attached.mimeType, size: staged.size, ...(attached.alt && { alt: attached.alt }) };
+        const comment: Comment = {
+          commentId,
+          contentId,
+          ...(parentId !== undefined && { parentId }),
+          userId: user.id,
+          text,
+          ...(mentions.length > 0 && { mentions }),
+          ...(body.aiGenerated === true && { aiGenerated: true }),
+          ...(media && { media }),
+          createdAt,
+        };
+        // A video the server processes waits as it was sent: the row says so, and the job is what the video worker finds it by (see write).
+        const process = staged !== undefined && media?.kind === 'video' && config.video.processing;
         try {
           // It takes no number, and no lock on its post: the comments of one post commit side by side.
           await writeUnnumbered(db, config.db.dialect, contentId, { reply: parentId !== undefined }, async (trx) => {
@@ -333,7 +418,8 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
             // here, where the compactor waits for this reply before it decides what a removal of that comment leaves.
             if (parentId !== undefined && !(await answerable(trx))) throw commentNotFound();
             if (held) await queue(trx, comment, trustScore, createdAt);
-            await insertPending(trx, { contentId, key: commentId, kind: 'comment_put', commentId, payload: { comment, held }, stagedKey: staged?.key, at: createdAt });
+            await insertPending(trx, { contentId, key: commentId, kind: 'comment_put', commentId, payload: { comment, held, ...(process && { process: true }) }, stagedKey: staged?.key, at: createdAt });
+            if (process) await addVideoJob(trx, { contentId, seq: UNNUMBERED, key: commentId, commentId, at: createdAt });
           });
         } catch (err) {
           // A COMMIT can fail yet still be applied, e.g. if the connection dropped mid-commit: the comment is then there, with its file.
@@ -347,9 +433,11 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
           }
           if (committed !== true) throw err;
         }
-        return toCommentRecord(comment, { userId: user.id, username: user.username }, config.publicBaseUrl);
+        return { ...toCommentRecord(comment, { userId: user.id, username: user.username }, config.publicBaseUrl), ...(process && PROCESSING) };
       });
       stored = true;
+      // Whom it mentions is told once it is published: one that is held tells nobody until it is accepted (routes/moderation.ts).
+      if (!held) await notifyMentions(deps, { by: user.id, contentId, commentId: record.commentId, mentions, excerpt: excerpt(text) }, req.log);
       reply.status(held ? 202 : 201);
       return held ? { ...record, ...PENDING_REVIEW } : record;
     } finally {
@@ -365,7 +453,12 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
    * The comment keeps its id, its place, its replies and its likes, and says when it was edited
    * (`editedAt`). 200 with the comment; with `unchanged` and nothing written for the text it has.
    *
-   * Only the text is edited. The image or video a comment came with stays as it is: an edit
+   * An edit can also say whether the comment was created with AI (`aiGenerated`), as an update of
+   * a post does: one that leaves it out keeps what the comment declared, and changing only that
+   * is an edit too, with the text the comment has. `unchanged` is for an edit that changes
+   * neither.
+   *
+   * Nothing else is edited. The image or video a comment came with stays as it is: an edit
    * neither replaces it nor takes it away, and gives none to a comment that came without. A
    * comment that has one can be left with no text; one that hasn't needs a text (400).
    *
@@ -381,8 +474,10 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
    * - published: a comment that was waiting in the queue leaves it, published.
    *
    * A banned user is refused (403), and a post that doesn't take comments (404), as for a new
-   * comment. An edit is limited as a new comment is, and counted with them: 428 with a challenge,
-   * or 429, where a new comment would get one (see commentWriteRoutes).
+   * comment. So is the comment's author once the post's publisher blocks them (403, see
+   * refuseBlocked): an edit would be a new text under the post. An edit is limited as a new
+   * comment is, and counted with them: 429 where a new comment would get one (see
+   * commentWriteRoutes).
    */
   app.patch('/content/:contentId/comments/:commentId', async (req, reply) => {
     const { contentId, commentId } = CommentParams.parse(req.params);
@@ -395,14 +490,22 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
     // A held comment is there only for those who can read it.
     if (!seen || (seen.held && !own && !moderatesServer(user))) throw commentNotFound();
     if (!own) throw forbidden(msg('comment.edit_own_only'));
+    await refuseBlocked(post, user);
     const { comment } = seen;
-    if (body.text === comment.text) return { contentId, commentId, unchanged: true, ...(seen.held && PENDING_REVIEW) };
+    // The text it has, with the declaration it has, or with none said: nothing to write.
+    const declares = body.aiGenerated !== undefined && body.aiGenerated !== (comment.aiGenerated === true);
+    if (body.text === comment.text && !declares) return { contentId, commentId, unchanged: true, ...(seen.held && PENDING_REVIEW) };
     if (!body.text && !comment.media) throw badRequest(msg('comment.text_required'));
 
-    const { route, trustScore } = await moderateComment({ db, config, trustPlugins, now, log: req.log }, { userId: user.id, contentId, text: body.text });
+    const { route, trustScore } = await moderateComment(
+      { db, config, trustPlugins, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } },
+      { userId: user.id, contentId, text: body.text },
+    );
     const held = route === 'queue';
+    // Whom the new text mentions: it goes on mentioning whom the text it replaces did (see resolveMentions).
+    const mentions = await resolveMentions(db, body.text, comment.mentions);
 
-    const edited = await challenges.admitting('comment', user.id, body, req.language, () => {
+    const edited = await admitting(deps, 'comment', user.id, () => {
       const editedAt = now();
       return writePending(
         db,
@@ -412,7 +515,10 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
         async (trx, seq, state) => {
           // Deleted while this was under way. Otherwise the edit is of the comment as it is by now, whatever was written to it meanwhile.
           if (!state) throw commentNotFound();
-          const edited: Comment = { ...state.comment, text: body.text, editedAt };
+          // The mentions it had were of the text it had. What it declares of AI is what the edit says, or what it declared by now.
+          const { mentions: mentioned, aiGenerated: declared, ...was } = state.comment;
+          const aiGenerated = body.aiGenerated ?? (declared === true);
+          const edited: Comment = { ...was, text: body.text, ...(mentions.length > 0 && { mentions }), ...(aiGenerated && { aiGenerated }), editedAt };
           // Where the edit leaves it is where it is: in the queue, with a row there, or published, with none.
           if (held) await queue(trx, edited, trustScore, editedAt);
           else await trx.deleteFrom('comment_queue').where('comment_id', '=', commentId).where('content_id', '=', contentId).execute();
@@ -422,6 +528,8 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
       );
     });
     req.log.info({ contentId, commentId, by: user.id, held }, 'edited a comment');
+    // Those the edit newly mentions are told, once it is published: not those the comment mentioned as it was read here, if it was published.
+    if (!held) await notifyMentions(deps, { by: user.id, contentId, commentId, mentions, before: seen.held ? undefined : comment.mentions, excerpt: excerpt(body.text) }, req.log);
     const [record] = await toCommentRecords(deps, [edited]);
     return reply.status(held ? 202 : 200).send({ ...record, ...(held && PENDING_REVIEW) });
   });

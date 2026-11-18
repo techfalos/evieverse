@@ -1,4 +1,4 @@
-import { createReadStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { Operator } from 'opendal';
@@ -27,8 +27,24 @@ const LINK_CACHE_SIZE = 10_000;
  */
 const STAGED_KEY = /^staged\/[0-9a-f-]{36}$/;
 
+/** Matches the id of a version of a post's video, written as a UUID is: what its files are kept under. */
+const MEDIA_ID = /^[0-9a-f-]{36}$/;
+
+/**
+ * Matches the name of a file of a processed video: its poster, the master playlist of its
+ * stream, and for each rendition, named by its height, a playlist and numbered segments. A
+ * request names one in its path, and nothing else is read by a name a request gave.
+ */
+export const MEDIA_FILE = /^(?:poster\.jpg|master\.m3u8|\d{3,4}p\.m3u8|\d{3,4}p_\d{5}\.ts)$/;
+
 /** Where a post's bytes are kept: an image's, video's or audio's file, a text post's text, or a link's URL. */
 const contentKey = (contentId: string) => `content/${contentId}`;
+/**
+ * Where an image of an image post is kept, by its place among the post's images, counted from 1.
+ * The first is the post's bytes. Each one after it, of a post of several, is a file of its own
+ * beside them: `content/<id>.2`, `content/<id>.3`, and so on.
+ */
+const imageKey = (contentId: string, image: number) => (image === 1 ? contentKey(contentId) : `${contentKey(contentId)}.${image}`);
 /** Where a post's meta file is kept (see ContentMeta): beside its bytes, as JSON. */
 const metaKey = (contentId: string) => `content/${contentId}.meta.json`;
 /**
@@ -40,6 +56,41 @@ const uploadKey = (userId: string, uploadId: string) => `uploads/${userId}/${upl
 
 /** Where the image of an image ad is kept (src/monetization.ts): apart from posts, as an ad is no post. */
 const adImageKey = (adId: string) => `ads/${adId}`;
+
+/**
+ * Where a user's avatars are kept (src/profile.ts): apart from posts, as an avatar is no post,
+ * and all under the user's id, so that whatever is left of them goes with the account in one
+ * deletion.
+ */
+const avatarPrefix = (userId: string) => `avatars/${userId}/`;
+/**
+ * Where one avatar of a user's is kept, by its id (`users.avatar_id`). An avatar that takes
+ * another's place has another id, and so a file of its own: nothing is written over, and what a
+ * reader holds of the one before is never mixed with it. Throws for an id that isn't written as
+ * a UUID is.
+ */
+const avatarKey = (userId: string, avatarId: string) => {
+  if (!MEDIA_ID.test(avatarId)) throw new Error(`"${avatarId}" is not the id of an avatar`);
+  return `${avatarPrefix(userId)}${avatarId}`;
+};
+
+/**
+ * Where what the server made of a post's videos is kept, beside the MP4 that is the post's
+ * bytes: a folder for each version of its video (see mediaKey), all of them under the post's id,
+ * so that they go with the post in one deletion.
+ */
+const mediaPrefix = (contentId: string) => `media/${contentId}/`;
+/**
+ * Where a file of one version of a post's video is kept (see StoredVideo.id): its poster
+ * (`poster.jpg`), the master playlist of its stream (`master.m3u8`), and the playlist and the
+ * segments of each rendition. The video worker writes them, once, under an id nothing else has,
+ * before the write that names the id is applied; the compactor deletes them, with the version
+ * or with the post. Throws for a name that is none of a video's files (see MEDIA_FILE).
+ */
+const mediaKey = (contentId: string, videoId: string, file: string) => {
+  if (!MEDIA_ID.test(videoId) || !MEDIA_FILE.test(file)) throw new Error(`"${videoId}/${file}" is not a file of a video`);
+  return `${mediaPrefix(contentId)}${videoId}/${file}`;
+};
 
 /**
  * Where the file a write came with waits for the compactor: a post's image, video or audio, or
@@ -60,24 +111,49 @@ function stagedObject(key: string): string {
 }
 
 /**
- * Whose bytes a file in the store is: a post's, named by the post's id, those of the image or
- * video a comment came with, named by the comment and the post it is on, the image of an ad,
- * named by the ad, or a staged file's, named by its key (see stagedKey). They are written, read
- * and linked to the same way; only where they are kept differs.
+ * Whose bytes a file in the store is: a post's, named by the post's id, those of one image of
+ * an image post, named by the post and the image's place among its images (see imageKey), those
+ * of the image or video a comment came with, named by the comment and the post it is on, the
+ * image of an ad, named by the ad, a user's avatar, named by the user and the avatar's id (see
+ * avatarKey), a staged file's, named by its key (see stagedKey), or those of a file of a post's
+ * processed video, named by the post, the version of the video and the file (see mediaKey).
+ * They are written, read and linked to the same way; only where they are kept differs.
  */
-export type BytesOwner = string | { postId: string; commentId: string } | { adId: string } | { staged: string };
-/** Where the bytes of `of` are kept: with the posts', with the comments of the post it is on, with the ads' images, or where staged files wait. */
-const bytesKey = (of: BytesOwner) =>
-  typeof of === 'string' ? contentKey(of) : 'adId' in of ? adImageKey(of.adId) : 'staged' in of ? stagedObject(of.staged) : commentMediaKey(of.postId, of.commentId);
+export type BytesOwner =
+  | string
+  | { contentId: string; image: number }
+  | { contentId: string; video: string; file: string }
+  | { postId: string; commentId: string }
+  | { adId: string }
+  | { userId: string; avatar: string }
+  | { staged: string };
+/** Where the bytes of `of` are kept: with the posts', with what was made of a post's video, with the comments of the post it is on, with the ads' images, with its user's avatars, or where staged files wait. */
+function bytesKey(of: BytesOwner): string {
+  if (typeof of === 'string') return contentKey(of);
+  if ('image' in of) return imageKey(of.contentId, of.image);
+  if ('video' in of) return mediaKey(of.contentId, of.video, of.file);
+  if ('adId' in of) return adImageKey(of.adId);
+  if ('avatar' in of) return avatarKey(of.userId, of.avatar);
+  if ('staged' in of) return stagedObject(of.staged);
+  return commentMediaKey(of.postId, of.commentId);
+}
 
 /**
  * Uploaded bytes and the meta file of each piece of content, the bytes of the images and videos
- * that comments come with, and the images of ads, on any Apache OpenDAL backend (fs, s3, gcs,
- * azblob, sftp, webdav, gdrive, onedrive, dropbox, hdfs, ...).
+ * that comments come with, the images of ads and users' avatars, on any Apache OpenDAL backend (fs, s3, gcs,
+ * azblob, sftp, webdav, gdrive, onedrive, dropbox, hdfs, ...). An image post of several images
+ * has a file for each: the first is the post's bytes, and the others are beside it (see imageKey).
  *
  * Only the compactor writes or deletes a post's bytes and meta file, and a comment's image or
- * video: `putBytes`, `adopt`, `putMeta` and `remove` are its own. What a request writes is a
+ * video: `putBytes`, `adopt`, `putMeta`, `remove` and `removeImage` are its own. What a request writes is a
  * staged file (`stageFile`, `stageUpload`), once, which it alone knows of until it commits.
+ *
+ * A video the server processes (src/video) is staged by its request like any file. The video
+ * worker then reads it from there (`fetchTo`), stages the MP4 it makes in its place, and for a
+ * post writes the poster and the stream beside the posts' bytes (`putFile`, to a file of the
+ * video: see mediaKey), under an id that no write names until the worker's commit does. The
+ * compactor deletes those with the version of the video they are of, or with the post
+ * (`removeMedia`).
  *
  * Links to the bytes are signed by OpenDAL with the store's key, where it has one. A store that
  * has none and runs where it needs none has a signer instead (see linkSigner), which asks a
@@ -109,7 +185,7 @@ export class ContentStore {
     await pipeline(createReadStream(localPath), writer.createWriteStream());
   }
 
-  /** Writes bytes that are in memory as `of`'s, over the ones it had: a text post's text, a link's URL. */
+  /** Writes bytes that are in memory as `of`'s, over the ones it had: a text post's text, a link's URL, an avatar as the server made it. */
   async putBytes(of: BytesOwner, bytes: Buffer, mimeType: string): Promise<void> {
     await this.op.write(bytesKey(of), bytes, { contentType: mimeType });
   }
@@ -208,18 +284,75 @@ export class ContentStore {
     }
   }
 
-  async remove(contentId: string): Promise<void> {
-    this.links.delete(contentKey(contentId));
-    await Promise.all([
-      this.op.delete(contentKey(contentId)).catch(() => {}),
-      this.op.delete(metaKey(contentId)).catch(() => {}),
-    ]);
+  /**
+   * Deletes a post's bytes and its meta file. `images` is how many images its meta file says it
+   * has (see ContentMeta.images), for an image post of several: each is deleted with them.
+   */
+  async remove(contentId: string, images = 1): Promise<void> {
+    const keys = Array.from({ length: Math.max(1, images) }, (_, i) => imageKey(contentId, i + 1));
+    for (const key of keys) this.links.delete(key);
+    await Promise.all([...keys, metaKey(contentId)].map((key) => this.op.delete(key).catch(() => {})));
+  }
+
+  /**
+   * Deletes one image of an image post, by its place among the post's images: one after the
+   * first, which an update of the post left it without. One that isn't there is no error.
+   */
+  async removeImage(contentId: string, image: number): Promise<void> {
+    if (image < 2) throw new Error(`image ${image} of ${contentId} is the post's bytes, which go with the post`);
+    this.links.delete(imageKey(contentId, image));
+    await this.op.delete(imageKey(contentId, image));
+  }
+
+  /**
+   * Copies the bytes of `of` to a local file, which is made, or written over: what the video
+   * worker reads a staged video with. Fails, with an error isNotFound knows, if `of` has none.
+   */
+  async fetchTo(of: BytesOwner, localPath: string): Promise<void> {
+    await pipeline(await this.stream(of), createWriteStream(localPath));
+  }
+
+  /**
+   * Deletes what the server made of a post's video beside the post's bytes: the poster and the
+   * stream of one version of it (`videoId`, see StoredVideo.id), or with none, of every version
+   * there is, which is what goes with the post. Nothing there is no error.
+   */
+  async removeMedia(contentId: string, videoId?: string): Promise<void> {
+    if (videoId !== undefined && !MEDIA_ID.test(videoId)) throw new Error(`"${videoId}" is not the id of a video`);
+    const prefix = videoId === undefined ? mediaPrefix(contentId) : `${mediaPrefix(contentId)}${videoId}/`;
+    // The links a signer gave to its files are forgotten with them.
+    for (const key of this.links.keys()) if (key.startsWith(prefix)) this.links.delete(key);
+    try {
+      await this.op.removeAll(prefix);
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
   }
 
   /** Deletes the image of an ad. One that isn't there is no error: a text ad has none. */
   async removeAdImage(adId: string): Promise<void> {
     this.links.delete(adImageKey(adId));
     await this.op.delete(adImageKey(adId)).catch(() => {});
+  }
+
+  /** Deletes one avatar of a user's: the one another took the place of, or that the user took away. One that isn't there is no error. */
+  async removeAvatar(userId: string, avatarId: string): Promise<void> {
+    this.links.delete(avatarKey(userId, avatarId));
+    await this.op.delete(avatarKey(userId, avatarId));
+  }
+
+  /**
+   * Deletes every avatar the store holds of a user: the one they have, and any that a request
+   * which died left behind. What goes with the account. Nothing there is no error.
+   */
+  async removeAvatars(userId: string): Promise<void> {
+    const prefix = avatarPrefix(userId);
+    for (const key of this.links.keys()) if (key.startsWith(prefix)) this.links.delete(key);
+    try {
+      await this.op.removeAll(prefix);
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
   }
 
   /**

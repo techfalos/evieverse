@@ -18,7 +18,7 @@ for (const target of TARGETS) {
       await ctx.close();
     });
 
-    const { store: storePost, storeText, like, feed } = requests(() => ctx);
+    const { store: storePost, storeText, like, unlike, feed } = requests(() => ctx);
     const upload = (fields: Record<string, string>, file: { name: string; type: string; data: Buffer }) => {
       const mp = multipart(fields, file);
       return ctx.app.inject({ method: 'POST', url: '/store', payload: mp.payload, headers: mp.headers });
@@ -38,6 +38,11 @@ for (const target of TARGETS) {
         userId: a.json().userId,
         username: 'alice',
         createdAt: expect.any(String),
+        banned: false,
+        bio: null,
+        links: [],
+        avatarUrl: null,
+        pinnedContentIds: [],
         admin: false,
         moderator: false,
         moderates: [],
@@ -47,7 +52,7 @@ for (const target of TARGETS) {
       const rename = (username: string) => ctx.app.inject({ method: 'PATCH', url: `/users/${bob.userId}`, payload: { ...bob, username } });
       expect((await rename('alice')).statusCode).toBe(409);
       expect((await rename('bob')).statusCode).toBe(200);
-      expect((await rename('robert')).json()).toEqual({ userId: bob.userId, username: 'robert', language: 'en', messages: true, showFollowing: false, showFollowers: false });
+      expect((await rename('robert')).json()).toEqual({ userId: bob.userId, username: 'robert', language: 'en', messages: true, showFollowing: false, showFollowers: false, bio: null, links: [], avatarUrl: null });
     });
 
     it('lets a user post as soon as they register, and only them change their profile', async () => {
@@ -57,7 +62,7 @@ for (const target of TARGETS) {
       const patch = (payload: Record<string, unknown>) => ctx.app.inject({ method: 'PATCH', url: `/users/${bob.userId}`, payload });
       expect((await patch({ ...other, username: 'robert' })).statusCode).toBe(403);
       const nothing = await patch({ userId: bob.userId, apiKey: bob.apiKey });
-      expect([nothing.statusCode, nothing.json().error]).toEqual([400, 'nothing to update: provide username, language, messages, showFollowing or showFollowers']);
+      expect([nothing.statusCode, nothing.json().error]).toEqual([400, 'nothing to update: provide username, language, messages, showFollowing, showFollowers, bio or links']);
       expect((await ctx.app.inject({ method: 'GET', url: `/users/${bob.userId}` })).json()).toMatchObject({ username: 'bob' });
     });
 
@@ -280,7 +285,7 @@ for (const target of TARGETS) {
 
     it("takes only the server's hashtags in server mode, and gives a post the ones its publisher chose of them", async () => {
       await ctx.close();
-      ctx = await createTestContext(target, { tagging: { mode: 'server', serverTags: ['Local', '#austin', 'Music'] }, challenge: { postWindowSeconds: 60 } });
+      ctx = await createTestContext(target, { tagging: { mode: 'server', serverTags: ['Local', '#austin', 'Music'] }, postRateLimitPerMinute: 1 });
       const alice = await ctx.register('alice');
       const refused = (res: Awaited<ReturnType<typeof storeText>>, error: string) => {
         expect(res.statusCode, res.body).toBe(400);
@@ -299,7 +304,7 @@ for (const target of TARGETS) {
       for (const tag of ['local', 'music']) expect((await feed(`tags=${tag}`)).tags).toEqual({});
 
       // A hashtag that isn't the server's refuses the post, even beside ones that are: nothing is dropped unsaid.
-      // All of it before any challenge, which a post this soon after the last would otherwise get.
+      // All of it before the limit on posts a minute, which would otherwise refuse a post this soon after the last.
       const notAllowed = (tag: string) => `#${tag} is not one of this server's hashtags, which GET /tagging lists`;
       refused(await storeText(alice, 'Match report', { tags: ['sports'] }), notAllowed('sports'));
       refused(await storeText(alice, 'Match report', { tags: 'local, sports, austin' }), notAllowed('sports'));
@@ -359,8 +364,8 @@ for (const target of TARGETS) {
 
     it("doesn't start in server mode without a usable list of hashtags", () => {
       const load = (env: Record<string, string>) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).tagging;
-      expect(load({})).toEqual({ mode: 'user', serverTags: [] });
-      expect(load({ TAGGING_MODE: 'server', TAGGING_SERVER_TAGS: 'News, #local sports' })).toEqual({ mode: 'server', serverTags: ['news', 'local', 'sports'] });
+      expect(load({})).toMatchObject({ mode: 'user', serverTags: [] });
+      expect(load({ TAGGING_MODE: 'server', TAGGING_SERVER_TAGS: 'News, #local sports' })).toMatchObject({ mode: 'server', serverTags: ['news', 'local', 'sports'] });
       expect(load({ TAGGING_MODE: 'server', TAGGING_SERVER_TAGS: Array.from({ length: 40 }, (_, i) => `t${i}`).join(',') }).serverTags).toHaveLength(40);
       expect(() => load({ TAGGING_MODE: 'server' })).toThrow('server tagging needs at least one hashtag in TAGGING_SERVER_TAGS');
       expect(() => load({ TAGGING_MODE: 'server', TAGGING_SERVER_TAGS: 'news, 日本' })).toThrow(/日本.* is not a usable hashtag/);
@@ -368,8 +373,8 @@ for (const target of TARGETS) {
 
     it('takes only the types of post that are on, and keeps the posts it has of a type turned off since', async () => {
       await ctx.close();
-      // A server of pictures and links. The post window is on: a refusal comes before any challenge.
-      ctx = await createTestContext(target, { postTypes: { text: false, video: false, audio: false }, challenge: { postWindowSeconds: 60 } });
+      // A server of pictures and links, and of one post a minute: a refusal comes before the limit.
+      ctx = await createTestContext(target, { postTypes: { text: false, video: false, audio: false }, postRateLimitPerMinute: 1 });
       const alice = await ctx.register('alice');
       const off = (type: string) => [400, `this server doesn't take ${type} posts: the types it takes are image, link`];
       const refusal = (res: Awaited<ReturnType<typeof storeText>>) => [res.statusCode, res.json().error];
@@ -380,7 +385,7 @@ for (const target of TARGETS) {
       const link = await storePost(alice, { type: 'link', url: 'https://news.example/story', tags: ['news'] });
       expect(link.statusCode, link.body).toBe(201);
 
-      // Straight after a post, when one that could be stored would be answered with a challenge.
+      // Straight after a post, when one that could be stored would be past the limit.
       expect(refusal(await storeText(alice, 'Some words #news'))).toEqual(off('text'));
       expect(refusal(await upload({ ...alice, type: 'video', tags: 'clips' }, { name: 'clip.mp4', type: 'video/mp4', data: PNG }))).toEqual(off('video'));
       expect(refusal(await storePost(alice, { type: 'audio', content: PNG.toString('base64'), contentEncoding: 'base64', contentType: 'audio/mpeg', tags: ['songs'] }))).toEqual(off('audio'));
@@ -434,9 +439,9 @@ for (const target of TARGETS) {
       expect(many.json().error).toBe('at most 10 hashtags are allowed, got 11');
     });
 
-    it("requires the publisher's hashtags by default, before any challenge, and updates the post when they change", async () => {
+    it("requires the publisher's hashtags by default, before the limit on posts a minute, and updates the post when they change", async () => {
       await ctx.close();
-      ctx = await createTestContext(target, { challenge: { postWindowSeconds: 60 } });
+      ctx = await createTestContext(target, { postRateLimitPerMinute: 1 });
       expect(ctx.config.tagging.mode).toBe('user');
       const alice = await ctx.register('alice');
       const refused = (res: Awaited<ReturnType<typeof storeText>>) => {
@@ -577,6 +582,64 @@ for (const target of TARGETS) {
       ctx.clock.now += 1000;
       expect((await ctx.compact()).tags).toEqual([authorIndex(alice.userId), 'news']);
       expect(await news()).toEqual([[second, 3], [first, 2]]);
+    });
+
+    it('takes a like back once, which the next compactor run writes into the day indexes, and lets it be given again', async () => {
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const carol = await ctx.register('carol');
+      const first = (await storeText(alice, 'first #news')).json().contentId;
+      ctx.clock.now += 1000;
+      const second = (await storeText(alice, 'second #news')).json().contentId;
+      for (const u of [bob, carol]) expect((await like(u, first)).statusCode).toBe(201);
+      expect((await like(bob, second)).statusCode).toBe(201);
+      await ctx.compact();
+      const news = async () => ((await feed('tags=news')).tags.news ?? []).map((i) => [i.contentId, i.likes]);
+      const taken = async (res: Awaited<ReturnType<typeof unlike>>) => [res.statusCode, res.json()];
+      const likesOf = async (contentId: string) => (await ctx.db.selectFrom('likes').select('user_id').where('content_id', '=', contentId).execute()).map((r) => r.user_id).sort();
+      expect(await news()).toEqual([[first, 2], [second, 1]]);
+
+      // A user's own, with their key, of content that is there.
+      expect((await unlike(bob, '00000000-0000-4000-8000-000000000000')).statusCode).toBe(404);
+      expect((await ctx.app.inject({ method: 'DELETE', url: '/like', payload: { userId: bob.userId, apiKey: 'nope', contentId: first } })).statusCode).toBe(401);
+      expect((await ctx.app.inject({ method: 'DELETE', url: '/like', payload: { ...bob } })).statusCode).toBe(400);
+      expect((await ctx.app.inject({ method: 'DELETE', url: '/like', headers: as(bob) })).statusCode).toBe(400);
+      // A like that isn't there is taken back from nobody: nothing changes.
+      expect(await taken(await unlike(alice, first))).toEqual([200, { contentId: first, likes: 2, wasLiked: false }]);
+      expect(await likesOf(first)).toEqual([bob.userId, carol.userId].sort());
+
+      // Once: the row goes, and the count with it, at once for whoever reads the post.
+      ctx.clock.now += 1000;
+      expect(await taken(await unlike(bob, first))).toEqual([200, { contentId: first, likes: 1, wasLiked: true }]);
+      expect(await taken(await unlike(bob, first))).toEqual([200, { contentId: first, likes: 1, wasLiked: false }]);
+      expect(await likesOf(first)).toEqual([carol.userId]);
+      expect(await likesOf(second)).toEqual([bob.userId]);
+      expect((await ctx.app.inject({ method: 'GET', url: `/content/${first}` })).json().likes).toBe(1);
+      // Feeds have the count they had until the compactor has run, and then the new one, in the order that makes.
+      expect(await news()).toEqual([[first, 2], [second, 1]]);
+      expect((await ctx.compact()).tags).toEqual([authorIndex(alice.userId), 'news']);
+      expect(await news()).toEqual([[second, 1], [first, 1]]);
+      // A run after which nothing was liked, or taken back, writes nothing again.
+      expect((await ctx.compact()).tags).toEqual([]);
+
+      // Named in the query, with the credentials in the headers; and the same request twice at once takes the like back once.
+      const both = await Promise.all([1, 2].map(() => ctx.app.inject({ method: 'DELETE', url: `/like?contentId=${first}`, headers: as(carol) })));
+      expect(both.map((res) => [res.statusCode, res.json().likes, res.json().wasLiked]).sort()).toEqual([[200, 0, false], [200, 0, true]]);
+      expect(await likesOf(first)).toEqual([]);
+      expect((await ctx.db.selectFrom('content').select('like_count').where('id', '=', first).executeTakeFirstOrThrow()).like_count).toBe(0);
+      await ctx.compact();
+      expect(await news()).toEqual([[second, 1], [first, 0]]);
+
+      // It can be given again, and is a new like.
+      expect((await like(carol, first)).json()).toEqual({ contentId: first, likes: 1, alreadyLiked: false });
+      expect((await like(bob, first)).json()).toEqual({ contentId: first, likes: 2, alreadyLiked: false });
+      await ctx.compact();
+      expect(await news()).toEqual([[first, 2], [second, 1]]);
+
+      // Content that is set for deletion is gone to an unlike too: its likes go with it.
+      expect((await ctx.app.inject({ method: 'DELETE', url: `/content/${first}`, headers: as(alice) })).statusCode).toBe(202);
+      expect(await taken(await unlike(bob, first))).toEqual([404, { error: 'content not found' }]);
+      expect(await likesOf(first)).toEqual([bob.userId, carol.userId].sort());
     });
 
     it('lets only the owner set content for deletion, which refuses reads, updates and likes at once and leaves feeds on the next run', async () => {

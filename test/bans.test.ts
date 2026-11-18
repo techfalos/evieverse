@@ -79,6 +79,7 @@ for (const target of TARGETS) {
       const { commentId } = ok(await req(bob, 'POST', `/content/${bobs}/comments`, { text: 'First' }), 201);
       const like = (u: User, contentId: string, comment?: string) => req(u, 'POST', '/like', { contentId, ...(comment && { commentId: comment }) });
       ok(await like(alice, bobs), 201);
+      ok(await like(alice, bobs, commentId), 201);
       ok(await ban(mod, alice, 'Spam'), 201);
       const refusal = [403, BANNED];
 
@@ -88,12 +89,18 @@ for (const target of TARGETS) {
       expect(await refused(req(alice, 'POST', `/content/${bobs}/comments`, { text: 'Hello' }))).toEqual(refusal);
       expect(await refused(send(alice, bob, 'Hello'))).toEqual(refusal);
       expect(await refused(req(alice, 'POST', '/uploads', { type: 'image', contentType: 'image/png', size: 100 }))).toEqual(refusal);
-      // A like of a post or of a comment, and of what isn't there. The like she made before the ban stays, and is refused like any other.
+      // A like of a post or of a comment, and of what isn't there. The likes she made before the ban stay, and are refused like any other.
       expect(await refused(like(alice, first))).toEqual(refusal);
       expect(await refused(like(alice, bobs, commentId))).toEqual(refusal);
       expect(await refused(like(alice, NO_USER))).toEqual(refusal);
       expect(await refused(like(alice, bobs))).toEqual(refusal);
       expect(ok(await req(null, 'GET', `/content/${bobs}`))).toMatchObject({ likes: 1 });
+      expect(ok(await req(null, 'GET', `/content/${bobs}/comments`)).comments).toMatchObject([{ commentId, likes: 1 }]);
+      // They are still hers to take back, which adds nothing to the server; and then no longer hers to give.
+      expect(ok(await req(alice, 'DELETE', '/like', { contentId: bobs }))).toEqual({ contentId: bobs, likes: 0, wasLiked: true });
+      expect(ok(await req(alice, 'DELETE', '/like', { contentId: bobs, commentId }))).toEqual({ contentId: bobs, commentId, likes: 0, wasLiked: true });
+      expect(await refused(like(alice, bobs))).toEqual(refusal);
+      expect(await refused(like(alice, bobs, commentId))).toEqual(refusal);
       expect(ok(await req(null, 'GET', `/content/${bobs}/comments`)).comments).toMatchObject([{ commentId, likes: 0 }]);
 
       // Her post is as it was, and she can read, be written to, and take her posts and her account away.

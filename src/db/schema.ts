@@ -14,6 +14,12 @@ export interface UsersTable {
   id: string;
   /** Unique display name; never used as a key. */
   username: string;
+  /**
+   * The username as a search compares it (GET /search): lowercase, without accents, cut to 255
+   * characters (see foldUsername). Written with the username, by whatever writes that. Null only
+   * on a row that something other than the server inserted, which no search finds.
+   */
+  username_folded: ColumnType<string | null, string, string | undefined>;
   created_at: number;
   /** When the user registered or last changed their username; the compactor re-syncs their credit in Redis. */
   updated_at: number;
@@ -50,6 +56,34 @@ export interface UsersTable {
    * anyone is concerned, and its username is still taken.
    */
   deleted_at: number | null;
+  /** What the user says of themselves on their profile (PATCH /users/:userId), as they wrote it; null for one who says nothing. */
+  bio: string | null;
+  /**
+   * The addresses the user gives of where else they are found, in the order they gave them: a JSON
+   * array of http and https URLs, read with `profileLinks` (src/profile.ts). Null for one who gives none.
+   */
+  links: string | null;
+  /**
+   * The id of the user's avatar (PUT /users/:userId/avatar), which names its file in the content
+   * store: another image is another id. Null for a user who has none. The row of a closed
+   * account is purged only once this is null again (see dropAvatars).
+   */
+  avatar_id: string | null;
+  /** The content type of the user's avatar, which is the one every avatar is made as (AVATAR_TYPE in src/profile.ts); null with `avatar_id`. */
+  avatar_type: string | null;
+}
+
+/**
+ * The posts a user pinned to their profile (PUT /users/:userId/pinned/:contentId): one row for
+ * each, of which a user has MAX_PINNED_POSTS at most (src/profile.ts). Each is one of the user's
+ * own posts, and the row says nothing of whether it can be read: a post that is withheld, or set
+ * for deletion, is pinned and not shown. The row goes with the post, and with the user's account.
+ */
+export interface PinnedPostsTable {
+  user_id: string;
+  content_id: string;
+  /** When it was pinned. A profile gives the post pinned last first. */
+  created_at: number;
 }
 
 /**
@@ -72,7 +106,14 @@ export interface ContentTable {
   user_id: string;
   /** 1 if the publisher declared the content created with AI, else 0. */
   ai_generated: Generated<number>;
+  /** How many users like the content: its rows of `likes`, counted as they are added and taken away (POST and DELETE /like). */
   like_count: Generated<number>;
+  /**
+   * When a like of the content was last taken back (DELETE /like), or null if none ever was: how
+   * a compactor run finds the content that lost a like since the last one, as the row of a like
+   * that was taken back is gone (see `likes`).
+   */
+  unliked_at: Generated<number | null>;
   created_at: number;
   /** Set by DELETE /content/:id; the compactor removes the content from the feed index, then deletes it. */
   delete_requested_at: number | null;
@@ -97,13 +138,18 @@ export interface ContentTable {
   /**
    * The number of the post's last numbered write: a write of the post, an edit or a removal of a
    * comment on it, or a moderator's decision on one adds one with the row locked, and takes the
-   * number for its row in `pending_writes` (see nextSeq). A new comment and a like of one take none.
+   * number for its row in `pending_writes` (see nextSeq). A new comment, and a like of one or its
+   * taking back, take none.
    */
   seq: Generated<number>;
 }
 
-/** What a row of `pending_writes` is: a post's write, or a comment's (as it now is, removed, or liked). */
-export type PendingKind = 'post' | 'comment_put' | 'comment_remove' | 'comment_like';
+/**
+ * What a row of `pending_writes` is: a post's write, the file of one more image of that write
+ * (an image post of several images), or a comment's (as it now is, removed, or liked: a
+ * `comment_like` row is a user's like of the comment, or the taking back of it).
+ */
+export type PendingKind = 'post' | 'post_file' | 'comment_put' | 'comment_remove' | 'comment_like';
 
 /**
  * A write that committed and that the compactor hasn't applied yet: requests write nothing of a
@@ -112,11 +158,14 @@ export type PendingKind = 'post' | 'comment_put' | 'comment_remove' | 'comment_l
  */
 export interface PendingWritesTable {
   content_id: string;
-  /** The write's number among the post's (see `content.seq`); 0 for a write that took none: a new comment, a like of one. */
+  /** The write's number among the post's (see `content.seq`); 0 for a write that took none: a new comment, a like of one or its taking back. */
   seq: number;
   /**
    * What tells a post's writes that took no number apart, and makes a second one of the same fail:
-   * the comment's id for a new comment, `<commentId>:<userId>` for a like. '' on a numbered write.
+   * the comment's id for a new comment, `<commentId>:<userId>` for a like, which is one row
+   * whether the user last liked the comment or took the like back. '' on a numbered write,
+   * but for a `post_file` row, which has its post write's number: there it is the image's place
+   * among the post's images, counted from 1 ('2' for the second, which is the first to have a row).
    */
   write_key: Generated<string>;
   kind: PendingKind;
@@ -127,8 +176,44 @@ export interface PendingWritesTable {
    * give it back parsed, and SQLite as the string, so it is read with `payloadOf`.
    */
   payload: ColumnType<unknown, string | null, string | null>;
-  /** The object under staged/ that holds the file the write came with, which the request wrote once; null on a write with none. */
+  /**
+   * The object under staged/ that holds the file the write came with, which the request wrote
+   * once; null on a write with none. A post's row names its file, which for an image post of
+   * several images is the first: each of the others is named by a `post_file` row of its own.
+   */
   staged_key: string | null;
+  /**
+   * On a `comment_like` row: what it adds to the number of likes the content store has of the
+   * comment, for whoever counts the two together (see pendingLikes). 1 for a like the store
+   * doesn't have, -1 for the taking back of one it has, 0 for a row that leaves the store as it
+   * is. Null on every other kind, and on a like committed by a server from before likes could be
+   * taken back, which counts as 1.
+   */
+  net: Generated<number | null>;
+  /** When the write was made. */
+  created_at: number;
+}
+
+/**
+ * A video that is yet to be processed: the one a write of a post, or a new comment, came with
+ * (src/video). The write's commit adds the row, and the video worker deletes it in the commit
+ * that puts the processed file in the write's row of `pending_writes`. Until then the write
+ * says in its payload that it waits (`process`), and the compactor leaves it.
+ */
+export interface MediaJobsTable {
+  /** The job; for a post's video, also the id of the version of the video it makes (see StoredVideo.id). */
+  id: string;
+  /** The post the write is of, or is a comment on. */
+  content_id: string;
+  /** With `write_key`: the row of `pending_writes` that names the staged file. */
+  seq: number;
+  write_key: Generated<string>;
+  /** The comment the video came with; null on a post's. */
+  comment_id: string | null;
+  /** How many times a worker took the job: one taken more often than a video is tried is given up. */
+  attempts: Generated<number>;
+  /** Until when the worker that took the job has it; 0 on one nobody took. */
+  claimed_until: Generated<number>;
   /** When the write was made. */
   created_at: number;
 }
@@ -157,9 +242,31 @@ export interface RepostsTable {
   tag: string;
   /** Who reposted; null once that user is gone. */
   user_id: string | null;
-  /** The content's like count when it was reposted: the entry counts the likes since. */
+  /**
+   * The content's like count when it was reposted: the entry counts the likes since. One less
+   * for each like from before the repost that was taken back since, so the entry's count doesn't
+   * lose a like that wasn't its own.
+   */
   likes_before: Generated<number>;
   /** When it was reposted, which is where its entry is placed. */
+  created_at: number;
+}
+
+/**
+ * A place of a repost that an admin or a server moderator removed, which the compactor is yet
+ * to take away: the removal deleted the repost's rows of `reposts`, and left one of these for
+ * each, which says where the content's entry is, and which hashtag comes off the content (see
+ * contentWriter's unrepost). The run that has taken the place away deletes the row.
+ */
+export interface RepostRemovalsTable {
+  /** Names the row: a place can be removed, given again and removed again before a run comes by. */
+  id: string;
+  content_id: string;
+  /** The index the repost placed the content in: a hashtag it gave it, or "@<userId>", the reposter's own index. */
+  tag: string;
+  /** When the repost was made (`reposts.created_at`): the day its entry is in, and the day the summary has a copy under. */
+  reposted_at: number;
+  /** When it was removed. */
   created_at: number;
 }
 
@@ -191,9 +298,10 @@ export interface TagPairsTable {
 }
 
 /**
- * A user's like of a post: one row per user and post, as a like is given once and not taken back.
- * `content.like_count` is the running total, and `created_at` is how the compactor finds the
- * content liked since its last run. Likes of comments aren't here: they are in the content store.
+ * A user's like of a post: one row per user and post, as a like is given once. Taking it back
+ * (DELETE /like) deletes the row. `content.like_count` is the running total, and `created_at` is
+ * how the compactor finds the content liked since its last run; what lost a like since, it finds
+ * by `content.unliked_at`. Likes of comments aren't here: they are in the content store.
  */
 export interface LikesTable {
   user_id: string;
@@ -223,11 +331,40 @@ export interface FeedQueueTable {
   created_at: number;
 }
 
-/** Who moderates which hashtag. Admins and server moderators moderate every hashtag without a row. */
+/** Who moderates which hashtag: the users an admin or one of the hashtag's moderators appointed, and those whose claim to the hashtag went through (see TagClaimsTable). Admins and server moderators moderate every hashtag without a row. */
 export interface TagModeratorsTable {
   tag: string;
   user_id: string;
   created_at: number;
+}
+
+/**
+ * A user's claim to moderate a hashtag, while it waits (src/moderation/claims.ts): admins and
+ * server moderators can refuse it until `review_until`, after which the compactor makes the user
+ * a moderator of the hashtag and deletes the row. A hashtag has one claim at a time.
+ */
+export interface TagClaimsTable {
+  tag: string;
+  /** Who claims the hashtag. */
+  user_id: string;
+  /** When the claim was made. */
+  created_at: number;
+  /** Until when the claim can be refused; the compactor's first run after it grants the claim. */
+  review_until: number;
+}
+
+/** One of a hashtag's rules, which its moderators keep and anyone reads (GET /tags/:tag/rules): to a hashtag what ServerRulesTable is to the server. */
+export interface TagRulesTable {
+  id: string;
+  /** The hashtag the rule is one of. */
+  tag: string;
+  /** Where the rule comes among the hashtag's others, lowest first. A response gives its place in the list instead, counted from 1. */
+  sort_order: number;
+  /** The rule's text. */
+  body: string;
+  created_at: number;
+  /** When its text or its place was last changed by a request about it; created_at until then. */
+  updated_at: number;
 }
 
 /** A user muted on a hashtag: their new posts and updates don't get it. */
@@ -268,6 +405,30 @@ export interface TagModerationTable {
   applied_at: number | null;
 }
 
+/** As what a moderator decided about content under a hashtag: the role that let them, as it was then. */
+export type ModeratorRole = 'tag_moderator' | 'server_moderator' | 'admin';
+
+/**
+ * What moderators did to a post under a hashtag, one row for each time: the post's own record of
+ * it, which GET /content/:contentId gives with the post. `tag_moderation` holds what stands now;
+ * these rows are never changed, and go with the post.
+ */
+export interface TagModerationLogTable {
+  id: string;
+  content_id: string;
+  tag: string;
+  /** approved: the post was approved under the hashtag. removed: the hashtag was taken off the post. */
+  decision: TagDecision;
+  /** Who did it, which no response gives; null once that user is gone. */
+  moderator_id: string | null;
+  /** As what they did it, which is what a response says of them. */
+  moderator_role: ModeratorRole;
+  /** Why, as the moderator said it, for a removal that came with a reason; null otherwise. */
+  reason: string | null;
+  /** When it was done. */
+  created_at: number;
+}
+
 /** What a user has been sent: a message another user wrote them, or a notice of the server's (src/inbox.ts). */
 export interface InboxTable {
   id: string;
@@ -275,13 +436,15 @@ export interface InboxTable {
   user_id: string;
   /** 'message', or a notice's kind: what happened (post_rejected, tag_removed, tag_muted, ...). */
   kind: string;
-  /** Who wrote a message; null on a notice, and once that user is gone. */
+  /** Who wrote a message, or the post or comment that a notice of a mention is about; null on any other notice, and once that user is gone. */
   sender_id: string | null;
   /** The content a notice is about, which may be gone by the time it is read. */
   content_id: string | null;
+  /** The comment a notice of a mention is about, on the post `content_id` names; null on anything else. */
+  comment_id: string | null;
   /** The hashtag a notice is about. */
   tag: string | null;
-  /** A message's text; on a notice about content, the start of the post. */
+  /** A message's text; on a notice about content, the start of the post; on a notice with facts of its own, those as JSON (`DETAILED` in src/inbox.ts). */
   body: string | null;
   created_at: number;
   /** When its owner marked it as read; null until then. */
@@ -362,6 +525,8 @@ export interface MonetizationTable {
   clicks: Generated<number>;
   /** The content type of an image ad's image, read from its bytes; null on a text ad. */
   image_type: string | null;
+  /** The alternative text of an image ad's image, which describes it to those who can't see it; null on a text ad, and on an image ad with none. */
+  image_alt: string | null;
   /** Null: the ad appears all the time, under every hashtag. Otherwise the hashtags it is targeted at, separated by single spaces. */
   tags: string | null;
   /** The ad is shown from this instant... */
@@ -387,6 +552,20 @@ export interface ServerRulesTable {
   updated_at: number;
 }
 
+/**
+ * The words a post is found by (GET /search): one row per word and post, of the most frequent
+ * words of its text or caption and of every one of its hashtags (src/search/keywords.ts). The
+ * compactor writes them whenever it writes the post's meta file, which they are worked out from.
+ * A post that is withheld from readers keeps its rows: a search leaves it out by its own row.
+ */
+export interface SearchTermsTable {
+  /** The word or the hashtag, lowercase and without accents. */
+  term: string;
+  content_id: string;
+  /** When the post was created (`content.created_at`): what the posts with a word are ordered by. */
+  created_at: number;
+}
+
 /** One row ('compactor'): which compactor run may publish heads and delete, and until when. */
 export interface CompactorLeaseTable {
   id: string;
@@ -406,21 +585,28 @@ export interface Database {
   follows: FollowsTable;
   feed_queue: FeedQueueTable;
   pending_writes: PendingWritesTable;
+  media_jobs: MediaJobsTable;
   staged_removals: StagedRemovalsTable;
   reposts: RepostsTable;
+  repost_removals: RepostRemovalsTable;
   compactor_lease: CompactorLeaseTable;
   tag_moderators: TagModeratorsTable;
+  tag_claims: TagClaimsTable;
+  tag_rules: TagRulesTable;
   tag_mutes: TagMutesTable;
   blocked_words: BlockedWordsTable;
   moderation_queue: ModerationQueueTable;
   tag_moderation: TagModerationTable;
+  tag_moderation_log: TagModerationLogTable;
   reports: ReportsTable;
   comment_queue: CommentQueueTable;
   comment_reports: CommentReportsTable;
   inbox: InboxTable;
   user_blocks: UserBlocksTable;
+  pinned_posts: PinnedPostsTable;
   server_rules: ServerRulesTable;
   monetization: MonetizationTable;
+  search_terms: SearchTermsTable;
 }
 
 export type ContentRow = Selectable<ContentTable>;

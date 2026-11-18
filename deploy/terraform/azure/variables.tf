@@ -56,7 +56,7 @@ variable "trust_proxy" {
 }
 
 variable "compactor_cpu" {
-  description = "CPUs of the compactor's replica. The compactor is one replica that is always up; how often it makes a pass is COMPACT_INTERVAL_SECONDS in `environment` (5 by default)."
+  description = "CPUs of the compactor's replica. The compactor is one replica that is always up; how often it makes a pass is COMPACT_INTERVAL_SECONDS in `environment` (5 by default). It also processes the videos users send, with ffmpeg, which is CPU work: where videos are common, give it 2 or more (and memory to match), or set VIDEO_PROCESSING to false in `environment`."
   type        = number
   default     = 0.5
 }

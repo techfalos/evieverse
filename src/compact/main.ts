@@ -1,8 +1,10 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import pino from 'pino';
+import { startAuthorIndexing } from '../authorIndex.js';
 import { loadConfig } from '../config.js';
 import { bootstrap } from '../deps.js';
 import { createOriginSweep } from '../originSweep.js';
+import { startVideoWorker } from '../video/worker.js';
 import { createCompactor } from './compactor.js';
 
 /**
@@ -14,6 +16,10 @@ import { createCompactor } from './compactor.js';
  * Beside the passes, the process asks other servers after the posts this one holds reposts of
  * (src/originSweep.ts), so it has to reach them over https: without that, a repost learns what
  * its original became only from an attestation a client brings.
+ *
+ * It is also where the videos users send are processed (src/video/worker.ts), unless the server
+ * processes none (VIDEO_PROCESSING): the process needs ffmpeg for that, and doesn't start
+ * without it. A pass that is run by hand (`--once`) processes none.
  *
  * `--all` first rebuilds every day of every tag, and works out every hashtag's related hashtags
  * again. `--rebuild` first rebuilds the whole feed index, the summaries, the publisher credits and
@@ -67,8 +73,14 @@ if (process.argv.includes('--once')) {
   const stop = compactor.start();
   // Beside the compactor, as this is the one process that is always up: what asks other servers after the posts this one holds reposts of.
   const stopOriginSweep = (await createOriginSweep(deps, log)).start();
+  // And what indexes, by who wrote or liked them, the comments that are older than that index (src/authorIndex.ts).
+  const stopAuthorIndexing = startAuthorIndexing(deps, log);
+  // And what makes the videos users send into videos that play, where the server processes them (src/video/worker.ts).
+  const stopVideoWorker = await startVideoWorker(deps, log);
   const shutdown = async () => {
     await stopOriginSweep();
+    await stopAuthorIndexing();
+    await stopVideoWorker();
     await stop();
     await close();
     process.exit(0);

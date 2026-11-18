@@ -5,7 +5,7 @@ import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { newCommentId } from '../src/comments.js';
 import { setAdmin } from '../src/moderation/policy.js';
-import { insertPending, writeUnnumbered } from '../src/pending.js';
+import { insertPending, likeKey, payloadOf, writeUnnumbered } from '../src/pending.js';
 import { as, createTestContext, feedItems, multipart, PNG, store, storeText, TARGETS, type TestContext, type User } from './helpers.js';
 
 /** A video's bytes are stored as they came, whatever they are. */
@@ -57,6 +57,15 @@ for (const target of TARGETS) {
     const edit = (u: User, contentId: string, commentId: string, text: string) => req(u, 'PATCH', `/content/${contentId}/comments/${commentId}`, { text });
     const remove = (u: User, contentId: string, commentId: string) => req(u, 'DELETE', `/content/${contentId}/comments/${commentId}`);
     const likeComment = (u: User, contentId: string, commentId: string) => req(u, 'POST', '/like', { contentId, commentId });
+    const unlikeComment = (u: User, contentId: string, commentId: string) => req(u, 'DELETE', '/like', { contentId, commentId });
+    /**
+     * The likes of comments that wait for the compactor, "<userId> <like or unlike> <net>" of each: whose it is,
+     * whether its row makes the like or takes it back, and what the row adds to the store's number of likes.
+     */
+    const likeRows = async () =>
+      (await ctx.db.selectFrom('pending_writes').select(['write_key', 'payload', 'net']).where('kind', '=', 'comment_like').execute())
+        .map((r) => `${r.write_key.split(':')[1]} ${payloadOf<{ unlike?: true } | null>(r.payload)?.unlike ? 'unlike' : 'like'} ${r.net}`)
+        .sort();
     const rawOf = (contentId: string, commentId: string) => req(null, 'GET', `/content/${contentId}/comments/${commentId}/raw`);
 
     /**
@@ -580,6 +589,183 @@ for (const target of TARGETS) {
       expect(await pending()).toEqual([]);
       expect(await ctx.comments.likes(contentId, [sent.commentId])).toEqual([2]);
       expect(ok(await likeComment(alice, contentId, sent.commentId), 200)).toMatchObject({ likes: 2, alreadyLiked: true });
+
+      // The same of its taking back: both find the like in the store, and one of them commits the row that takes it back.
+      const neither = await Promise.all([unlikeComment(alice, contentId, sent.commentId), unlikeComment(alice, contentId, sent.commentId)]);
+      expect(neither.map((res) => res.statusCode)).toEqual([200, 200]);
+      expect(neither.map((res) => res.json().wasLiked).sort()).toEqual([false, true]);
+      expect(await likeRows()).toEqual([`${alice.userId} unlike -1`]);
+      await ctx.compactor.runOnce();
+      expect(await pending()).toEqual([]);
+      expect(await ctx.comments.likes(contentId, [sent.commentId])).toEqual([1]);
+    });
+
+    it('takes a like of a comment back before the compactor made it or after, by the one row that says what the user last asked', async () => {
+      ctx = await createTestContext(target, { settle: false });
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const carol = await ctx.register('carol');
+      const contentId = ok(await storeText(ctx, alice, 'Talk to me #news', { comments: true })).contentId;
+      const { commentId } = ok(await comment(bob, contentId, 'First'));
+      await ctx.compactor.runOnce();
+      const liked = async (u: User, status: number) => ok(await likeComment(u, contentId, commentId), status).likes;
+      const taken = async (u: User, wasLiked: boolean) => {
+        const res = ok(await unlikeComment(u, contentId, commentId), 200);
+        expect(res).toEqual({ contentId, commentId, likes: res.likes, wasLiked });
+        return res.likes;
+      };
+      /** How many likes the comment has to whoever reads it: the ones the store has. */
+      const read = async () => ok(await one(null, contentId, commentId), 200).likes;
+      const likers = async () => (await commentFiles(contentId)).filter((file) => file.startsWith('likes/')).map((file) => file.split('/')[2]);
+      const [addLike, removeLike] = [vi.spyOn(ctx.comments, 'addLike'), vi.spyOn(ctx.comments, 'removeLike')];
+
+      // A like that waits is taken back by its own row, which then leaves the store as it is; and is given again by it.
+      expect(await liked(alice, 201)).toBe(1);
+      expect(await likeRows()).toEqual([`${alice.userId} like 1`]);
+      expect(await taken(alice, true)).toBe(0);
+      expect(await likeRows()).toEqual([`${alice.userId} unlike 0`]);
+      expect(await taken(alice, false)).toBe(0);
+      expect(await liked(alice, 201)).toBe(1);
+      expect(await liked(alice, 200)).toBe(1);
+      expect(await likeRows()).toEqual([`${alice.userId} like 1`]);
+      expect(await taken(alice, true)).toBe(0);
+      expect(await liked(carol, 201)).toBe(1);
+      expect(await likeRows()).toEqual([`${alice.userId} unlike 0`, `${carol.userId} like 1`].sort());
+      expect(await read()).toBe(0);
+
+      // The run makes the like that is asked for, and nothing of the one that was given and taken back.
+      await ctx.compactor.runOnce();
+      expect(await pending()).toEqual([]);
+      expect(addLike.mock.calls.map(([, , userId]) => userId)).toEqual([carol.userId]);
+      expect(removeLike).not.toHaveBeenCalled();
+      expect(await likers()).toEqual([carol.userId]);
+      expect(await read()).toBe(1);
+
+      // A like the store has is taken back by a row that counts against it, until the compactor has taken it out of the store.
+      expect(await taken(alice, false)).toBe(1);
+      expect(await taken(carol, true)).toBe(0);
+      expect(await likeRows()).toEqual([`${carol.userId} unlike -1`]);
+      expect(await taken(carol, false)).toBe(0);
+      expect(await read()).toBe(1);
+      // Given again before that, the row leaves the store as it is, which has the like.
+      expect(await liked(carol, 201)).toBe(1);
+      expect(await likeRows()).toEqual([`${carol.userId} like 0`]);
+      expect(await liked(alice, 201)).toBe(2);
+      addLike.mockClear();
+      await ctx.compactor.runOnce();
+      expect(await pending()).toEqual([]);
+      expect(addLike.mock.calls.map(([, , userId]) => userId)).toEqual([alice.userId]);
+      expect(removeLike).not.toHaveBeenCalled();
+      expect(await likers()).toEqual([alice.userId, carol.userId].sort());
+
+      // Taken back for good: the like goes from the store, and from the index of what its user liked.
+      expect(await taken(carol, true)).toBe(1);
+      await ctx.compactor.runOnce();
+      expect(await pending()).toEqual([]);
+      expect(removeLike.mock.calls.map(([, , userId]) => userId)).toEqual([carol.userId]);
+      expect(await likers()).toEqual([alice.userId]);
+      expect(await read()).toBe(1);
+      expect(await ctx.comments.likedBy(carol.userId, null, 10)).toEqual([]);
+      expect(await ctx.comments.likedBy(alice.userId, null, 10)).toEqual([{ commentId, postId: contentId }]);
+      expect(await liked(alice, 200)).toBe(1);
+
+      // A run that is killed once it took a like away leaves the row, which the next run applies again, to a store that lacks the like.
+      expect(await taken(alice, true)).toBe(0);
+      killAfter(ctx.comments, 'removeLike');
+      await ctx.compactor.runOnce();
+      expect(await likeRows()).toEqual([`${alice.userId} unlike -1`]);
+      expect(await likers()).toEqual([]);
+      expect(await taken(alice, false)).toBe(0);
+      await ctx.compactor.runOnce();
+      expect(await pending()).toEqual([]);
+      expect(await read()).toBe(0);
+      expect(await ctx.comments.likes(contentId, [commentId])).toEqual([0]);
+      expect(await liked(alice, 201)).toBe(1);
+    });
+
+    it('keeps what a user asked of their like while the compactor was applying the row that said otherwise', async () => {
+      ctx = await createTestContext(target, { settle: false });
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const contentId = ok(await storeText(ctx, alice, 'Talk to me #news', { comments: true })).contentId;
+      const { commentId } = ok(await comment(bob, contentId, 'First'));
+      await ctx.compactor.runOnce();
+      const likers = async () => (await commentFiles(contentId)).filter((file) => file.startsWith('likes/')).map((file) => file.split('/')[2]);
+      /** Has the next call of a comment store's method do its work, and then a request be answered, before the run settles the row. */
+      const then = (method: 'addLike' | 'removeLike', request: () => Promise<unknown>) => {
+        const real = ctx.comments[method].bind(ctx.comments);
+        vi.spyOn(ctx.comments, method).mockImplementationOnce(async (postId, commentId, userId) => {
+          await real(postId, commentId, userId);
+          await request().catch((err) => crossed.push(err));
+        });
+      };
+
+      // The like is taken back once the run has made it, and before the run deletes its row: the row stays, and now counts against the store.
+      ok(await likeComment(alice, contentId, commentId));
+      then('addLike', async () => expect(ok(await unlikeComment(alice, contentId, commentId), 200)).toMatchObject({ wasLiked: true }));
+      await ctx.compactor.runOnce();
+      expect(await likers()).toEqual([alice.userId]);
+      expect(await likeRows()).toEqual([`${alice.userId} unlike -1`]);
+      expect(ok(await unlikeComment(alice, contentId, commentId), 200)).toEqual({ contentId, commentId, likes: 0, wasLiked: false });
+      // The next run takes it out of the store. Given again as that happens, it is a like the store then lacks.
+      then('removeLike', async () => expect(ok(await likeComment(alice, contentId, commentId))).toMatchObject({ alreadyLiked: false }));
+      await ctx.compactor.runOnce();
+      expect(await likers()).toEqual([]);
+      expect(await likeRows()).toEqual([`${alice.userId} like 1`]);
+      expect(ok(await likeComment(alice, contentId, commentId), 200)).toEqual({ contentId, commentId, likes: 1, alreadyLiked: true });
+      // Asked twice as the run applies it, the row says what it said, and goes as applied.
+      then('addLike', async () => {
+        ok(await unlikeComment(alice, contentId, commentId), 200);
+        ok(await likeComment(alice, contentId, commentId));
+      });
+      await ctx.compactor.runOnce();
+      expect(await pending()).toEqual([]);
+      expect(await likers()).toEqual([alice.userId]);
+      expect(ok(await likeComment(alice, contentId, commentId), 200)).toEqual({ contentId, commentId, likes: 1, alreadyLiked: true });
+    });
+
+    it('takes a like that was committed before likes could be taken back for one the store lacks, and no like back from a comment that is deleted', async () => {
+      ctx = await createTestContext(target, { settle: false });
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const contentId = ok(await storeText(ctx, alice, 'Talk to me #news', { comments: true })).contentId;
+      const { commentId } = ok(await comment(bob, contentId, 'First'));
+      const other = ok(await comment(bob, contentId, 'Second')).commentId;
+      await ctx.compactor.runOnce();
+
+      // As a server from before wrote it: the row says who likes the comment, and not what it comes to.
+      await writeUnnumbered(ctx.db, target.dialect, contentId, {}, (trx) =>
+        insertPending(trx, { contentId, key: likeKey(commentId, alice.userId), kind: 'comment_like', commentId, payload: { userId: alice.userId }, at: ctx.clock.now }),
+      );
+      expect(await likeRows()).toEqual([`${alice.userId} like null`]);
+      expect(ok(await likeComment(alice, contentId, commentId), 200)).toMatchObject({ likes: 1, alreadyLiked: true });
+      expect(ok(await unlikeComment(alice, contentId, commentId), 200)).toMatchObject({ likes: 0, wasLiked: true });
+      expect(await likeRows()).toEqual([`${alice.userId} unlike 0`]);
+      ok(await likeComment(alice, contentId, commentId));
+      // And one a run finds as it was written is made.
+      await writeUnnumbered(ctx.db, target.dialect, contentId, {}, (trx) =>
+        insertPending(trx, { contentId, key: likeKey(commentId, bob.userId), kind: 'comment_like', commentId, payload: { userId: bob.userId }, at: ctx.clock.now }),
+      );
+      expect(ok(await one(null, contentId, commentId), 200).likes).toBe(0);
+      await ctx.compactor.runOnce();
+      expect(await pending()).toEqual([]);
+      expect(await ctx.comments.likes(contentId, [commentId])).toEqual([2]);
+
+      // The taking back of a like that was under way as the comment was deleted is refused, and one that committed before goes with the comment.
+      ok(await likeComment(alice, contentId, other));
+      await ctx.compactor.runOnce();
+      beforeCommit(() => remove(bob, contentId, other));
+      expect(refusal(await unlikeComment(alice, contentId, other))).toEqual([404, 'comment not found']);
+      expect(refusal(await unlikeComment(alice, contentId, other))).toEqual([404, 'comment not found']);
+      ok(await unlikeComment(alice, contentId, commentId), 200);
+      ok(await remove(bob, contentId, commentId), 200);
+      expect(await kinds()).toEqual(['comment_like', 'comment_remove', 'comment_remove']);
+      const removeLike = vi.spyOn(ctx.comments, 'removeLike');
+      expect(await ctx.apply()).toBe(true);
+      expect(removeLike).not.toHaveBeenCalled();
+      expect(await pending()).toEqual([]);
+      expect(await commentFiles(contentId)).toEqual([]);
+      expect(await ctx.comments.likedBy(alice.userId, null, 10)).toEqual([]);
     });
 
     // SQLite has one connection, which runs one transaction at a time: there is nothing of it to hold open beside another.

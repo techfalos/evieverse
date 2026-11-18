@@ -1,15 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import type { AppDeps } from './deps.types.js';
 import { plainText } from './format.js';
-import type { Notice } from './inbox.types.js';
-import type { MessageKey } from './language.js';
+import type { InboxRow, Notice } from './inbox.types.js';
+import { msg, type MessageKey } from './language.js';
+import type { Message } from './language.types.js';
 import { effectiveMeta } from './pending.js';
 import type { ContentMeta } from './storage/index.js';
+import { iso } from './time.js';
 
 /**
  * A user's inbox (the table `inbox`) holds what they have been sent: the messages other users
- * wrote them, and the server's notices of what moderation did to their posts and of their mutes
- * on hashtags. This is what a notice is, and how one is left; the routes are in routes/inbox.ts.
+ * wrote them, and the server's notices of what moderation did to their posts, of their mutes
+ * on hashtags, of the claims to moderate a hashtag (src/moderation/claims.ts), of being made a
+ * hashtag's moderator or no longer being one, and of the posts
+ * and comments that mention them (src/mentions.ts). This is what a
+ * notice is, and how one is left; the routes are in routes/inbox.ts.
  */
 
 /** The longest message one user can send another, which is what `inbox.body` holds. */
@@ -25,6 +30,7 @@ const EXCERPT_CHARS = 200;
  *   post_accepted      a server moderator or an admin accepted the post from the moderation queue
  *   post_rejected      ...or rejected it there, which deletes it
  *   post_deleted       an admin deleted the post
+ *   repost_removed     a server moderator or an admin removed the user's repost of the post
  *   tag_removed        a moderator of the hashtag removed it from the post
  *   last_tag_removed   ...and it was the post's last, so the post is in no hashtag's feed
  *   tag_muted          a moderator of the hashtag muted the user on it
@@ -35,11 +41,29 @@ const EXCERPT_CHARS = 200;
  *                      admin, or a server moderator or an admin from the report queue
  *   user_banned        a server moderator or an admin banned the user
  *   user_unbanned      ...or ended the ban
+ *   csam_match_refused the pdq trust plugin found an image that matches its list of hashes of known
+ *                      child sexual abuse material, and the post or comment was refused. Left for
+ *                      every admin, by the plugin (src/plugins/trust/pdq/report.ts): see DETAILED
+ *   csam_match_held    ...or was stored, and waits in the moderation queue, on a server that deletes
+ *                      nothing on arrival
+ *   post_mention       a post that was published mentions the user (`@` and their name, in its text
+ *                      or caption). Left by notifyMentions (src/mentions.ts), with who published
+ *                      it as the row's sender: see MENTIONS
+ *   comment_mention    ...or a comment does, which the row names too (`comment_id`), with its author
+ *                      as the sender
+ *   tag_claimed        a user claimed the hashtag, to moderate it. Left for every admin and server
+ *                      moderator (src/moderation/claims.ts), who can refuse the claim while it
+ *                      waits: see DETAILED
+ *   tag_claim_granted  the user's claim to the hashtag went through: they moderate it now
+ *   tag_claim_refused  ...or an admin or a server moderator refused it
+ *   tag_moderator_added    an admin, or a moderator of the hashtag, made the user a moderator of it
+ *   tag_moderator_removed  ...or ended their time as one
  */
 export const NOTICES = {
   post_accepted: 'notice.post_accepted',
   post_rejected: 'notice.post_rejected',
   post_deleted: 'notice.post_deleted',
+  repost_removed: 'notice.repost_removed',
   tag_removed: 'notice.tag_removed',
   last_tag_removed: 'notice.last_tag_removed',
   tag_muted: 'notice.tag_muted',
@@ -47,8 +71,20 @@ export const NOTICES = {
   comment_accepted: 'notice.comment_accepted',
   comment_rejected: 'notice.comment_rejected',
   comment_deleted: 'notice.comment_deleted',
+  video_failed: 'notice.video_failed',
+  video_update_failed: 'notice.video_update_failed',
+  comment_video_failed: 'notice.comment_video_failed',
   user_banned: 'notice.user_banned',
   user_unbanned: 'notice.user_unbanned',
+  csam_match_refused: 'notice.csam_match_refused',
+  csam_match_held: 'notice.csam_match_held',
+  post_mention: 'notice.post_mention',
+  comment_mention: 'notice.comment_mention',
+  tag_claimed: 'notice.tag_claimed',
+  tag_claim_granted: 'notice.tag_claim_granted',
+  tag_claim_refused: 'notice.tag_claim_refused',
+  tag_moderator_added: 'notice.tag_moderator_added',
+  tag_moderator_removed: 'notice.tag_moderator_removed',
 } as const satisfies Record<string, MessageKey>;
 
 export type NoticeKind = keyof typeof NOTICES;
@@ -56,14 +92,86 @@ export type NoticeKind = keyof typeof NOTICES;
 /** The `kind` of a message another user wrote; every other kind is a notice's. */
 export const MESSAGE = 'message';
 
+/**
+ * The notices that quote no post, and are of something that happened: their `body` is the facts
+ * of it as JSON, each a text or a number. A response gives them as the notice's `details`, in
+ * place of an excerpt, and the notice's message says them by their names ({username}, {at}).
+ * The notice of a claim to a hashtag is one: who claims it, and until when the claim can be refused.
+ */
+const DETAILED: ReadonlySet<string> = new Set<NoticeKind>(['csam_match_refused', 'csam_match_held', 'tag_claimed']);
+
+/**
+ * The notices of a mention, which are the ones that have a sender: who wrote the post or the
+ * comment that mentions the user. A response gives them as the notice's `from`, as a message's
+ * is given, and the notice's message names them ({username}). Each is here with the message
+ * that words it when it has no sender any more, since their account is gone.
+ */
+const MENTIONS = {
+  post_mention: 'notice.post_mention_unnamed',
+  comment_mention: 'notice.comment_mention_unnamed',
+} as const satisfies Partial<Record<NoticeKind, MessageKey>>;
+
+/** Whether the `kind` of an inbox row is a mention's (see MENTIONS). */
+const isMention = (kind: string): kind is keyof typeof MENTIONS => Object.hasOwn(MENTIONS, kind);
+
 /** Whether the `kind` of an inbox row is one of NOTICES, which has words to say it with. Not a message's, and not a kind this build doesn't know. */
 export const isNotice = (kind: string): kind is NoticeKind => Object.hasOwn(NOTICES, kind);
+
+/** The facts a notice's body holds, for a notice that holds them (see DETAILED). Null for any other, and for a body that isn't an object of them. */
+function detailsOf({ kind, body }: Pick<InboxRow, 'kind' | 'body'>): Record<string, string | number> | null {
+  if (!DETAILED.has(kind) || body === null) return null;
+  try {
+    const facts: unknown = JSON.parse(body);
+    if (typeof facts !== 'object' || facts === null || Array.isArray(facts)) return null;
+    return Object.fromEntries(Object.entries(facts).filter((fact): fact is [string, string | number] => typeof fact[1] === 'string' || typeof fact[1] === 'number'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What is in an inbox, as responses give it: the inbox's own list, and its user's export. A
+ * message has who wrote it and its text. A notice has its kind, the post and hashtag it is
+ * about, the start of that post, and what it says, which `say` puts in its reader's language.
+ * One that holds facts in place of a post's start (see DETAILED) has them as `details`. The
+ * notice of a mention has who made it (`from`, as a message has), the post it is in, the comment
+ * if it is in one (`commentId`), and the start of the text that mentions the user.
+ */
+export function inboxItem(r: InboxRow, say: (text: Message) => string) {
+  const details = detailsOf(r);
+  const times = { sentAt: iso(r.created_at), readAt: r.read_at === null ? null : iso(r.read_at) };
+  // No sender: their account is gone.
+  const from = r.sender_id !== null && r.username !== null ? { userId: r.sender_id, username: r.username } : null;
+  if (r.kind === MESSAGE) {
+    return {
+      messageId: r.id,
+      kind: r.kind,
+      from,
+      text: r.body ?? '',
+      ...times,
+    };
+  }
+  // A notice is worded by its kind, and a mention whose sender is gone in words that name nobody.
+  const key = !isNotice(r.kind) ? null : isMention(r.kind) && !from ? MENTIONS[r.kind] : NOTICES[r.kind];
+  return {
+    messageId: r.id,
+    kind: r.kind,
+    ...(isMention(r.kind) && { from }),
+    ...(r.content_id !== null && { contentId: r.content_id }),
+    ...(r.comment_id !== null && { commentId: r.comment_id }),
+    ...(r.tag !== null && { tag: r.tag }),
+    ...(details ? { details } : r.body !== null && { excerpt: r.body }),
+    // A kind this build doesn't know (left by a newer one) is shown by its name.
+    text: key ? say(msg(key, { ...details, tag: r.tag ?? '', ...(from && { username: from.username }) })) : r.kind,
+    ...times,
+  };
+}
 
 /**
  * The start of a text, as a notice quotes it. Null for no text at all. A `formatted` text (a post's,
  * a caption, a comment's) is quoted as it reads, without its formatting.
  */
-function excerpt(text: string | null | undefined, formatted = true): string | null {
+export function excerpt(text: string | null | undefined, formatted = true): string | null {
   if (!text) return null;
   // By code point, so the cut never splits a character in two.
   const chars = [...(formatted ? plainText(text) : text).replace(/\s+/g, ' ').trim()];

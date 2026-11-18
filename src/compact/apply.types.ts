@@ -9,4 +9,10 @@ export interface Applied {
    * the run leaves their rows in the feed queue alone, for the run that does apply it.
    */
   failed: Set<string>;
+  /**
+   * The posts whose newest write waits for its video to be processed (see PostPayload.process):
+   * nothing of them was applied, and nothing failed. The run leaves their rows in the feed
+   * queue alone, as it does a failed write's, for the run that applies the write.
+   */
+  waiting: Set<string>;
 }

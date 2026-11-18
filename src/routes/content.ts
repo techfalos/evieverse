@@ -3,25 +3,43 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { attest, signingKeys } from '../attestation.js';
 import { authenticate } from '../auth/apiKey.js';
-import { contentNotFound, loadPublished, loadReadable, ORIGIN_GONE, PENDING_REVIEW, publisherOf, requireMeta, takesComments } from '../content.js';
+import { contentNotFound, creditOf, imageNotFound, imagesOf, loadPublished, loadReadable, ORIGIN_GONE, PENDING_REVIEW, PROCESSING, publisherOf, requireMeta, requirePost, takesComments, videoProcessing } from '../content.js';
 import { setForDeletion } from '../deletion.js';
 import type { AppDeps } from '../deps.types.js';
-import { badRequest, forbidden, HttpError } from '../http/errors.js';
+import { badRequest, forbidden, HttpError, notFound } from '../http/errors.js';
 import { say } from '../http/language.js';
 import { perMinute } from '../http/rateLimitStore.js';
 import { Credentials } from '../http/schemas.js';
 import { notify } from '../inbox.js';
 import { msg } from '../language.js';
+import { tagActionItem, tagActions } from '../moderation/tagDecisions.js';
 import { adRecord, eligibleAds } from '../monetization.js';
 import type { PublishedAd } from '../monetization.types.js';
-import { payloadBytes, pendingPost } from '../pending.js';
-import { originMediaUrl, ownAddress, postAddress, previewOf } from '../posts.js';
-import type { BytesOwner, ContentStore, Publisher } from '../storage/index.js';
+import { payloadBytes, pendingImage, pendingPost } from '../pending.js';
+import { altsOf, imageCount, imageUrl, originMediaUrl, ownAddress, postAddress, previewOf, videoFileUrl } from '../posts.js';
+import { MEDIA_FILE, type BytesOwner, type ContentStore, type Publisher } from '../storage/index.js';
 import { indexAuthor } from '../tagfeed/layout.js';
 import { DAY, iso } from '../time.js';
+import { videoFileType } from '../video/files.js';
 
 /** The path of a piece of content: its id. */
 const Params = z.object({ contentId: z.string().uuid() });
+
+/** The path of one image of an image post: the post's id, and the image's place among its images, counted from 1. */
+const ImageParams = Params.extend({ image: z.coerce.number().int().min(1) });
+
+/** The path of a file of a post's processed video: the post's id, the id of the version of its video, and the file's name (see MEDIA_FILE). */
+const VideoParams = Params.extend({ videoId: z.string().uuid(), file: z.string().regex(MEDIA_FILE) });
+
+/**
+ * How long a reader may keep a file of a processed video, as `cache-control` says it: a day.
+ * The file never changes (a new video has a new address), but its post may be deleted, or
+ * taken back to the moderation queue, and a day is how long a copy somebody kept outlasts that.
+ */
+const VIDEO_FILE_CACHE = 'public, max-age=86400';
+
+/** 404 for a file a post's processed video doesn't have, and for any of a post that has no such video. */
+const videoFileNotFound = () => notFound(msg('content.video_file_not_found'));
 
 /**
  * Sent with a post's bytes, which are a user's, when this server streams them, and with those of
@@ -50,9 +68,18 @@ export function rawHeaders(contentType: string) {
  *
  * `staged`: the bytes are a staged file, which the compactor deletes once it has made it its
  * post's or its comment's. They are looked for first, and false is returned, with nothing sent,
- * if they are gone: they are then where the post's, or the comment's, are kept.
+ * if they are gone: they are then where the post's, or the comment's, are kept. So are the
+ * bytes of an image after the first of an image post, which an update with fewer images
+ * deletes: false is returned for one that is gone. `headers` go out with bytes that are
+ * streamed from here, and not with a redirect.
  */
-export async function sendBytes(reply: FastifyReply, content: ContentStore, of: BytesOwner, typeOf: () => Promise<string> | string, { staged = false } = {}): Promise<boolean> {
+export async function sendBytes(
+  reply: FastifyReply,
+  content: ContentStore,
+  of: BytesOwner,
+  typeOf: () => Promise<string> | string,
+  { staged = false, headers = {} }: { staged?: boolean; headers?: Record<string, string> } = {},
+): Promise<boolean> {
   const found = staged ? await content.statIfThere(of) : undefined;
   if (found === null) return false;
   const signed = await content.signedUrl(of);
@@ -64,7 +91,7 @@ export async function sendBytes(reply: FastifyReply, content: ContentStore, of: 
   const bytes = staged ? await content.streamIfThere(of) : await content.stream(of);
   if (!bytes) return false;
   const type = contentType ?? (await typeOf());
-  reply.headers(rawHeaders(type));
+  reply.headers({ ...rawHeaders(type), ...headers });
   reply.header('content-type', type);
   reply.header('content-length', String(size));
   reply.send(bytes);
@@ -96,14 +123,39 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
   }
 
   /**
-   * retrieve_content: the publisher's credit (their userId and username) first, then the preview, the
+   * retrieve_content: the publisher's credit first (their userId and username, and where their
+   * avatar is read, `avatarUrl`, if they have one: see creditOf), then the preview, the
    * whole text or caption, and hashtags. `status: "pending_review"` on content that waits in the
    * moderation queue. Who may read it is in loadReadable. `ad`, last, is the ad to show at the
    * end of the post (see postAd); content that waits in the moderation queue has none.
    *
+   * `mentions`, on a post whose text or caption mentions users (src/mentions.ts): each with the
+   * name the text has them by. The text and the preview are read with them, to show each
+   * `@name` of theirs as a link to the user's profile (see parseFormatted).
+   *
    * `reposts`, on a post that was reposted (src/reposts.ts): each repost, oldest first, with who
    * made it, the hashtags it gave the post that the post still has from it, and when. `likes` is
    * the post's one count, all of them, whichever feed a like came from.
+   *
+   * `moderation`, on a post a hashtag's moderator decided about (src/moderation/tagDecisions.ts):
+   * the post's record of it, oldest first. Each says what was done (`tag_removed`, or
+   * `tag_approved`) under which hashtag, as what the moderator did it (`by`: `tag_moderator`,
+   * `server_moderator` or `admin`, and never who), when, the `reason` a removal was given, and
+   * the words to show a reader (`text`), in the language the request is answered in: "#cars was
+   * removed from this post by a moderator of the hashtag: it has no cars in it".
+   *
+   * `images`, on an image post: its images in their order, each with where it is read
+   * (`contentUrl` for the first, and `contentUrl`/2, /3 and so on for the ones after it), its
+   * content type and its size. One for a post of one image, several for an album, whose preview
+   * says how many (`imageCount`). `mimeType` and `size` are the first's. An image its publisher
+   * described has that as its `alt`, the text to give it for those who can't see it, and the
+   * preview has them all, in the images' order (`alt`).
+   *
+   * `preview.video`, on a video post whose video the server processed (src/video): its size
+   * and length, a poster to show before it plays (`poster`), and its adaptive stream (`hls`,
+   * see GET /content/:contentId/video/:videoId/:file). `contentUrl` is then an MP4 that plays
+   * anywhere. `processing: true` on a post whose video is still being processed: it is read as
+   * it was written, but is in no feed yet, and its video isn't there to play (see /raw).
    *
    * `origin`, on a repost of a post on another server: the original's address and who published
    * it there, with `publisher` the one who reposted it here, and `attestedAt`, when the original's
@@ -123,15 +175,17 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
     const { contentId } = Params.parse(req.params);
     const row = await loadReadable(db, req, contentId);
     // The row says whose the content is and how liked; what it is, is in the meta file beside its bytes.
-    const [meta, reposts] = await Promise.all([requireMeta({ db, content }, contentId), repostsMade(contentId)]);
+    const [{ meta, processing }, reposts, actions] = await Promise.all([requirePost({ db, content }, contentId), repostsMade(contentId), tagActions(db, contentId)]);
     const ad = row.queued || row.gone ? undefined : await postAd(req, meta.tags);
     return {
-      publisher: publisherOf(row),
+      publisher: creditOf(row, config.publicBaseUrl),
       contentId: row.id,
       ...(row.queued && PENDING_REVIEW),
       ...(row.gone && ORIGIN_GONE),
+      ...(processing && PROCESSING),
       preview: previewOf(meta, config.publicBaseUrl),
       ...(meta.text !== undefined && { text: meta.text }),
+      ...(meta.mentions?.length && { mentions: meta.mentions }),
       tags: meta.tags,
       likes: row.like_count,
       mimeType: meta.mimeType,
@@ -139,9 +193,11 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
       comments: takesComments(meta),
       ...(!meta.origin && { size: meta.size }),
       contentUrl: `/content/${row.id}/raw`,
+      ...(imagesOf(meta) && { images: imagesOf(meta) }),
       createdAt: iso(row.created_at),
       updatedAt: iso(meta.updatedAt),
       ...(reposts.length > 0 && { reposts }),
+      ...(actions.length > 0 && { moderation: actions.map((action) => tagActionItem(action, (text) => say(req, text))) }),
       ...(meta.origin && {
         origin: {
           ...meta.origin,
@@ -179,8 +235,9 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
   /**
    * The attestation of a post: what this server says the post is, signed with its key, for
    * whoever reposts the post on another server to carry there (src/attestation.ts). It says the
-   * post's address here, its publisher, its content type, its AI declaration and its preview, as
-   * of now. For anyone, with no key: a post anyone can repost is one anyone can read. It is good
+   * post's address here, its publisher, its content type, its AI declaration and its preview
+   * (with how many images it has, for an image post of several, the alternative texts of its
+   * images, and what a processed video is: see StoredVideo), as of now. For anyone, with no key: a post anyone can repost is one anyone can read. It is good
    * for a few minutes, so it is asked for when it is used, and nothing in between keeps it.
    *
    * Only of a published post: one that waits in the moderation queue, or is set for deletion, is
@@ -193,7 +250,9 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    * repost of the post to hide it (POST /repost/refresh there, or that server's own asking, see
    * src/originSweep.ts), and to delete it if the post stays gone. It is given
    * for whatever isn't published, which is all a 404 says of it: a post that was deleted, one that
-   * waits in the moderation queue, and an id that was never a post's.
+   * waits in the moderation queue, and an id that was never a post's. A new post whose video is
+   * still being processed isn't published yet either; an update that is, is attested as the
+   * post was before it.
    *
    * 400 on a server that signs nothing (it has no REPOSTS_SIGNING_KEYS, or no PUBLIC_BASE_URL to
    * say where its posts are). Its 404 is a bare one.
@@ -204,15 +263,25 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    */
   app.get('/content/:contentId/attestation', { config: perMinute(config.reposts.attestationRateLimitPerMinute) }, async (req, reply) => {
     const { contentId } = Params.parse(req.params);
-    const row = await loadPublished(db, contentId).catch((err) => {
-      if (!(err instanceof HttpError) || err.statusCode !== 404 || !signingKey || ownBase === null) throw err;
+    /** The 404 of a post that isn't published, signed where this server signs (see above). */
+    const unpublished = (err: unknown) => {
+      if (!(err instanceof HttpError) || err.statusCode !== 404 || !signingKey || ownBase === null) return err;
       const gone = attest(signingKey, { url: postAddress(ownBase, contentId.toLowerCase()), gone: true }, now());
-      throw new HttpError(404, err.text, undefined, { gone }, { 'cache-control': 'no-store' });
+      return new HttpError(404, err.text, undefined, { gone }, { 'cache-control': 'no-store' });
+    };
+    const row = await loadPublished(db, contentId).catch((err) => {
+      throw unpublished(err);
     });
-    const meta = await requireMeta({ db, content }, contentId);
+    const post = await requirePost({ db, content }, contentId);
+    // A write whose video is still being processed isn't published yet: what is, is the post as it was before, or nothing.
+    const meta = post.processing ? await content.getMeta(contentId) : post.meta;
+    if (!meta) throw unpublished(contentNotFound());
     if (meta.origin) throw new HttpError(409, msg('attestation.is_repost', { url: meta.origin.url }), undefined, { origin: { url: meta.origin.url } });
     if (!signingKey || ownBase === null) throw badRequest(msg('attestation.off'));
     const { preview } = meta;
+    const text = preview.kind !== 'text' && preview.kind !== 'link' && preview.text ? { text: preview.text } : {};
+    const alt = altsOf(preview);
+    const video = preview.kind === 'video' ? preview.video : undefined;
     reply.header('cache-control', 'no-store');
     return {
       attestation: attest(
@@ -222,7 +291,16 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
           publisher: publisherOf(row),
           mimeType: meta.mimeType,
           aiGenerated: row.ai_generated === 1,
-          preview: preview.kind === 'text' ? { kind: 'text', text: preview.text } : preview.kind === 'link' ? { kind: 'link', url: preview.url } : { kind: preview.kind, ...(preview.text && { text: preview.text }) },
+          preview:
+            preview.kind === 'text'
+              ? { kind: 'text', text: preview.text }
+              : preview.kind === 'link'
+                ? { kind: 'link', url: preview.url }
+                : preview.kind === 'image'
+                  ? { kind: 'image', ...text, ...(imageCount(preview) > 1 && { imageCount: imageCount(preview) }), ...(alt && { alt }) }
+                  : preview.kind === 'video'
+                    ? { kind: 'video', ...text, ...(video && { video: { id: video.id, width: video.width, height: video.height, duration: video.duration } }) }
+                    : { kind: 'audio', ...text },
         },
         now(),
       ),
@@ -245,29 +323,121 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    * A write the compactor hasn't applied yet is served as written, like the content itself (see
    * requireMeta): a file from where it is staged, and a text or a link's URL from the write's
    * row, which holds it.
+   *
+   * Not a video the server is still processing (src/video): the file as it was sent is never
+   * served, since it says what the processed one doesn't (where it was filmed, and when). Until
+   * it is ready, an update's bytes are the ones the post had, and a new post has none: 404,
+   * which says so. Once it is, these are an MP4 that plays anywhere.
+   *
+   * Of an image post of several images, these are the first's: each of the others is at
+   * /raw/:image.
    */
   app.get('/content/:contentId/raw', { compress: false }, async (req, reply) => {
     const { contentId } = Params.parse(req.params);
+    return sendRaw(req, reply, contentId, 1);
+  });
+
+  /**
+   * The bytes of one image of an image post, by its place among the post's images, counted from
+   * 1: /raw/2 is the second image of an album, and /raw/1 is /raw. They are read as /raw reads
+   * the post's bytes, by whoever may read those, from wherever the image is by now: staged,
+   * for a write the compactor hasn't applied, or with the post's bytes. 404 past the last of
+   * the post's images, which for a post that isn't an album is any after the first.
+   *
+   * On a repost of a post on another server, a redirect to that image of the original, on its
+   * own server.
+   */
+  app.get('/content/:contentId/raw/:image', { compress: false }, async (req, reply) => {
+    const { contentId, image } = ImageParams.parse(req.params);
+    return sendRaw(req, reply, contentId, image);
+  });
+
+  /**
+   * A file of a post's processed video (src/video), by the id of that version of the video
+   * (`preview.video.id`) and the file's name: its poster (`poster.jpg`), the master playlist
+   * of its adaptive stream (`master.m3u8`), and what that leads to, a playlist for each size
+   * (`720p.m3u8`) and the segments each of those lists (`720p_00000.ts`). A post's preview
+   * gives the first two (`preview.video.poster`, `preview.video.hls`), and a player finds the
+   * rest from the playlists, which name them by their names alone, beside themselves. Read by
+   * whoever may read the post (see loadReadable).
+   *
+   * A playlist is always sent from here, as text, so that what it names is asked for here
+   * too, whoever may read it then. A segment and the poster are a redirect to the store where
+   * it can sign links, else streamed from here. They never change: an update with another
+   * video has another id. So they can be kept for as long as a reader likes.
+   *
+   * 404 for a file the video doesn't have, for a version of the video the post no longer has,
+   * and for a post that has no processed video. On a repost of a post on another server, a
+   * redirect to that file of the original, on its own server.
+   */
+  app.get('/content/:contentId/video/:videoId/:file', { compress: false }, async (req, reply) => {
+    const { contentId, videoId, file } = VideoParams.parse(req.params);
+    const row = await loadReadable(db, req, contentId);
+    if (row.origin_hash !== null) {
+      const { origin } = await requireMeta({ db, content }, contentId);
+      if (origin) return reply.redirect(videoFileUrl(originMediaUrl(origin), videoId, file), 302);
+    }
+    const of = { contentId, video: videoId, file };
+    const type = videoFileType(file);
+    if (file.endsWith('.m3u8')) {
+      const playlist = await content.streamIfThere(of);
+      if (!playlist) throw videoFileNotFound();
+      reply.header('content-type', type);
+      reply.header('x-content-type-options', 'nosniff');
+      reply.header('cache-control', row.queued || row.gone ? 'private, no-store' : VIDEO_FILE_CACHE);
+      return reply.send(playlist);
+    }
+    // Whoever may read the post may keep the file, where it is sent from here; a link to the store is good for a while only, and isn't kept.
+    const headers = { 'cache-control': row.queued || row.gone ? 'private, no-store' : VIDEO_FILE_CACHE };
+    if (!(await sendBytes(reply, content, of, () => type, { staged: true, headers }))) throw videoFileNotFound();
+    return reply;
+  });
+
+  /** Answers with the content's bytes (GET /content/:contentId/raw), or for an image post, with those of its image number `image` (/raw/:image). */
+  async function sendRaw(req: FastifyRequest, reply: FastifyReply, contentId: string, image: number): Promise<FastifyReply> {
     const row = await loadReadable(db, req, contentId);
     const pending = await pendingPost(db, contentId);
     if (row.origin_hash !== null) {
-      const { origin } = pending?.meta ?? (await requireMeta({ db, content }, contentId));
-      if (origin) return reply.redirect(originMediaUrl(origin), 302);
+      const { origin, preview } = pending?.meta ?? (await requireMeta({ db, content }, contentId));
+      if (origin) {
+        if (image > imageCount(preview)) throw imageNotFound();
+        return reply.redirect(imageUrl(originMediaUrl(origin), image), 302);
+      }
     }
 
-    if (pending?.stagedKey) {
-      if (await sendBytes(reply, content, { staged: pending.stagedKey }, () => pending.meta.mimeType, { staged: true })) return reply;
-    } else if (pending) {
-      const { bytes, mimeType } = payloadBytes(pending.meta);
-      reply.headers(rawHeaders(mimeType));
-      reply.header('content-type', mimeType);
-      reply.header('content-length', String(bytes.length));
-      return reply.send(bytes);
+    if (pending?.processing) {
+      // Nothing of a video as it was sent: what the post had before, for an update, and for a new post, nothing yet.
+      if (image > 1) throw imageNotFound();
+      if (!(await content.statIfThere(contentId))) throw videoProcessing();
+      await sendBytes(reply, content, contentId, async () => (await content.getMeta(contentId))?.mimeType ?? 'application/octet-stream');
+      return reply;
+    }
+    if (pending) {
+      if (image > imageCount(pending.meta.preview)) throw imageNotFound();
+      // The first waits where the write's row says, and each of the others where a row of its own does.
+      const staged = image === 1 ? pending.stagedKey : await pendingImage(db, contentId, pending.seq, image);
+      if (staged) {
+        if (await sendBytes(reply, content, { staged }, () => pending.meta.images?.[image - 1]?.mimeType ?? pending.meta.mimeType, { staged: true })) return reply;
+      } else if (image === 1) {
+        const { bytes, mimeType } = payloadBytes(pending.meta);
+        reply.headers(rawHeaders(mimeType));
+        reply.header('content-type', mimeType);
+        reply.header('content-length', String(bytes.length));
+        return reply.send(bytes);
+      }
     }
     // Applied, if it was pending a moment ago: the meta file in the store is the one to go by.
-    await sendBytes(reply, content, contentId, async () => (await requireMeta({ db, content }, contentId)).mimeType);
+    if (image === 1) {
+      await sendBytes(reply, content, contentId, async () => (await requireMeta({ db, content }, contentId)).mimeType);
+      return reply;
+    }
+    const meta = await requireMeta({ db, content }, contentId);
+    // Looked for first, as a staged file is: an update with fewer images may have been applied since the meta file was read.
+    if (image > imageCount(meta.preview) || !(await sendBytes(reply, content, { contentId, image }, () => meta.images?.[image - 1]?.mimeType ?? meta.mimeType, { staged: true }))) {
+      throw imageNotFound();
+    }
     return reply;
-  });
+  }
 }
 
 /**

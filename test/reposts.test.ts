@@ -4,10 +4,12 @@ import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { attest, readAttestation, signedBy, signingKeys, type Attestable } from '../src/attestation.js';
 import type { PublishedKey, SigningKey } from '../src/attestation.types.js';
+import { summaryOf } from '../src/content.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import type { TrustPlugin } from '../src/moderation/trust.types.js';
 import { authorIndex } from '../src/tagfeed/layout.js';
 import { DAY, HOUR, MINUTE, utcDay } from '../src/time.js';
+import { contentWriter } from '../src/write.js';
 import { as, createTestContext, multipart, PNG, queued, requests, TARGETS, type FeedItem, type TestContext, type User } from './helpers.js';
 
 const NO_CONTENT = '00000000-0000-4000-8000-000000000000';
@@ -35,6 +37,7 @@ const NO_ENTRY = 'this server has no entry for that post, so there is nothing to
 const NOT_TRUSTED = "this server doesn't trust the post enough to keep it, so it wasn't published";
 const NO_TAGS_LEFT = "none of the repost's hashtags is one the post can have and doesn't have already, so it wasn't reposted";
 const ALREADY = 'you already reposted this post';
+const NOT_REPOSTED = 'that user has no repost of this post';
 
 for (const target of TARGETS) {
   describe(`reposts (${target.name})`, () => {
@@ -55,7 +58,7 @@ for (const target of TARGETS) {
       return servers[address];
     };
 
-    const { post, store, storeText, like, feed, feedItems: feedOf } = requests(() => ctx);
+    const { post, store, storeText, like, unlike, feed, feedItems: feedOf } = requests(() => ctx);
     const req = (u: User | null, method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: Record<string, unknown>) =>
       ctx.app.inject({ method, url, headers: u ? as(u) : {}, ...(payload && { payload }) });
     const ok = (res: LightMyRequestResponse, status = 200) => {
@@ -88,6 +91,10 @@ for (const target of TARGETS) {
       )
         .map((r) => `${r.tag} ${r.username ?? '-'} ${r.likes_before}`)
         .sort();
+    /** The places of removed reposts that the compactor is yet to take away (`repost_removals`): their tags, sorted. */
+    const removals = async () => (await ctx.db.selectFrom('repost_removals').select('tag').execute()).map((r) => r.tag).sort();
+    /** The notices in a user's inbox, oldest first. */
+    const inbox = async (u: User) => ok(await req(u, 'GET', `/users/${u.userId}/inbox`)).inbox as Record<string, unknown>[];
     /** The days a piece of content's summary is kept under, in the object store. */
     const summaryDays = async (contentId: string) =>
       (await readdir(join(ctx.dir, 'summaries', 'summaries'), { recursive: true, withFileTypes: true }))
@@ -163,6 +170,20 @@ for (const target of TARGETS) {
       expect((await feedOf('weather'))[0]).toMatchObject({ likes: 1, repost: { at: iso(repostedAt) } });
       expect((await feed('tags=news&hours=72')).tags.news![0]).toMatchObject({ likes: 2 });
       expect((await content(contentId)).likes).toBe(2);
+
+      // A like from before the repost that is taken back was never the entry's: the post loses it, and the entry's count stays.
+      expect(ok(await unlike(carol!, contentId))).toEqual({ contentId, likes: 1, wasLiked: true });
+      expect(await places(contentId)).toEqual([`${authorIndex(bob!.userId)} bob 0`, 'weather bob 0']);
+      await ctx.compact();
+      expect((await feedOf('weather'))[0]).toMatchObject({ likes: 1, repost: { at: iso(repostedAt) } });
+      expect((await feed('tags=news&hours=72')).tags.news![0]).toMatchObject({ likes: 1 });
+      // One from since the repost is the entry's to lose, with the post.
+      expect(ok(await unlike(dave!, contentId))).toEqual({ contentId, likes: 0, wasLiked: true });
+      expect(await places(contentId)).toEqual([`${authorIndex(bob!.userId)} bob 0`, 'weather bob 0']);
+      await ctx.compact();
+      expect((await feedOf('weather'))[0]).toMatchObject({ likes: 0, repost: { at: iso(repostedAt) } });
+      expect((await feed('tags=news&hours=72')).tags.news![0]).toMatchObject({ likes: 0 });
+      expect((await content(contentId)).likes).toBe(0);
 
       // Its summary is kept under the day it was posted and the day it was reposted, which is where each entry looks for it.
       expect(await summaryDays(contentId)).toEqual([utcDay(postedAt), utcDay(repostedAt)]);
@@ -263,24 +284,24 @@ for (const target of TARGETS) {
       expect(refused(await repost(root, { contentId, tags: 'storms' }))).toEqual([404, 'content not found']);
     });
 
-    it('holds a repost to what a post is held to: challenges, the server\'s hashtags, and whether the server takes reposts', async () => {
-      ctx = await createTestContext(target, { challenge: { postWindowSeconds: 60 }, tagging: { mode: 'server', serverTags: ['news', 'weather', 'local'] } });
+    it('holds a repost to what a post is held to: the limit on posts a minute, the server\'s hashtags, and whether the server takes reposts', async () => {
+      ctx = await createTestContext(target, { postRateLimitPerMinute: 1, tagging: { mode: 'server', serverTags: ['news', 'weather', 'local'] } });
       const [alice, bob] = await Promise.all(['alice', 'bob'].map((name) => ctx.register(name)));
       const contentId = await post(alice!, 'Flooding downtown #news');
       const second = await post(bob!, 'Bob was here #local');
 
-      // In server tagging mode a repost gives only the server's hashtags, and is refused before any challenge.
+      // In server tagging mode a repost gives only the server's hashtags, and is refused before the limit on posts a minute.
       expect(refused(await repost(bob!, { contentId, tags: ['weather', 'sports'] }))).toEqual([400, "#sports is not one of this server's hashtags, which GET /tagging lists"]);
-      // Bob posted a moment ago, so his repost is challenged like a post would be, and goes through once it is solved.
-      const asked = await repost(bob!, { contentId, tags: 'weather' });
-      expect(asked.statusCode, asked.body).toBe(428);
-      expect(asked.json().error).toBe('you posted or were challenged less than 60 seconds ago; solve the challenge to post');
-      expect(await places(contentId)).toEqual([]);
-      ok(await repost(bob!, { contentId, tags: 'weather', ...(await ctx.solve(asked.json().challenge)) }), 201);
-      // And a post straight after a repost is challenged in turn.
-      expect((await storeText(bob!, 'Again #local')).statusCode).toBe(428);
-      // One refused for what it is costs no challenge.
+      // So is one refused for what it is, which is told that, not when to try again.
       expect(refused(await repost(alice!, { contentId: second, tags: 'local' }))).toEqual([422, NO_TAGS_LEFT]);
+      // Bob posted a moment ago, so his repost is refused as a post would be, and goes through once the minute is over.
+      const limited = await repost(bob!, { contentId, tags: 'weather' });
+      expect(refused(limited)).toEqual([429, 'you can post at most once a minute; try again in 60 seconds']);
+      expect(await places(contentId)).toEqual([]);
+      ctx.clock.now += 60_000;
+      ok(await repost(bob!, { contentId, tags: 'weather' }), 201);
+      // And a post straight after a repost is refused in turn.
+      expect((await storeText(bob!, 'Again #local')).statusCode).toBe(429);
       await ctx.close();
 
       // REPOSTS=false: the server takes none. What was reposted stays.
@@ -454,6 +475,202 @@ for (const target of TARGETS) {
       ok(await repost(carol!, { contentId: second, tags: 'sun' }), 201);
       await ctx.compact();
       expect((await following(erin!)).map((r) => [r.contentId, r.repost?.by?.username])).toEqual([[second, 'carol']]);
+    });
+
+    it("lets a server moderator or an admin remove one user's repost: what it added goes, and the post stays", async () => {
+      ctx = await createTestContext(target);
+      const root = await admin();
+      const [alice, bob, carol, erin, mod] = await Promise.all(['alice', 'bob', 'carol', 'erin', 'mod'].map((name) => ctx.register(name)));
+      ok(await req(root, 'PUT', `/moderators/${mod!.userId}`), 201);
+      await follow(erin!, bob!);
+      const postedAt = ctx.clock.now;
+      const contentId = await post(alice!, 'Flooding downtown #news');
+      ok(await like(erin!, contentId), 201);
+      await ctx.compact();
+
+      // Bob reposts it two days on, and carol the day after: two reposts, on two days.
+      ctx.clock.now += 2 * DAY;
+      const bobsAt = ctx.clock.now;
+      ok(await repost(bob!, { contentId, tags: ['weather', 'rain'] }), 201);
+      ctx.clock.now += 13 * HOUR;
+      const carolsAt = ctx.clock.now;
+      ok(await repost(carol!, { contentId, tags: 'storms' }), 201);
+      await ctx.compact();
+      expect(ids(await feedOf('weather'))).toEqual([contentId]);
+      expect(ids(await following(erin!))).toEqual([contentId]);
+      expect((await content(contentId)).tags).toEqual(['news', 'rain', 'weather', 'storms']);
+      expect(await summaryDays(contentId)).toEqual([utcDay(postedAt), utcDay(bobsAt), utcDay(carolsAt)]);
+
+      // It is a server moderator's to remove, or an admin's: not the publisher's, nor the reposter's own, nor a stranger's.
+      const bobs = `/content/${contentId}/reposts/${bob!.userId}`;
+      expect((await req(null, 'DELETE', bobs)).statusCode).toBe(401);
+      for (const user of [alice!, bob!, carol!]) expect(refused(await req(user, 'DELETE', bobs))).toEqual([403, 'only an admin or a server moderator can do this']);
+      // And only a repost that is there: of content that is, by a user who made one.
+      expect(refused(await req(mod!, 'DELETE', `/content/${NO_CONTENT}/reposts/${bob!.userId}`))).toEqual([404, 'content not found']);
+      for (const user of [alice!, erin!]) expect(refused(await req(mod!, 'DELETE', `/content/${contentId}/reposts/${user.userId}`))).toEqual([404, NOT_REPOSTED]);
+      expect(await places(contentId)).toHaveLength(5);
+
+      expect(ok(await req(mod!, 'DELETE', bobs))).toEqual({ contentId, userId: bob!.userId, status: 'removed', tags: ['rain', 'weather'], repostedAt: iso(bobsAt) });
+      // The request deleted the repost's rows, and wrote nothing else: it is no repost from then on, and bob is told.
+      expect(await places(contentId)).toEqual([`${authorIndex(carol!.userId)} carol 1`, 'storms carol 1']);
+      expect((await content(contentId)).reposts).toEqual([{ by: { userId: carol!.userId, username: 'carol' }, tags: ['storms'], at: iso(carolsAt) }]);
+      expect(refused(await req(mod!, 'DELETE', bobs))).toEqual([404, NOT_REPOSTED]);
+      expect(await inbox(bob!)).toMatchObject([{ kind: 'repost_removed', contentId, excerpt: 'Flooding downtown #news', text: 'A moderator removed your repost of a post from this server.' }]);
+      expect(await inbox(alice!)).toEqual([]);
+      // Feeds show it until the compactor has run.
+      expect(ids(await feedOf('weather'))).toEqual([contentId]);
+
+      await ctx.compact();
+      // What the repost added is gone: its hashtags, with the post's places under them, and its place among what bob's followers see.
+      expect(await feedOf('weather')).toEqual([]);
+      expect(await feedOf('rain')).toEqual([]);
+      expect(await following(erin!)).toEqual([]);
+      // The post stays as its publisher and the other repost made it, with its likes.
+      expect(await content(contentId)).toMatchObject({ publisher: { userId: alice!.userId, username: 'alice' }, tags: ['news', 'storms'], likes: 1 });
+      expect((await feedOf('storms'))[0]).toMatchObject({ contentId, tags: ['news', 'storms'], repost: { at: iso(carolsAt) } });
+      expect((await feed('tags=news&hours=336')).tags.news![0]).toMatchObject({ contentId, tags: ['news', 'storms'], likes: 1 });
+      // Its summary is under the days it is still found by, and the removal is done with.
+      expect(await summaryDays(contentId)).toEqual([utcDay(postedAt), utcDay(carolsAt)]);
+      expect(await removals()).toEqual([]);
+
+      // It blocks nothing: bob reposts the post again, and it is back where his repost puts it.
+      ctx.clock.now += HOUR;
+      expect(ok(await repost(bob!, { contentId, tags: ['weather', 'storms'] }), 201).tags).toEqual(['weather']);
+      await ctx.compact();
+      expect(ids(await feedOf('weather'))).toEqual([contentId]);
+      expect(ids(await following(erin!))).toEqual([contentId]);
+      // An admin removes it as a server moderator does. A ban is what keeps bob from making it a third time.
+      expect(ok(await req(root, 'DELETE', bobs))).toMatchObject({ status: 'removed', tags: ['weather'] });
+      ok(await req(root, 'PUT', `/banned/${bob!.userId}`), 201);
+      expect(refused(await repost(bob!, { contentId, tags: 'weather' }))).toEqual([403, "your account is banned: you can't post, comment, like or send messages"]);
+      await ctx.compact();
+      expect(await feedOf('weather')).toEqual([]);
+      expect(await following(erin!)).toEqual([]);
+      expect((await content(contentId)).tags).toEqual(['news', 'storms']);
+      expect(await places(contentId)).toEqual([`${authorIndex(carol!.userId)} carol 1`, 'storms carol 1']);
+    });
+
+    it('takes the hashtags of a removed repost off a post whatever was written of the post around the removal', async () => {
+      // The writes requests commit wait for the compactor here, as they do on a server.
+      ctx = await createTestContext(target, { settle: false });
+      const root = await admin();
+      const [alice, bob, carol] = await Promise.all(['alice', 'bob', 'carol'].map((name) => ctx.register(name)));
+      const postedAt = ctx.clock.now;
+      const contentId = await post(alice!, 'Flooding downtown #news');
+      const bobs = `/content/${contentId}/reposts/${bob!.userId}`;
+      const tags = async () => (await content(contentId)).tags;
+      await ctx.compact();
+
+      // A repost that is removed before a run has made it show never does.
+      ok(await repost(bob!, { contentId, tags: 'weather' }), 201);
+      ok(await req(root, 'DELETE', bobs));
+      await ctx.compact();
+      expect(await tags()).toEqual(['news']);
+      expect(await feedOf('weather')).toEqual([]);
+      expect([await queued(ctx), await removals()]).toEqual([[], []]);
+
+      // An update that committed while the repost was there holds its hashtag, and is applied after the removal: without it.
+      ok(await repost(bob!, { contentId, tags: 'weather' }), 201);
+      await ctx.compact();
+      expect(await tags()).toEqual(['news', 'weather']);
+      expect(ok(await storeText(alice!, 'Flooding downtown, again #news', { contentId })).tags).toEqual(['news', 'weather']);
+      ok(await req(root, 'DELETE', bobs));
+      // The run can't apply the update: the file it names isn't there. It takes the repost away all the same...
+      await ctx.db.updateTable('pending_writes').set({ staged_key: 'staged/nowhere' }).where('content_id', '=', contentId).execute();
+      await ctx.compact();
+      expect(await ctx.content.getMeta(contentId)).toMatchObject({ tags: ['news'], preview: { text: 'Flooding downtown #news' } });
+      expect(await feedOf('weather')).toEqual([]);
+      // ...and keeps what says the hashtag was the repost's, for the run that does apply it.
+      expect(await removals()).toEqual([authorIndex(bob!.userId), 'weather']);
+      await ctx.db.updateTable('pending_writes').set({ staged_key: null }).where('content_id', '=', contentId).execute();
+      await ctx.compact();
+      expect(await content(contentId)).toMatchObject({ tags: ['news'], preview: { text: 'Flooding downtown, again #news' } });
+      expect(await feedOf('weather')).toEqual([]);
+      expect((await feed('tags=news')).tags.news![0]).toMatchObject({ contentId, tags: ['news'] });
+      expect(await removals()).toEqual([]);
+
+      // An update whose request read the post while the repost was there, and that commits once the removal is done with,
+      // leaves the hashtag out: it held it as the repost's, and no repost gives it by then.
+      ok(await repost(bob!, { contentId, tags: 'weather' }), 201);
+      await ctx.compact();
+      const row = await ctx.db.selectFrom('content').selectAll().where('id', '=', contentId).executeTakeFirstOrThrow();
+      const meta = (await ctx.content.getMeta(contentId))!;
+      expect(meta.tags).toEqual(['news', 'weather']);
+      ok(await req(root, 'DELETE', bobs));
+      await ctx.compact();
+      expect(await removals()).toEqual([]);
+      const written = await contentWriter(ctx, { warn: () => {} }).write({
+        publisher: { userId: alice!.userId, username: 'alice' },
+        previous: meta,
+        seenSeq: Number(row.seq),
+        summary: { ...summaryOf(row, meta, ctx.config.publicBaseUrl), updatedAt: ctx.clock.now },
+        meta: { ...meta, updatedAt: ctx.clock.now },
+        given: ['weather'],
+      });
+      expect(written).toEqual(['news']);
+      await ctx.compact();
+      expect(await tags()).toEqual(['news']);
+      expect(await feedOf('weather')).toEqual([]);
+
+      // A hashtag that another repost gives the post before a run has taken the removed one's away is that repost's, and stays.
+      ok(await repost(bob!, { contentId, tags: 'weather' }), 201);
+      ok(await req(root, 'DELETE', bobs));
+      ctx.clock.now += HOUR;
+      const carols = ctx.clock.now;
+      ok(await repost(carol!, { contentId, tags: 'weather' }), 201);
+      await ctx.compact();
+      expect(await tags()).toEqual(['news', 'weather']);
+      expect((await feedOf('weather'))[0]).toMatchObject({ contentId, repost: { at: iso(carols) } });
+      expect((await content(contentId)).reposts).toEqual([{ by: { userId: carol!.userId, username: 'carol' }, tags: ['weather'], at: iso(carols) }]);
+      expect(await removals()).toEqual([]);
+
+      // A post that is deleted while a removal waits goes with every copy of its summary, the removed repost's too.
+      ctx.clock.now += 2 * DAY;
+      ok(await repost(bob!, { contentId, tags: 'rain' }), 201);
+      await ctx.compact();
+      expect(await summaryDays(contentId)).toEqual([utcDay(postedAt), utcDay(ctx.clock.now)]);
+      ok(await req(root, 'DELETE', bobs));
+      ok(await req(alice!, 'DELETE', `/content/${contentId}`), 202);
+      expect((await ctx.compact()).deleted).toEqual([contentId]);
+      expect(await summaryDays(contentId)).toEqual([]);
+      expect(await feedOf('rain')).toEqual([]);
+      expect(await removals()).toEqual([]);
+    });
+
+    it("removes the first repost of a post on another server by deleting the server's entry for it, and a later one on its own", async () => {
+      ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com', reposts: { signingKeys: OWN_SEEDS }, keyFetcher });
+      const root = await admin();
+      const [bob, carol, erin, mod] = await Promise.all(['bob', 'carol', 'erin', 'mod'].map((name) => ctx.register(name)));
+      ok(await req(root, 'PUT', `/moderators/${mod!.userId}`), 201);
+      await follow(erin!, bob!);
+      await follow(erin!, carol!);
+      const { contentId } = ok(await repost(bob!, { origin: origin(), tags: 'news' }), 201);
+      ctx.clock.now += HOUR;
+      ok(await repost(carol!, { origin: origin(), tags: 'weather' }), 201);
+      await ctx.compact();
+      expect(ids(await feedOf('weather'))).toEqual([contentId]);
+      expect((await following(erin!)).map((r) => [r.contentId, r.repost?.by?.username])).toEqual([[contentId, 'carol'], [contentId, undefined]]);
+
+      // Carol's is a repost of the entry, and goes like a repost of a post written here: the entry stays, as bob's.
+      expect(ok(await req(mod!, 'DELETE', `/content/${contentId}/reposts/${carol!.userId}`))).toMatchObject({ status: 'removed', tags: ['weather'] });
+      await ctx.compact();
+      expect(await feedOf('weather')).toEqual([]);
+      expect(ids(await feedOf('news'))).toEqual([contentId]);
+      expect((await following(erin!)).map((r) => [r.contentId, r.repost?.by?.username])).toEqual([[contentId, undefined]]);
+      expect((await content(contentId)).tags).toEqual(['news']);
+
+      // Bob's is the entry itself: removing it deletes the entry, which is all this server has of the post, and he is told.
+      ok(await repost(carol!, { contentId, tags: 'weather' }), 201);
+      const removed = ok(await req(mod!, 'DELETE', `/content/${contentId}/reposts/${bob!.userId}`), 202);
+      expect(removed).toEqual({ contentId, userId: bob!.userId, status: 'pending_deletion', requestedAt: iso(ctx.clock.now) });
+      expect(refused(await req(null, 'GET', `/content/${contentId}`))).toEqual([404, 'content not found']);
+      expect(refused(await req(mod!, 'DELETE', `/content/${contentId}/reposts/${bob!.userId}`))).toEqual([404, 'content not found']);
+      expect(await inbox(bob!)).toMatchObject([{ kind: 'repost_removed', contentId, text: 'A moderator removed your repost of a post from this server.' }]);
+      expect((await ctx.compact()).deleted).toEqual([contentId]);
+      expect([await feedOf('news'), await feedOf('weather'), await following(erin!)]).toEqual([[], [], []]);
+      // The original is where it was, on its own server, and can be reposted here anew.
+      const anew = ok(await repost(carol!, { origin: origin(), tags: 'news' }), 201);
+      expect(anew.contentId).not.toBe(contentId);
     });
 
     it('shows a repost of a post older than the feeds keep, for as long as they keep the repost, and rebuilds it from the database', async () => {
@@ -962,6 +1179,11 @@ for (const target of TARGETS) {
       ctx.clock.now += 7 * DAY - HOUR;
       expect((await ctx.compact()).deleted).toEqual([]);
       expect(await content(contentId, bob!)).toMatchObject({ status: 'origin_gone', likes: 1 });
+      // A like is still its user's to take back while the entry is hidden. To whoever has no like of it, the entry isn't there.
+      expect(refused(await unlike(carol!, contentId))).toEqual([404, 'content not found']);
+      expect(ok(await unlike(alice!, contentId))).toEqual({ contentId, likes: 0, wasLiked: true });
+      expect(refused(await unlike(alice!, contentId))).toEqual([404, 'content not found']);
+      expect(await content(contentId, bob!)).toMatchObject({ status: 'origin_gone', likes: 0 });
       ctx.clock.now += HOUR;
       expect((await ctx.compact()).deleted).toEqual([contentId]);
       expect((await req(bob!, 'GET', `/content/${contentId}`)).statusCode).toBe(404);

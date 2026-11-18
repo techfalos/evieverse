@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { cutFormatted, parseFormatted, plainText, type Block, type Inline } from '../src/format.js';
+import { cutFormatted, mentionable, mentionsIn, parseFormatted, plainText, type Block, type Inline } from '../src/format.js';
+import type { Mention } from '../src/mentions.types.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { parseFormatted as parseInBrowser } from '../testbed/web/format.js';
 import { as, createTestContext, requests, TARGETS, type TestContext } from './helpers.js';
@@ -57,10 +58,74 @@ const READS: [string, Block[]][] = [
   ['intro\r\n- a\r\n\r\nend', [p(text('intro')), list([text('a')]), p(text('end'))]],
 ];
 
+const ann: Mention = { userId: 'id-of-ann', username: 'ann' };
+const annLee: Mention = { userId: 'id-of-ann-lee', username: 'Ann Lee' };
+const snake: Mention = { userId: 'id-of-snake', username: 'snake_case' };
+const starred: Mention = { userId: 'id-of-starred', username: 'a*b' };
+/** The users the texts of MENTIONS are read with: the ones the server found by the names written in them. */
+const USERS = [ann, annLee, snake, starred];
+const at = (user: Mention): Inline => ({ type: 'mention', userId: user.userId, username: user.username });
+
+/** Texts that mention USERS, and what each says to show, to both parsers. */
+const MENTIONS: [string, Block[]][] = [
+  ['@ann', [p(at(ann))]],
+  ['hi @ann, and (@Ann Lee)!', [p(text('hi '), at(ann), text(', and ('), at(annLee), text(')!'))]],
+  // A name is as its user has it, to the letter, and the whole of the word it is written in.
+  ['@Ann Leeds, @Ann lee, @ANN and @annie', [p(text('@Ann Leeds, @Ann lee, @ANN and @annie'))]],
+  ['ann@example.com, x@ann and @ann_x', [p(text('ann@example.com, x@ann and @ann_x'))]],
+  ["@ann_ and _@ann_ and @ann's", [p(at(ann), text('_ and '), italic(at(ann)), text(' and '), at(ann), text("'s"))]],
+  ['**@ann** ~~@Ann Lee~~', [p(bold(at(ann)), text(' '), strike(at(annLee)))]],
+  // A name is read before what is in it: its `_` and `*` format nothing, with a backslash or without.
+  ['@snake_case and @snake\\_case, @a*b* and @a\\*b', [p(at(snake), text(' and '), at(snake), text(', '), at(starred), text('* and '), at(starred))]],
+  ['\\@ann, `@ann` and [@ann](https://x.example)', [p(text('@ann, '), code('@ann'), text(' and '), link('https://x.example', text('@ann')))]],
+  ['@ann\n@Ann\nLee', [p(at(ann), br, text('@Ann'), br, text('Lee'))]],
+  ['- @ann\n\n> @Ann Lee', [list([at(ann)]), quote(at(annLee))]],
+  ['@ann@ann @@ann', [p(at(ann), text('@ann @'), at(ann))]],
+];
+
 describe('formatted text', () => {
   it.each(READS)('reads %j', (source, blocks) => {
     expect(parseFormatted(source)).toEqual(blocks);
     expect(parseInBrowser(source)).toEqual(blocks);
+  });
+
+  it.each(MENTIONS)('reads %j with its mentions', (source, blocks) => {
+    expect(parseFormatted(source, USERS)).toEqual(blocks);
+    expect(parseInBrowser(source, USERS)).toEqual(blocks);
+  });
+
+  it('reads no mention in a text that comes without its mentions, and says whom a text mentions', () => {
+    for (const parse of [parseFormatted, parseInBrowser]) {
+      expect(parse('hi @ann and @Ann Lee')).toEqual([p(text('hi @ann and @Ann Lee'))]);
+      // By what it is given, in whatever order: the longer name is the one.
+      expect(parse('@Ann Lee', [{ userId: 'id-of-ann', username: 'Ann' }, annLee])).toEqual([p(at(annLee))]);
+      // A name of more than one line is nobody's.
+      expect(parse('@a\nb', [{ userId: 'id', username: 'a\nb' }])).toEqual([p(text('@a'), br, text('b'))]);
+    }
+    expect(plainText('hi **@ann**')).toBe('hi @ann');
+    expect(mentionsIn('- @Ann Lee\n- @ann, @ann and `@snake_case`\n\n[@a*b](https://x.example)', USERS)).toEqual([annLee, ann]);
+    expect(mentionsIn('nobody here', USERS)).toEqual([]);
+    // Every name it could be, for whoever knows the users to look for: as written, and as it reads.
+    expect([...mentionable('to @Ann Lee, ok', { sites: 10, chars: 64 })]).toEqual(['Ann', 'Ann Lee', 'Ann Lee,', 'Ann Lee, ok']);
+    expect([...mentionable('a@b @snake\\_case\n@ and @x-y', { sites: 10, chars: 64 })]).toEqual(['snake_case', 'snake\\_case', 'x', 'x-y']);
+    expect([...mentionable('@abcdef @ghi @jkl', { sites: 2, chars: 3 })]).toEqual(['ghi']);
+  });
+
+  it('cuts a text that mentions users to a start that mentions the same ones', () => {
+    const cut = (source: string, words: number, chars = 1000) => cutFormatted(source, words, chars, USERS);
+    // A mention is written whole, each word of its name counted, or the text is cut before it.
+    expect(cut('hi @Ann Lee and more', 3)).toBe('hi @Ann Lee …');
+    expect(cut('hi @Ann Lee and more', 2)).toBe('hi …');
+    expect(cut('hi @ann', 5, 5)).toBe('hi …');
+    expect(cut('**@ann and more**', 1)).toBe('**@ann** …');
+    expect(cut('(@snake\\_case) @a*b', 2)).toBe('(@snake\\_case) @a*b');
+    // What mentions nobody in the text mentions nobody in its start, where a name may end that went on.
+    expect(cut('hi @Ann Leeds', 9)).toBe('hi \\@Ann Leeds');
+    expect(cut('@Ann\nLee', 9)).toBe('\\@Ann Lee');
+    expect(parseFormatted(cut('@Ann\nLee', 9), USERS)).toEqual([p(text('@Ann Lee'))]);
+    expect(cut('[@ann x](https://x.co) y', 9)).toBe('[\\@ann x](https://x.co) y');
+    // A text that mentions nobody is cut as it always was.
+    expect(cutFormatted('hi @Ann Leeds and ann@example.com', 9, 1000)).toBe('hi @Ann Leeds and ann@example.com');
   });
 
   it('reads a text as its readers do, with where its links lead', () => {
@@ -135,6 +200,7 @@ describe('formatted text', () => {
       for (const node of nodes) {
         if (node.type === 'break') chars.push([' ', '']);
         else if (node.type === 'text' || node.type === 'code') for (const c of node.text) chars.push([c, [...marks, ...(node.type === 'code' ? ['code'] : [])].sort().join()]);
+        else if (node.type === 'mention') for (const c of `@${node.username}`) chars.push([c, [...marks, node.userId].sort().join()]);
         else walk(node.children, [...marks, node.type === 'link' ? node.url : node.type]);
       }
     };
@@ -156,7 +222,14 @@ describe('formatted text', () => {
     return words;
   }
 
-  it('cuts any text to a start that reads as the text does', () => {
+  const PIECES = ['a', 'b', 'c', 'é', '😀', ' ', ' ', ' ', '\n', '\n\n', '*', '*', '**', '**', '***', '_', '__', '~~', '~', '`', '[', ']', '](https://x.co/a_b)', '(', ')', '\\', '.', '- ', '> ', '1. ', 'https://x.co/a_(b)*c', '[https://x.co/a_b', '<b>'];
+  /** What a text that mentions USERS is made of, beside PIECES: their names, whole and not, and an `@` alone. */
+  const NAMES = ['@', '@ann', '@ann', '@Ann Lee', '@Ann Lee', '@Ann', 'Lee', '@a*b', '@snake_case', '@snake\\_case', 'ann'];
+
+  it.each([
+    ['any text', PIECES, []],
+    ['any text that mentions users', [...PIECES, ...NAMES], USERS],
+  ])('cuts %s to a start that reads as the text does', (_, pieces, users) => {
     // A small generator, the same texts on every run.
     let seed = 20261115;
     const random = (n: number) => {
@@ -165,23 +238,23 @@ describe('formatted text', () => {
       t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
       return Math.floor((((t ^ (t >>> 14)) >>> 0) / 4294967296) * n);
     };
-    const PIECES = ['a', 'b', 'c', 'é', '😀', ' ', ' ', ' ', '\n', '\n\n', '*', '*', '**', '**', '***', '_', '__', '~~', '~', '`', '[', ']', '](https://x.co/a_b)', '(', ')', '\\', '.', '- ', '> ', '1. ', 'https://x.co/a_(b)*c', '[https://x.co/a_b', '<b>'];
     for (let run = 0; run < 8000; run++) {
-      const source = Array.from({ length: random(24) }, () => PIECES[random(PIECES.length)]).join('');
+      const source = Array.from({ length: random(24) }, () => pieces[random(pieces.length)]).join('');
       const maxWords = 1 + random(8);
       const maxChars = random(4) ? 1000 : 4 + random(40);
-      const start = cutFormatted(source, maxWords, maxChars);
+      const start = cutFormatted(source, maxWords, maxChars, users);
       const where = JSON.stringify({ source, maxWords, maxChars, start });
 
-      const whole = shown(parseFormatted(source));
+      const whole = shown(parseFormatted(source, users));
       const cut = start.endsWith('…') && !source.trimEnd().endsWith('…');
-      const blocks = parseFormatted(cut ? start.slice(0, -1) : start);
+      const blocks = parseFormatted(cut ? start.slice(0, -1) : start, users);
       expect(blocks.length, where).toBeLessThanOrEqual(1);
       expect(blocks.every((b) => b.type === 'paragraph' && !b.children.some((node) => node.type === 'break')), where).toBe(true);
       const words = shown(blocks);
       expect(words.length, where).toBeLessThanOrEqual(maxWords);
       if (!cut) expect(words, where).toEqual(whole);
-      if (cut && maxChars === 1000) expect(words.length, where).toBe(maxWords);
+      // As many words as it may have, unless a name of two words was next, with room for one.
+      if (cut && maxChars === 1000 && !(words.length === maxWords - 1 && source.includes('@Ann Lee'))) expect(words.length, where).toBe(maxWords);
       // Within the limit, but for " …" and the backslash a start that looks like a list is given.
       expect(start.length, where).toBeLessThanOrEqual(maxChars + 3);
 

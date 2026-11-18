@@ -1,0 +1,15 @@
+-- 0008_mention_notices
+--
+-- A text can mention users: `@` and a user's name, in a post's text or caption, or in a comment
+-- (src/mentions.ts). Each user a published text mentions is told, by a notice in their inbox
+-- (kinds post_mention and comment_mention), and the notice of a mention in a comment has to say
+-- which comment that is, beside the post it is on.
+--
+-- comment_id: the comment a notice is about, on the post content_id names. NULL on a message, and
+--   on every notice that is about no comment, or is about one without naming it. Like content_id
+--   it is no foreign key: comments aren't in the database, and the comment may be gone by the
+--   time the notice is read.
+--
+-- Unlike the other notices, a mention's has a sender (sender_id): who wrote the text. It is what
+-- the notice names, and it goes NULL with that user's account, as a message's does.
+ALTER TABLE inbox ADD COLUMN comment_id varchar(36);

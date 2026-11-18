@@ -39,7 +39,7 @@ async function deployment() {
       },
       feed: { headCacheMs: 0 },
       // A proof of work quick enough for tests, and an answer accepted at once: the clock stands still here.
-      challenge: { postWindowSeconds: 0, powBits: 8, minSolveMs: 0 },
+      challenge: { powBits: 8, minSolveMs: 0 },
       postRateLimitPerMinute: 0,
     },
     {},

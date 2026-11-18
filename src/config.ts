@@ -42,11 +42,19 @@ const ENV_MAP: Record<string, string> = {
   AUDIT_OPTIONS: 'audit.options',
   TAGGING_MODE: 'tagging.mode',
   TAGGING_SERVER_TAGS: 'tagging.serverTags',
+  TAG_CLAIM_REVIEW_HOURS: 'tagging.claimReviewHours',
+  TAG_CLAIMS_PER_DAY: 'tagging.claimsPerDay',
   POST_TYPE_TEXT: 'postTypes.text',
   POST_TYPE_IMAGE: 'postTypes.image',
   POST_TYPE_VIDEO: 'postTypes.video',
   POST_TYPE_AUDIO: 'postTypes.audio',
   POST_TYPE_LINK: 'postTypes.link',
+  VIDEO_PROCESSING: 'video.processing',
+  VIDEO_HEIGHTS: 'video.heights',
+  VIDEO_COMMENT_HEIGHT: 'video.commentHeight',
+  VIDEO_TIMEOUT_SECONDS: 'video.timeoutSeconds',
+  VIDEO_FFMPEG_PATH: 'video.ffmpegPath',
+  VIDEO_FFPROBE_PATH: 'video.ffprobePath',
   REPOSTS: 'reposts.enabled',
   REPOSTS_REMOTE: 'reposts.remote',
   REPOSTS_SIGNING_KEYS: 'reposts.signingKeys',
@@ -54,6 +62,8 @@ const ENV_MAP: Record<string, string> = {
   REPOSTS_REFRESH_HOURS: 'reposts.refreshHours',
   REPOSTS_GONE_DAYS: 'reposts.goneDays',
   CONTENT_RATE_LIMIT_PER_MINUTE: 'contentRateLimitPerMinute',
+  PROFILE_POSTS_RATE_LIMIT_PER_MINUTE: 'profilePostsRateLimitPerMinute',
+  AVATAR_RATE_LIMIT_PER_MINUTE: 'avatarRateLimitPerMinute',
   FEED_PAGE_SIZE: 'feed.pageSize',
   FEED_MAX_PAGE_SIZE: 'feed.maxPageSize',
   FEED_RATE_LIMIT_PER_MINUTE: 'feed.rateLimitPerMinute',
@@ -85,8 +95,6 @@ const ENV_MAP: Record<string, string> = {
   COMPACT_CONCURRENCY: 'compact.concurrency',
   COMPACT_COMMENT_WRITES: 'compact.commentWrites',
   COMPACT_LEASE_SECONDS: 'compact.leaseSeconds',
-  CHALLENGE_POST_WINDOW_SECONDS: 'challenge.postWindowSeconds',
-  CHALLENGE_COMMENTS_PER_MINUTE: 'challenge.commentsPerMinute',
   CHALLENGE_TTL_SECONDS: 'challenge.ttlSeconds',
   CHALLENGE_POW_BITS: 'challenge.powBits',
   CHALLENGE_MIN_SOLVE_MS: 'challenge.minSolveMs',
@@ -96,6 +104,11 @@ const ENV_MAP: Record<string, string> = {
   URLHAUS_AUTH_KEY: 'urlhaus.authKey',
   URLHAUS_LIST_URL: 'urlhaus.listUrl',
   URLHAUS_REFRESH_MINUTES: 'urlhaus.refreshMinutes',
+  PDQ_HASH_LIST: 'pdq.hashList',
+  PDQ_HASH_LIST_AUTHORIZATION: 'pdq.authorization',
+  PDQ_MAX_DISTANCE: 'pdq.maxDistance',
+  PDQ_MIN_QUALITY: 'pdq.minQuality',
+  PDQ_REFRESH_MINUTES: 'pdq.refreshMinutes',
   REGISTER_RATE_LIMIT_PER_HOUR: 'registerRateLimitPerHour',
   POST_RATE_LIMIT_PER_MINUTE: 'postRateLimitPerMinute',
   MAX_FOLLOWING: 'maxFollowing',
@@ -105,6 +118,9 @@ const ENV_MAP: Record<string, string> = {
   COMMENTS_HOT_HOURS: 'comments.hotHours',
   INBOX_MESSAGES_PER_MINUTE: 'inbox.messagesPerMinute',
   INBOX_RETENTION_DAYS: 'inbox.retentionDays',
+  EXPORT_PAGES_PER_MINUTE: 'export.pagesPerMinute',
+  SEARCH_RATE_LIMIT_PER_MINUTE: 'search.rateLimitPerMinute',
+  SEARCH_MAX_KEYWORDS: 'search.maxKeywords',
   MONETIZATION_FEED_ADS: 'monetization.feedAds',
   MONETIZATION_POST_ADS: 'monetization.postAds',
 };
@@ -121,14 +137,18 @@ const EMPTY_SECTIONS: Json = {
   audit: {},
   tagging: {},
   postTypes: {},
+  video: {},
   reposts: {},
   feed: {},
   compact: {},
   challenge: {},
   trust: {},
   urlhaus: {},
+  pdq: {},
   comments: {},
   inbox: {},
+  export: {},
+  search: {},
   monetization: {},
 };
 
@@ -234,7 +254,7 @@ const ConfigSchema = z.object({
    * The proxies in front of the server whose X-Forwarded-For is believed, which decides the client
    * address that registrations, feeds and the reads that need no key are limited by
    * (`registerRateLimitPerHour`, `feed.rateLimitPerMinute`, `feed.followingRateLimitPerMinute`,
-   * `contentRateLimitPerMinute`, `comments.listRateLimitPerMinute`,
+   * `contentRateLimitPerMinute`, `profilePostsRateLimitPerMinute`, `avatarRateLimitPerMinute`, `comments.listRateLimitPerMinute`,
    * `reposts.attestationRateLimitPerMinute`) and that the audit log
    * and the request log record: how many of them there are, true for any, or their addresses and
    * CIDR ranges (separated by commas or spaces). Empty: none, so the address is the connection's
@@ -311,6 +331,16 @@ const ConfigSchema = z.object({
           ctx.addIssue({ code: 'custom', message: loadLanguages().render(REFERENCE_LANGUAGE, parsed.error) });
           return z.NEVER;
         }),
+      /**
+       * In user mode, a user can claim a hashtag that has no moderator, to moderate it
+       * (POST /tags/:tag/claim, src/moderation/claims.ts). The server's admins and server
+       * moderators are told of the claim, and this is how long, in hours, any of them has to
+       * refuse it: once it has passed, the compactor's next run makes the user a moderator of the
+       * hashtag. 0: a claim is granted by the next run, and is an admin's to undo.
+       */
+      claimReviewHours: z.coerce.number().int().min(0).default(24),
+      /** Hashtags one user can claim in a day; each claim leaves a notice with every admin and server moderator (0: no limit). */
+      claimsPerDay: z.coerce.number().int().min(0).default(5),
     })
     .refine((t) => t.mode !== 'server' || t.serverTags.length > 0, {
       path: ['serverTags'],
@@ -332,6 +362,54 @@ const ConfigSchema = z.object({
     .refine((types) => Object.values(types).some(Boolean), {
       message: 'the server needs a type of post to take: POST_TYPE_TEXT, POST_TYPE_IMAGE, POST_TYPE_VIDEO, POST_TYPE_AUDIO and POST_TYPE_LINK are all off',
     }),
+
+  /**
+   * What the server makes of the videos it is sent (src/video): of a video post's, and of the one
+   * a comment comes with. A video is not published as it was sent. It is transcoded to H.264 and
+   * AAC in MP4, which plays on any device, without the metadata its file came with (where and
+   * when it was taken, on what), and a post's is also given a poster image and an adaptive stream
+   * (HLS) at several sizes, so that a slow connection plays a small one. The post, or the
+   * comment, is published once that is done: until then it says `processing`.
+   *
+   * The work is done with ffmpeg, by the video worker, which runs in the process that runs the
+   * compactor (`npm run compact`, or the server's own with COMPACT_IN_PROCESS): that process
+   * needs `ffmpeg` and `ffprobe`, which the Docker image has, and refuses to start without them
+   * while this is on. Requests only mark a video to be processed, and need neither.
+   */
+  video: z.object({
+    /**
+     * Off: videos are stored and served as they were sent, metadata and all, as they were before
+     * the server processed any. Every process of a deployment takes the same value: the ones that
+     * serve requests mark the videos, and the compactor's processes them.
+     */
+    processing: bool(true),
+    /**
+     * The heights a post's video is made at, in pixels, as a list or as a string of them separated
+     * by commas or spaces. Each is a rendition of the stream; the ones taller than the video are
+     * left out, and a video shorter than the shortest is made at its own height. The MP4 that is
+     * the post's bytes (`/raw`), which is what plays where the stream can't, is the tallest of
+     * them that is no more than 720.
+     */
+    heights: z
+      .preprocess(
+        (v) => (typeof v === 'string' ? v.split(/[\s,]+/).filter(Boolean) : v),
+        z.array(z.coerce.number().int().min(144).max(2160)).min(1).max(8),
+      )
+      .default([1080, 720, 480, 240])
+      .transform((heights) => [...new Set(heights)].sort((a, b) => b - a)),
+    /** The most a comment's video measures in height, in pixels: it is one MP4, with no stream and no poster. */
+    commentHeight: z.coerce.number().int().min(144).max(2160).default(720),
+    /**
+     * How long ffmpeg is given for one video, all of its renditions together, before it is
+     * stopped and the video counts as one that can't be processed. Keep it above what the
+     * longest video the server takes needs on the machine the worker runs on.
+     */
+    timeoutSeconds: int(3600),
+    /** The `ffmpeg` to run: a path, or a name that is looked for on the PATH. */
+    ffmpegPath: z.string().min(1).default('ffmpeg'),
+    /** The `ffprobe` to run, likewise. */
+    ffprobePath: z.string().min(1).default('ffprobe'),
+  }),
 
   /**
    * Reposts (POST /repost): a user gives a post that is there more hashtags, which puts it in those
@@ -398,6 +476,23 @@ const ConfigSchema = z.object({
    * feeds are (`feed.rateLimitPerMinute`).
    */
   contentRateLimitPerMinute: z.coerce.number().int().min(0).default(300),
+
+  /**
+   * Requests to GET /users/:userId/posts from one address in a minute, past which they are
+   * refused (0: no limit). It lists a user's posts for their profile, needs no key, and reads the
+   * database, the summary store and, for posts older than summaries are kept, the content store.
+   * Counted as feeds are (`feed.rateLimitPerMinute`).
+   */
+  profilePostsRateLimitPerMinute: z.coerce.number().int().min(0).default(120),
+
+  /**
+   * Requests to GET /users/:userId/avatar from one address in a minute, past which they are
+   * refused (0: no limit). It needs no key and reads the database and the content store for
+   * each. A post read by its id and a profile each name one avatar, and what the address they
+   * give answers is kept for a day, so this is what the posts of a minute can ask for. Counted
+   * as feeds are (`feed.rateLimitPerMinute`).
+   */
+  avatarRateLimitPerMinute: z.coerce.number().int().min(0).default(300),
 
   feed: z.object({
     /** Posts per feed page when the request doesn't pass `limit`. */
@@ -508,21 +603,11 @@ const ConfigSchema = z.object({
   }),
 
   /**
-   * Challenges people solve to register, to post again soon after posting, and to comment past a few
-   * comments a minute. They're kept in Redis. Registering always takes one, which no setting turns
-   * off: only an admin's request is spared it.
+   * The challenge people solve to register, which is kept in Redis. Registering always takes one,
+   * which no setting turns off: only an admin's request is spared it. Nothing else takes one:
+   * posts and comments are held to a limit a minute (`postRateLimitPerMinute`, `comments.perMinute`).
    */
   challenge: z.object({
-    /**
-     * A user's post (/store) less than this long after their previous post or challenge must
-     * solve a challenge, or two from the third such post in a row (0: never).
-     */
-    postWindowSeconds: z.coerce.number().int().min(0).default(60),
-    /**
-     * A user's comment, or edit of one, past this many in any minute must solve a challenge, or two
-     * from the third such comment in a row (0: never). `comments.perMinute` is where they stop.
-     */
-    commentsPerMinute: z.coerce.number().int().min(0).default(3),
     /** How long a challenge can be solved for. */
     ttlSeconds: int(120),
     /** Zero bits the proof of work's SHA-256 must start with; each doubles the client's work (0: none). */
@@ -581,14 +666,48 @@ const ConfigSchema = z.object({
   }),
 
   /**
+   * The pdq trust plugin (src/plugins/trust/pdq), which gives a post or a comment with an image
+   * of known child sexual abuse material a trust score of 0, and tells the server's admins of it.
+   * It matches each image's PDQ hash against a list of hashes of such material, which each
+   * process reads and keeps in memory. It is optional: these are read only where
+   * `trust.optionalPlugins` names pdq.
+   */
+  pdq: z.object({
+    /**
+     * Where the list of hashes is: the path of a file, or an http or https address it is
+     * downloaded from. One PDQ hash a line, as 64 hex digits; a CSV or TSV with the hash in a
+     * column is read too. A server that runs the plugin needs one. The list is the operator's to
+     * get: the hashes aren't public, and are shared with the platforms that apply for them by
+     * those who keep them (a hash-sharing programme, such as NCMEC's or Meta's ThreatExchange).
+     */
+    hashList: z.string().trim().min(1).optional(),
+    /** The Authorization header a list at an address is asked for with, such as "Bearer <token>". Not used for a file. */
+    authorization: z.string().trim().min(1).optional(),
+    /**
+     * The most bits, of a hash's 256, an image's hash can differ from a listed one in and still be
+     * taken for the same picture. 31 is what PDQ's authors match at; lower finds fewer altered
+     * copies, and higher takes more pictures for ones they aren't. 0: only the very same hash.
+     */
+    maxDistance: z.coerce.number().int().min(0).max(63).default(31),
+    /**
+     * The least quality, from 0 to 100, an image's hash must have to be matched: how much there
+     * is in the picture to tell it by. A picture of one colour, or of a plain gradient, has a hash
+     * near that of every other such picture, and would match by chance. 50 is what PDQ's authors use.
+     */
+    minQuality: z.coerce.number().int().min(0).max(100).default(50),
+    /** Minutes between two readings of the list, by each process. A file that hasn't changed isn't read again. */
+    refreshMinutes: z.coerce.number().int().min(1).default(60),
+  }),
+
+  /**
    * Requests to /register from one address in an hour, past which they are refused. Every attempt
    * counts, an admin's included, so registering takes two: one for the challenge, one with its answer.
    * The address is the connection's own, or the one `trustProxy` has read from X-Forwarded-For.
    */
   registerRateLimitPerHour: int(10),
   /**
-   * A user's posts (/store) in any minute past this many are refused outright, before any
-   * challenge, however many challenges they'd solve (0: no limit).
+   * A user's posts (/store) in any minute past this many are refused, reposts and updates of
+   * posts among them (0: no limit).
    */
   postRateLimitPerMinute: z.coerce.number().int().min(0).default(3),
   /** The most users one user can follow. A following feed reads the index of every one of them. */
@@ -598,10 +717,7 @@ const ConfigSchema = z.object({
 
   /** Comments on posts, which each post's publisher turns on for it. They are objects in the content store, with Redis as a cache over them. */
   comments: z.object({
-    /**
-     * A user's comments in any minute past this many, edits of comments among them, are refused
-     * outright, before any challenge, however many challenges they'd solve (0: no limit).
-     */
+    /** A user's comments in any minute past this many, edits of comments among them, are refused (0: no limit). */
     perMinute: z.coerce.number().int().min(0).default(10),
     /**
      * Requests from one address in a minute to each of the two lists of comments (GET
@@ -626,6 +742,33 @@ const ConfigSchema = z.object({
     retentionDays: int(90),
   }),
 
+  /** A user's export of their own data (GET /users/:userId/export), which they read a page at a time. */
+  export: z.object({
+    /**
+     * Pages of their export one user can read in a minute (0: no limit). A page is up to 1,000
+     * records and about a megabyte, so this bounds what one account can have the database and the
+     * content store read, and still lets a large account be exported in minutes.
+     */
+    pagesPerMinute: z.coerce.number().int().min(0).default(120),
+  }),
+
+  /** Search (GET /search): of users by the start of their username, and of posts by the words of their text and their hashtags. */
+  search: z.object({
+    /**
+     * Requests to GET /search from one address in a minute, past which they get 429 (0: no
+     * limit). It needs no key and reads the database for each. Counted as feeds are
+     * (`feed.rateLimitPerMinute`).
+     */
+    rateLimitPerMinute: z.coerce.number().int().min(0).default(60),
+    /**
+     * The most words of its text or caption a post is found by: the most frequent ones, which are
+     * the rows the compactor keeps for it in `search_terms`, beside one for each of its hashtags.
+     * The compactor takes it, and so does `npm run reindex`, which is what makes a change of it
+     * hold for the posts that are already there.
+     */
+    maxKeywords: int(100),
+  }),
+
   /**
    * Where the server shows the ads its admins keep (/monetization/ads), each with the word
    * "Sponsored". Both are off unless turned on: a server that turns on neither shows no ad, whatever
@@ -643,6 +786,12 @@ const ConfigSchema = z.object({
 }).refine((c) => !c.trust.optionalPlugins.includes('urlhaus') || c.urlhaus.authKey !== undefined, {
   path: ['urlhaus', 'authKey'],
   message: 'TRUST_OPTIONAL_PLUGINS turns on urlhaus, which needs URLHAUS_AUTH_KEY: the Auth-Key of an abuse.ch account, which is free (https://auth.abuse.ch)',
+}).refine((c) => !c.trust.optionalPlugins.includes('pdq') || c.pdq.hashList !== undefined, {
+  path: ['pdq', 'hashList'],
+  message: 'TRUST_OPTIONAL_PLUGINS turns on pdq, which needs PDQ_HASH_LIST: the file or the address of the list of PDQ hashes it matches images against',
+}).refine((c) => !c.trust.optionalPlugins.includes('pdq') || c.trust.allowFrom > 0, {
+  path: ['trust', 'allowFrom'],
+  message: 'TRUST_OPTIONAL_PLUGINS turns on pdq, which needs TRUST_SCORE_ALLOW_FROM above 0: at 0 every post is published whatever its score, an image that matches the list too',
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

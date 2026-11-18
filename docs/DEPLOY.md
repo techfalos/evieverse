@@ -18,7 +18,7 @@ Summaries share the content bucket, under `summaries/`, and so do comments, unde
 | Group     | Requests                                                                                                                                                                       | Uses                                              |
 | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------- |
 | `feed`    | `GET /feed`                                                                                                                                                                    | Redis and the bucket only: no database connection |
-| `content` | `GET /content/:id`, `GET /content/:id/raw`, `GET /content/:id/attestation`, and reading a post's comments: `GET /content/:id/comments`, `GET /content/:id/comments/:commentId` | Database, bucket, and Redis for comments          |
+| `content` | `GET /content/:id`, `GET /content/:id/raw`, `GET /content/:id/raw/:n`, `GET /content/:id/video/:videoId/:file`, `GET /content/:id/attestation`, and reading a post's comments: `GET /content/:id/comments`, `GET /content/:id/comments/:commentId` | Database, bucket, and Redis for comments          |
 | `store`   | `POST /uploads`, `POST /store`                                                                                                                                                 | Database, Redis, bucket                           |
 | `api`     | Everything else                                                                                                                                                                | Database, Redis, bucket                           |
 
@@ -90,6 +90,19 @@ secrets     = { URLHAUS_AUTH_KEY = "..." }
 - Set both in the same `apply`. The server doesn't start with `urlhaus` named and no key, so the modules check for it: the plan fails, before anything is changed, if `TRUST_OPTIONAL_PLUGINS` names `urlhaus` and `URLHAUS_AUTH_KEY` is missing or empty. The check is on the key being there, not on URLhaus accepting it. A name that isn't a plugin, such as `urlhouse`, gets past the plan and is refused by the [settings check](#deploy), which stops the `apply` before any function is updated.
 - Each function instance downloads URLhaus's list when it first has a link to check, and keeps it while it lives. A post with a link that reaches a new instance waits for that download, on top of the cold start.
 - The functions need a way out to `urlhaus-api.abuse.ch`, which the three modules give them: through the NAT gateway on AWS, and directly on GCP and Azure. If the list can't be downloaded, posts with a link fail with `500` on instances that have no list yet.
+
+For `pdq`, which refuses posts and comments with an [image of known child sexual abuse material](TRUST_PLUGINS.md#images-of-known-child-sexual-abuse-material) and tells the admins, name it and say where its list of hashes is, with the list's Authorization header in `secrets` if it asks for one:
+
+```hcl
+environment = { TRUST_OPTIONAL_PLUGINS = "pdq", PDQ_HASH_LIST = "https://hashes.example.com/pdq.csv" }
+secrets     = { PDQ_HASH_LIST_AUTHORIZATION = "Bearer ..." }
+```
+
+- Set them in the same `apply`. The server doesn't start with `pdq` named and no list, so the modules check for it as they do for `urlhaus`: the plan fails if `TRUST_OPTIONAL_PLUGINS` names `pdq` and `PDQ_HASH_LIST` is empty, or in neither `environment` nor `secrets`. The check is on the setting being there, not on the list being one the server can read.
+- Give the list as an address. A path is a file on the function's own disk, so the list would have to be in the image.
+- Each function instance reads the list when its first post or comment arrives, and keeps it while it lives, about 100 bytes a hash: count a long list in the functions' memory. A post or a comment with an image that reaches a new instance waits for that download, on top of the cold start.
+- The functions need a way out to the list's host, which the three modules give them as they do for URLhaus. If the list can't be read, posts and comments with an image fail with `500` on instances that have no list yet.
+- A match is told to the deployment's [admin](#the-admin-account), in its inbox, and to every other admin, and is a warning in the function's log. The server reports it to nobody else: that is yours to do.
 
 **The signing key for reposts**
 
@@ -181,6 +194,77 @@ Three things change on the first `apply` of a version whose API keys start with 
 
 This upgrade wasn't applied to a live deployment either. The modules pass `terraform validate`, and the migration, old keys and the new settings are covered by the server's tests, on SQLite.
 
+## Upgrading to the data export
+
+The first `apply` of a version that has a user's [export](API.md#get-usersuseridexport) (`GET /users/:userId/export`) needs nothing set. What it does:
+
+- **It runs migration `0006_export_indexes`,** in its [first step](#deploy): three indexes (`content (user_id, created_at, id)`, `reposts (user_id, content_id)` and `inbox (sender_id, created_at, id)`), which let a page of an export read the rows it returns and no others. It changes no row.
+- **The [compactor](#compactor) indexes the comments the deployment already has,** once, by who wrote them and who liked them: comments are objects in the bucket, so that index is what finds a user's. It starts when the new compactor's container does, beside its passes, and reads every comment. A container that's replaced meanwhile leaves the work where it was, and the next one goes on from there; a failure is logged, and tried again a minute later. The compactor's log says when it starts ("indexing the comments and likes that are older than users' indexes of them") and when it's done ("users' indexes of their comments and likes hold everything").
+- **Until that's done, every export answers `503`,** with `Retry-After: 60`, so that no client takes an export without its old comments for a whole one. Nothing else waits for it. A new deployment has no comments to index, and answers exports as soon as its compactor first starts.
+
+A user can read 120 pages of their export a minute (`EXPORT_PAGES_PER_MINUTE`, through `environment`).
+
+This upgrade wasn't applied to a live deployment either: the migration, the indexing and the export are covered by the server's tests, on SQLite.
+
+## Upgrading to search
+
+[Search](API.md#search) (`GET /search`) finds posts by keywords that the compactor keeps in the database, and users by a copy of their username in lowercase and without accents. The first `apply` of a version that has it needs nothing set, and leaves one thing to do by hand: the posts and the names that were there before are indexed by a command of their own, run once after the apply.
+
+What the apply does:
+
+- **It runs migration `0009_search`,** in its [first step](#deploy): a table for the keywords (`search_terms`), and a column on `users` for the name as a search compares it (`username_folded`), which it fills with each username in lowercase. That writes every row of `users` once.
+- **The gateways get no new route.** `GET /search` is in the `api` [group](#route-groups), which is sent every path that has no route of its own.
+- **The compactor indexes what it writes out from then on:** new posts, updates, and the posts whose hashtags a repost or a moderator changed.
+
+What that leaves, until the reindex has run:
+
+- **A post from before the upgrade is found by no search,** unless it has been written out again since.
+- **A name with an accent is found only by the letters before it.** The migration can put a name in lowercase, and can't take its accents off: `jos` finds José, and `jose` and `josé` don't.
+- **An account registered or renamed between the migration and the functions' update,** which is a few minutes, was written by the version before. It has no name to be found by.
+
+The reindex is `node dist/search/reindex.js`, run in the deployment's image with its settings. It reads every post's meta file from the bucket and every user, writes what's missing, and ends. It needs the database and the bucket, and no Redis. The modules keep no task of its own for it. On AWS and GCP, start the [rebuild](#redis)'s task or job with this command in place of its own. On Azure, run it in the compactor's container, which has the same image and settings:
+
+```sh
+# AWS: what `terraform output -raw rebuild_command` prints, with --overrides added
+aws ecs run-task --cluster evieverse --task-definition evieverse-rebuild --launch-type FARGATE \
+  --network-configuration 'awsvpcConfiguration={subnets=[subnet-...],securityGroups=[sg-...],assignPublicIp=DISABLED}' \
+  --overrides '{"containerOverrides":[{"name":"compactor","command":["node","dist/search/reindex.js"]}]}'
+
+# GCP: the rebuild job, with other arguments
+gcloud run jobs execute evieverse-rebuild --region us-central1 --wait --args=dist/search/reindex.js
+
+# Azure: a shell in the compactor's container (`terraform output compactor` names it), then the command in it
+az containerapp exec --resource-group evieverse-rg --name evieverse-compactor --command sh
+node dist/search/reindex.js
+```
+
+- **It runs beside the functions and the compactor.** It takes the compactor's lease for each 500 posts and leaves it free for as long between them, so passes go on while it works, about half as often: posts are published a little later meanwhile.
+- **Its log says where it is** (`1500 posts read...`), and ends with `Reindex complete:` and how many posts it indexed and usernames it changed. On Azure, keep the session open until then.
+- **It can be run again, at any time.** What's right already is read and left as it is, so one that was stopped is started again from the beginning.
+- **Run it again after changing `SEARCH_MAX_KEYWORDS`** (100, through `environment`), the most words a post is found by. The compactor applies a new value to the posts it writes out from then on, and the reindex to the rest.
+- **Where you run the server yourself,** it's `npm run reindex` from the built source, or `node dist/search/reindex.js` in a container, with the server's settings.
+- **A new deployment needs none of this:** it has no post or name from before.
+
+What search costs from then on:
+
+- **Rows in the database:** one for each distinct word of a post, up to `SEARCH_MAX_KEYWORDS`, and one for each of its hashtags. They're deleted with the post.
+- **Database reads that need no key:** every search is a query from the `api` group. One address gets 60 a minute (`SEARCH_RATE_LIMIT_PER_MINUTE`), counted by the [client's address](#client-addresses).
+- **A search of users reads more as the users grow.** PostgreSQL reads only the names that start with what was asked for where the database sorts text byte by byte (the `C` collation). With any other, it reads names past those too, in the index's order, until the page is full. A database these modules make has another: `en_US.utf8`, which the Azure module sets, and which is the default on RDS and Cloud SQL.
+
+This upgrade wasn't applied to a live deployment either, and the three commands above weren't run on one. The migration, the search and the reindex are covered by the server's tests, on SQLite, so the note on PostgreSQL is read from the query and wasn't measured.
+
+## Upgrading to likes that can be taken back
+
+A user can take back a like of a post or of a comment ([`DELETE /like`](API.md#delete-like)). The first `apply` of a version that has it needs nothing set, and nothing done by hand afterwards. What it does:
+
+- **It runs migration `0010_unlikes`,** in its [first step](#deploy): a column on `content` for when a post last lost a like (`unliked_at`), with an index, and a column on `pending_writes` for what a like of a comment that waits comes to (`net`). Both are empty on the rows that are there, and it changes no row.
+- **The gateways get no new route.** `DELETE /like` is in the `api` [group](#route-groups), which is sent every path that has no route of its own.
+- **The compactor has to be of the new version before a like of a comment is taken back.** The request commits the taking back as a row, which the compactor applies. A compactor of the version before reads such a row as a like: the like stays, or is made. So between the functions' update and the compactor's, which is a few minutes, a like of a comment that's taken back may be there still afterwards, and the user takes it back again. A post's likes don't wait for the compactor, and are taken back at once either way.
+- **The version before runs on the migrated database:** it writes neither column, and a like of a comment it commits meanwhile counts as any other.
+- **Where you run it yourself,** migrate, then start the compactor on the new version, and then the API nodes. In that order no taking back is committed before there's a compactor that can apply it.
+
+This upgrade wasn't applied to a live deployment either. The migration and the likes taken back are covered by the server's tests, on SQLite, and the tests of likes were run on PostgreSQL and MySQL as well.
+
 ## Uploads
 
 A request to a function can't carry a large file. The limits on a file sent in the request to `/store`:
@@ -193,9 +277,11 @@ A request to a function can't carry a large file. The limits on a file sent in t
 | Azure | None set by Container Apps; not tested through Front Door |                                                                |
 
 
+The limit is on the request, so an [album](API.md#albums) sent in one request has it for all its images together. A larger album sends each image by its own upload link.
+
 Larger files go straight to the bucket: the client asks `[POST /uploads](API.md#post-uploads)` for a link, sends the file to it, and posts it with `/store` by its `uploadId`. Every module sets the bucket up for that:
 
-- **CORS:** pages on `upload_origins` (any origin by default) may send files to the bucket from a browser. The link is the permission; this only tells browsers which pages may use one.
+- **CORS:** pages on `upload_origins` (any origin by default) may send files to the bucket from a browser, and read from it the segments of a [processed video](#videos)'s stream. The link is the permission; this only tells browsers which pages may use one.
 - **Expiry:** an upload nobody posts is deleted after a day (`uploads/` in the bucket). A file that waits for the [compactor](#compactor) to write it out is kept for a week (`staged/`).
 - `MAX_UPLOAD_BYTES` is the largest file `/store` accepts either way. To post an upload, `/store` copies it within the bucket, inside the request's time limit: 30 seconds on AWS, `request_timeout` on GCP (300) and Azure (240). AWS is set to 256 MiB, GCP to 1 GiB and Azure to 512 MiB. Those are estimates of what fits, not measurements; time a large upload on your own deployment before raising them through `environment`.
 
@@ -217,7 +303,7 @@ The audit log is written by the functions that answer requests, in each request,
 
 ## Client addresses
 
-The limits on registrations, on feeds and on the other reads that need no key (`REGISTER_RATE_LIMIT_PER_HOUR`, `FEED_RATE_LIMIT_PER_MINUTE`, `FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE`, `CONTENT_RATE_LIMIT_PER_MINUTE`, `COMMENTS_LIST_RATE_LIMIT_PER_MINUTE`, `REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE`) count by the client's address, which the server reads from `X-Forwarded-For`, as far from the end as there are proxies in front of it (`TRUST_PROXY`). Nothing can reach the functions except through the address in front, so a client can't make one up:
+The limits on registrations, on feeds and on the other reads that need no key (`REGISTER_RATE_LIMIT_PER_HOUR`, `FEED_RATE_LIMIT_PER_MINUTE`, `FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE`, `CONTENT_RATE_LIMIT_PER_MINUTE`, `COMMENTS_LIST_RATE_LIMIT_PER_MINUTE`, `REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE`, `SEARCH_RATE_LIMIT_PER_MINUTE`) count by the client's address, which the server reads from `X-Forwarded-For`, as far from the end as there are proxies in front of it (`TRUST_PROXY`). Nothing can reach the functions except through the address in front, so a client can't make one up:
 
 - **AWS:** CloudFront sends a secret header (`X-Origin-Secret`) that the functions require, since the API Gateway's own address is public.
 - **GCP:** the Cloud Run services only admit the gateway's service account. There's no `allUsers` binding.
@@ -260,6 +346,23 @@ What waits for it:
 Its size is `compactor_cpu` and `compactor_memory` (half a CPU and 1 GB on AWS and Azure, one CPU and 1 GiB on GCP). It runs all the time, so unlike the functions it costs the same with or without traffic: about $18 a month on AWS at the default size, from Fargate's list prices in `us-east-1`. `terraform output compactor` names it, for finding its logs (on AWS, the log group too).
 
 None of this was applied to a live account for this change: the modules pass `terraform validate`, and the pacing, the lease and stopping mid-pass are covered by the server's tests. That the compactor's container reaches other servers is read from each module's network, and wasn't tried on a live one.
+
+## Videos
+
+The compactor's container also processes the videos users send ([API.md](API.md#videos)): it makes each an MP4 that plays anywhere, without its metadata, and for a post, a poster and an adaptive stream. The functions only mark a video to be processed, and serve what the compactor made. The settings are in [CONFIG.md](CONFIG.md#videos).
+
+- **The image has ffmpeg.** The compactor checks for it when it starts, and doesn't start without it. An image of your own needs `ffmpeg` and `ffprobe` with `libx264` and `aac`.
+- **The default size is small for it.** Encoding is CPU work, and at half a CPU a minute of 1080p video takes several minutes. Videos are processed one at a time, so they queue behind each other, and each post waits to be published until its own is done. Where videos are common, raise `compactor_cpu` to 2 CPUs or more and `compactor_memory` to at least 2 GB (4 GB for 4K sources), which raises the compactor's cost in proportion. Fewer or smaller `VIDEO_HEIGHTS` cut the work too.
+- **It needs disk for the video as it was sent, and for every size it's made in, twice over** (the MP4 and its stream's segments). On AWS that's the task's ephemeral storage (20 GB), and on Azure the replica's, which Container Apps sizes by its CPUs (2 GB at half a CPU, 8 GB above one). **On GCP the files count against `compactor_memory`,** since Cloud Run keeps an instance's files in memory: there, set `compactor_memory` to several times the largest video the server takes (`MAX_UPLOAD_BYTES`), or lower `MAX_UPLOAD_BYTES`.
+- **A video that takes longer than `VIDEO_TIMEOUT_SECONDS` (an hour) is given up,** and so is one the compactor was stopped on three times, which is what running out of memory looks like. Its publisher gets a notice. The compactor's log says why, in a line that starts `could not process a video`, and has `processed a video` with the time it took for each one that went through.
+- **Passes go on while a video is processed.** The video worker runs beside the passes in the same process, so posts and comments without a video are written out as ever, though more slowly on a machine whose CPUs the encoder is using.
+- **The stream's segments are read from the bucket** on AWS and GCP, by a redirect to a signed link, as `/raw` is. A player that fetches them by script (hls.js, in every browser but Safari) is held to the bucket's CORS rule, so the modules allow `GET` there for `upload_origins`. On Azure they're streamed through the Container App and Front Door.
+- **Processed videos take more room:** each rendition is stored twice, as the stream's segments and, for one of them, as the MP4. The file as it was sent isn't kept.
+- **To turn it off,** set `VIDEO_PROCESSING = "false"` in `environment`. It applies to the functions and the compactor alike, as every setting there does. Videos are then stored and served as they're sent.
+
+The first `apply` of a version that processes videos runs migration `0007_media` (a table for the videos that wait, and a column on ads), adds `GET` and `HEAD` to the bucket's CORS rule, and replaces the compactor's container with one that has ffmpeg. Videos stored before it stay as they were sent: nothing processes them again.
+
+None of this was applied to a live account for this change. The processing itself is covered by the server's tests, with ffmpeg 8; the timings above are estimates, so time a video of the length your users send on your own deployment.
 
 ## Scaling and the database
 

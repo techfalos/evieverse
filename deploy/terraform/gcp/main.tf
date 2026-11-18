@@ -201,10 +201,12 @@ resource "google_storage_bucket" "content" {
   public_access_prevention    = "enforced"
   force_destroy               = !var.deletion_protection
 
-  # Browsers send files straight to the bucket, with the link POST /uploads signs.
+  # Browsers send files straight to the bucket, with the link POST /uploads signs. And they read from it
+  # the pieces of a processed video's stream, which the server redirects to with a signed link: a player
+  # that fetches them by script (hls.js) is refused them without GET here.
   cors {
     origin          = var.upload_origins
-    method          = ["PUT"]
+    method          = ["PUT", "GET", "HEAD"]
     response_header = ["Content-Type", "ETag"]
     max_age_seconds = 3600
   }
@@ -585,6 +587,11 @@ resource "terraform_data" "migrate" {
     precondition {
       condition     = !contains(local.optional_plugins, "urlhaus") || trimspace(lookup(local.settings, "URLHAUS_AUTH_KEY", "")) != ""
       error_message = "TRUST_OPTIONAL_PLUGINS turns on urlhaus, which needs URLHAUS_AUTH_KEY in `secrets`: the Auth-Key of an abuse.ch account, which is free (https://auth.abuse.ch). Without it no service and no compactor would start."
+    }
+    # The same for pdq and its list of hashes.
+    precondition {
+      condition     = !contains(local.optional_plugins, "pdq") || trimspace(lookup(local.settings, "PDQ_HASH_LIST", "")) != ""
+      error_message = "TRUST_OPTIONAL_PLUGINS turns on pdq, which needs PDQ_HASH_LIST in `environment` or `secrets`: the address of the list of PDQ hashes it matches images against. Without it no service and no compactor would start."
     }
   }
 }

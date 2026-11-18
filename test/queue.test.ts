@@ -338,6 +338,7 @@ for (const target of TARGETS) {
         parentId: null,
         author: { userId: bob.userId, username: 'bob' },
         text,
+        aiGenerated: false,
         media: null,
         likes: 0,
         replies: 0,

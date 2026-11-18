@@ -21,9 +21,8 @@ function byteRange(header: string | undefined, size: number): { first: number; l
 
 /**
  * A challenge read out, for whoever can't read its image: GET /challenges/:challengeId/audio, and
- * nothing else. Challenges are issued, and answered, by the requests they are asked of
- * (registering, posting and reposting, commenting); this reads out any of them, whichever route
- * issued it.
+ * nothing else. Challenges are issued, and answered, by the request they are asked of, which is
+ * registering (POST /register); this reads them out.
  */
 export function challengeRoutes(app: FastifyInstance, { challenges }: RouteDeps) {
   /**

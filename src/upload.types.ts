@@ -29,6 +29,14 @@ export interface PostBytes {
    */
   hash(): Promise<string | null>;
   /**
+   * The path of the temp file here that holds the bytes `stage` stores, for what reads them before
+   * they are stored: a trust plugin that looks at an image (see trustImage), and what makes an
+   * avatar of one (standardAvatar in src/profile.ts). An image sent with
+   * an upload link is fetched to one when this is first asked for, as `hash` fetches it. Null for
+   * bytes that never come through this process: a video or audio file sent with an upload link.
+   */
+  local(): Promise<string | null>;
+  /**
    * Writes the bytes as `of`'s, over the ones it had, and returns their size as stored. For what
    * no compactor writes, which is an ad's image: a post's file and a comment's are staged.
    */
@@ -41,8 +49,8 @@ export interface PostBytes {
   stage(content: ContentStore, writeId: string, mimeType: string): Promise<StagedBytes>;
   /**
    * Call when the request is over. `stored`: the server now holds the post, so its upload can go.
-   * Otherwise an upload in the content store is kept, for the request to be sent again (with a
-   * challenge solved, say); the store expires what nobody comes back for.
+   * Otherwise an upload in the content store is kept, for the request to be sent again (once
+   * the limit on posts a minute has room for it, say); the store expires what nobody comes back for.
    */
   release(stored?: boolean): Promise<void>;
 }
@@ -54,22 +62,50 @@ export interface Upload {
   mimeType: string;
 }
 
-/** What a request says of its post, beside an uploaded file. */
+/** What a request says of its post, beside its files. */
 export interface PostFields {
   type: PostType;
   text?: string;
   url?: string;
-  /** An image's, video's or audio's file, inline. */
-  content?: string;
-  contentEncoding: 'utf8' | 'base64';
-  contentType?: string;
-  filename?: string;
+  /** The alternative text of an image post's one image, which only an image post says. */
+  alt?: string;
 }
 
-/** The image or video a comment comes with, and its bytes. */
+/**
+ * One file as a request sends it, with what the request says of it: an upload (a multipart part,
+ * or a file put in the content store with a link from POST /uploads), or the file inline in
+ * `content`. An image, video or audio post has one; an image post of several images has one for
+ * each, in the order of the images.
+ */
+export interface SentFile {
+  upload?: Upload;
+  /** The file inline, as `contentEncoding` says; read only where there is no upload. */
+  content?: string;
+  contentEncoding: 'utf8' | 'base64';
+  /** The content type it is sent as, over the upload's own. */
+  contentType?: string;
+  /** Its name, where the upload has none. */
+  filename?: string;
+  /** An image's alternative text: what describes it to those who can't see it. Only an image has one. */
+  alt?: string;
+}
+
+/**
+ * A file of a post as it is stored: its bytes, the name it was sent with, and its content type.
+ * An image that was sent with an alternative text has it in `alt`, without the spaces around it.
+ */
+export interface PostFile {
+  file: PostBytes;
+  filename: string | null;
+  mimeType: string;
+  alt?: string;
+}
+
+/** The image or video a comment comes with, and its bytes; an image with its alternative text, if it was sent with one. */
 export interface CommentFile {
   kind: 'image' | 'video';
   file: PostBytes;
   filename: string | null;
   mimeType: string;
+  alt?: string;
 }

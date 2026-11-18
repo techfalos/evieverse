@@ -1,3 +1,4 @@
+import type { Mention } from '../mentions.types.js';
 import type { Origin, Preview, Publisher } from '../storage/index.js';
 
 /** A feed record, in exactly the shape the feed returns. */
@@ -9,6 +10,12 @@ export interface FeedRecord {
   /** Whether the post takes comments, which are read at /content/:contentId/comments. */
   comments: boolean;
   preview: Preview;
+  /**
+   * The users the preview's text mentions, each with the name it has them by: what the text is
+   * read with, to show each `@name` of theirs as a link to their profile (src/format.ts). Absent
+   * where it mentions nobody.
+   */
+  mentions?: Mention[];
   tags: string[];
   likes: number;
   /**

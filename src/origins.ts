@@ -10,8 +10,8 @@ import { badRequest, conflict, HttpError, notFound } from './http/errors.js';
 import { msg } from './language.js';
 import { moderatePost } from './moderation/policy.js';
 import type { OriginSummary, RefreshedGone, RefreshedNone, RefreshedUpdated } from './origins.types.js';
-import { LINK_MIME, mediaType, originMediaUrl, ownAddress, postAddress, previewCutter, previewOf, TEXT_MIME } from './posts.js';
-import { repostedTags, repostsOf } from './reposts.js';
+import { LINK_MIME, mediaType, originMediaUrl, ownAddress, postAddress, previewCutter, previewOf, readPreview, TEXT_MIME } from './posts.js';
+import { removedRepostTags, repostedTags, repostsOf } from './reposts.js';
 import type { ContentMeta, Origin, Preview } from './storage/index.js';
 import { MINUTE } from './time.js';
 import { requirePostType } from './upload.js';
@@ -107,8 +107,22 @@ export function originEntries({ db, config, content, writer, trustPlugins, origi
         ? { kind: 'text', text: cut(sent.preview.text) }
         : sent.preview.kind === 'link'
           ? { kind: 'link', url: sent.preview.url }
-          : { kind: sent.preview.kind, url: originMediaUrl(origin), ...(caption ? { text: cut(caption) } : {}) };
-    return { mimeType, origin, preview, texts: [sent.preview.kind === 'link' ? sent.preview.url : caption && plainText(caption, true), origin.url, origin.publisher.username] };
+          : readPreview(
+              {
+                kind: sent.preview.kind,
+                ...(caption ? { text: cut(caption) } : {}),
+                // How many images the original has, for one of several: they are read on its server, each at its place after the first's address.
+                ...(sent.preview.kind === 'image' && sent.preview.imageCount !== undefined && { imageCount: sent.preview.imageCount }),
+                // What describes its images there, which is read out here as there.
+                ...(sent.preview.kind === 'image' && sent.preview.alt && { alt: sent.preview.alt.map((alt) => alt.trim()) }),
+                // What a video its server processed is: its poster and its stream are read on that server, as its bytes are.
+                ...(sent.preview.kind === 'video' && sent.preview.video && { video: sent.preview.video }),
+              },
+              originMediaUrl(origin),
+            );
+    // The alternative texts are the post's words as its caption is, and are read as it is.
+    const alts = sent.preview.kind === 'image' ? (sent.preview.alt ?? []) : [];
+    return { mimeType, origin, preview, texts: [sent.preview.kind === 'link' ? sent.preview.url : caption && plainText(caption, true), ...alts, origin.url, origin.publisher.username] };
   }
 
   /**
@@ -168,24 +182,29 @@ export function originEntries({ db, config, content, writer, trustPlugins, origi
     await changing();
     // What the entry now says is held to the rules of every hashtag it has, those reposts gave it too, as an update of a post is.
     const given = repostedTags(await repostsOf(db, row.id));
+    // The entry's own are the rest of what its meta file holds, but for those of a repost that was removed and that the
+    // compactor is yet to take off it: read after the meta file and the reposts, so one of them is either a repost's
+    // there or named here.
+    const taken = await removedRepostTags(db, row.id);
     const moderated = await moderatePost(
       { db, config, trustPlugins, now, log },
-      { userId: row.user_id, contentId: row.id, tags: [...meta.tags.filter((tag) => !given.includes(tag)), ...given], texts },
+      { userId: row.user_id, contentId: row.id, tags: [...meta.tags.filter((tag) => !given.includes(tag) && !taken.includes(tag)), ...given], texts },
     );
     const queued = moderated.route === 'queue';
     const ts = now();
-    await writer.write({
+    const tags = await writer.write({
       publisher: publisherOf(row),
       previous: meta,
       seenSeq: Number(row.seq),
       recheck,
+      given,
       summary: { contentId: row.id, createdAt: row.created_at, updatedAt: ts, userId: row.user_id, mimeType, aiGenerated, comments: false, tags: moderated.tags, preview, origin },
       meta: { contentId: row.id, mimeType, size: Buffer.byteLength(origin.url), aiGenerated, comments: false, preview, tags: moderated.tags, updatedAt: ts, origin, originAttestedAt: said.issuedAt },
       queued: queued ? { trustScore: moderated.trustScore } : undefined,
       // The hashtags of reposts that what it now says is refused: they come off the entry for good (see ContentWrite.droppedReposts).
       droppedReposts: moderated.removedTags.filter((r) => given.includes(r.tag) && r.reason !== 'removed').map((r) => r.tag),
     });
-    return { change: 'updated', contentId: row.id, queued, tags: moderated.tags, removedTags: moderated.removedTags, preview, aiGenerated, origin };
+    return { change: 'updated', contentId: row.id, queued, tags, removedTags: moderated.removedTags, preview, aiGenerated, origin };
   }
 
   return { ownKeys, ownContentId, attested, summarised, refresh };

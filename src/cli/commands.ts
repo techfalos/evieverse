@@ -103,15 +103,17 @@ interface CommentRecord {
   author: { userId: string; username: string } | null;
   /** Empty for one that is only its image or video. */
   text: string;
+  /** Whether its author declared it created with AI; false on what stands in a comment's place. */
+  aiGenerated: boolean;
   /** The image or video it came with, and where its bytes are read; null for one that is only text. */
-  media: { kind: 'image' | 'video'; url: string; mimeType: string; size: number } | null;
+  media: { kind: 'image' | 'video'; url: string; mimeType: string; size: number; alt?: string } | null;
   likes: number;
   /** How many comments reply to it. */
   replies: number;
   createdAt: string;
   /** When its author last edited it; null for one that never was. */
   editedAt: string | null;
-  /** "pending_review" on one that waits in the moderation queue; "deleted" on what a deleted comment that has replies leaves. */
+  /** "pending_review" on one that waits in the moderation queue; "deleted" on what a deleted comment that has replies leaves; "blocked" on one by a user you block. */
   status?: string;
 }
 
@@ -119,11 +121,19 @@ interface CommentRecord {
 const counted = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
 /**
- * What a comment is, on one line: the kind of file it came with, if it came with one, and its
- * text. Of one that isn't there to read, why: it was deleted, or waits for the server's moderators.
+ * What a comment is, on one line: the kind of file it came with, if it came with one, with what
+ * describes an image that is described (its alternative text), and its
+ * text. Of one that isn't there to read, why: it was deleted, its author is someone you block, or
+ * it waits for the server's moderators.
  */
 const commentLine = ({ author, media, text, status }: CommentRecord): string =>
-  author === null ? (status === 'deleted' ? '[deleted]' : '[waits for moderators]') : oneLine([media && `[${media.kind}]`, text].filter(Boolean).join(' '));
+  author === null
+    ? status === 'deleted'
+      ? '[deleted]'
+      : status === 'blocked'
+        ? '[by a user you block]'
+        : '[waits for moderators]'
+    : oneLine([media && (media.alt ? `[${media.kind}: ${media.alt}]` : `[${media.kind}]`), text].filter(Boolean).join(' '));
 
 /** A file to send inside a request, as the server takes one inline: its bytes in base64, and its name, which says what type it is. */
 async function inlineFile(file: string): Promise<{ content: string; contentEncoding: 'base64'; filename: string }> {
@@ -186,11 +196,27 @@ function confirmed({ values }: Args, what: string): void {
 const deletedText = (d: AccountDeleted) =>
   d.status === 'deleted' ? `Deleted account ${d.userId}.` : `Deleted account ${d.userId}: its posts are being removed, and the account goes with the last of them.`;
 
-/** One of the server's rules, as it gives them: `position` is its place in the list, from 1. */
+/** One of the server's rules, or of a hashtag's, as the server gives them: `position` is its place in the list, from 1. */
 interface RuleRecord {
   ruleId: string;
   position: number;
   text: string;
+}
+
+/** A claim to moderate a hashtag that waits, as the server gives it: who made it, when, and when it is granted unless an admin or a server moderator refuses it before. */
+interface ClaimRecord {
+  tag: string;
+  userId: string;
+  username: string;
+  claimedAt: string;
+  reviewUntil: string;
+}
+
+/** What ending a hashtag's claim answers: whether there was one, and whose. */
+interface ClaimEnded {
+  tag: string;
+  wasClaimed: boolean;
+  userId?: string;
 }
 
 /** What a server says of the code it runs, beside its rules: its operator's statement. */
@@ -239,7 +265,10 @@ function own<T>(spec: Omit<Command, 'run'> & { request(args: Args, userId: strin
   };
 }
 
-/** What is in an inbox: a message a user sent, or a notice of the server's, which has no sender and may quote the post or the comment it is about. */
+/**
+ * What is in an inbox: a message a user sent, or a notice of the server's, which may quote the post or the comment it
+ * is about. A notice has no sender, but for the notice of a mention, whose sender is who mentioned the user.
+ */
 interface InboxItem {
   messageId: string;
   kind: string;
@@ -256,7 +285,8 @@ function inboxRow(m: InboxItem): string[] {
     m.messageId,
     m.sentAt,
     m.readAt ? 'read' : 'new',
-    m.kind !== 'message' ? 'the server' : m.from ? `${m.from.username} (${m.from.userId})` : '(an account that is gone)',
+    // What says nothing of a sender is the server's own: a message and the notice of a mention say whose they are.
+    m.kind !== 'message' && m.from === undefined ? 'the server' : m.from ? `${m.from.username} (${m.from.userId})` : '(an account that is gone)',
     // A notice about a comment (comment_accepted, comment_deleted, ...) quotes the comment.
     (m.excerpt ? `${m.text} The ${m.kind.startsWith('comment_') ? 'comment' : 'post'}: "${m.excerpt}"` : m.text).replace(/\s+/g, ' ').trim(),
   ];
@@ -500,15 +530,7 @@ export const COMMANDS: Command[] = [
       const { tags } = values;
       if (typeof tags !== 'string' || !tags.trim()) throw new CliError('name the hashtags the repost gives the post: --tags "news, mumbai"', 2);
       const api = await ctx.api();
-      const d = await api
-        .request<Reposted>('POST', '/repost', { ...(/^https?:\/\//i.test(post!) ? await repostSource(ctx.io, api.server, post!) : { contentId: post! }), tags })
-        .catch((err: unknown) => {
-          // A repost is a post as far as challenges go, and a challenge's image takes a client to show.
-          if (err instanceof ApiError && err.status === 428) {
-            throw new CliError(`${err.message}. The CLI can't show a challenge: repost again later, or with a client that shows its image`);
-          }
-          throw err;
-        });
+      const d = await api.request<Reposted>('POST', '/repost', { ...(/^https?:\/\//i.test(post!) ? await repostSource(ctx.io, api.server, post!) : { contentId: post! }), tags });
       const what = d.origin ? d.origin.url : d.contentId;
       return {
         data: d,
@@ -559,7 +581,7 @@ export const COMMANDS: Command[] = [
     flags: `[--replies-to <commentId>] [--newest] ${PAGE_FLAGS}`,
     role: 'anyone',
     summary:
-      "Lists the comments on a post, or with --replies-to, the replies to one of them, oldest first, or with --newest, newest first. Each row says how many likes and replies the comment has. A comment that has replies and was deleted, or waits for the server's moderators, is listed as that.",
+      "Lists the comments on a post, or with --replies-to, the replies to one of them, oldest first, or with --newest, newest first. Each row says how many likes and replies the comment has, and whether its author says it was created with AI. A comment that has replies and was deleted, or waits for the server's moderators, is listed as that.",
     request: (args) => {
       const parentId = args.values['replies-to'];
       const contentId = args.positionals[0]!;
@@ -580,7 +602,7 @@ export const COMMANDS: Command[] = [
               c.createdAt,
               counted(c.likes, 'like', 'likes'),
               counted(c.replies, 'reply', 'replies'),
-              `${commentLine(c)}${c.editedAt ? ' (edited)' : ''}`,
+              `${commentLine(c)}${c.aiGenerated ? ' (created with AI)' : ''}${c.editedAt ? ' (edited)' : ''}`,
             ]),
           )
         : d.commentId === undefined
@@ -590,16 +612,18 @@ export const COMMANDS: Command[] = [
   {
     name: 'comments add',
     positionals: ['contentId', 'text'],
-    options: { file: { type: 'string' }, 'reply-to': { type: 'string' } },
-    flags: '[--file <path>] [--reply-to <commentId>]',
+    options: { file: { type: 'string' }, alt: { type: 'string' }, 'reply-to': { type: 'string' }, ai: { type: 'boolean' } },
+    flags: '[--file <path>] [--alt <text>] [--reply-to <commentId>] [--ai]',
     role: 'anyone',
     summary:
-      'Comments on a post that takes comments, or with --reply-to, replies to a comment on it; quote the text. With --file, the comment comes with an image or a video, and its text can be "". One the server holds back waits for its moderators, as a post does.',
+      'Comments on a post that takes comments, or with --reply-to, replies to a comment on it; quote the text. With --file, the comment comes with an image or a video, and its text can be "". With --alt, an image comes with its alternative text, which describes it to those who can\'t see it; quote it. With --ai, you say that the comment was created with AI. One the server holds back waits for its moderators, as a post does.',
     async run(ctx, { positionals: [contentId, text], values }) {
       const body = {
         text,
         ...(typeof values['reply-to'] === 'string' && { parentId: values['reply-to'] }),
+        ...(values.ai === true && { aiGenerated: true }),
         ...(typeof values.file === 'string' && (await inlineFile(values.file))),
+        ...(typeof values.alt === 'string' && { alt: values.alt }),
       };
       const d = await (await ctx.api()).request<CommentRecord>('POST', path`/content/${contentId!}/comments`, body);
       return {
@@ -616,10 +640,16 @@ export const COMMANDS: Command[] = [
   endpoint<{ contentId: string; commentId: string; unchanged?: boolean; status?: string }>({
     name: 'comments edit',
     positionals: ['contentId', 'commentId', 'text'],
+    options: { ai: { type: 'boolean' }, 'no-ai': { type: 'boolean' } },
+    flags: '[--ai | --no-ai]',
     role: 'anyone',
     summary:
-      "Gives a comment of yours another text; quote it. The comment keeps its replies and its likes. An edit the server holds back takes the comment off the post until its moderators accept it; its replies stay.",
-    request: ({ positionals: [contentId, commentId, text] }) => ({ method: 'PATCH', path: path`/content/${contentId!}/comments/${commentId!}`, body: { text } }),
+      "Gives a comment of yours another text; quote it. With --ai, you say that the comment was created with AI, and with --no-ai, that it wasn't; with neither, it says what it said. The comment keeps its replies and its likes. An edit the server holds back takes the comment off the post until its moderators accept it; its replies stay.",
+    request: ({ positionals: [contentId, commentId, text], values }) => {
+      if (values.ai === true && values['no-ai'] === true) throw new CliError("say one of the two: --ai if the comment was created with AI, --no-ai if it wasn't", 2);
+      const declared = values.ai === true ? { aiGenerated: true } : values['no-ai'] === true ? { aiGenerated: false } : {};
+      return { method: 'PATCH', path: path`/content/${contentId!}/comments/${commentId!}`, body: { text, ...declared } };
+    },
     text: (d) =>
       d.unchanged
         ? `Comment ${d.commentId} already says that.`
@@ -631,9 +661,17 @@ export const COMMANDS: Command[] = [
     name: 'comments like',
     positionals: ['contentId', 'commentId'],
     role: 'anyone',
-    summary: 'Likes a comment. You like a comment once, and a like is not taken back.',
+    summary: 'Likes a comment. You like a comment once, until you take the like back with comments unlike.',
     request: ({ positionals: [contentId, commentId] }) => ({ method: 'POST', path: '/like', body: { contentId, commentId } }),
     text: (d) => `${d.alreadyLiked ? `You had already liked comment ${d.commentId}` : `Liked comment ${d.commentId}`}: it has ${counted(d.likes, 'like', 'likes')}.`,
+  }),
+  endpoint<{ contentId: string; commentId: string; likes: number; wasLiked: boolean }>({
+    name: 'comments unlike',
+    positionals: ['contentId', 'commentId'],
+    role: 'anyone',
+    summary: 'Takes back your like of a comment. You can like the comment again afterwards.',
+    request: ({ positionals: [contentId, commentId] }) => ({ method: 'DELETE', path: '/like', body: { contentId, commentId } }),
+    text: (d) => `${d.wasLiked ? `Took back your like of comment ${d.commentId}` : `You hadn't liked comment ${d.commentId}`}: it has ${counted(d.likes, 'like', 'likes')}.`,
   }),
   endpoint<{ contentId: string; commentId: string }>({
     name: 'comments delete',
@@ -643,13 +681,41 @@ export const COMMANDS: Command[] = [
     request: ({ positionals: [contentId, commentId] }) => ({ method: 'DELETE', path: path`/content/${contentId!}/comments/${commentId!}` }),
     text: (d) => `Deleted comment ${d.commentId}.`,
   }),
-  endpoint<{ tag: string; moderators: { userId: string; username: string; since: string }[] }>({
+  endpoint<{ tag: string; moderators: { userId: string; username: string; since: string }[]; claim?: ClaimRecord }>({
     name: 'moderators list',
     positionals: ['tag'],
     role: 'anyone',
-    summary: "Lists a hashtag's moderators.",
+    summary: "Lists a hashtag's moderators, and the claim to it that waits, if there is one.",
     request: ({ positionals: [tag] }) => ({ method: 'GET', path: path`/tags/${tag!}/moderators` }),
-    text: (d) => (d.moderators.length ? table(d.moderators.map((m) => [m.userId, m.username, `since ${m.since}`])) : `#${d.tag} has no moderators.`),
+    text: (d) =>
+      (d.moderators.length ? table(d.moderators.map((m) => [m.userId, m.username, `since ${m.since}`])) : `#${d.tag} has no moderators.`) +
+      (d.claim ? `\n${d.claim.username} (${d.claim.userId}) claimed it, and becomes its moderator at ${d.claim.reviewUntil} unless the claim is refused.` : ''),
+  }),
+  endpoint<ClaimRecord & { alreadyClaimed: boolean }>({
+    name: 'claims add',
+    positionals: ['tag'],
+    role: 'anyone',
+    summary:
+      'Claims a hashtag that has no moderator, to moderate it. The admins and server moderators are told, and can refuse the claim while it waits; if none does, you become its moderator. Only where publishers choose the hashtags of their posts.',
+    request: ({ positionals: [tag] }) => ({ method: 'POST', path: path`/tags/${tag!}/claim` }),
+    text: (d) =>
+      `${d.alreadyClaimed ? `You had already claimed #${d.tag}` : `You claimed #${d.tag}`}: you become its moderator at ${d.reviewUntil}, unless an admin or a server moderator refuses the claim before then.`,
+  }),
+  endpoint<ClaimEnded>({
+    name: 'claims withdraw',
+    positionals: ['tag'],
+    role: 'anyone',
+    summary: 'Withdraws your claim to a hashtag.',
+    request: ({ positionals: [tag] }) => ({ method: 'DELETE', path: path`/tags/${tag!}/claim` }),
+    text: (d) => (d.wasClaimed ? `Withdrew your claim to #${d.tag}.` : `Nobody's claim to #${d.tag} is waiting.`),
+  }),
+  endpoint<{ tag: string; rules: RuleRecord[] }>({
+    name: 'tag-rules list',
+    positionals: ['tag'],
+    role: 'anyone',
+    summary: "Lists a hashtag's rules, in their order: what its moderators ask of the posts under it.",
+    request: ({ positionals: [tag] }) => ({ method: 'GET', path: path`/tags/${tag!}/rules` }),
+    text: (d) => (d.rules.length ? table(d.rules.map((r) => [String(r.position), r.ruleId, r.text.replace(/\s+/g, ' ').trim()])) : `#${d.tag} has no rules.`),
   }),
   endpoint<{ modificationDisclosure: ModificationDisclosure; supportEmail: string; rules: RuleRecord[] }>({
     name: 'rules list',
@@ -728,9 +794,10 @@ export const COMMANDS: Command[] = [
     name: 'blocks add',
     positionals: ['userId'],
     role: 'anyone',
-    summary: 'Blocks a user: no message goes between the two of you, either way.',
+    summary: "Blocks a user: no message goes between the two of you, neither follows the other, they can't comment on your posts, and what they wrote is left out of what you're listed.",
     request: ({ positionals: [userId] }, me) => ({ method: 'PUT', path: path`/users/${me}/blocked/${userId!}` }),
-    text: (d) => (d.alreadyBlocked ? `You already blocked ${d.blockedId}.` : `You block ${d.blockedId}: no message goes between the two of you.`),
+    text: (d) =>
+      d.alreadyBlocked ? `You already blocked ${d.blockedId}.` : `You block ${d.blockedId}: no message goes between the two of you, neither follows the other, and they can't comment on your posts.`,
   }),
   own<{ blockedId: string; wasBlocked: boolean }>({
     name: 'blocks remove',
@@ -799,19 +866,52 @@ export const COMMANDS: Command[] = [
   endpoint<{ contentId: string; tag: string; tags: string[]; muted: boolean }>({
     name: 'tag remove',
     positionals: ['contentId', 'tag'],
-    options: { mute: { type: 'boolean' } },
-    flags: '[--mute]',
+    options: { mute: { type: 'boolean' }, reason: { type: 'string' } },
+    flags: '[--mute] [--reason <text>]',
     role: 'moderator',
-    summary: "Removes a hashtag from content, for good: updates don't get it back. With --mute, also mutes its publisher on the hashtag.",
-    request: ({ positionals: [contentId, tag], values }) => ({
-      method: 'DELETE',
-      path: path`/content/${contentId!}/tags/${tag!}`,
-      ...(values.mute === true && { body: { mute: true } }),
-    }),
+    summary:
+      "Removes a hashtag from content, for good: updates don't get it back. With --mute, also mutes its publisher on the hashtag. With --reason, why, which the post says to whoever reads it; quote it.",
+    request: ({ positionals: [contentId, tag], values }) => {
+      const body = { ...(values.mute === true && { mute: true }), ...(typeof values.reason === 'string' && { reason: values.reason }) };
+      return { method: 'DELETE', path: path`/content/${contentId!}/tags/${tag!}`, ...(Object.keys(body).length > 0 && { body }) };
+    },
     text: (d) =>
       (d.tags.length
         ? `Removed #${d.tag} from ${d.contentId}: it's now under ${hashtags(d.tags)}.`
         : `Removed #${d.tag} from ${d.contentId}: it was its last hashtag, so the content is in no hashtag's feed any more.`) + (d.muted ? `\nIts publisher is muted on #${d.tag}.` : ''),
+  }),
+  endpoint<RuleRecord & { tag: string }>({
+    name: 'tag-rules add',
+    positionals: ['tag', 'text'],
+    options: { position: { type: 'string' } },
+    flags: '[--position <n>]',
+    role: 'moderator',
+    summary: "Adds a rule to a hashtag's rules; quote it. It goes at the end of the list, or with --position, at that place, counted from 1.",
+    request: (args) => ({ method: 'POST', path: path`/tags/${args.positionals[0]!}/rules`, body: ruleBody(args, args.positionals[1]) }),
+    text: (d) => `Added rule ${d.position} of #${d.tag}: ${d.ruleId}`,
+  }),
+  endpoint<RuleRecord & { tag: string }>({
+    name: 'tag-rules update',
+    positionals: ['tag', 'ruleId'],
+    options: { text: { type: 'string' }, position: { type: 'string' } },
+    flags: '[--text <text>] [--position <n>]',
+    role: 'moderator',
+    summary: "Changes one of a hashtag's rules: with --text, what it says, and with --position, its place in the list, counted from 1.",
+    request: (args) => {
+      const { text } = args.values;
+      const body = ruleBody(args, typeof text === 'string' ? text : undefined);
+      if (!Object.keys(body).length) throw new CliError('say what to change: --text <text>, --position <n>, or both', 2);
+      return { method: 'PATCH', path: path`/tags/${args.positionals[0]!}/rules/${args.positionals[1]!}`, body };
+    },
+    text: (d) => `Updated rule ${d.ruleId}: it is rule ${d.position} of #${d.tag}.`,
+  }),
+  endpoint<{ tag: string; ruleId: string; wasThere: boolean }>({
+    name: 'tag-rules remove',
+    positionals: ['tag', 'ruleId'],
+    role: 'moderator',
+    summary: "Removes one of a hashtag's rules.",
+    request: ({ positionals: [tag, ruleId] }) => ({ method: 'DELETE', path: path`/tags/${tag!}/rules/${ruleId!}` }),
+    text: (d) => (d.wasThere ? `Removed rule ${d.ruleId} of #${d.tag}.` : `${d.ruleId} isn't one of the rules of #${d.tag}.`),
   }),
 
   {
@@ -959,6 +1059,25 @@ export const COMMANDS: Command[] = [
     request: ({ positionals: [ruleId] }) => ({ method: 'DELETE', path: path`/rules/${ruleId!}` }),
     text: (d) => (d.wasThere ? `Removed rule ${d.ruleId}.` : `${d.ruleId} isn't one of the server's rules.`),
   }),
+  endpoint<{ claims: ClaimRecord[]; nextCursor: string | null }>({
+    name: 'claims list',
+    options: PAGE_OPTIONS,
+    flags: PAGE_FLAGS,
+    role: 'serverModerator',
+    summary: 'Lists the claims to hashtags that wait, longest waiting first: who claims each, and when they become its moderator unless the claim is refused.',
+    request: (args) => ({ method: 'GET', path: `/moderation/tag-claims${pageQuery(args)}` }),
+    text: (d) =>
+      (d.claims.length ? table(d.claims.map((c) => [`#${c.tag}`, c.userId, c.username, `claimed ${c.claimedAt}`, `granted ${c.reviewUntil}`])) : 'No claim to a hashtag is waiting.') +
+      more(d.nextCursor),
+  }),
+  endpoint<ClaimEnded>({
+    name: 'claims refuse',
+    positionals: ['tag'],
+    role: 'serverModerator',
+    summary: "Refuses the claim to a hashtag that waits: its user doesn't become the hashtag's moderator, and is told.",
+    request: ({ positionals: [tag] }) => ({ method: 'DELETE', path: path`/tags/${tag!}/claim` }),
+    text: (d) => (d.wasClaimed ? `Refused the claim of ${d.userId} to #${d.tag}.` : `Nobody's claim to #${d.tag} is waiting.`),
+  }),
   endpoint<{ banned: { userId: string; username: string; bannedAt: string; reason: string | null; bannedBy: { userId: string; username: string } | null }[]; nextCursor: string | null }>({
     name: 'bans list',
     options: PAGE_OPTIONS,
@@ -993,6 +1112,18 @@ export const COMMANDS: Command[] = [
     summary: 'Ends a ban. The user is told.',
     request: ({ positionals: [userId] }) => ({ method: 'DELETE', path: path`/banned/${userId!}` }),
     text: (d) => (d.wasBanned ? `${d.userId} is no longer banned.` : `${d.userId} wasn't banned.`),
+  }),
+  endpoint<{ contentId: string; userId: string; status: 'removed' | 'pending_deletion'; tags?: string[] }>({
+    name: 'reposts remove',
+    positionals: ['contentId', 'userId'],
+    role: 'serverModerator',
+    summary:
+      "Removes a user's repost of a post from this server: the post leaves the reposter's own feed, and loses the hashtags the repost gave it. The post itself stays. Of a post on another server, the first repost is this server's entry for it, which is deleted. The user is told, and can repost again: ban them to stop that.",
+    request: ({ positionals: [contentId, userId] }) => ({ method: 'DELETE', path: path`/content/${contentId!}/reposts/${userId!}` }),
+    text: (d) =>
+      d.status === 'pending_deletion'
+        ? `Removed the repost of ${d.userId}: ${d.contentId} was this server's entry for a post on another server, and is set for deletion.`
+        : `Removed the repost of ${d.contentId} by ${d.userId}${d.tags?.length ? `: it loses ${hashtags(d.tags)}` : ''}.`,
   }),
   endpoint<{ queue: (QueueItem & { trustScore: number; queuedAt: string })[]; nextCursor: string | null }>({
     name: 'queue list',

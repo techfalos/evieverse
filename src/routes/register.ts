@@ -10,6 +10,10 @@ import { badRequest, conflict, forbidden, notFound } from '../http/errors.js';
 import { say } from '../http/language.js';
 import { Credentials, Flag } from '../http/schemas.js';
 import { msg } from '../language.js';
+import { moderateProfile } from '../moderation/policy.js';
+import { LinkUrl } from '../posts.js';
+import { MAX_BIO_CHARS, MAX_PROFILE_LINKS, pinnedPosts, profileOf, shownProfile, storedLinks } from '../profile.js';
+import { foldUsername } from '../search/keywords.js';
 import { iso } from '../time.js';
 
 /** A username as a request gives it, for a new user or a rename: 1 to 64 characters once trimmed. Whether it is taken is the database's to say. */
@@ -35,6 +39,20 @@ const UpdateBody = Credentials.extend({
   /** Whether anyone can list whom the user follows, and who follows them (see routes/follow.ts). */
   showFollowing: Flag.optional(),
   showFollowers: Flag.optional(),
+  /**
+   * What the user says of themselves on their profile (src/profile.ts), in the format a post's text
+   * is in. Null takes it away, and so does an empty string, which is all a form field can send.
+   * Not the character no text has, which a database refuses to store.
+   */
+  bio: z
+    .string()
+    .trim()
+    .max(MAX_BIO_CHARS)
+    .refine((bio) => !bio.includes('\0'))
+    .nullable()
+    .optional(),
+  /** Where else the user is found: the links of their profile, all of them, in the order it shows them. Null takes them away, and so does an empty list. */
+  links: z.array(LinkUrl).max(MAX_PROFILE_LINKS).nullable().optional(),
 });
 
 /** The user a path names (/users/:userId): the one whose profile is read or updated, whose key is replaced, or whose account is deleted. */
@@ -52,7 +70,7 @@ function usernameTaken(err: unknown): never {
  * deletes any account.
  */
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
-  const { db, config, publishers, challenges, now = Date.now } = deps;
+  const { db, config, publishers, challenges, trustPlugins, now = Date.now } = deps;
   const { languages } = app;
 
   /** Feeds read credits from Redis; the compactor re-syncs changed users if this write fails. */
@@ -95,7 +113,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const ts = now();
     await db
       .insertInto('users')
-      .values({ id: userId, username: body.username, created_at: ts, updated_at: ts, language })
+      .values({ id: userId, username: body.username, username_folded: foldUsername(body.username), created_at: ts, updated_at: ts, language })
       .execute()
       .catch(usernameTaken);
     await putPublisher({ userId, username: body.username });
@@ -114,7 +132,16 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     (await db.selectFrom('tag_moderators').select('tag').where('user_id', '=', userId).execute()).map((r) => r.tag).sort();
 
   /**
-   * A public profile, with the user's roles: whether they're an admin or a server moderator, and the
+   * A public profile: the user's name, when their account was created (`createdAt`), what they say
+   * of themselves (`bio`, null for one who says nothing), where else they are found (`links`),
+   * where their avatar is read (`avatarUrl`, null for one who has none), and the posts they pinned
+   * to it, the one pinned last first (`pinnedContentIds`, without those nobody may read: see
+   * pinnedPosts). GET /users/:userId/posts lists their posts (routes/profile.ts).
+   *
+   * `banned` says whether the user is banned. A banned user's profile says so and shows nothing
+   * else they put on it (see shownProfile): no bio, no links, no avatar and no pinned post.
+   *
+   * With the user's roles: whether they're an admin or a server moderator, and the
    * hashtags they moderate. Not whether they take messages from other users: with it, someone
    * refused could tell a block from the setting (see routes/inbox.ts). Nor whether they show whom
    * they follow or who follows them, which asking for either list answers (see routes/follow.ts).
@@ -123,7 +150,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const { userId } = Params.parse(req.params);
     const user = await db
       .selectFrom('users')
-      .select(['id', 'username', 'created_at', 'admin', 'moderator'])
+      .select(['id', 'username', 'created_at', 'admin', 'moderator', 'bio', 'links', 'avatar_id', 'banned_at'])
       .where('id', '=', userId)
       .where('deleted_at', 'is', null)
       .executeTakeFirst();
@@ -132,6 +159,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       userId: user.id,
       username: user.username,
       createdAt: iso(user.created_at),
+      ...shownProfile(user, config.publicBaseUrl),
+      pinnedContentIds: user.banned_at === null ? (await pinnedPosts(db, userId)).map((post) => post.id) : [],
       admin: user.admin === 1,
       moderator: user.moderator === 1,
       moderates: await moderatedBy(userId),
@@ -162,17 +191,33 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   /**
    * Updates the caller's own profile: their username, their language, whether they take part in
    * messages between users, whether they show whom they follow, whether they show who follows
-   * them, or any of them at once. Feeds show the new name at once: they read it from Redis. The
-   * new language is the one the server answers the user in from this response on. Only the name
-   * is part of their credit, so nothing else changes `updated_at`.
+   * them, their bio, their links, or any of them at once. Feeds show the new name at once: they
+   * read it from Redis. The new language is the one the server answers the user in from this
+   * response on. Only the name is part of their credit, so nothing else changes `updated_at`.
+   *
+   * A bio and links (src/profile.ts) are read by anyone, so they go through the trust plugins
+   * first, as a post does (see moderateProfile): the request is refused (422), all of it, if they
+   * aren't trusted. A banned user sets neither (403), and can take them away. `links` is all of
+   * the profile's links: the ones sent take the place of the ones there were. The same link sent
+   * twice is there once. The avatar is a file, and has routes of its own (routes/profile.ts).
+   *
+   * The answer gives the profile as the user's row has it (see profileOf), to the user whose it
+   * is: a banned user is given theirs here, which nobody is shown while they are banned.
    */
   app.patch('/users/:userId', async (req) => {
     const { userId } = Params.parse(req.params);
     const body = UpdateBody.parse(req.body ?? {});
     const user = await authenticate(db, req, body);
     if (user.id !== userId) throw forbidden(msg('user.update_own_only'));
-    if ([body.username, body.language, body.messages, body.showFollowing, body.showFollowers].every((value) => value === undefined)) {
+    if ([body.username, body.language, body.messages, body.showFollowing, body.showFollowers, body.bio, body.links].every((value) => value === undefined)) {
       throw badRequest(msg('user.nothing_to_update'));
+    }
+    // What the request makes of each, where it names it: null for a bio or links that are taken away.
+    const bio = body.bio === undefined ? undefined : body.bio || null;
+    const links = body.links === undefined ? undefined : [...new Set(body.links ?? [])];
+    if (bio || links?.length) {
+      if (user.banned) throw forbidden(msg('user.banned_profile'));
+      await moderateProfile({ db, config, trustPlugins, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } }, { userId, bio, links });
     }
     const username = body.username ?? user.username;
     const language = body.language === undefined ? user.language : chosen(body.language);
@@ -182,16 +227,23 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const renamed = username !== user.username;
     // One statement, so a request that changes several things changes them all or, its username taken, none.
     const changes = {
-      ...(renamed && { username, updated_at: now() }),
+      // With the name as a search compares it (GET /search), which is found by the new one from here on.
+      ...(renamed && { username, username_folded: foldUsername(username), updated_at: now() }),
       ...(body.language !== undefined && { language }),
       ...(body.messages !== undefined && { messages: messages ? 1 : 0 }),
       ...(body.showFollowing !== undefined && { show_following: showFollowing ? 1 : 0 }),
       ...(body.showFollowers !== undefined && { show_followers: showFollowers ? 1 : 0 }),
+      ...(bio !== undefined && { bio }),
+      ...(links !== undefined && { links: storedLinks(links) }),
     };
     if (Object.keys(changes).length > 0) await db.updateTable('users').set(changes).where('id', '=', userId).execute().catch(usernameTaken);
     if (renamed) await putPublisher({ userId, username });
     req.language = language;
-    return { userId, username, language, messages, showFollowing, showFollowers };
+    // The profile as the row now has it: what this request set of it, and what it left as it was.
+    const profile = await db.selectFrom('users').select(['id', 'bio', 'links', 'avatar_id']).where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
+    // Deleted while this request was under way.
+    if (!profile) throw notFound(msg('user.not_found'));
+    return { userId, username, language, messages, showFollowing, showFollowers, ...profileOf(profile, config.publicBaseUrl) };
   });
 
   /**

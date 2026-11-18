@@ -25,6 +25,7 @@ import { repostsOf } from '../src/reposts.js';
 import type { HotStore } from '../src/storage/index.js';
 import type { TrustPlugin } from '../src/moderation/trust.types.js';
 import type { CliRelease } from '../src/routes/cli.types.js';
+import { createVideoWorker } from '../src/video/worker.js';
 
 export interface TestTarget {
   name: string;
@@ -46,6 +47,8 @@ export const TARGETS: TestTarget[] = [
 ];
 
 export const TABLES = [
+  'pinned_posts',
+  'search_terms',
   'monetization',
   'inbox',
   'server_rules',
@@ -53,15 +56,20 @@ export const TABLES = [
   'comment_reports',
   'comment_queue',
   'reports',
+  'tag_moderation_log',
   'tag_moderation',
   'moderation_queue',
   'blocked_words',
+  'tag_rules',
+  'tag_claims',
   'tag_mutes',
   'tag_moderators',
   'follows',
   'likes',
+  'repost_removals',
   'reposts',
   'staged_removals',
+  'media_jobs',
   'pending_writes',
   // What 0004_unnumbered_writes leaves behind if it stops halfway, where a database commits each statement of a migration.
   'pending_writes_keyed',
@@ -113,11 +121,11 @@ export const queued = async (ctx: { db: Db }) =>
 /**
  * Registering takes a challenge, as on any server, which `register` and `registration` solve. Its
  * proof of work is quick enough for tests, and an answer is accepted at once, so solving one leaves
- * the clock where it was, unless `challenge` says otherwise. The post window is off unless `challenge`
- * turns it on, as the challenges for comments are, and so are the limits on posts and on comments a
- * minute. So is the limit on registrations from one address, which every test's are, unless
- * `registerRateLimitPerHour` sets one, and so are the limits on feeds, by address and at a time,
- * unless `feed` sets them (`rateLimitPerMinute`, `maxConcurrent`).
+ * the clock where it was, unless `challenge` says otherwise. The limits on posts and on comments a
+ * minute are off, unless `postRateLimitPerMinute` and `comments` set them. So is the limit on
+ * registrations from one address, which every test's are, unless `registerRateLimitPerHour` sets
+ * one, and so are the limits on feeds, by address and at a time, unless `feed` sets them
+ * (`rateLimitPerMinute`, `maxConcurrent`).
  *
  * A request commits what it writes of posts and comments to the database, and the compactor
  * writes the stores (`pending_writes`). Here those writes are applied as soon as the request that
@@ -142,6 +150,8 @@ export async function createTestContext(
     trust?: Partial<Config['trust']>;
     /** What the urlhaus trust plugin downloads its list with. No Auth-Key, so the plugin is off, unless given. */
     urlhaus?: Partial<Config['urlhaus']>;
+    /** Where the pdq trust plugin reads its list of hashes, and how it matches. No list, so the plugin is off, unless given. */
+    pdq?: Partial<Config['pdq']>;
     /** Requests to /register from one address in an hour, of which a registration takes two. More than any test makes, unless given. */
     registerRateLimitPerHour?: number;
     postRateLimitPerMinute?: number;
@@ -150,6 +160,8 @@ export async function createTestContext(
     reportsPerHour?: number;
     /** The limit on messages a minute and how long inboxes keep them; the server's defaults unless given. */
     inbox?: Partial<Config['inbox']>;
+    /** The pages of their export a user can read in a minute; the server's default unless given. */
+    export?: Partial<Config['export']>;
     /** The limit on comments a minute, which tests have none of unless they say, and how long Redis keeps comments. */
     comments?: Partial<Config['comments']>;
     /** Where the server shows its ads: in hashtag feeds, at the end of posts. Nowhere unless given. */
@@ -162,6 +174,12 @@ export async function createTestContext(
     supportEmail?: string;
     corsOrigins?: string | string[];
     compact?: Partial<Config['compact']>;
+    /**
+     * Whether the server processes the videos it is sent, and how (src/video). It doesn't,
+     * unless asked: the "videos" tests post are a few bytes, which no ffmpeg reads. A test that
+     * asks runs the worker itself (see `processVideo`).
+     */
+    video?: Partial<Config['video']>;
     /** The connections the server keeps to its database, for a test of requests that are under way together. 4, unless given. */
     poolSize?: number;
     /** Replaces the content store, which is otherwise a directory of the test's own. */
@@ -183,6 +201,12 @@ export async function createTestContext(
     attestationFetcher?: OriginSweepOptions['fetcher'];
     /** Requests to GET /content/:id from one address in a minute. No limit, unless given. */
     contentRateLimitPerMinute?: number;
+    /** Requests to GET /users/:userId/posts from one address in a minute. No limit, unless given. */
+    profilePostsRateLimitPerMinute?: number;
+    /** Requests to GET /users/:userId/avatar from one address in a minute. No limit, unless given. */
+    avatarRateLimitPerMinute?: number;
+    /** Searches from one address in a minute, which tests have no limit on unless they say, and the most words a post is found by. */
+    search?: Partial<Config['search']>;
   } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'evieverse-test-'));
@@ -203,17 +227,22 @@ export async function createTestContext(
       ...(opts.audit && { audit: { scheme: 'fs', options: { root: join(dir, 'audit') } } }),
       feed: { headCacheMs: 0, rateLimitPerMinute: 0, followingRateLimitPerMinute: 0, maxConcurrent: 0, ...opts.feed },
       contentRateLimitPerMinute: opts.contentRateLimitPerMinute ?? 0,
-      challenge: { postWindowSeconds: 0, commentsPerMinute: 0, powBits: 8, minSolveMs: 0, ...opts.challenge },
+      profilePostsRateLimitPerMinute: opts.profilePostsRateLimitPerMinute ?? 0,
+      avatarRateLimitPerMinute: opts.avatarRateLimitPerMinute ?? 0,
+      search: { rateLimitPerMinute: 0, ...opts.search },
+      challenge: { powBits: 8, minSolveMs: 0, ...opts.challenge },
       ...(opts.tagging && { tagging: opts.tagging }),
       ...(opts.postTypes && { postTypes: opts.postTypes }),
       reposts: { attestationRateLimitPerMinute: 0, ...opts.reposts },
       ...(opts.trust && { trust: opts.trust }),
       ...(opts.urlhaus && { urlhaus: opts.urlhaus }),
+      ...(opts.pdq && { pdq: opts.pdq }),
       registerRateLimitPerHour: opts.registerRateLimitPerHour ?? 1_000_000,
       postRateLimitPerMinute: opts.postRateLimitPerMinute ?? 0,
       ...(opts.maxFollowing && { maxFollowing: opts.maxFollowing }),
       ...(opts.reportsPerHour !== undefined && { reportsPerHour: opts.reportsPerHour }),
       ...(opts.inbox && { inbox: opts.inbox }),
+      ...(opts.export && { export: opts.export }),
       comments: { perMinute: 0, listRateLimitPerMinute: 0, ...opts.comments },
       ...(opts.monetization && { monetization: opts.monetization }),
       ...(opts.modified !== undefined && { modified: opts.modified }),
@@ -221,6 +250,7 @@ export async function createTestContext(
       ...(opts.supportEmail !== undefined && { supportEmail: opts.supportEmail }),
       ...(opts.corsOrigins && { corsOrigins: opts.corsOrigins }),
       ...(opts.compact && { compact: opts.compact }),
+      video: { processing: false, ...opts.video },
       ...(opts.trustProxy !== undefined && { trustProxy: opts.trustProxy }),
     },
     {},
@@ -252,6 +282,8 @@ export async function createTestContext(
     pauseMs: 0,
   });
   const graceMs = config.compact.graceSeconds * 1000;
+  // What processes the videos users send, as the compactor's process runs it: here a test runs each job itself.
+  const videoWorker = createVideoWorker(deps, pino({ level: 'silent' }));
 
   // One at a time, in the order they were asked for, as a compactor's runs are.
   let applying: Promise<unknown> = Promise.resolve();
@@ -321,6 +353,15 @@ export async function createTestContext(
       return due;
     },
     /**
+     * Has the video worker take the oldest video that waits and process it (src/video/worker.ts),
+     * and applies what that committed. False if no video waited.
+     */
+    async processVideo() {
+      const took = await videoWorker.runOnce();
+      if (took && opts.settle !== false) await apply();
+      return took;
+    },
+    /**
      * Runs one compaction pass, which is what puts writes in feeds, with the clock moved past the
      * grace period first: the run then takes everything there is to take, the hashtag counts too.
      * A write needs no such wait: `compactor.runOnce()` takes it as it is.
@@ -358,17 +399,20 @@ export async function readAudit(ctx: Pick<TestContext, 'dir'>): Promise<(AuditRe
   return records.sort((a, b) => a.time.localeCompare(b.time) || a.key.localeCompare(b.key));
 }
 
-/** Builds a multipart/form-data body for app.inject. */
-export function multipart(fields: Record<string, string>, file?: { name: string; type: string; data: Buffer }) {
+/** A file part of a multipart body: named "content", unless `field` names it otherwise. */
+export type FilePart = { name: string; type: string; data: Buffer; field?: string };
+
+/** Builds a multipart/form-data body for app.inject: the fields, then the file, or the files in their order. */
+export function multipart(fields: Record<string, string>, file?: FilePart | FilePart[]) {
   const boundary = `----evieverse${Math.random().toString(16).slice(2)}`;
   const chunks: Buffer[] = [];
   for (const [k, v] of Object.entries(fields)) {
     chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
   }
-  if (file) {
+  for (const part of file === undefined ? [] : Array.isArray(file) ? file : [file]) {
     chunks.push(
-      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="content"; filename="${file.name}"\r\nContent-Type: ${file.type}\r\n\r\n`),
-      file.data,
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${part.field ?? 'content'}"; filename="${part.name}"\r\nContent-Type: ${part.type}\r\n\r\n`),
+      part.data,
       Buffer.from('\r\n'),
     );
   }
@@ -398,7 +442,7 @@ export type FeedItem = {
   aiGenerated: boolean;
   /** Whether the post takes comments. */
   comments: boolean;
-  preview: { kind: string; text?: string; url?: string };
+  preview: { kind: string; text?: string; url?: string; imageCount?: number; alt?: string[]; video?: { id: string; width: number; height: number; duration: number; poster: string; hls: string } };
   tags: string[];
   likes: number;
   /** On a hashtag's feed: whether one of its moderators approved the record there. */
@@ -450,6 +494,9 @@ export async function post(ctx: App, user: User, text: string, extra: Record<str
 
 export const like = (ctx: App, user: User, contentId: string) => ctx.app.inject({ method: 'POST', url: '/like', payload: { ...user, contentId } });
 
+/** DELETE /like as `user`: takes their like of a post back. */
+export const unlike = (ctx: App, user: User, contentId: string) => ctx.app.inject({ method: 'DELETE', url: '/like', payload: { ...user, contentId } });
+
 /** GET /feed?<query>, which must succeed. */
 export async function feed(ctx: App, query: string): Promise<Feed> {
   const res = await ctx.app.inject({ method: 'GET', url: `/feed?${query}` });
@@ -466,6 +513,7 @@ export const requests = (ctx: () => App) => ({
   storeText: (user: User, text: string, extra?: Record<string, unknown>) => storeText(ctx(), user, text, extra),
   post: (user: User, text: string, extra?: Record<string, unknown>) => post(ctx(), user, text, extra),
   like: (user: User, contentId: string) => like(ctx(), user, contentId),
+  unlike: (user: User, contentId: string) => unlike(ctx(), user, contentId),
   feed: (query: string) => feed(ctx(), query),
   feedItems: (tag: string) => feedItems(ctx(), tag),
 });

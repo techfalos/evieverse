@@ -14,11 +14,18 @@ import { msg } from './language.js';
  *
  *   1. closeAccount, which the request does. The user is marked deleted (`users.deleted_at`) and
  *      is gone from then on: their keys are revoked, no lookup finds them, they hold no role, and
- *      their follows, blocks, mutes, reports and moderation of hashtags are removed. Their content
+ *      their follows, blocks, mutes, reports, moderation of hashtags and claims to hashtags are
+ *      removed. Their content
  *      is set for deletion, so it is 404 at once, and gone from feeds once the compactor has run.
  *   2. purgeAccounts, which deletes the row once none of their content is left, and what still
- *      cascades goes with it (likes, inbox, keys). The request does it when there is no content to
- *      wait for, and the compactor does it otherwise, after it has deleted the content.
+ *      cascades goes with it (likes, inbox, keys, the posts they pinned). The request does it when
+ *      there is no content to wait for, and the compactor does it otherwise, after it has deleted
+ *      the content.
+ *
+ * Their profile goes with step 1 as far as anyone can read: the bio and the links are in the row,
+ * which no lookup finds, and the avatar is 404. Its file is in the content store, which no
+ * transaction covers, so the row waits for it as it waits for content: dropAvatars deletes what
+ * the store holds of the user's avatars, and the row goes only once that is done.
  *
  * What they reposted is in their own index (`reposts`, src/reposts.ts), which following feeds read,
  * and goes the same way: nobody follows them from step 1 on, the compactor's next run drops those
@@ -26,16 +33,20 @@ import { msg } from './language.js';
  * like it waits for content. The hashtags their reposts gave other users' posts stay on the posts,
  * with nobody named as who added them.
  *
- * What an account leaves behind: its comments on other users' posts, which comments' own store has
- * no index by author to find them by, and which are shown with no username from then on; and the
- * messages it sent, which stay in their recipients' inboxes without a sender.
+ * What an account leaves behind: its comments on other users' posts, which are shown with no
+ * username from then on, and its likes of comments; and the messages it sent, which stay in
+ * their recipients' inboxes without a sender. The comment store has an index of a user's comments
+ * and likes of comments (storage/commentStore.ts), which the user's export reads; a deletion
+ * doesn't read it, and leaves it, with what it names.
  */
 
 type Log = { warn: (o: object, msg?: string) => void };
 
 /** What setting the content of an account for deletion needs. */
 type SweepDeps = Pick<AppDeps, 'db' | 'now'>;
-type AccountDeps = SweepDeps & Pick<AppDeps, 'follows' | 'publishers'>;
+/** What deleting the avatars of an account needs. */
+type AvatarDeps = Pick<AppDeps, 'db' | 'content'>;
+type AccountDeps = SweepDeps & AvatarDeps & Pick<AppDeps, 'follows' | 'publishers'>;
 
 /** Users per read of their follows, well within every dialect's limit on parameters. */
 const SYNC_BATCH = 500;
@@ -77,6 +88,8 @@ function retire(db: Db, userId: string, keeperId: string | null, at: number): Pr
     await trx.deleteFrom('user_blocks').where((eb) => eb.or([eb('user_id', '=', userId), eb('blocked_id', '=', userId)])).execute();
     await trx.deleteFrom('tag_mutes').where('user_id', '=', userId).execute();
     await trx.deleteFrom('tag_moderators').where('user_id', '=', userId).execute();
+    // And the claim to a hashtag that waits, which would make them a moderator of it.
+    await trx.deleteFrom('tag_claims').where('user_id', '=', userId).execute();
     await trx.deleteFrom('reports').where('user_id', '=', userId).execute();
     await trx.deleteFrom('comment_reports').where('user_id', '=', userId).execute();
     // The messages the user sent stay with their recipients, as one from an account that is gone.
@@ -95,7 +108,8 @@ function retire(db: Db, userId: string, keeperId: string | null, at: number): Pr
  * for the only admin, which is an admin's alone to be rid of once another is in place.
  *
  * Returns when the account was closed, and whether it is gone altogether: the compactor deletes
- * an account that still has content when that content is deleted.
+ * an account that still has content when that content is deleted, and one whose avatar the
+ * content store didn't let go of when it does.
  */
 export async function closeAccount(
   deps: AccountDeps,
@@ -137,7 +151,9 @@ export async function closeAccount(
         await syncFollowing(db, follows, affected.slice(i, i + SYNC_BATCH)).catch((err) => log.warn({ err, userId }, 'could not write the follows of a deleted account to Redis'));
       }
     }
-    return { deletedAt: closed.at, removed: (await purgeAccounts(db, [userId])).length > 0 };
+    // The account is closed whether or not the store lets go of the avatar now: the compactor tries again, and the row waits for it.
+    const cleared = await dropAvatars(deps, [userId], log);
+    return { deletedAt: closed.at, removed: (await purgeAccounts(db, cleared)).length > 0 };
   }
   throw conflict(msg('moderation.admins_changed'));
 }
@@ -152,10 +168,33 @@ export async function sweepContent({ db, now = Date.now }: SweepDeps, userId: st
 }
 
 /**
- * Deletes the rows of deleted accounts (all of them, or `userIds`') that have no content left, and
- * nothing they reposted left in their own index, and returns whose. What references a user and
- * doesn't cascade is set to null (who moderated a hashtag's post, who banned a user, who sent a
- * message, who gave a post a hashtag by reposting it).
+ * Deletes what the content store holds of the avatars of the deleted accounts `userIds`: the one
+ * each has, and any that a request which died midway left under the user's id. Returns the
+ * accounts it is done for, whose rows name no avatar from then on, and so can be purged. One the
+ * store fails for is logged and left as it is, for a later call.
+ *
+ * It asks the store about every account it is given, and not only those whose row names an
+ * avatar: a file that no row names is found no other way.
+ */
+export async function dropAvatars({ db, content }: AvatarDeps, userIds: string[], log?: Log): Promise<string[]> {
+  const cleared: string[] = [];
+  for (const userId of userIds) {
+    try {
+      await content.removeAvatars(userId);
+      await db.updateTable('users').set({ avatar_id: null, avatar_type: null }).where('id', '=', userId).where('deleted_at', 'is not', null).where('avatar_id', 'is not', null).execute();
+      cleared.push(userId);
+    } catch (err) {
+      log?.warn({ err, userId }, 'could not delete the avatar of a deleted account');
+    }
+  }
+  return cleared;
+}
+
+/**
+ * Deletes the rows of deleted accounts (all of them, or `userIds`') that have no content left,
+ * nothing they reposted left in their own index, and no avatar (see dropAvatars), and returns
+ * whose. What references a user and doesn't cascade is set to null (who moderated a hashtag's
+ * post, who banned a user, who sent a message, who gave a post a hashtag by reposting it).
  *
  * The check is part of the DELETE, not before it: an insert of content for the user that comes
  * between a check and a delete would be cascaded away, with the post's entries still in the index.
@@ -175,6 +214,8 @@ export async function purgeAccounts(db: Db, userIds?: string[]): Promise<string[
             .deleteFrom('users')
             .where('id', '=', id)
             .where('deleted_at', 'is not', null)
+            // Nor an avatar the content store may still hold: the row is what says there is one to delete.
+            .where('avatar_id', 'is', null)
             .where((eb) => eb.not(eb.exists(eb.selectFrom('content').select('content.id').whereRef('content.user_id', '=', 'users.id'))))
             // Nor a post of someone else's that they reposted, still in their own index: the compactor finds those by this row.
             .where((eb) => eb.not(eb.exists(eb.selectFrom('reposts').select('reposts.content_id').whereRef('reposts.user_id', '=', 'users.id').where('reposts.tag', 'like', '@%'))))

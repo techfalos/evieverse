@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Db } from '../db/index.js';
+import { foldUsername } from '../search/keywords.js';
 import type { EnsuredAdmin } from './bootstrap.types.js';
 
 /**
@@ -39,7 +40,7 @@ export function ensureAdmin(db: Db, admin: BootstrapAdmin, now = Date.now()): Pr
       // updated_at makes the compactor write the publisher credit to Redis, as it does for a changed profile.
       await trx
         .insertInto('users')
-        .values({ id: userId, username: admin.username, created_at: now, updated_at: now, admin: 1 })
+        .values({ id: userId, username: admin.username, username_folded: foldUsername(admin.username), created_at: now, updated_at: now, admin: 1 })
         .execute();
     } else if (user.admin !== 1) {
       await trx.updateTable('users').set({ admin: 1 }).where('id', '=', userId).execute();

@@ -63,6 +63,7 @@ export const toFeedRecord = (s: Summary, likes: number, publisher: Publisher, mo
   aiGenerated: s.aiGenerated,
   comments: s.comments,
   preview: s.preview,
+  ...(s.mentions?.length && { mentions: s.mentions }),
   tags: s.tags,
   likes,
   ...(moderated !== undefined && { moderated }),

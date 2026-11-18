@@ -3,16 +3,14 @@ import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inflateSync } from 'node:zlib';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadVoices, renderSpoken, SAMPLE_RATE, shippedVoices, Voices, type Voice } from '../src/challenge/audio.js';
 import { challengeKey, Challenges, leadingZeroBits } from '../src/challenge/challenges.js';
 import type { Challenge } from '../src/challenge/challenges.types.js';
 import { ALPHABET, ANSWER_LENGTH, challengeText, HEIGHT, renderChallenge, WIDTH } from '../src/challenge/image.js';
 import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
-import { payloadOf } from '../src/pending.js';
-import type { CommentPutPayload, PostPayload } from '../src/pending.types.js';
-import { as, createTestContext, multipart, requests, TARGETS, type TestContext, type User } from './helpers.js';
+import { as, createTestContext, TARGETS, type TestContext, type User } from './helpers.js';
 
 /** The pixels of an 8-bit grayscale PNG. */
 function decodePng(png: Buffer) {
@@ -172,60 +170,17 @@ describe('challenge audio', () => {
   });
 });
 
-describe('CHALLENGE_COMMENTS_PER_MINUTE', () => {
-  it('is 3 unless set, beside the 10 comments a minute that are the most, and 0 comments a minute challenges none', () => {
-    const load = (env: Record<string, string> = {}) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env });
-    expect([load().challenge.commentsPerMinute, load().comments.perMinute]).toEqual([3, 10]);
-    expect(load({ CHALLENGE_COMMENTS_PER_MINUTE: '5', COMMENTS_PER_MINUTE: '20' })).toMatchObject({ challenge: { commentsPerMinute: 5 }, comments: { perMinute: 20 } });
-    expect(load({ CHALLENGE_COMMENTS_PER_MINUTE: '0' }).challenge.commentsPerMinute).toBe(0);
-    expect(() => load({ CHALLENGE_COMMENTS_PER_MINUTE: '-1' })).toThrow();
-  });
-});
-
 for (const target of TARGETS) {
   describe(`challenges (${target.name})`, () => {
     let ctx: TestContext;
-    /** The texts of the posts and comments that got as far as their commit, which is all of a request's write. */
-    let written: string[];
-    /** Writes wait for this before they commit, while set. */
-    let hold: Promise<void> | null;
     beforeEach(async () => {
-      written = [];
-      hold = null;
-      // As a server has them: a post window of a minute, and no answer accepted within 2 seconds.
-      ctx = await createTestContext(target, { challenge: { postWindowSeconds: 60, minSolveMs: 2000 } });
-      // A write whose text starts with "fail" fails as its commit would: nothing of it is kept.
-      const transaction = ctx.db.transaction.bind(ctx.db);
-      const seen = new Set<string>();
-      vi.spyOn(ctx.db, 'transaction').mockImplementation(
-        () =>
-          ({
-            execute: async (fn: (trx: Parameters<Parameters<ReturnType<typeof transaction>['execute']>[0]>[0]) => Promise<unknown>) => {
-              await hold;
-              return transaction().execute(async (trx) => {
-                const out = await fn(trx);
-                for (const row of await trx.selectFrom('pending_writes').select(['content_id', 'seq', 'write_key', 'kind', 'payload']).where('kind', 'in', ['post', 'comment_put']).execute()) {
-                  const key = `${row.content_id}:${row.seq}:${row.write_key}`;
-                  if (seen.has(key)) continue;
-                  const text = row.kind === 'post' ? payloadOf<PostPayload>(row.payload).meta.text! : payloadOf<CommentPutPayload>(row.payload).comment.text;
-                  written.push(text);
-                  if (text.startsWith('fail')) throw new Error('storage unavailable');
-                  seen.add(key);
-                }
-                return out;
-              });
-            },
-          }) as never,
-      );
+      // As a server has it: no answer accepted within 2 seconds.
+      ctx = await createTestContext(target, { challenge: { minSolveMs: 2000 } });
     });
-    afterEach(async () => {
-      vi.restoreAllMocks();
-      await ctx.close();
-    });
+    afterEach(() => ctx.close());
 
     const register = (payload: Record<string, unknown>) => ctx.app.inject({ method: 'POST', url: '/register', payload });
-    const { storeText, post } = requests(() => ctx);
-    const newChallenge = (scope: string) => ctx.app.inject({ method: 'POST', url: '/register', payload: { username: scope } }).then((r) => r.json().challenge as Challenge);
+    const newChallenge = (username: string) => ctx.app.inject({ method: 'POST', url: '/register', payload: { username } }).then((r) => r.json().challenge as Challenge);
     const gone = async (c: Challenge) => (await ctx.hot.get(challengeKey(c.id))) === null;
 
     it('answers /register with a challenge, and registers once the same request solves it', async () => {
@@ -240,8 +195,6 @@ for (const target of TARGETS) {
         audio: `/challenges/${challenge.id}/audio`,
         expiresAt: new Date(ctx.clock.now + 120_000).toISOString(),
         expiresInSeconds: 120,
-        step: 1,
-        steps: 1,
         proofOfWork: { algorithm: 'SHA-256', prefix: `${challenge.id}:`, bits: 8 },
       });
       expect(decodePng(Buffer.from(challenge.image.split(',')[1]!, 'base64'))).toMatchObject({ width: WIDTH, height: HEIGHT });
@@ -266,7 +219,7 @@ for (const target of TARGETS) {
       expect(taken.json()).toEqual({ error: 'username is already taken' });
     });
 
-    it('refuses an answer that is wrong, late, too quick, without the work or for another request, with a new challenge each time', async () => {
+    it('refuses an answer that is wrong, late, too quick or without the work, with a new challenge each time', async () => {
       const attempt = async (solution: Record<string, unknown>) => {
         const res = await register({ username: 'bob', ...solution });
         expect(res.statusCode).toBe(428);
@@ -299,13 +252,7 @@ for (const target of TARGETS) {
 
       expect(await attempt({ ...s, challengeId: randomUUID() })).toBe('the challenge has expired or was already used; solve the new challenge');
       expect((await register({ username: 'bob', challengeId: 'nope' })).statusCode).toBe(400);
-
-      // A challenge issued for a post doesn't register anyone.
-      const alice = await ctx.register('alice');
-      await storeText(alice, 'first #news');
-      const postChallenge = (await storeText(alice, 'second #news')).json().challenge as Challenge;
-      expect(await attempt(await ctx.solve(postChallenge))).toBe('the challenge was issued for another request; solve the new challenge');
-      expect((await ctx.db.selectFrom('users').select('username').execute()).map((u) => u.username)).toEqual(['alice']);
+      expect(await ctx.db.selectFrom('users').selectAll().execute()).toEqual([]);
     });
 
     it('reads a challenge out to whoever has it, as often as they ask and in the parts they ask for, until it is answered or too old', async () => {
@@ -364,15 +311,6 @@ for (const target of TARGETS) {
       ctx.clock.now += 120_001;
       const tooLate = await listen(late);
       expect([tooLate.statusCode, tooLate.json()]).toEqual([404, { error: 'the challenge has expired' }]);
-
-      // A challenge to post is read out as one to register is.
-      const alice = done.json() as User;
-      await storeText(alice, 'first #news');
-      const toPost = (await storeText(alice, 'second #news')).json().challenge as Challenge;
-      const posted = await listen(toPost);
-      expect([posted.statusCode, posted.headers['content-type']]).toEqual([200, 'audio/wav']);
-      expect(posted.rawPayload.equals(renderSpoken((await kept(toPost)).answer, shippedVoices().for('en'), Buffer.from((await kept(toPost)).seed, 'base64')))).toBe(true);
-      expect((await storeText(alice, 'second #news', await ctx.solve(toPost))).statusCode).toBe(201);
     });
 
     it('reads a challenge out in the voice of the language it was issued in, or of the default language where that has none', async () => {
@@ -381,7 +319,7 @@ for (const target of TARGETS) {
       const other: Voice = new Map([...ALPHABET].map((character, i) => [character, english.get(ALPHABET[(i + 1) % ALPHABET.length]!)!]));
       const challenges = new Challenges({ hot: ctx.hot, config: ctx.config, now: () => ctx.clock.now, voices: new Voices([['en', english], ['pt', other]]) });
       const spokenBy = async (language: string) => {
-        const c = await challenges.issue('register', language);
+        const c = await challenges.issue(language);
         const { answer, seed } = JSON.parse((await ctx.hot.get(challengeKey(c.id)))!.toString('utf8')) as { answer: string; seed: string };
         const wav = await challenges.audio(c.id);
         return [english, other].map((voice) => wav.equals(renderSpoken(answer, voice, Buffer.from(seed, 'base64'))));
@@ -396,7 +334,7 @@ for (const target of TARGETS) {
     it('has no setting that spares a registration its challenge', async () => {
       // What once turned it off, in the environment or in a config file, is no setting now, and changes nothing.
       const off = loadConfig({ challenge: { register: false } }, { EVIEVERSE_CONFIG: '/nonexistent.json' });
-      expect(off.challenge).toEqual({ postWindowSeconds: 60, commentsPerMinute: 3, ttlSeconds: 120, powBits: 18, minSolveMs: 2000 });
+      expect(off.challenge).toEqual({ ttlSeconds: 120, powBits: 18, minSolveMs: 2000 });
 
       await ctx.close();
       ctx = await createTestContext(target, { challenge: { register: false } as object });
@@ -448,360 +386,6 @@ for (const target of TARGETS) {
       await setAdmin(ctx.db, 'root', false);
       expect((await register({ username: 'dave', ...by(root) })).statusCode).toBe(428);
       expect(await usernames()).toEqual(['alice', 'bob', 'carol', 'erin', 'root']);
-    });
-
-    it('lets a post through at once, and answers one less than a minute later with a challenge before anything is stored', async () => {
-      const alice = await ctx.register('alice');
-      expect((await storeText(alice, 'first #news')).statusCode).toBe(201);
-      ctx.clock.now += 30_000;
-      const second = await storeText(alice, 'second #news');
-      expect(second.statusCode).toBe(428);
-      expect(second.json().error).toBe('you posted or were challenged less than 60 seconds ago; solve the challenge to post');
-      expect(written).toEqual(['first #news']);
-      expect(await ctx.db.selectFrom('content').select('id').execute()).toHaveLength(1);
-
-      const solved = await storeText(alice, 'second #news', await ctx.solve(second.json().challenge));
-      expect(solved.statusCode, solved.body).toBe(201);
-      const { contentId } = solved.json();
-
-      // The minute runs from the latest post, and updates are posts too.
-      ctx.clock.now += 50_000;
-      expect((await storeText(alice, 'second, edited #news', { contentId })).statusCode).toBe(428);
-      // Storing the same bytes again isn't a post.
-      expect((await storeText(alice, 'second #news', { contentId })).json()).toMatchObject({ unchanged: true });
-      // Each challenge starts the minute again.
-      ctx.clock.now += 59_000;
-      expect((await storeText(alice, 'second, edited #news', { contentId })).statusCode).toBe(428);
-      ctx.clock.now += 60_000;
-      expect((await storeText(alice, 'second, edited #news', { contentId })).json()).toMatchObject({ contentId, preview: { kind: 'text', text: 'second, edited #news' } });
-
-      // Each user has their own minute, and their own challenges.
-      const bob = await ctx.register('bob');
-      expect((await storeText(bob, 'hello #news')).statusCode).toBe(201);
-      const bobs = (await storeText(bob, 'hello again #news')).json().challenge as Challenge;
-      const stolen = await storeText(alice, 'third #news', await ctx.solve(bobs));
-      expect(stolen.statusCode).toBe(428);
-      expect(stolen.json().error).toBe('the challenge was issued for another request; solve the new challenge to post');
-      expect(written).toEqual(['first #news', 'second #news', 'second, edited #news', 'hello #news']);
-    });
-
-    it('gives the minute back when a post fails, and passes only one of concurrent posts without a challenge', async () => {
-      const alice = await ctx.register('alice');
-      expect((await storeText(alice, 'fail #news')).statusCode).toBe(500);
-      expect((await storeText(alice, 'works #news')).statusCode).toBe(201);
-
-      ctx.clock.now += 60_000;
-      let release!: () => void;
-      hold = new Promise((resolve) => (release = resolve));
-      let answered = 0;
-      const posts = ['a', 'b', 'c'].map((t) => Promise.resolve(storeText(alice, `${t} #news`)).finally(() => answered++));
-      // Two are answered while one is still being written.
-      for (let i = 0; i < 400 && answered < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
-      expect(answered).toBe(2);
-      expect(written).toHaveLength(2);
-      release();
-      expect((await Promise.all(posts)).map((r) => r.statusCode).sort()).toEqual([201, 428, 428]);
-      expect(written).toHaveLength(3);
-    });
-
-    /** Stores `text`, solving every challenge it's answered with, 10 seconds each; returns the last answer, and each challenge's step. */
-    const storeSolving = async (user: User, text: string) => {
-      const steps: string[] = [];
-      let res = await storeText(user, text);
-      while (res.statusCode === 428) {
-        const c = res.json().challenge as Challenge;
-        steps.push(`${c.step}/${c.steps}`);
-        ctx.clock.now += 8_000;
-        res = await storeText(user, text, await ctx.solve(c));
-      }
-      return { res, steps };
-    };
-
-    it('asks posts in a row for 1, 1, then never more than 2 challenges, one after another, until a minute goes by without a post or challenge', async () => {
-      const alice = await ctx.register('alice');
-      const steps = async (text: string) => {
-        const { res, steps } = await storeSolving(alice, text);
-        expect(res.statusCode, res.body).toBe(201);
-        return steps;
-      };
-      expect(await steps('one #news')).toEqual([]);
-      expect(await steps('two #news')).toEqual(['1/1']);
-      expect(await steps('three #news')).toEqual(['1/1']);
-      expect(await steps('four #news')).toEqual(['1/2', '2/2']);
-
-      // Each right answer gets the next challenge; a wrong one, a new challenge at the same step.
-      const first = await storeText(alice, 'five #news');
-      expect(first.json()).toMatchObject({
-        error: 'you posted or were challenged less than 60 seconds ago; solve 2 challenges to post',
-        challenge: { step: 1, steps: 2 },
-      });
-      const next = await storeText(alice, 'five #news', await ctx.solve(first.json().challenge));
-      expect(next.json()).toMatchObject({ error: 'solved 1 of 2; solve the next challenge', challenge: { step: 2, steps: 2 } });
-      const solution = await ctx.solve(next.json().challenge);
-      const wrongAnswer = solution.challengeAnswer.replace(/^./, (ch) => (ch === 'A' ? 'C' : 'A'));
-      const wrong = await storeText(alice, 'five #news', { ...solution, challengeAnswer: wrongAnswer });
-      expect(wrong.json()).toMatchObject({ error: 'the characters are wrong; solve the new challenge', challenge: { step: 2, steps: 2 } });
-      expect((await storeText(alice, 'five #news', await ctx.solve(wrong.json().challenge))).statusCode).toBe(201);
-
-      // Two is the most, however long the run goes on, and each challenge starts the minute again.
-      for (const text of ['six #news', 'seven #news', 'eight #news', 'nine #news']) expect(await steps(text)).toEqual(['1/2', '2/2']);
-      expect(written).toHaveLength(9);
-
-      // A minute without either, and the run starts over.
-      ctx.clock.now += 60_000;
-      expect(await steps('ten #news')).toEqual([]);
-      expect(await steps('eleven #news')).toEqual(['1/1']);
-    });
-
-    it('lets one of runs solved in parallel through, and gives a failed post its place in the run back', async () => {
-      const alice = await ctx.register('alice');
-      for (const text of ['one #news', 'two #news']) expect((await storeSolving(alice, text)).res.statusCode).toBe(201);
-
-      // A post that fails after its challenge gives its place back: the next needs one again, and only the one after it two.
-      const failed = await storeSolving(alice, 'fail #news');
-      expect([failed.res.statusCode, failed.steps]).toEqual([500, ['1/1']]);
-      expect((await storeSolving(alice, 'three #news')).steps).toEqual(['1/1']);
-
-      // Two posts at once each get their own run of two challenges, but only one can use its run.
-      const runs = await Promise.all(['four #news', 'five #news'].map((text) => storeText(alice, text)));
-      const lasts = await Promise.all(
-        runs.map(async (r, i) => {
-          const second = await storeText(alice, ['four #news', 'five #news'][i]!, await ctx.solve(r.json().challenge));
-          expect(second.json().challenge).toMatchObject({ step: 2, steps: 2 });
-          return ctx.solve(second.json().challenge);
-        }),
-      );
-      expect((await storeText(alice, 'four #news', lasts[0]!)).statusCode).toBe(201);
-      const late = await storeText(alice, 'five #news', lasts[1]!);
-      // The one that lost solves a new run, which is no longer than the one it lost.
-      expect(late.json()).toMatchObject({ error: 'another post went through meanwhile; solve 2 new challenges to post', challenge: { step: 1, steps: 2 } });
-      const five = await storeSolving(alice, 'five #news');
-      expect([five.res.statusCode, five.steps]).toEqual([201, ['1/2', '2/2']]);
-    });
-
-    it('refuses a post past three in a minute outright, before any challenge, until the oldest is a minute old', async () => {
-      ctx.config.postRateLimitPerMinute = 3;
-      const alice = await ctx.register('alice');
-      const start = ctx.clock.now;
-      for (const text of ['one #news', 'two #news', 'three #news']) expect((await storeSolving(alice, text)).res.statusCode).toBe(201);
-
-      // They went through 10 seconds apart.
-      const refused = await storeText(alice, 'four #news');
-      expect(refused.statusCode).toBe(429);
-      expect(refused.headers['retry-after']).toBe('40');
-      expect(refused.json()).toEqual({ error: 'you can post at most 3 times a minute; try again in 40 seconds', retryAfterSeconds: 40 });
-      expect(written).toEqual(['one #news', 'two #news', 'three #news']);
-      ctx.clock.now = start + 59_500;
-      expect((await storeText(alice, 'four #news')).json().error).toBe('you can post at most 3 times a minute; try again in 1 second');
-
-      // A refused post isn't a post or a challenge, so the run went on, and the next needs two challenges.
-      ctx.clock.now = start + 60_000;
-      const four = await storeSolving(alice, 'four #news');
-      expect([four.res.statusCode, four.steps]).toEqual([201, ['1/2', '2/2']]);
-
-      ctx.config.postRateLimitPerMinute = 1;
-      expect((await storeText(alice, 'five #news')).json().error).toBe('you can post at most once a minute; try again in 60 seconds');
-    });
-
-    it('counts only posts that go through, and lets only as many of concurrent posts through', async () => {
-      ctx.config.postRateLimitPerMinute = 3;
-      ctx.config.challenge.postWindowSeconds = 0;
-      const alice = await ctx.register('alice');
-      expect((await storeText(alice, 'fail #news')).statusCode).toBe(500);
-      const { contentId } = (await storeText(alice, 'one #news')).json();
-      expect((await storeText(alice, 'one #news', { contentId })).json()).toMatchObject({ unchanged: true });
-
-      ctx.clock.now += 30_000;
-      const posts = await Promise.all(['a', 'b', 'c', 'd'].map((t) => storeText(alice, `${t} #news`)));
-      expect(posts.map((r) => r.statusCode).sort()).toEqual([201, 201, 429, 429]);
-      expect(posts.find((r) => r.statusCode === 429)!.json().retryAfterSeconds).toBe(30);
-
-      // 'one' leaves the minute.
-      ctx.clock.now += 30_000;
-      expect((await storeText(alice, 'e #news')).statusCode).toBe(201);
-      const refused = await storeText(alice, 'f #news');
-      expect([refused.statusCode, refused.json().retryAfterSeconds]).toEqual([429, 30]);
-    });
-
-    /** A post of alice's that takes comments, and bob to comment on it, on a server that limits comments as one does: 3 a minute with no challenge, 10 at most. */
-    const commented = async () => {
-      ctx.config.challenge.commentsPerMinute = 3;
-      ctx.config.comments.perMinute = 10;
-      const alice = await ctx.register('alice');
-      const bob = await ctx.register('bob');
-      return { alice, bob, contentId: await post(alice, 'Talk to me #news', { comments: true }) };
-    };
-    const comment = (user: User, contentId: string, text: string, extra: Record<string, unknown> = {}) =>
-      ctx.app.inject({ method: 'POST', url: `/content/${contentId}/comments`, payload: { ...user, text, ...extra } });
-    const edit = (user: User, contentId: string, commentId: string, text: string, extra: Record<string, unknown> = {}) =>
-      ctx.app.inject({ method: 'PATCH', url: `/content/${contentId}/comments/${commentId}`, payload: { ...user, text, ...extra } });
-    const commentTexts = async (contentId: string) =>
-      ((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}/comments` })).json().comments as { text: string }[]).map((c) => c.text);
-    /** Sends a request, solving every challenge it's answered with, `thinkMs` each; returns the last answer, and each challenge's step. */
-    const solving = async (send: (solution?: Record<string, unknown>) => ReturnType<typeof comment>, thinkMs = 10_000) => {
-      const steps: string[] = [];
-      let res = await send();
-      while (res.statusCode === 428) {
-        const c = res.json().challenge as Challenge;
-        steps.push(`${c.step}/${c.steps}`);
-        res = await send(await ctx.solve(c, thinkMs));
-      }
-      return { res, steps };
-    };
-    /** The challenges a comment took to be stored. */
-    const commentSteps = async (user: User, contentId: string, text: string, thinkMs?: number) => {
-      const { res, steps } = await solving((solution) => comment(user, contentId, text, solution), thinkMs);
-      expect(res.statusCode, res.body).toBe(201);
-      return steps;
-    };
-
-    it('lets three comments a minute through at once, and asks each one past them for 1, 1, then 2 challenges, before anything is stored', async () => {
-      const { bob, contentId } = await commented();
-      for (const text of ['one', 'two', 'three']) expect((await comment(bob, contentId, text)).statusCode).toBe(201);
-
-      const fourth = await comment(bob, contentId, 'four');
-      expect(fourth.statusCode).toBe(428);
-      expect(fourth.json()).toMatchObject({ error: 'you commented 3 times in the last minute; solve the challenge to comment', challenge: { step: 1, steps: 1 } });
-      expect(await commentTexts(contentId)).toEqual(['one', 'two', 'three']);
-      expect((await comment(bob, contentId, 'four', await ctx.solve(fourth.json().challenge))).statusCode).toBe(201);
-
-      // Posts and comments are limited apart: a post needs no challenge for the comments before it,
-      // a challenge to post lets no comment through, and one to comment lets no post through.
-      expect((await storeText(bob, 'hello #news')).statusCode).toBe(201);
-      const toPost = (await storeText(bob, 'hello again #news')).json().challenge as Challenge;
-      const fifth = await comment(bob, contentId, 'five', await ctx.solve(toPost));
-      expect(fifth.statusCode).toBe(428);
-      expect(fifth.json()).toMatchObject({ error: 'the challenge was issued for another request; solve the new challenge to comment', challenge: { step: 1, steps: 1 } });
-      const posted = await storeText(bob, 'hello again #news', await ctx.solve(fifth.json().challenge));
-      expect([posted.statusCode, posted.json().error]).toEqual([428, 'the challenge was issued for another request; solve the new challenge to post']);
-      expect(await commentSteps(bob, contentId, 'five', 2000)).toEqual(['1/1']);
-
-      // From the third challenged comment in a row, two challenges, one after another, and never more.
-      const sixth = await comment(bob, contentId, 'six');
-      expect(sixth.json()).toMatchObject({ error: 'you commented 5 times in the last minute; solve 2 challenges to comment', challenge: { step: 1, steps: 2 } });
-      const next = await comment(bob, contentId, 'six', await ctx.solve(sixth.json().challenge));
-      expect(next.json()).toMatchObject({ error: 'solved 1 of 2; solve the next challenge', challenge: { step: 2, steps: 2 } });
-      const solution = await ctx.solve(next.json().challenge);
-      const wrongAnswer = solution.challengeAnswer.replace(/^./, (ch) => (ch === 'A' ? 'C' : 'A'));
-      const wrong = await comment(bob, contentId, 'six', { ...solution, challengeAnswer: wrongAnswer });
-      expect(wrong.json()).toMatchObject({ error: 'the characters are wrong; solve the new challenge', challenge: { step: 2, steps: 2 } });
-      expect((await comment(bob, contentId, 'six', await ctx.solve(wrong.json().challenge))).statusCode).toBe(201);
-      expect(await commentSteps(bob, contentId, 'seven', 2000)).toEqual(['1/2', '2/2']);
-      expect(await commentTexts(contentId)).toEqual(['one', 'two', 'three', 'four', 'five', 'six', 'seven']);
-
-      // A form's fields answer a challenge as a JSON body's do.
-      const asked = await comment(bob, contentId, 'eight');
-      const form = multipart({ text: 'eight', ...(await ctx.solve(asked.json().challenge)) });
-      const second = await ctx.app.inject({ method: 'POST', url: `/content/${contentId}/comments`, payload: form.payload, headers: { ...form.headers, ...as(bob) } });
-      expect(second.json().challenge).toMatchObject({ step: 2, steps: 2 });
-    });
-
-    it('challenges a comment by the comments of the last minute, and starts the run over after a minute without a challenged comment or a challenge', async () => {
-      const { bob, contentId } = await commented();
-      const start = ctx.clock.now;
-      const steps = (text: string) => commentSteps(bob, contentId, text);
-      // Three at once, then one every 10 or 20 seconds: a challenge takes 10 seconds to solve.
-      for (const text of ['one', 'two', 'three']) expect(await steps(text)).toEqual([]);
-      expect(await steps('four')).toEqual(['1/1']);
-      expect(await steps('five')).toEqual(['1/1']);
-      expect(ctx.clock.now).toBe(start + 20_000);
-
-      // The first three are a minute old: the two since leave room for one comment with no challenge, and no more.
-      ctx.clock.now = start + 60_000;
-      expect(await steps('six')).toEqual([]);
-      // The run went on meanwhile, since its last challenge was less than a minute ago: this is its third.
-      expect(await commentSteps(bob, contentId, 'seven', 2000)).toEqual(['1/2', '2/2']);
-
-      // A user's own comments alone count, on whichever posts.
-      const carol = await ctx.register('carol');
-      for (const text of ['hers', 'hers too', 'and this']) expect(await commentSteps(carol, contentId, text)).toEqual([]);
-
-      // A minute after the run's last challenge, with no comment since: the run is over, and so is the minute.
-      ctx.clock.now += 60_000;
-      for (const text of ['eight', 'nine', 'ten']) expect(await steps(text)).toEqual([]);
-      const eleventh = await comment(bob, contentId, 'eleven');
-      expect(eleventh.json()).toMatchObject({ error: 'you commented 3 times in the last minute; solve the challenge to comment', challenge: { step: 1, steps: 1 } });
-      // A challenge that isn't solved holds nothing up: the comment needs none once the three are a minute old.
-      ctx.clock.now += 59_000;
-      expect((await comment(bob, contentId, 'eleven')).statusCode).toBe(428);
-      ctx.clock.now += 1000;
-      expect((await comment(bob, contentId, 'eleven')).statusCode).toBe(201);
-    });
-
-    it('limits an edit of a comment as a comment, and counts it as one', async () => {
-      const { bob, contentId } = await commented();
-      const { commentId } = (await comment(bob, contentId, 'one')).json();
-      expect((await edit(bob, contentId, commentId, 'one, edited')).statusCode).toBe(200);
-      expect((await comment(bob, contentId, 'two')).statusCode).toBe(201);
-      // The text it has isn't an edit: it needs no challenge, and counts for nothing.
-      expect((await edit(bob, contentId, commentId, 'one, edited')).json()).toMatchObject({ unchanged: true });
-
-      const asked = await edit(bob, contentId, commentId, 'one, edited again');
-      expect(asked.statusCode).toBe(428);
-      expect(asked.json()).toMatchObject({ error: 'you commented 3 times in the last minute; solve the challenge to comment', challenge: { step: 1, steps: 1 } });
-      expect(await commentTexts(contentId)).toEqual(['one, edited', 'two']);
-      const { res, steps } = await solving((solution) => edit(bob, contentId, commentId, 'one, edited again', solution));
-      expect([res.statusCode, steps]).toEqual([200, ['1/1']]);
-      expect(await commentTexts(contentId)).toEqual(['one, edited again', 'two']);
-      // The edit was a challenged comment, so the next is the second in a row, and the one after it the third.
-      expect(await commentSteps(bob, contentId, 'three')).toEqual(['1/1']);
-      expect((await solving((solution) => edit(bob, contentId, commentId, 'one, at last', solution))).steps).toEqual(['1/2', '2/2']);
-    });
-
-    it('refuses a comment past ten in a minute outright, before any challenge, until the oldest is a minute old', async () => {
-      const { bob, contentId } = await commented();
-      // Ten in 50 seconds, which takes solving each challenge in 4.
-      const start = ctx.clock.now;
-      const taken: string[][] = [];
-      for (let i = 1; i <= 10; i++) taken.push(await commentSteps(bob, contentId, `comment ${i}`, 4000));
-      expect(taken).toEqual([[], [], [], ['1/1'], ['1/1'], ...Array.from({ length: 5 }, () => ['1/2', '2/2'])]);
-      expect(ctx.clock.now).toBe(start + 48_000);
-
-      const refused = await comment(bob, contentId, 'comment 11');
-      expect(refused.statusCode).toBe(429);
-      expect(refused.headers['retry-after']).toBe('12');
-      expect(refused.json()).toEqual({ error: 'too many comments; try again in 12 seconds', retryAfterSeconds: 12 });
-      // An edit is one comment too many as well.
-      const { commentId } = (await ctx.app.inject({ method: 'GET', url: `/content/${contentId}/comments` })).json().comments[0];
-      expect((await edit(bob, contentId, commentId, 'comment 1, edited')).statusCode).toBe(429);
-      expect(await commentTexts(contentId)).toHaveLength(10);
-
-      // The first three leave the minute together. A refused comment isn't a comment or a challenge, so the run went on.
-      ctx.clock.now = start + 60_000;
-      expect(await commentSteps(bob, contentId, 'comment 11', 2000)).toEqual(['1/2', '2/2']);
-
-      // The limit alone, where comments are never challenged.
-      ctx.config.challenge.commentsPerMinute = 0;
-      ctx.config.comments.perMinute = 2;
-      const carol = await ctx.register('carol');
-      const answers = await Promise.all(['a', 'b', 'c', 'd'].map((text) => comment(carol, contentId, text)));
-      expect(answers.map((r) => r.statusCode).sort()).toEqual([201, 201, 429, 429]);
-      expect(answers.find((r) => r.statusCode === 429)!.json().error).toBe('too many comments; try again in 60 seconds');
-    });
-
-    it('counts only comments that are stored, and passes only three of concurrent comments without a challenge', async () => {
-      const { bob, contentId } = await commented();
-
-      // One that fails gives its place in the minute back, and one that is refused never took one.
-      for (const text of ['fail', 'fail again', 'fail once more']) expect((await comment(bob, contentId, text)).statusCode).toBe(500);
-      expect((await comment(bob, contentId, 'lost', { parentId: randomUUID() })).statusCode).toBe(404);
-      const answers = await Promise.all(['a', 'b', 'c', 'd', 'e'].map((text) => comment(bob, contentId, text)));
-      expect(answers.map((r) => r.statusCode).sort()).toEqual([201, 201, 201, 428, 428]);
-      const passed = ['a', 'b', 'c', 'd', 'e'].filter((_, i) => answers[i]!.statusCode === 201);
-
-      // The two that were challenged each solve theirs, but only one of them can use it: the run has one place at each point.
-      const [first, second] = answers.filter((r) => r.statusCode === 428).map((r) => r.json().challenge as Challenge);
-      const solutions = [await ctx.solve(first!), await ctx.solve(second!)];
-      expect((await comment(bob, contentId, 'x', solutions[0])).statusCode).toBe(201);
-      const late = await comment(bob, contentId, 'y', solutions[1]);
-      expect(late.json()).toMatchObject({ error: 'another comment went through meanwhile; solve the new challenge to comment', challenge: { step: 1, steps: 1 } });
-
-      // One that fails after its challenge gives its place in the run back: the next needs one again, and only the one after it two.
-      const failed = await solving((solution) => comment(bob, contentId, 'fail', solution));
-      expect([failed.res.statusCode, failed.steps]).toEqual([500, ['1/1']]);
-      expect(await commentSteps(bob, contentId, 'y')).toEqual(['1/1']);
-      expect(await commentSteps(bob, contentId, 'z')).toEqual(['1/2', '2/2']);
-      expect((await commentTexts(contentId)).sort()).toEqual([...passed, 'x', 'y', 'z']);
     });
   });
 }

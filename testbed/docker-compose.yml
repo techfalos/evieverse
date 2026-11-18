@@ -23,6 +23,10 @@ x-app-env: &app-env
   # The seed posts its planned hashtags either way.
   TAGGING_MODE: ${TAGGING_MODE:-user}
   TAGGING_SERVER_TAGS: ${TAGGING_SERVER_TAGS:-}
+  # Videos are processed by the compactor's container, with the image's ffmpeg, before they are published: made an
+  # MP4 that plays anywhere, without their metadata, with a poster and an adaptive stream. false stores and serves
+  # them as they are sent. The app and the compactor share it: the app marks the videos the compactor processes.
+  VIDEO_PROCESSING: ${VIDEO_PROCESSING:-true}
   # The modification disclosure, which GET /rules gives beside the rules: true if this instance runs a
   # modified version of Evieverse, which then needs the address its source code can be obtained from.
   EVIEVERSE_MODIFIED: ${EVIEVERSE_MODIFIED:-false}
@@ -38,6 +42,11 @@ x-app-env: &app-env
   # abuse.ch account, which is free (https://auth.abuse.ch). Off unless set.
   TRUST_OPTIONAL_PLUGINS: ${TRUST_OPTIONAL_PLUGINS:-}
   URLHAUS_AUTH_KEY: ${URLHAUS_AUTH_KEY:-}
+  # TRUST_OPTIONAL_PLUGINS=pdq refuses posts and comments with an image whose PDQ hash is on a list of
+  # hashes of known child sexual abuse material, and tells the admins. It then needs the list, which the
+  # operator gets (see .env.example): an http(s) address, or the path of a file mounted into the containers.
+  PDQ_HASH_LIST: ${PDQ_HASH_LIST:-}
+  PDQ_HASH_LIST_AUTHORIZATION: ${PDQ_HASH_LIST_AUTHORIZATION:-}
 
 services:
   postgres:

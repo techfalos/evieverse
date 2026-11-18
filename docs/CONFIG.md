@@ -180,6 +180,8 @@ The server only writes records. Moving them to cold storage is the bucket's own 
 | --------------------- | -------------------- | ------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `TAGGING_MODE`        | `tagging.mode`       | choice | `user`  | `user`: a post can have any hashtags. `server`: only those of `TAGGING_SERVER_TAGS`, and a post with another is refused.                                                                       |
 | `TAGGING_SERVER_TAGS` | `tagging.serverTags` | list   | empty   | The hashtags posts can have in server mode, as many as you like, such as `news,local,sports`. Required in server mode, which doesn't start without one. `GET /tagging` lists them for clients. |
+| `TAG_CLAIM_REVIEW_HOURS` | `tagging.claimReviewHours` | number | `24` | In user mode, a user can [claim a hashtag](API.md#claiming-a-hashtag) that has no moderator, to moderate it. Every admin and server moderator is told, and any of them can refuse the claim for this many hours. A claim nobody refused in that time is granted. `0`: the compactor's next run grants it, so a claim can only be undone, by an admin. |
+| `TAG_CLAIMS_PER_DAY` | `tagging.claimsPerDay` | number | `5` | Hashtags one user can claim in a day (0: no limit). |
 
 
 
@@ -196,6 +198,27 @@ Which [types of post](API.md#post-store) the server takes: all five by default. 
 | `POST_TYPE_VIDEO` | `postTypes.video` | true/false | `true`  | Whether it takes video posts, and comments that come with a video.                                                        |
 | `POST_TYPE_AUDIO` | `postTypes.audio` | true/false | `true`  | Whether it takes audio posts.                                                                                             |
 | `POST_TYPE_LINK`  | `postTypes.link`  | true/false | `true`  | Whether it takes link posts.                                                                                              |
+
+
+
+
+### Videos
+
+
+The server [processes the videos](API.md#videos) it's sent before it publishes them: a post's video, and the one a comment comes with. The work is done with ffmpeg, by the process that runs the compactor.
+
+- **That process needs `ffmpeg` and `ffprobe`,** with the `libx264` and `aac` encoders. The Docker image has them. Run from source, install ffmpeg (`brew install ffmpeg`, `apt install ffmpeg`), or set `VIDEO_PROCESSING=false`. A compactor that can't find them doesn't start, and says which is missing.
+- **It's CPU work.** Give the compactor's process at least 2 CPUs and 2 GB of memory where videos are common ([DEPLOY.md](DEPLOY.md#videos)).
+- **Every process takes the same `VIDEO_PROCESSING`.** The API marks the videos to process, and the compactor's process does the work. With it on in one and off in the other, videos are either never published or published as sent.
+
+| Variable                | File key               | Format        | Default           | What it does |
+| ----------------------- | ---------------------- | ------------- | ----------------- | ------------ |
+| `VIDEO_PROCESSING`      | `video.processing`     | true/false    | `true`            | Whether videos are processed: made an MP4 of H.264 and AAC that plays anywhere, without the metadata the file came with, and for a post, with a poster and an adaptive stream (HLS). The post or comment is published once that's done. `false`: videos are stored and served as they're sent, metadata included, and no ffmpeg is needed. Videos stored before it was turned on stay as they are. |
+| `VIDEO_HEIGHTS`         | `video.heights`        | list          | `1080,720,480,240` | The sizes a post's video is made in, as the pixels of its shorter side: each from 144 to 2160, at most 8 of them. The ones larger than the video are left out, and a video smaller than all of them is made in its own size. The MP4 a post is read as (`/raw`) is the largest that's no more than 720. Fewer and smaller sizes take less time and less room. |
+| `VIDEO_COMMENT_HEIGHT`  | `video.commentHeight`  | number        | `720`             | The most a comment's video measures on its shorter side, from 144 to 2160. It's one MP4, with no stream and no poster. |
+| `VIDEO_TIMEOUT_SECONDS` | `video.timeoutSeconds` | number        | `3600`            | How long one video can take to process, all its sizes together. Past it the video is given up: its publisher gets a notice, a new post is deleted, and an update keeps the video the post had. Keep it above what the longest video the server takes needs on the compactor's machine. |
+| `VIDEO_FFMPEG_PATH`     | `video.ffmpegPath`     | text (a path) | `ffmpeg`          | The ffmpeg to run: a path, or a name that's looked for on the `PATH`. |
+| `VIDEO_FFPROBE_PATH`    | `video.ffprobePath`    | text (a path) | `ffprobe`         | The ffprobe to run, likewise. |
 
 
 
@@ -242,6 +265,15 @@ Which [types of post](API.md#post-store) the server takes: all five by default. 
 
 
 
+### Search
+
+[`GET /search`](API.md#search) finds users by the start of their username, and posts by the words of their text and by their hashtags. It's always on. A server that had posts before it had search indexes them once, with `npm run reindex` ([DEPLOY.md](DEPLOY.md#upgrading-to-search)).
+
+| Variable                       | File key                    | Format | Default | What it does |
+| ------------------------------ | --------------------------- | ------ | ------- | ------------ |
+| `SEARCH_RATE_LIMIT_PER_MINUTE` | `search.rateLimitPerMinute` | number | `60`    | Requests to `GET /search` from one address in a minute, past which they get `429` (0: no limit). It needs no key, and reads the database for each. Counted as `FEED_RATE_LIMIT_PER_MINUTE` is. |
+| `SEARCH_MAX_KEYWORDS`          | `search.maxKeywords`        | number | `100`   | The most words of its text or caption a post is found by: the most frequent ones. At least 1. Each is a row in the database, beside one for each of the post's hashtags, which don't count towards it. The compactor reads it, and so does `npm run reindex`: a new value holds for the posts the compactor writes from then on, and for the ones already there once the reindex has run again. |
+
 ### Monetization
 
 The server can show the ads its admins keep (`/monetization/ads`), each with the word "Sponsored". Both ways of showing them are off by default, and each has its own setting. Admins can keep ads whichever is on: with both off, the server shows none.
@@ -275,8 +307,6 @@ The compactor needs the same two settings as the API. It publishes the ads to Re
 
 | Variable                        | File key                      | Format | Default | What it does                                                                                                                                                                                                                     |
 | ------------------------------- | ----------------------------- | ------ | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CHALLENGE_POST_WINDOW_SECONDS` | `challenge.postWindowSeconds` | number | `60`    | A post less than this long after the user's previous post or challenge must solve a challenge, or two from the third such post in a row (0: never).                                                                              |
-| `CHALLENGE_COMMENTS_PER_MINUTE` | `challenge.commentsPerMinute` | number | `3`     | A user's comment past this many in any minute must solve a challenge, or two from the third such comment in a row (0: never). Edits of comments count as comments.                                                               |
 | `CHALLENGE_TTL_SECONDS`         | `challenge.ttlSeconds`        | number | `120`   | How long a challenge can be solved for.                                                                                                                                                                                          |
 | `CHALLENGE_POW_BITS`            | `challenge.powBits`           | number | `18`    | Zero bits the proof of work's SHA-256 must start with, 0 to 32. Each doubles the client's work (0: none).                                                                                                                        |
 | `CHALLENGE_MIN_SOLVE_MS`        | `challenge.minSolveMs`        | number | `2000`  | Answers sent sooner than this after the challenge was issued are refused.                                                                                                                                                        |
@@ -286,10 +316,11 @@ The compactor needs the same two settings as the API. It publishes the ads to Re
 | `CONTENT_RATE_LIMIT_PER_MINUTE` | `contentRateLimitPerMinute` | number | `300` | The same for `GET /content/:contentId`, counted apart (0: no limit). `/raw` isn't limited. |
 | `COMMENTS_LIST_RATE_LIMIT_PER_MINUTE` | `comments.listRateLimitPerMinute` | number | `120` | The same for each of the two lists of comments (a post's comments, and the replies to a comment), each counted apart (0: no limit). A list of a post whose comments Redis doesn't hold is a listing of the content store. |
 | `FEED_MAX_CONCURRENT`           | `feed.maxConcurrent`          | number | `100`   | `/feed` requests one process answers at a time. One more gets `503` with `Retry-After`, rather than waiting behind them, whatever addresses they come from (0: no limit). Each node, and each function instance, counts its own.                                                               |
-| `POST_RATE_LIMIT_PER_MINUTE`    | `postRateLimitPerMinute`      | number | `3`     | A user's posts in any minute past this many get `429`, before any challenge (0: no limit).                                                                                                                                       |
+| `POST_RATE_LIMIT_PER_MINUTE`    | `postRateLimitPerMinute`      | number | `3`     | A user's posts in any minute past this many get `429` (0: no limit).                                                                                                                                                             |
 | `REPORTS_PER_HOUR`              | `reportsPerHour`              | number | `20`    | Posts and comments one user can report in an hour (0: no limit).                                                                                                                                                                 |
-| `COMMENTS_PER_MINUTE`           | `comments.perMinute`          | number | `10`    | A user's comments in any minute past this many, on any posts, get `429`, before any challenge (0: no limit). Edits of comments count as comments.                                                                                |
+| `COMMENTS_PER_MINUTE`           | `comments.perMinute`          | number | `10`    | A user's comments in any minute past this many, on any posts, get `429` (0: no limit). Edits of comments count as comments.                                                                                                      |
 | `INBOX_MESSAGES_PER_MINUTE`     | `inbox.messagesPerMinute`     | number | `10`    | Messages one user can send other users in a minute (0: no limit).                                                                                                                                                                |
+| `EXPORT_PAGES_PER_MINUTE`       | `export.pagesPerMinute`       | number | `120`   | Pages of their [export](API.md#get-usersuseridexport) one user can read in a minute, past which they get `429` (0: no limit). A page is up to 1,000 records and about a megabyte, so this bounds what one account can have the database and the content store read, and still lets a large account be exported in minutes. |
 | `MAX_FOLLOWING`                 | `maxFollowing`                | number | `1000`  | The most users one user can follow. A following feed reads the index of every one of them.                                                                                                                                       |
 
 
@@ -315,7 +346,7 @@ The [trust score](API.md#moderation) of a post or comment runs from 0 to 100. Th
 | -------------------------- | ----------------------- | ------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `TRUST_SCORE_DELETE_BELOW` | `trust.deleteBelow`     | number | `25`    | A post that scores less than this is refused (`422`) and nothing of it is kept. 0: no post is, so posts with a blocked word wait in the moderation queue instead.                  |
 | `TRUST_SCORE_ALLOW_FROM`   | `trust.allowFrom`       | number | `75`    | A post that scores at least this is published. One that scores less, and isn't refused, waits in the moderation queue. 101: every post waits. At least `TRUST_SCORE_DELETE_BELOW`. |
-| `TRUST_OPTIONAL_PLUGINS`   | `trust.optionalPlugins` | list   | empty   | The optional trust plugins the server runs, by the names of their folders in `src/plugins/trust`, separated by commas or spaces (a list of names in the file). The server comes with one, `urlhaus`. Empty: no optional plugin runs. Plugins that aren't optional, such as `blocked_words`, run whatever this says. A name that isn't a folder there stops the server from starting. |
+| `TRUST_OPTIONAL_PLUGINS`   | `trust.optionalPlugins` | list   | empty   | The optional trust plugins the server runs, by the names of their folders in `src/plugins/trust`, separated by commas or spaces (a list of names in the file). The server comes with two, `urlhaus` and `pdq`. Empty: no optional plugin runs. Plugins that aren't optional, such as `blocked_words`, run whatever this says. A name that isn't a folder there stops the server from starting. |
 
 
 ### Links that spread malware
@@ -328,6 +359,22 @@ These are the settings of the `urlhaus` trust plugin, which refuses posts and co
 | `URLHAUS_AUTH_KEY`        | `urlhaus.authKey`        | text   | unset                                                             | The Auth-Key the list is downloaded with: that of an abuse.ch account, which is free ([auth.abuse.ch](https://auth.abuse.ch)). Required when `TRUST_OPTIONAL_PLUGINS` names `urlhaus`: the server doesn't start without it. It's a credential, so on a deployment it belongs in `secrets`. |
 | `URLHAUS_LIST_URL`        | `urlhaus.listUrl`        | URL    | `https://urlhaus-api.abuse.ch/v2/files/exports/{key}/recent.csv` | Where the list is downloaded from, with `{key}` where the Auth-Key goes: one of URLhaus's database dumps as a CSV, or its plain list of URLs. The default has the URLs added in the last 30 days. The server must be able to reach its host.                     |
 | `URLHAUS_REFRESH_MINUTES` | `urlhaus.refreshMinutes` | number | `15`                                                              | Minutes between two downloads of the list, by each process. At least 5: URLhaus writes its lists every 5 minutes and asks not to be asked more often.                                                                                                          |
+
+
+### Images of known child sexual abuse material
+
+These are the settings of the `pdq` trust plugin, which refuses posts and comments with an image whose PDQ hash is on a list of hashes of known child sexual abuse material, and tells the server's admins ([Trust plugins](TRUST_PLUGINS.md#images-of-known-child-sexual-abuse-material)). The plugin is optional: it runs only with `TRUST_OPTIONAL_PLUGINS=pdq`, and the settings aren't used otherwise.
+
+
+| Variable                      | File key              | Format | Default | What it does |
+| ----------------------------- | --------------------- | ------ | ------- | ------------ |
+| `PDQ_HASH_LIST`               | `pdq.hashList`        | text   | unset   | Where the list of hashes is: the path of a file, or an `http` or `https` address it's downloaded from. One PDQ hash a line, as 64 hex digits; a CSV or TSV with the hash in a column is read too, and lines that start with `#` are skipped. Required when `TRUST_OPTIONAL_PLUGINS` names `pdq`: the server doesn't start without it. The server comes with no list, and there is no public one: the operator gets it from a hash-sharing programme. Each process keeps the list in memory, about 100 bytes a hash. An address that holds a key is a credential, so on a deployment it then belongs in `secrets`. |
+| `PDQ_HASH_LIST_AUTHORIZATION` | `pdq.authorization`   | text   | unset   | The Authorization header a list at an address is asked for with, such as `Bearer <token>`. Unset: none is sent. Not used for a file. It's a credential, so on a deployment it belongs in `secrets`. |
+| `PDQ_MAX_DISTANCE`            | `pdq.maxDistance`     | number | `31`    | The most bits, of a hash's 256, an image's hash can differ from a listed one in and still match. 31 is what PDQ's authors match at. Lower finds fewer altered copies, and higher takes more pictures for ones they aren't. From 0, which matches only the very same hash, to 63. |
+| `PDQ_MIN_QUALITY`             | `pdq.minQuality`      | number | `50`    | The least quality, from 0 to 100, an image's hash must have to be matched: how much there is in the picture to tell it by. A picture of one colour has a hash near every other such picture's, and would match by chance. 50 is what PDQ's authors use. |
+| `PDQ_REFRESH_MINUTES`         | `pdq.refreshMinutes`  | number | `60`    | Minutes between two readings of the list, by each process. At least 1. A file that hasn't changed isn't read again. |
+
+The plugin also needs `TRUST_SCORE_ALLOW_FROM` above 0: the server doesn't start with `pdq` named and a threshold that publishes every post whatever its score.
 
 
 
@@ -475,7 +522,7 @@ Updating a function doesn't start it, so a setting the server refuses wouldn't s
 - **The step's log says which setting, and why,** for example "the functions would not start with these settings, so nothing was changed: TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't a folder of…". The step is named after the deployment, `<name>-migrate`: on AWS its log group is `/aws/lambda/<name>-migrate`, and on GCP and Azure it's the job's log.
 - **Fix the value and apply again.** The step runs again on every apply until it passes.
 
-What the check catches is what stops the server from starting: a value in the wrong format, a name that isn't one (a plugin in `TRUST_OPTIONAL_PLUGINS`, a `CONTENT_SCHEME`, a `DEFAULT_LANGUAGE` with no file), and settings that need each other (`TAGGING_MODE=server` without `TAGGING_SERVER_TAGS`, `urlhaus` without `URLHAUS_AUTH_KEY`). The last of these fails sooner, in the plan. What it doesn't catch is a value the server starts with but that is wrong: a bucket that doesn't exist, or a key a service refuses, shows when it's used.
+What the check catches is what stops the server from starting: a value in the wrong format, a name that isn't one (a plugin in `TRUST_OPTIONAL_PLUGINS`, a `CONTENT_SCHEME`, a `DEFAULT_LANGUAGE` with no file), and settings that need each other (`TAGGING_MODE=server` without `TAGGING_SERVER_TAGS`, `urlhaus` without `URLHAUS_AUTH_KEY`, `pdq` without `PDQ_HASH_LIST`). The last two of these fail sooner, in the plan. What it doesn't catch is a value the server starts with but that is wrong: a bucket that doesn't exist, or a key a service refuses, shows when it's used.
 
 Things to know:
 

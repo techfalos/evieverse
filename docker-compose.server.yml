@@ -46,6 +46,9 @@ services:
       POST_TYPE_VIDEO: ${POST_TYPE_VIDEO:-true}
       POST_TYPE_AUDIO: ${POST_TYPE_AUDIO:-true}
       POST_TYPE_LINK: ${POST_TYPE_LINK:-true}
+      # Videos are processed with the image's ffmpeg before they are published: made an MP4 that plays anywhere,
+      # without their metadata, with a poster and an adaptive stream. false stores and serves them as they are sent.
+      VIDEO_PROCESSING: ${VIDEO_PROCESSING:-true}
       # Reposts (POST /repost), and reposts of posts on other servers: both on unless set to false.
       REPOSTS: ${REPOSTS:-true}
       REPOSTS_REMOTE: ${REPOSTS_REMOTE:-true}
@@ -66,6 +69,11 @@ services:
       # abuse.ch account, which is free (https://auth.abuse.ch). Off unless set.
       TRUST_OPTIONAL_PLUGINS: ${TRUST_OPTIONAL_PLUGINS:-}
       URLHAUS_AUTH_KEY: ${URLHAUS_AUTH_KEY:-}
+      # TRUST_OPTIONAL_PLUGINS=pdq refuses posts and comments with an image whose PDQ hash is on a list of
+      # hashes of known child sexual abuse material, and tells the admins. It then needs the list, which the
+      # operator gets (see .env.example): an http(s) address, or the path of a file mounted into the container.
+      PDQ_HASH_LIST: ${PDQ_HASH_LIST:-}
+      PDQ_HASH_LIST_AUTHORIZATION: ${PDQ_HASH_LIST_AUTHORIZATION:-}
     volumes: [content:/app/data]
 
 volumes:

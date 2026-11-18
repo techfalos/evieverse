@@ -4,6 +4,7 @@ import { challengeRoutes } from '../routes/challenges.js';
 import { cliRoutes } from '../routes/cli.js';
 import { commentReadRoutes, commentWriteRoutes } from '../routes/comments.js';
 import { contentRoutes, deletionRoutes } from '../routes/content.js';
+import { exportRoutes } from '../routes/export.js';
 import { feedRoutes, followingFeedRoutes } from '../routes/feed.js';
 import { followRoutes } from '../routes/follow.js';
 import { inboxRoutes } from '../routes/inbox.js';
@@ -11,10 +12,12 @@ import { languageRoutes } from '../routes/languages.js';
 import { likeRoutes } from '../routes/like.js';
 import { moderationRoutes } from '../routes/moderation.js';
 import { monetizationRoutes } from '../routes/monetization.js';
+import { profileRoutes } from '../routes/profile.js';
 import { registerRoutes } from '../routes/register.js';
 import { reportRoutes } from '../routes/reports.js';
 import { repostRoutes } from '../routes/reposts.js';
 import { rulesRoutes } from '../routes/rules.js';
+import { searchRoutes } from '../routes/search.js';
 import { storeRoutes } from '../routes/store.js';
 import { tagRoutes } from '../routes/tags.js';
 import { uploadRoutes } from '../routes/uploads.js';
@@ -41,15 +44,21 @@ interface WithoutDatabase {
  *   content  GET /content/:id, /content/:id/raw,              one database read each, and the content store
  *            /content/:id/comments, /content/:id/comments/:id (and Redis, for comments)
  *            and /content/:id/comments/:id/replies, /raw,
+ *            /content/:id/raw/:n (an album's image number n),
+ *            /content/:id/video/:videoId/:file (a processed video's poster and stream),
  *            /content/:id/attestation (signed, for a repost on another server)
  *   store    POST /uploads, /store                            writes posts
- *   api      everything else: register and users, challenges read out (/challenges/:id/audio,
- *            whichever group issued them: they are in Redis), languages, likes (of posts and of comments),
+ *   api      everything else: register and users, a user's profile (their avatar,
+ *            /users/:id/avatar; the list of their posts, GET /users/:id/posts, which reads the
+ *            database; the posts they pinned, /users/:id/pinned/:contentId), a user's export of
+ *            their own data (GET /users/:id/export, a page at a time), its challenges read out
+ *            (/challenges/:id/audio), languages, likes (of posts and of comments),
  *            reposts (POST /repost, which writes database rows, and a link to the original for a
  *            post on another server, whose keys it asks that server for; POST /repost/refresh,
  *            which brings such a link up to what its original is now; GET /repost/keys, this
  *            server's own), follows and the following feed (GET /feed/following, which asks the database who may
- *            read it), inboxes, messages and blocks, tagging and tags, moderation, reports, the
+ *            read it), inboxes, messages and blocks, tagging and tags, search (GET /search, of
+ *            users and of posts, which reads the database), moderation, reports, the
  *            server's rules and its modification disclosure (/rules),
  *            DELETE /content/:id, writing, editing and deleting comments, the server's ads,
  *            their images and the links they are followed by (/monetization/ads), and the CLI's
@@ -80,6 +89,8 @@ export const GROUPS = {
     database: true,
     register(app, deps) {
       registerRoutes(app, deps);
+      profileRoutes(app, deps);
+      exportRoutes(app, deps);
       challengeRoutes(app, deps);
       languageRoutes(app);
       likeRoutes(app, deps);
@@ -94,6 +105,7 @@ export const GROUPS = {
       reportRoutes(app, deps);
       rulesRoutes(app, deps);
       tagRoutes(app, deps);
+      searchRoutes(app, deps);
       cliRoutes(app, deps);
     },
   },

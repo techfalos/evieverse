@@ -525,6 +525,69 @@ describe('the CLI', () => {
     );
   });
 
+  it("claims a hashtag, refuses a claim as an admin, keeps a hashtag's rules as its moderator, and says why a hashtag is removed", async () => {
+    await setup();
+    const root = await ctx.register('root');
+    await setAdmin(ctx.db, 'root', true);
+    const alice = await ctx.register('alice');
+    const bob = await ctx.register('bob');
+    await profile('root', root);
+    await profile('alice', alice);
+    await profile('bob', bob);
+    const by = (name: string, ...args: string[]) => ran(...args, '--profile', name);
+    const refused = (name: string, ...args: string[]) => cli([...args, '--profile', name]);
+    const reviewUntil = new Date(ctx.clock.now + 24 * 60 * 60 * 1000).toISOString();
+    const waits = `you become its moderator at ${reviewUntil}, unless an admin or a server moderator refuses the claim before then.`;
+
+    expect(await by('root', 'claims', 'list')).toBe('No claim to a hashtag is waiting.');
+    expect(await by('alice', 'claims', 'add', 'Cars')).toBe(`You claimed #cars: ${waits}`);
+    expect(await by('alice', 'claims', 'add', 'cars')).toBe(`You had already claimed #cars: ${waits}`);
+    expect(await refused('bob', 'claims', 'add', 'cars')).toMatchObject({ code: 1, err: "evieverse: another user's claim to #cars is waiting" });
+    expect(await by('bob', 'moderators', 'list', 'cars')).toBe(
+      `#cars has no moderators.\nalice (${alice.userId}) claimed it, and becomes its moderator at ${reviewUntil} unless the claim is refused.`,
+    );
+    expect(await by('root', 'claims', 'list')).toBe(`#cars  ${alice.userId}  alice  claimed ${new Date(ctx.clock.now).toISOString()}  granted ${reviewUntil}`);
+    expect(await refused('bob', 'claims', 'list')).toMatchObject({ code: 1, err: 'evieverse: only an admin or a server moderator can do this' });
+    expect(await by('root', 'claims', 'refuse', 'cars')).toBe(`Refused the claim of ${alice.userId} to #cars.`);
+    expect(await by('root', 'claims', 'refuse', 'cars')).toBe("Nobody's claim to #cars is waiting.");
+    expect(await by('bob', 'claims', 'add', 'cars')).toBe(`You claimed #cars: ${waits}`);
+    expect(await by('bob', 'claims', 'withdraw', 'cars')).toBe('Withdrew your claim to #cars.');
+
+    // A claim that nobody refused makes its user the hashtag's moderator, who keeps its rules.
+    await by('alice', 'claims', 'add', 'cars');
+    ctx.clock.now += 25 * 60 * 60 * 1000;
+    await ctx.compact();
+    expect(await by('alice', 'whoami')).toBe(`alice (${alice.userId}) on ${SERVER}: moderator of #cars`);
+    const ruleId = (out: string) => out.split(': ')[1]!;
+    expect(await by('bob', 'tag-rules', 'list', 'cars')).toBe('#cars has no rules.');
+    const only = ruleId(await by('alice', 'tag-rules', 'add', 'cars', 'Cars only.'));
+    const first = await by('alice', 'tag-rules', 'add', 'cars', 'Read these first.', '--position', '1');
+    expect(first).toBe(`Added rule 1 of #cars: ${ruleId(first)}`);
+    expect(await by('bob', 'tag-rules', 'list', 'Cars')).toBe(`1  ${ruleId(first)}  Read these first.\n2  ${only}  Cars only.`);
+    expect(await by('alice', 'tag-rules', 'update', 'cars', only, '--text', 'Cars, and only cars.', '--position', '1')).toBe(`Updated rule ${only}: it is rule 1 of #cars.`);
+    expect(await by('alice', 'tag-rules', 'remove', 'cars', ruleId(first))).toBe(`Removed rule ${ruleId(first)} of #cars.`);
+    expect(await by('alice', 'tag-rules', 'remove', 'cars', ruleId(first))).toBe(`${ruleId(first)} isn't one of the rules of #cars.`);
+    expect(await by('root', 'tag-rules', 'list', 'cars')).toBe(`1  ${only}  Cars, and only cars.`);
+    expect(await refused('alice', 'tag-rules', 'update', 'cars', only)).toMatchObject({ code: 2, err: 'evieverse: say what to change: --text <text>, --position <n>, or both' });
+    expect(await refused('bob', 'tag-rules', 'add', 'cars', 'Anything goes.')).toMatchObject({ code: 1, err: 'evieverse: only an admin, a server moderator or a moderator of #cars can do this' });
+
+    // What a moderator says of a removal is on the post, for whoever reads it.
+    const contentId = await post(ctx, bob, 'a boat #cars #boats');
+    expect(await by('alice', 'tag', 'remove', contentId, 'cars', '--reason', 'It has no cars in it.')).toBe(`Removed #cars from ${contentId}: it's now under #boats.`);
+    expect((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}` })).json().moderation).toMatchObject([
+      { action: 'tag_removed', tag: 'cars', by: 'tag_moderator', reason: 'It has no cars in it.', text: '#cars was removed from this post by a moderator of the hashtag: It has no cars in it.' },
+    ]);
+
+    const help = (await refused('bob', 'help')).out;
+    expect(help).toMatch(/^  \+ claims add <tag> /m);
+    expect(help).toMatch(/^  \+ claims withdraw <tag> /m);
+    expect(help).toMatch(/^  \+ tag-rules list <tag> /m);
+    expect(help).toMatch(/^  - tag-rules add <tag> <text> \[--position <n>\] /m);
+    expect(help).toMatch(/^  - tag remove <contentId> <tag> \[--mute\] \[--reason <text>\] /m);
+    expect(help).toMatch(/^  - claims list \[--limit <n>\] \[--cursor <cursor>\] /m);
+    expect(help).toMatch(/^  - claims refuse <tag> /m);
+  });
+
   it('registers a user as an admin, without the challenge anyone else is asked to solve', async () => {
     await setup();
     const root = await ctx.register('root');
@@ -780,7 +843,7 @@ describe('the CLI', () => {
     expect(await json('comments', 'list', contentId, '--profile', 'bob')).toMatchObject({ contentId, count: 2, nextCursor: null });
     expect(await refused('bob', 'comments', 'add', contentId)).toMatchObject({
       code: 2,
-      err: 'evieverse: usage: evieverse comments add <contentId> <text> [--file <path>] [--reply-to <commentId>]',
+      err: 'evieverse: usage: evieverse comments add <contentId> <text> [--file <path>] [--alt <text>] [--reply-to <commentId>] [--ai]',
     });
 
     // A comment is replied to, liked, and edited by its author. Its replies are a list of their own.
@@ -792,9 +855,28 @@ describe('the CLI', () => {
     expect(await by('carol', 'comments', 'like', contentId, first)).toBe(`Liked comment ${first}: it has 1 like.`);
     expect(await by('carol', 'comments', 'like', contentId, first)).toBe(`You had already liked comment ${first}: it has 1 like.`);
     expect(await by('alice', 'comments', 'like', contentId, first)).toBe(`Liked comment ${first}: it has 2 likes.`);
+    // A like is taken back, once, and can be given again.
+    expect(await by('alice', 'comments', 'unlike', contentId, first)).toBe(`Took back your like of comment ${first}: it has 1 like.`);
+    expect(await by('alice', 'comments', 'unlike', contentId, first)).toBe(`You hadn't liked comment ${first}: it has 1 like.`);
+    expect(await json('comments', 'unlike', contentId, first, '--profile', 'dave')).toEqual({ contentId, commentId: first, likes: 1, wasLiked: false });
+    expect(await by('alice', 'comments', 'like', contentId, first)).toBe(`Liked comment ${first}: it has 2 likes.`);
     expect(await refused('bob', 'comments', 'edit', contentId, answer, 'Go away')).toMatchObject({ code: 1, err: "evieverse: only the comment's author can edit this comment" });
     expect(await by('carol', 'comments', 'edit', contentId, answer, 'Do go on')).toBe(`Edited comment ${answer}.`);
     expect(await by('carol', 'comments', 'edit', contentId, answer, 'Do go on')).toBe(`Comment ${answer} already says that.`);
+    // Its author says whether it was created with AI, as it is sent or with an edit, which otherwise leaves what it said. A list says which were.
+    const made = await json('comments', 'add', contentId, 'A model agrees', '--reply-to', answer, '--ai', '--profile', 'dave');
+    expect(made).toMatchObject({ text: 'A model agrees', aiGenerated: true });
+    expect(await by('bob', 'comments', 'list', contentId, '--replies-to', answer)).toMatch(new RegExp(`^${made.commentId}  dave  2026-\\S+  0 likes  0 replies  A model agrees \\(created with AI\\)$`));
+    expect(await by('dave', 'comments', 'edit', contentId, made.commentId, 'A model agreed')).toBe(`Edited comment ${made.commentId}.`);
+    expect(await by('bob', 'comments', 'list', contentId, '--replies-to', answer)).toMatch(/ {2}A model agreed \(created with AI\) \(edited\)$/);
+    expect(await by('dave', 'comments', 'edit', contentId, made.commentId, 'A model agreed', '--ai')).toBe(`Comment ${made.commentId} already says that.`);
+    expect(await refused('dave', 'comments', 'edit', contentId, made.commentId, 'A model agreed', '--ai', '--no-ai')).toMatchObject({
+      code: 2,
+      err: "evieverse: say one of the two: --ai if the comment was created with AI, --no-ai if it wasn't",
+    });
+    expect(await by('dave', 'comments', 'edit', contentId, made.commentId, 'A model agreed', '--no-ai')).toBe(`Edited comment ${made.commentId}.`);
+    expect(await by('bob', 'comments', 'list', contentId, '--replies-to', answer)).toMatch(/ {2}A model agreed \(edited\)$/);
+    expect(await by('dave', 'comments', 'delete', contentId, made.commentId)).toBe(`Deleted comment ${made.commentId}.`);
     expect((await by('bob', 'comments', 'list', contentId)).split('\n')).toEqual([
       expect.stringMatching(new RegExp(`^${first}  bob    2026-\\S+  2 likes  1 reply    A first thought$`)),
       expect.stringMatching(new RegExp(`^${second}  carol  2026-\\S+  0 likes  0 replies  A second thought$`)),
@@ -935,7 +1017,9 @@ describe('the CLI', () => {
 
     // ...and a block is between two users.
     expect(await by('bob', 'blocks', 'list')).toBe('You block nobody.');
-    expect(await by('bob', 'blocks', 'add', alice.userId)).toBe(`You block ${alice.userId}: no message goes between the two of you.`);
+    expect(await by('bob', 'blocks', 'add', alice.userId)).toBe(
+      `You block ${alice.userId}: no message goes between the two of you, neither follows the other, and they can't comment on your posts.`,
+    );
     expect(await by('bob', 'blocks', 'add', alice.userId)).toBe(`You already blocked ${alice.userId}.`);
     expect(await by('bob', 'blocks', 'list')).toMatch(new RegExp(`^${alice.userId}  alice  blocked 2026-\\S+$`));
     expect(await refused('alice', 'messages', 'send', bob.userId, 'Hello?')).toMatchObject({ code: 1, err: NOT_TAKEN });
@@ -1025,7 +1109,7 @@ describe('the CLI', () => {
     expect(await by('erin', 'mute', 'add', 'sports', dave.userId)).toMatchObject({ code: 0, out: `${dave.userId} is muted on #sports.` });
     expect(await by('erin', 'mute', 'remove', 'news', dave.userId)).toMatchObject({ code: 0, out: `${dave.userId} is no longer muted on #news.` });
     expect(await by('erin', 'words', 'add', '--tag', 'sports', 'doping')).toMatchObject({ code: 0, out: 'doping' });
-    expect(await by('erin', 'moderators', 'add', 'sports', erin.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin can do this' });
+    expect(await by('erin', 'moderators', 'add', 'sports', erin.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin or a moderator of #sports can do this' });
     expect(await by('erin', 'words', 'list', '--server')).toMatchObject({ code: 1, err: 'evieverse: only an admin can do this' });
     expect(await by('erin', 'server-moderators', 'add', dave.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin can do this' });
     expect(await by('erin', 'admins', 'grant', erin.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin can do this' });
@@ -1180,20 +1264,33 @@ describe('the CLI', () => {
       expect(await by('bob', 'repost', contentId)).toMatchObject({ code: 2, err: 'evieverse: name the hashtags the repost gives the post: --tags "news, mumbai"' });
       expect(await by('bob', 'repost', '--tags', 'pics')).toMatchObject({ code: 2, err: 'evieverse: usage: evieverse repost <post> --tags <tags>' });
       expect((await cli(['--help'])).out).toContain('\n  repost <post> --tags <tags> ');
+
+      // An admin or a server moderator removes one user's repost. Of a post written here it goes on its own; the first one
+      // of a post on another server is the server's entry for it, which is deleted.
+      await setAdmin(ctx.db, 'alice', true);
+      expect(await by('bob', 'reposts', 'remove', contentId, carol!.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin or a server moderator can do this' });
+      expect(await done('alice', 'reposts', 'remove', contentId, carol!.userId)).toBe(`Removed the repost of ${contentId} by ${carol!.userId}: it loses #rain.`);
+      expect(await by('alice', 'reposts', 'remove', contentId, carol!.userId)).toMatchObject({ code: 1, err: 'evieverse: that user has no repost of this post' });
+      await ctx.compact();
+      expect((await read(ctx, contentId)).tags).toEqual(['news', 'weather']);
+      expect(JSON.parse(await done('alice', 'reposts', 'remove', entry, carol!.userId, '--json'))).toMatchObject({ contentId: entry, userId: carol!.userId, status: 'removed', tags: ['art'] });
+      expect(await done('alice', 'reposts', 'remove', entry, bob!.userId)).toBe(`Removed the repost of ${bob!.userId}: ${entry} was this server's entry for a post on another server, and is set for deletion.`);
+      expect(await by('alice', 'reposts', 'remove', entry, bob!.userId)).toMatchObject({ code: 1, err: 'evieverse: content not found' });
+      expect(await by('alice', 'reposts', 'remove', contentId)).toMatchObject({ code: 2, err: 'evieverse: usage: evieverse reposts remove <contentId> <userId>' });
     } finally {
       await other.close();
     }
   });
 
-  it("says that a repost was challenged, which it can't show", async () => {
-    await setup({ challenge: { postWindowSeconds: 60 } });
+  it('says that a repost was one post too many in a minute, and when to try again', async () => {
+    await setup({ postRateLimitPerMinute: 1 });
     const [alice, bob] = await Promise.all(['alice', 'bob'].map((name) => ctx.register(name)));
     await profile('bob', bob!);
     const contentId = await post(ctx, alice!, 'Flooding downtown #news');
     await post(ctx, bob!, 'Bob was here #local');
     expect(await cli(['repost', contentId, '--tags', 'weather', '--profile', 'bob'])).toMatchObject({
       code: 1,
-      err: "evieverse: you posted or were challenged less than 60 seconds ago; solve the challenge to post. The CLI can't show a challenge: repost again later, or with a client that shows its image",
+      err: 'evieverse: you can post at most once a minute; try again in 60 seconds',
     });
     ctx.clock.now += 61_000;
     expect(await ran('repost', contentId, '--tags', 'weather', '--profile', 'bob')).toBe(`Reposted ${contentId} under #weather.`);

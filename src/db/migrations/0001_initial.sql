@@ -11,8 +11,8 @@
 
 -- Publishers and readers. Relations always use id; username is unique but used only for display.
 -- updated_at: when the user registered or last changed their username, which tells the compactor to
--- rewrite their publisher credit in Redis. What a user posted lately, which the post challenges and
--- the limit on posts a minute go by, is kept in Redis, not here.
+-- rewrite their publisher credit in Redis. What a user posted lately, which the limit on posts a
+-- minute goes by, is kept in Redis, not here.
 --
 -- admin: 1 for the server's admins. Admins set it for each other (/admins), a deployment for its
 -- first one (BOOTSTRAP_ADMIN), and the operator with `npm run admin`. An admin can delete any
@@ -157,7 +157,7 @@ CREATE TABLE tag_pairs (
 CREATE INDEX tag_pairs_b_idx ON tag_pairs (tag_b);
 CREATE INDEX tag_pairs_updated_idx ON tag_pairs (updated_at);
 
--- One permanent like per user per content item; content.like_count is the running total.
+-- One like per user per content item, which stays until the user takes it back (see 0010_unlikes); content.like_count is the running total.
 CREATE TABLE likes (
   user_id     varchar(36) NOT NULL,
   content_id  varchar(36) NOT NULL,

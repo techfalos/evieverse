@@ -1,4 +1,4 @@
-import { mkdir, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -73,6 +73,7 @@ for (const target of TARGETS) {
     const replies = async (contentId: string, commentId: string, query = '') => ok(await req(null, 'GET', `/content/${contentId}/comments/${commentId}/replies${query}`), 200);
     const edit = (u: User | null, contentId: string, commentId: string, text: string) => req(u, 'PATCH', `/content/${contentId}/comments/${commentId}`, { text });
     const likeComment = (u: User | null, contentId: string, commentId: string) => req(u, 'POST', '/like', { contentId, commentId });
+    const unlikeComment = (u: User | null, contentId: string, commentId: string) => req(u, 'DELETE', '/like', { contentId, commentId });
     type SentFile = { name: string; type: string; data: Buffer };
     /** A comment sent as a form, with its image or video as the form's file. */
     const attach = (u: User | null, contentId: string, fields: Record<string, string>, file?: SentFile) => {
@@ -127,6 +128,7 @@ for (const target of TARGETS) {
         parentId: null,
         author: { userId: bob.userId, username: 'bob' },
         text: 'First!',
+        aiGenerated: false,
         media: null,
         likes: 0,
         replies: 0,
@@ -428,6 +430,7 @@ for (const target of TARGETS) {
         parentId: top.commentId,
         author: { userId: carol.userId, username: 'carol' },
         text: 'Not much',
+        aiGenerated: false,
         media: null,
         likes: 0,
         replies: 0,
@@ -716,6 +719,71 @@ for (const target of TARGETS) {
       expect(texts(await list(contentId))).toEqual(['Two']);
     });
 
+    it("keeps what a comment's author says of AI: not created with it unless they say so, as it is sent or with an edit", async () => {
+      ctx = await createTestContext(target);
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const carol = await ctx.register('carol');
+      const contentId = await post(alice, 'Talk to me #news', { comments: true });
+      const send = (u: User, payload: Record<string, unknown>) => req(u, 'POST', `/content/${contentId}/comments`, payload);
+      const patch = (u: User, commentId: string, payload: Record<string, unknown>) => req(u, 'PATCH', `/content/${contentId}/comments/${commentId}`, payload);
+      /** A comment as the content store holds it. */
+      const object = async (commentId: string) => JSON.parse(await readFile(join(ctx.dir, 'content', 'comments', contentId, `${commentId}.json`), 'utf8'));
+      const declared = (page: { comments: { text: string; aiGenerated: boolean }[] }) => page.comments.map((c) => [c.text, c.aiGenerated]);
+
+      // Not created with AI unless its author says so: as a boolean, or as the string a form's field is, as /store takes it.
+      const plain = ok(await comment(bob, contentId, 'My own words'));
+      expect(plain.aiGenerated).toBe(false);
+      ctx.clock.now += 1000;
+      const made = ok(await send(bob, { text: 'A model wrote this', aiGenerated: true }));
+      expect(made).toEqual({ ...plain, commentId: made.commentId, text: 'A model wrote this', aiGenerated: true, createdAt: now() });
+      ctx.clock.now += 1000;
+      expect(ok(await attach(carol, contentId, { text: 'And this', aiGenerated: 'true' })).aiGenerated).toBe(true);
+      expect(ok(await send(carol, { text: 'Not this', aiGenerated: 'false' })).aiGenerated).toBe(false);
+      expect((await send(carol, { text: 'Or this', aiGenerated: 'perhaps' })).statusCode).toBe(400);
+
+      // It is given wherever the comment is, and is in the comment's object only where it was declared.
+      expect(ok(await one(null, contentId, made.commentId), 200)).toEqual(made);
+      expect(declared(await list(contentId))).toEqual([['My own words', false], ['A model wrote this', true], ['And this', true], ['Not this', false]]);
+      expect(await object(made.commentId)).toMatchObject({ text: 'A model wrote this', aiGenerated: true });
+      expect(await object(plain.commentId)).not.toHaveProperty('aiGenerated');
+      // A reply says its own.
+      const answer = ok(await send(carol, { text: 'So did I', parentId: plain.commentId, aiGenerated: true }));
+      expect((await replies(contentId, plain.commentId)).comments).toEqual([answer]);
+
+      // An edit that doesn't say keeps it,
+      ctx.clock.now += 1000;
+      const reworded = ok(await edit(bob, contentId, made.commentId, 'A model wrote this one'), 200);
+      expect(reworded).toEqual({ ...made, text: 'A model wrote this one', editedAt: now() });
+      // one that says what the comment says, with the text it has, changes nothing,
+      expect(ok(await patch(bob, made.commentId, { text: reworded.text, aiGenerated: true }), 200)).toEqual({ contentId, commentId: made.commentId, unchanged: true });
+      // and one that says otherwise is an edit, with another text or with the same.
+      ctx.clock.now += 1000;
+      const takenBack = ok(await patch(bob, made.commentId, { text: reworded.text, aiGenerated: false }), 200);
+      expect(takenBack).toEqual({ ...reworded, aiGenerated: false, editedAt: now() });
+      expect(await object(made.commentId)).not.toHaveProperty('aiGenerated');
+      ctx.clock.now += 1000;
+      const owned = ok(await patch(bob, plain.commentId, { text: 'Not my own words', aiGenerated: 'true' }), 200);
+      expect(owned).toEqual({ ...plain, text: 'Not my own words', aiGenerated: true, replies: 1, editedAt: now() });
+      expect(ok(await one(null, contentId, plain.commentId), 200)).toEqual(owned);
+      expect(await object(plain.commentId)).toMatchObject({ text: 'Not my own words', aiGenerated: true });
+      expect((await patch(bob, plain.commentId, { text: owned.text, aiGenerated: 'perhaps' })).statusCode).toBe(400);
+      // It is its author's to say, as its text is.
+      expect(refusal(await patch(alice, plain.commentId, { text: owned.text, aiGenerated: false }))).toEqual([403, "only the comment's author can edit this comment"]);
+      expect(declared(await list(contentId))).toEqual([['Not my own words', true], ['A model wrote this one', false], ['And this', true], ['Not this', false]]);
+
+      // What stands in a comment's place says nothing of it: of one that was deleted, and of one by a user its reader blocks.
+      ok(await remove(bob, contentId, plain.commentId), 200);
+      ok(await req(alice, 'PUT', `/users/${alice.userId}/blocked/${carol.userId}`));
+      expect(ok(await req(alice, 'GET', `/content/${contentId}/comments`), 200).comments.map((c: { status?: string; aiGenerated: boolean }) => [c.status, c.aiGenerated])).toEqual([
+        ['deleted', false],
+        [undefined, false],
+        ['blocked', false],
+        ['blocked', false],
+      ]);
+      expect(declared(await list(contentId)).slice(2)).toEqual([['And this', true], ['Not this', false]]);
+    });
+
     it('takes an image or a video with a comment only where the server takes posts of that type, and a text either way', async () => {
       // A server of pictures: no text posts, and no video.
       ctx = await createTestContext(target, { postTypes: { text: false, video: false } });
@@ -755,6 +823,7 @@ for (const target of TARGETS) {
         parentId: null,
         author: { userId: bob.userId, username: 'bob' },
         text: 'Look at this',
+        aiGenerated: false,
         media: { kind: 'image', url: urlOf(commentId), mimeType: 'image/png', size: PNG.length },
         likes: 0,
         replies: 0,
@@ -866,8 +935,8 @@ for (const target of TARGETS) {
       expect(await readdir(join(ctx.dir, 'tmp')).catch(() => [])).toEqual([]);
     });
 
-    it('keeps an upload for a comment to be sent again with its challenge solved, and stores nothing until then', async () => {
-      ctx = await createTestContext(target, { challenge: { commentsPerMinute: 1 } });
+    it('keeps an upload for a comment the limit on comments a minute refused, to be sent again, and stores nothing until then', async () => {
+      ctx = await createTestContext(target, { comments: { perMinute: 1 } });
       const alice = await ctx.register('alice');
       const bob = await ctx.register('bob');
       const contentId = await post(alice, 'Show me #news', { comments: true });
@@ -875,17 +944,18 @@ for (const target of TARGETS) {
 
       await putUpload(bob, uploadId(1), CLIP);
       const payload = { text: 'Two', uploadId: uploadId(1), filename: 'clip.mp4' };
-      const challenged = await req(bob, 'POST', `/content/${contentId}/comments`, payload);
-      expect(challenged.statusCode).toBe(428);
-      expect(challenged.json()).toMatchObject({ error: 'you commented once in the last minute; solve the challenge to comment', challenge: { step: 1, steps: 1 } });
+      const limited = await req(bob, 'POST', `/content/${contentId}/comments`, payload);
+      expect(limited.statusCode).toBe(429);
+      expect(limited.json()).toEqual({ error: 'too many comments; try again in 60 seconds', retryAfterSeconds: 60 });
       expect(await uploads(bob)).toEqual([uploadId(1)]);
       expect(await filed(contentId)).toEqual([]);
       expect(texts(await list(contentId))).toEqual(['One']);
 
-      const solved = ok(await req(bob, 'POST', `/content/${contentId}/comments`, { ...payload, ...(await ctx.solve(challenged.json().challenge)) }));
-      expect(solved).toMatchObject({ text: 'Two', media: { kind: 'video', size: CLIP.length } });
+      ctx.clock.now += 60_000;
+      const sent = ok(await req(bob, 'POST', `/content/${contentId}/comments`, payload));
+      expect(sent).toMatchObject({ text: 'Two', media: { kind: 'video', size: CLIP.length } });
       expect(await uploads(bob)).toEqual([]);
-      expect(await filed(contentId)).toEqual([solved.commentId]);
+      expect(await filed(contentId)).toEqual([sent.commentId]);
     });
 
     it("keeps a comment's image or video through an edit of its text, and until the comment goes: deleted, or with the post", async () => {
@@ -1008,6 +1078,67 @@ for (const target of TARGETS) {
       expect(ok(await one(null, contentId, answer), 200)).toMatchObject({ likes: 1 });
       expect(refusal(await likeComment(carol, contentId, commentId))).toEqual([404, NO_COMMENT]);
       expect(await ctx.hot.exists([count])).toEqual([false]);
+    });
+
+    it('takes a like of a comment back once, out of the content store and the count, and lets it be given again', async () => {
+      ctx = await createTestContext(target);
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const carol = await ctx.register('carol');
+      const dave = await ctx.register('dave');
+      const text = 'Talk to me #news';
+      const contentId = await post(alice, text, { comments: true });
+      const closed = await post(alice, 'Not to me #news');
+      const { commentId } = ok(await comment(bob, contentId, 'Like this'));
+      const taken = (likes: number, wasLiked: boolean) => ({ contentId, commentId, likes, wasLiked });
+      const count = commentLikesKey(commentId);
+      /** The comments a user liked, as the index of them has it. */
+      const likedBy = async (u: User) => (await ctx.comments.likedBy(u.userId, null, 10)).map((mark) => mark.commentId);
+      for (const u of [alice, carol, dave]) ok(await likeComment(u, contentId, commentId));
+      expect(await likers(contentId, commentId)).toEqual([alice.userId, carol.userId, dave.userId].sort());
+
+      // A user, of a comment that is there, on a post that takes comments: what a like is refused, its taking back is.
+      expect((await unlikeComment(null, contentId, commentId)).statusCode).toBe(401);
+      expect(refusal(await unlikeComment(carol, contentId, NO_ID))).toEqual([404, NO_COMMENT]);
+      expect(refusal(await unlikeComment(carol, NO_ID, commentId))).toEqual([404, 'content not found']);
+      expect(refusal(await unlikeComment(carol, closed, commentId))).toEqual([404, OFF]);
+      expect((await unlikeComment(carol, contentId, 'x')).statusCode).toBe(400);
+      // A like that isn't there is taken back from nobody.
+      expect(ok(await unlikeComment(bob, contentId, commentId), 200)).toEqual(taken(3, false));
+
+      // Once: the like goes from the store, from the count, and from the index of what its user liked. The others stay.
+      expect(ok(await unlikeComment(carol, contentId, commentId), 200)).toEqual(taken(2, true));
+      expect(ok(await unlikeComment(carol, contentId, commentId), 200)).toEqual(taken(2, false));
+      expect(await likers(contentId, commentId)).toEqual([alice.userId, dave.userId].sort());
+      expect([await likedBy(carol), await likedBy(alice)]).toEqual([[], [commentId]]);
+      expect(ok(await one(null, contentId, commentId), 200)).toMatchObject({ likes: 2 });
+      expect(await list(contentId)).toMatchObject({ comments: [{ commentId, likes: 2 }] });
+      expect(await ctx.db.selectFrom('pending_writes').select('kind').execute()).toEqual([]);
+
+      // Redis has no number of them: the likes are counted from the store, which lacks the one taken back.
+      await ctx.hot.del([count]);
+      expect(ok(await one(null, contentId, commentId), 200)).toMatchObject({ likes: 2 });
+      await ctx.hot.del([count]);
+      expect(ok(await unlikeComment(dave, contentId, commentId), 200)).toEqual(taken(1, true));
+      expect(await ctx.comments.likes(contentId, [commentId])).toEqual([1]);
+
+      // Given again, it is a new like; and the same taking back sent twice at once takes it once.
+      expect(ok(await likeComment(carol, contentId, commentId))).toEqual({ contentId, commentId, likes: 2, alreadyLiked: false });
+      expect(await likedBy(carol)).toEqual([commentId]);
+      const both = await Promise.all([unlikeComment(carol, contentId, commentId), unlikeComment(carol, contentId, commentId)]);
+      expect(both.map((res) => [res.statusCode, res.json().wasLiked]).sort()).toEqual([[200, false], [200, true]]);
+      expect(ok(await one(null, contentId, commentId), 200)).toMatchObject({ likes: 1 });
+      expect(await likers(contentId, commentId)).toEqual([alice.userId]);
+
+      // Once the post takes no comments any more, a like there is still its user's to take back, named in the query
+      // with the credentials in the headers. To whoever has no like there, the post takes no comments.
+      ok(await storeText(alice, text, { contentId, comments: false }), 200);
+      expect(refusal(await likeComment(carol, contentId, commentId))).toEqual([404, OFF]);
+      expect(refusal(await unlikeComment(carol, contentId, commentId))).toEqual([404, OFF]);
+      expect(ok(await ctx.app.inject({ method: 'DELETE', url: `/like?contentId=${contentId}&commentId=${commentId}`, headers: as(alice) }), 200)).toEqual(taken(0, true));
+      expect(refusal(await unlikeComment(alice, contentId, commentId))).toEqual([404, OFF]);
+      expect(await likers(contentId, commentId)).toEqual([]);
+      expect(await likedBy(alice)).toEqual([]);
     });
   });
 }

@@ -42,9 +42,11 @@ export interface FreshOptions {
 /**
  * Where a page stopped in a tag's ordered list: the last record it took from it, or passed over as
  * already shown. The next page starts after it in the algorithm's order, whatever the list then
- * holds. A record's likes only grow and its creation time never changes, so a record never moves
- * from ahead of a boundary to behind it: what was shown isn't shown again. One that moves ahead of
- * it meanwhile (liked, or indexed late) is missed.
+ * holds. A record's creation time never changes, and its likes mostly grow, so a record seldom
+ * moves from ahead of a boundary to behind it: what was shown isn't shown again, but for a
+ * record that lost likes since (DELETE /like) and is now behind where the session had got to in
+ * a likes order, which the session comes to once more. One that moves ahead of the boundary
+ * meanwhile (liked, or indexed late) is missed.
  */
 export interface Boundary {
   likes: number;

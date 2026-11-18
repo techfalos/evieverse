@@ -17,6 +17,7 @@ import { rateLimitStore } from './http/rateLimitStore.js';
 import { loadLanguages, msg } from './language.js';
 import { loadTrustPlugins } from './moderation/trust.js';
 import { OriginKeys } from './originKeys.js';
+import { MAX_POST_IMAGES } from './posts.js';
 import { loadCliRelease, requireCliBuild } from './routes/cli.js';
 import { MINUTE } from './time.js';
 import { contentWriter } from './write.js';
@@ -88,7 +89,8 @@ export async function buildApp(
   await app.register(multipart, {
     limits: {
       fileSize: deps.config.storage.maxUploadBytes,
-      files: 1,
+      // The images of an image post, and one more: the route is what refuses a request with too many, in its own words (see readMultipart).
+      files: MAX_POST_IMAGES + 1,
       fields: 20,
       fieldSize: 32 * 1024 * 1024,
     },

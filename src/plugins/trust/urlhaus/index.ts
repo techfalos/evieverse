@@ -7,9 +7,10 @@ import type { Listed } from './list.types.js';
 
 /**
  * Links that spread malware: a post with a link that is on URLhaus's list (https://urlhaus.abuse.ch)
- * isn't trusted at all, and neither is a comment. Every link in what there is of it to read is
- * checked: a link post's URL, and the links written in a text, a caption or a comment, with a
- * scheme or without one (see findLinks).
+ * isn't trusted at all, and neither is a comment, nor what a user puts on their profile. Every
+ * link in what there is of it to read is checked: a link post's URL, the links written in a
+ * text, a caption or a comment, with a scheme or without one (see findLinks), and a profile's
+ * links, with the ones written in its bio.
  *
  * The server never follows a link. It looks each up in the copy of the list this process keeps
  * (see MalwareList), so a link is checked for what URLhaus knew of it when the post was sent: one
@@ -29,7 +30,7 @@ export function urlhaus(fetcher?: typeof fetch): TrustAlgorithm {
   const list = new MalwareList(fetcher);
   return {
     optional: true,
-    async assess({ texts, commentOn }, ctx) {
+    async assess({ texts, commentOn, profile }, ctx) {
       const links = texts.flatMap(findLinks);
       if (!links.length) {
         // Nothing to check, but the list is kept current for the post that has.
@@ -44,7 +45,7 @@ export function urlhaus(fetcher?: typeof fetch): TrustAlgorithm {
         return null;
       }
       if (!links.some((link) => isListed(listed, link))) return null;
-      return { set: MIN_TRUST_SCORE, reason: msg(commentOn === undefined ? 'moderation.malware_link' : 'comment.malware_link') };
+      return { set: MIN_TRUST_SCORE, reason: msg(profile ? 'user.profile_malware_link' : commentOn === undefined ? 'moderation.malware_link' : 'comment.malware_link') };
     },
   };
 }
