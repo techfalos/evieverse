@@ -16,7 +16,13 @@ Names in capitals, such as `FEED_PAGE_SIZE`, are an instance's settings ([`.env.
 | [`POST /register`](#post-register) | Anyone | Creates an account and returns its API key, once a [challenge](#challenges) is solved. An admin's request needs none. |
 | [`GET /challenges/:challengeId/audio`](#get-challengeschallengeidaudio) | Anyone who has the challenge | A [challenge](#challenges)'s characters read out, for people who can't read its image. |
 | [`GET /users/:userId`](#get-usersuserid-and-patch-usersuserid) | Anyone | A user's public profile and roles. |
-| [`PATCH /users/:userId`](#get-usersuserid-and-patch-usersuserid) | The user | Changes the user's username, their language, whether they take part in messages between users, or whether they show whom they follow and who follows them. |
+| [`PATCH /users/:userId`](#get-usersuserid-and-patch-usersuserid) | The user | Changes the user's username, their language, whether they take part in messages between users, whether they show whom they follow and who follows them, or their profile's bio and links. |
+| [`PUT /users/:userId/avatar`](#the-avatar) | The user | Sets the user's avatar, made of the image the request sends. |
+| [`DELETE /users/:userId/avatar`](#the-avatar) | The user | Takes the user's avatar away. |
+| [`GET /users/:userId/avatar`](#the-avatar) | Anyone | A user's avatar. |
+| [`GET /users/:userId/posts`](#get-usersuseridposts) | Anyone | A user's posts, newest first, a page at a time, with the posts they pinned. |
+| [`PUT /users/:userId/pinned/:contentId`](#pinned-posts) | The user | Pins one of the user's posts to their profile. |
+| [`DELETE /users/:userId/pinned/:contentId`](#pinned-posts) | The user | Unpins it. |
 | [`POST /users/:userId/key`](#post-usersuseridkey) | The user, or an admin | Replaces the user's API key with a new one, and revokes the old one. |
 | [`DELETE /users/:userId`](#delete-usersuserid) | The user, or an admin | Deletes an account, and the posts it published. |
 | [`GET /users/:userId/export`](#get-usersuseridexport) | The user | The user's export of their own data: everything the instance holds of them, a page at a time. |
@@ -83,7 +89,7 @@ Names in capitals, such as `FEED_PAGE_SIZE`, are an instance's settings ([`.env.
 ## Conventions
 
 - **Base URL.** An instance's own address, such as `https://api.example.com`. The examples here use `localhost:3000`, where a server run from this repo listens.
-- **Bodies.** Requests and responses are JSON. The exceptions are files: `POST /store` and `POST /content/:contentId/comments` also take `multipart/form-data`, the two `/raw` endpoints return a post's bytes, and those of a comment's image or video, `/content/:contentId/video/…` returns the files of a [processed video](#videos), and [`GET /challenges/:challengeId/audio`](#get-challengeschallengeidaudio) returns a WAV.
+- **Bodies.** Requests and responses are JSON. The exceptions are files: `POST /store`, `POST /content/:contentId/comments` and `PUT /users/:userId/avatar` also take `multipart/form-data`, the two `/raw` endpoints return a post's bytes, and those of a comment's image or video, `GET /users/:userId/avatar` returns an [avatar](#the-avatar)'s, `/content/:contentId/video/…` returns the files of a [processed video](#videos), and [`GET /challenges/:challengeId/audio`](#get-challengeschallengeidaudio) returns a WAV.
 - **Time.** Every timestamp is UTC, as ISO-8601 with a `Z` suffix: `2026-11-10T14:02:00.000Z`.
 - **Ids.** Users, content and comments are identified by UUIDs.
 - **Pages.** An endpoint that returns a page at a time gives a `nextCursor` with it. Send that as `cursor` to get the next page. It's `null` when there are no more.
@@ -108,10 +114,10 @@ Errors are JSON, `{ error, details? }`. A request that doesn't validate gets `40
 | `401` | The `userId` and `apiKey` are missing or wrong. |
 | `403` | The key is right, but its account may not do this: it doesn't own what it's changing, or doesn't have the role. Also a [follow list](#following) or a [following feed](#get-feedfollowing) its user doesn't show, asked for by anyone else, with a key or without. |
 | `404` | There's no such user, content or comment. Content set for deletion, or held in the [moderation queue](#the-moderation-queue), counts as not there, and so do the comments of a post that doesn't take them, and the [audio](#get-challengeschallengeidaudio) of a challenge that was answered or has expired. |
-| `409` | The request conflicts with what's there: a username that's taken, an update of content set for deletion, a follow past the limit. |
+| `409` | The request conflicts with what's there: a username that's taken, an update of content set for deletion, a follow past the limit, a [pinned post](#pinned-posts) past the limit. |
 | `410` | A feed's cursor was issued by an earlier release of the server: start the feed over. |
 | `413` | The file is larger than the instance accepts. |
-| `422` | [Moderation](#moderation) refused the post, or the comment. |
+| `422` | [Moderation](#moderation) refused the post, the comment, or what a user put on their [profile](#a-users-profile). |
 | `426` | For the CLI only: the instance ships another build of it ([CLI.md](CLI.md#for-everyone)). |
 | `428` | A registration needs a [challenge](#challenges) solved. |
 | `429` | Too many requests: registrations, [feeds](#get-feed) or the [other reads that need no key](#limits-on-reads-that-need-no-key) from one address, [posts in a minute](#limits-on-posts-and-comments), upload links in a minute, messages in a minute, [comments in a minute](#limits-on-posts-and-comments), or reports in an hour. |
@@ -227,9 +233,26 @@ The [CLI](CLI.md#for-admins) sends this request as `evieverse register Alice`.
 
 ### `GET /users/:userId` and `PATCH /users/:userId`
 
-`GET` returns a public profile: `{ userId, username, createdAt, admin, moderator, moderates }`. `admin` is whether the user is an admin, `moderator` whether they're a server moderator, and `moderates` lists the hashtags they're a moderator of, as [moderation](#moderation) describes. A user's language isn't part of their public profile, and neither are their settings: whether they take messages, and whether they show whom they follow and who follows them.
+`GET` returns a public profile: `{ userId, username, createdAt, banned, bio, links, avatarUrl, pinnedContentIds, admin, moderator, moderates }`.
 
-`PATCH` (authenticated, own profile only) updates `username`, `language`, `messages`, `showFollowing`, `showFollowers`, or any of them at once, and returns `{ userId, username, language, messages, showFollowing, showFollowers }` as they now are. A request with none of them gets `400`.
+```json
+{ "userId": "...", "username": "alice", "createdAt": "2026-10-02T09:15:00.000Z",
+  "banned": false,
+  "bio": "Trams, mostly. **Lisbon** when I can.",
+  "links": ["https://blog.example/alice", "https://social.example/@alice"],
+  "avatarUrl": "/users/.../avatar?v=...",
+  "pinnedContentIds": ["..."],
+  "admin": false, "moderator": false, "moderates": [] }
+```
+
+- `createdAt` is when the account was registered.
+- `banned` is whether the account is [banned](#bans). A banned user's profile says so and shows nothing they put on it: `bio` is `null`, `links` and `pinnedContentIds` are empty and `avatarUrl` is `null`, until the ban ends.
+- `bio`, `links`, `avatarUrl` and `pinnedContentIds` are the user's [profile](#a-users-profile): what they say of themselves, where else they're found, where their avatar is read, and the posts they pinned. `bio` and `avatarUrl` are `null`, and the two lists empty, for a user who set none.
+- `admin` is whether the user is an admin, `moderator` whether they're a server moderator, and `moderates` lists the hashtags they're a moderator of, as [moderation](#moderation) describes.
+- A user's language isn't part of their public profile, and neither are their settings: whether they take messages, and whether they show whom they follow and who follows them.
+
+`PATCH` (authenticated, own profile only) updates `username`, `language`, `messages`, `showFollowing`, `showFollowers`, `bio`, `links`, or any of them at once, and returns `{ userId, username, language, messages, showFollowing, showFollowers, bio, links, avatarUrl }` as they now are. A request with none of them gets `400`.
+- `bio` and `links` are the user's [profile](#a-users-profile), which says what each can be.
 - `messages` is whether the user takes part in [messages between users](#post-messages): `true` (as every account starts) or `false`. With it off, the user is sent no messages and sends none. The server's [notices](#notices) still reach their inbox.
 - `showFollowing` is whether anyone can list whom the user [follows](#following), and `showFollowers` whether anyone can list who follows them: `false` (as every account starts) or `true`, each on its own. The user can list both themselves either way. `showFollowing` also decides whether anyone can read the user's [following feed](#get-feedfollowing), which shows whose posts they follow.
 - `username` must still be unique: `409` if it's taken. Feeds show the new name on all of the user's content at once: they look the credit up in Redis when they render.
@@ -240,6 +263,113 @@ The [CLI](CLI.md#for-admins) sends this request as `evieverse register Alice`.
 curl -X PATCH localhost:3000/users/$USER_ID -H 'content-type: application/json' \
   -d "{\"userId\":\"$USER_ID\",\"apiKey\":\"$KEY\",\"language\":\"es\"}"
 ```
+
+### A user's profile
+
+Beside their name, a user's profile has what they chose to say of themselves: a bio, links, an avatar and the posts they pinned. Each is the user's own to set and to take away, with their key, and nobody else's: anyone else gets `403`, an admin included. Anyone reads them, with [`GET /users/:userId`](#get-usersuserid-and-patch-usersuserid), and the user's posts with [`GET /users/:userId/posts`](#get-usersuseridposts).
+
+The bio and the links are fields of [`PATCH /users/:userId`](#get-usersuserid-and-patch-usersuserid):
+
+| Field | What it is |
+| --- | --- |
+| `bio` | A text of up to 500 characters, in the [format](TEXT_EDITORS.md) a post's text is in. It's stored as it was sent, without the spaces around it. It mentions nobody: an `@alice` in it is the characters. `null` or an empty string takes it away. |
+| `links` | Up to 10 addresses, `http` or `https`, each of 2,048 characters at most. The list sent is all of them: it takes the place of the one there was. They're kept in the order they were sent, and one sent twice is there once. `null` or an empty list takes them away. |
+
+```bash
+curl -X PATCH localhost:3000/users/$USER_ID -H 'content-type: application/json' \
+  -d "{\"userId\":\"$USER_ID\",\"apiKey\":\"$KEY\",\"bio\":\"Trams, mostly.\",\"links\":[\"https://blog.example/alice\"]}"
+```
+
+**A profile is moderated as a post is.** A bio, links and an avatar go through the instance's [trust plugins](#moderation) before they're saved. One that isn't trusted is refused with `422`, and nothing of the request is saved, whatever else it changed:
+
+```json
+{ "error": "it contains a word or phrase this server doesn't allow, so it wasn't saved" }
+```
+
+A profile doesn't wait in a moderation queue: what a post would be held for is refused too. Taking something away isn't checked.
+
+**A [banned](#bans) user sets no bio, links or avatar** (`403`), and can still take theirs away, and pin and unpin posts. While the ban lasts, nobody is shown what they put on their profile: [`GET /users/:userId`](#get-usersuserid-and-patch-usersuserid) says `banned: true` and gives no bio, no links, no avatar and no pinned post, the avatar is `404`, and the list of their posts is empty. It's all kept, and shown again when the ban ends. The user reads their own in the answer to their `PATCH`, and in their [export](#get-usersuseridexport).
+
+When an account is [deleted](#delete-usersuserid), its profile goes with it, avatar included.
+
+#### The avatar
+
+`PUT /users/:userId/avatar` (authenticated, own profile only) sets the user's avatar. The image is sent as [`POST /store`](#post-store) takes a file: as the file part `content` of a multipart request, or in JSON as a base64 string in `content` (a JSON request can be at most 16 MB), with an optional `filename`.
+
+```bash
+curl -X PUT localhost:3000/users/$USER_ID/avatar -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID" \
+  -F content=@me.jpg
+```
+
+```json
+{ "userId": "...", "avatarUrl": "/users/.../avatar?v=..." }
+```
+
+- **It's a JPEG, PNG, GIF or WebP image,** told by its bytes, whatever it was sent as: `400` for anything else. It can be at most 5 MiB, or `MAX_UPLOAD_BYTES` where that's less: `413` past that.
+- **Every avatar is the same size and type.** The server makes the avatar of the image: a square of 400 pixels a side, as a WebP file, whatever was sent. The image is turned the way it shows, cut to the largest square about its middle, and brought to the size, down for a large image and up for a small one. What was transparent stays so, and an animated image gives its first frame. None of the image's metadata is in it. An image whose pixels can't be read gets `400`.
+- **Setting another replaces it.** The one before is deleted.
+- **It's checked first,** as [above](#a-users-profile): `422` for one the instance doesn't trust, and nothing is stored. The image is checked as it was sent.
+
+`DELETE /users/:userId/avatar` (authenticated, own profile only) takes it away, and returns `{ userId, avatarUrl: null, hadAvatar }`. `hadAvatar` is `false` if there was none, which changes nothing.
+
+`GET /users/:userId/avatar` returns the avatar, to anyone: its bytes, as `image/webp`, or a redirect to them on stores that support presigned URLs, as [`/raw`](#get-contentcontentid) does for a post's.
+
+- **`avatarUrl` is this address, with the avatar's id as `v`:** `/users/<userId>/avatar?v=<avatarId>`. Another avatar has another `v`, so what that address answers may be kept for a day (`Cache-Control: public, max-age=86400`).
+- **Without `v`, it's whatever avatar the user has now,** kept for five minutes. A client that knows only a user's id shows their avatar with it. So does an address with the `v` of an avatar the user had before.
+- **`404`** for a user who has no avatar, for one who isn't there, and for one who is [banned](#bans): the `error` says which.
+- **It goes out with the user's credit on their posts,** where a post is read on its own or in the list of its publisher's posts: `publisher.avatarUrl` in [`GET /content/:contentId`](#get-contentcontentid) and in [`GET /users/:userId/posts`](#get-usersuseridposts). Feeds and search results have the name alone: read the avatar there by the address without `v`.
+- One address can ask for 300 avatars a minute (`AVATAR_RATE_LIMIT_PER_MINUTE`), then gets `429` ([below](#limits-on-reads-that-need-no-key)).
+
+#### `GET /users/:userId/posts`
+
+Returns a user's posts, for their profile: all of them, newest first, a page at a time. It needs no key.
+
+```bash
+curl "localhost:3000/users/$USER_ID/posts?limit=20"
+```
+
+```json
+{ "userId": "...", "banned": false,
+  "pinned": [ { "contentId": "...", "publisher": { "userId": "...", "username": "alice", "avatarUrl": "/users/.../avatar?v=..." }, "…": "…" } ],
+  "posts": [ { "contentId": "...", "publisher": { "userId": "...", "username": "alice", "avatarUrl": "/users/.../avatar?v=..." }, "…": "…" } ],
+  "nextCursor": "WzE3OTQ…" }
+```
+
+It takes:
+- `limit`: the most posts in the page, 20 by default, from 1 to 50.
+- `cursor`: the previous page's `nextCursor`. It's `null` on the last page.
+
+What it returns:
+- **`posts` is the page.** Each post is a record as a [feed](#get-feed) gives one, with all of its likes, and without `moderated`, which is a hashtag's. Its `publisher` also has `avatarUrl`, if the user has an avatar.
+- **`pinned` is the posts the user [pinned](#pinned-posts),** the one pinned last first, as records like the others, and `[]` if they pinned none. Only the first page has it. A pinned post keeps its place among `posts` too.
+- **Only what anyone can read is listed:** no post set for deletion, none that waits in the [moderation queue](#the-moderation-queue), and no repost of a post on another server that is [gone there](#refreshing-a-repost).
+- **The user's own posts,** not what they [reposted](#post-repost), which are other users' posts.
+- **A new post is listed once the [compactor](APP.md#8-the-compactor) has written it,** which is when it's in feeds: seconds.
+- **`banned` is whether the user is [banned](#bans).** For a banned user it's `true` and the list is empty, on every page: `posts` is `[]`, `pinned` is `[]` and `nextCursor` is `null`. Their posts are still in feeds, and read by their ids.
+
+| Status | What happened |
+| --- | --- |
+| `200` | A page of the user's posts. |
+| `400` | The `cursor` isn't one of this list's, or `limit` isn't from 1 to 50. |
+| `404` | There's no such user, or their account is deleted. |
+| `429` | The address asked for 120 pages in the last minute (`PROFILE_POSTS_RATE_LIMIT_PER_MINUTE`, [below](#limits-on-reads-that-need-no-key)). |
+
+#### Pinned posts
+
+`PUT /users/:userId/pinned/:contentId` (authenticated, own profile only) pins one of the user's own posts to their profile. It takes no fields but the [credentials](#authentication), and returns `201` with `{ userId, contentId, pinnedAt, alreadyPinned: false }`.
+
+```bash
+curl -X PUT localhost:3000/users/$USER_ID/pinned/$CONTENT_ID -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID"
+```
+
+- **A profile has 5 pinned posts at most.** One more gets `409`, until another is unpinned.
+- **Pinning a post that's pinned changes nothing:** `200`, with `alreadyPinned: true` and the `pinnedAt` it was first pinned at. It keeps its place among the pinned posts.
+- **Only the user's own posts:** `403` for anyone else's, and `404` for a post that isn't there, or is set for deletion.
+- **The profile names them** in `pinnedContentIds`, the one pinned last first, and the first page of the [user's posts](#get-usersuseridposts) gives them as records, in `pinned`, in the same order.
+- **A pinned post is shown as one only while anyone can read it.** One that waits in the moderation queue can be pinned, and is among the pinned posts once it's published. It counts towards the 5 meanwhile.
+- **Deleting a post unpins it.**
+
+`DELETE /users/:userId/pinned/:contentId` (authenticated, own profile only) unpins it, and returns `{ userId, contentId, wasPinned }`. `wasPinned` is `false` for a post that wasn't pinned, which changes nothing.
 
 ### `POST /users/:userId/key`
 
@@ -274,7 +404,7 @@ The response says whether the account is gone yet:
 - `202` with `{ userId, status: "pending_deletion", requestedAt }`: the account has posts. They're set for deletion as [`DELETE /content/:contentId`](#delete-contentcontentid) sets one, and the account goes with the last of them, when the [compactor](APP.md) next runs. A repeat of the request gets the same answer, with the same `requestedAt`.
 
 From the response on, as far as anyone can tell the account is gone, whichever it is:
-- Its keys stop working (`401`), and it isn't a user to look up (`404`), follow, message, block, ban or appoint to a role.
+- Its keys stop working (`401`), and it isn't a user to look up (`404`), follow, message, block, ban or appoint to a role. Its [profile](#a-users-profile) goes with it: its avatar and the list of its posts are `404` too.
 - Its posts are `404`, and leave every feed on the compactor's next run.
 - Its follows, in both directions, its blocks, its mutes, its reports and its roles (admin, server moderator and hashtag moderator) are removed.
 - A message it sent stays in the inbox it was sent to, with `from: null`. A [comment](#comments) it wrote stays, with an empty `username`, as a comment does whose author is gone.
@@ -312,7 +442,7 @@ Every record says what it is in `type`. They come in this order, each kind in an
 
 | `type` | What it is | It has |
 | --- | --- | --- |
-| `account` | The account, once. | `userId`, `username`, `createdAt`, `usernameSetAt` (when the user registered, or last changed their name), `language` (`null` for the instance's default), `admin`, `moderator`, `messages`, `showFollowing`, `showFollowers`, and `bannedAt` (`null` unless they're banned). Not why they were banned, nor by whom. |
+| `account` | The account, once. | `userId`, `username`, `createdAt`, `usernameSetAt` (when the user registered, or last changed their name), their [profile](#a-users-profile) (`bio`, `links`, `avatarUrl`, and `pinnedContentIds`: every post they pinned, the one pinned last first, whether or not anyone else can read it now), `language` (`null` for the instance's default), `admin`, `moderator`, `messages`, `showFollowing`, `showFollowers`, and `bannedAt` (`null` unless they're banned). Not why they were banned, nor by whom. |
 | `apiKey` | Each API key the account has had. Never the key. | `keyId`, `createdAt`, `revokedAt` |
 | `post` | Each of the user's posts, oldest first, as [`GET /content/:contentId`](#get-contentcontentid) gives it to its publisher. Posts that wait in the moderation queue are there, with their `status`; posts set for deletion aren't. | `contentId`, `preview`, `text`, `mentions`, `tags`, `mimeType`, `comments`, `size`, `images`, `likes`, `aiGenerated`, `contentUrl`, `createdAt`, `updatedAt`, and `origin` on a repost of a post on another server |
 | `comment` | Each [comment](#comments) the user wrote, oldest first, with the ones that wait in the moderation queue (`status: "pending_review"`). | `commentId`, `contentId`, `parentId`, `text`, `mentions`, `aiGenerated`, `media`, `createdAt`, `editedAt`. Not its likes or its replies, which are what others did. |
@@ -330,7 +460,7 @@ Every record says what it is in `type`. They come in this order, each kind in an
 
 What to know about it:
 
-- **Files aren't in the export.** A post's record has its `contentUrl`, an image post's has each of its `images` with its own `url`, and a comment's `media` has its `url`: whoever keeps the export fetches the bytes from there, as any reader does.
+- **Files aren't in the export.** A post's record has its `contentUrl`, an image post's has each of its `images` with its own `url`, and a comment's `media` has its `url`: whoever keeps the export fetches the bytes from there, as any reader does. The account's record has its `avatarUrl`, which answers `404` while the user is banned.
 - **It isn't a snapshot.** Each page reads what is there when it's asked for, while the account is in use. What is there throughout is in the export exactly once. What is written or deleted meanwhile is in it or not, by where the export had got to.
 - **A new post or an edit is in it at once.** A comment the user just sent, and a like of a comment, are in it after the [compactor](APP.md#8-the-compactor)'s next run, which is seconds. A like that was [taken back](#delete-like) isn't in it: a post's at once, and a comment's after that run.
 - **What it leaves out:** what moderators hold about the user and don't tell them (why they were banned, what was decided about their reports), what the user did as a moderator or an admin (decisions, blocked words, rules, ads), the operator's logs, counts that are kept for minutes (limits), and a file that was uploaded and never posted.
@@ -660,7 +790,7 @@ The notice is `post_mention` or `comment_mention`, with who wrote the text as it
 
 ### `GET /content/:contentId`
 
-Returns the publisher credit first: `publisher: { userId, username }`. Then come `contentId`, `preview`, `text` (a text post's whole text, or a caption), `mentions` (the users that text [mentions](#mentions), where it mentions any), `tags`, `likes`, `mimeType`, `aiGenerated`, `comments` (whether the post takes [comments](#comments)), `size`, `contentUrl`, `images` (on an image post), `createdAt` and `updatedAt`. A post whose video is still being [processed](#videos) has `processing: true`. Where the instance shows [ads](#ads) on posts, `ad` comes last: one ad to show at the post's end, `{ adId, label, kind, imageUrl?, imageAlt?, text?, url? }`, as in [`GET /feed`](#get-feed). A post with no ad to show has none.
+Returns the publisher credit first: `publisher: { userId, username, avatarUrl }`, with `avatarUrl` where the publisher has an [avatar](#the-avatar), and without it where they have none, or are [banned](#bans). Then come `contentId`, `preview`, `text` (a text post's whole text, or a caption), `mentions` (the users that text [mentions](#mentions), where it mentions any), `tags`, `likes`, `mimeType`, `aiGenerated`, `comments` (whether the post takes [comments](#comments)), `size`, `contentUrl`, `images` (on an image post), `createdAt` and `updatedAt`. A post whose video is still being [processed](#videos) has `processing: true`. Where the instance shows [ads](#ads) on posts, `ad` comes last: one ad to show at the post's end, `{ adId, label, kind, imageUrl?, imageAlt?, text?, url? }`, as in [`GET /feed`](#get-feed). A post with no ad to show has none.
 
 An image post has `images`, its images in the order they're shown: `[{ url, mimeType, size, alt? }]`, each with where its bytes are read, its content type, its size in bytes as stored, and its [alt text](#alt-text) if it has one. A post of one image has one item, whose `url` is `contentUrl`. An [album](#albums) has one for each image: the first at `contentUrl`, and the others at `contentUrl` with their number after it (`/content/<contentId>/raw/2`, and so on). The post's own `mimeType` and `size` are the first image's. No other post has `images`.
 
@@ -1274,7 +1404,7 @@ A notice has no `from`, except the notice of a [mention](#mentions): its `from` 
 
 #### An image that matches the server's list
 
-On a server that runs the `pdq` [trust plugin](TRUST_PLUGINS.md#images-of-known-child-sexual-abuse-material), every admin gets a notice when an image of a post or of a comment matches the server's list of hashes of known child sexual abuse material. It holds what a report to the authorities is written from, as `details`, and its `text` says the same in words:
+On a server that runs the `pdq` [trust plugin](TRUST_PLUGINS.md#images-of-known-child-sexual-abuse-material), every admin gets a notice when an image of a post or of a comment, or a user's [avatar](#the-avatar), matches the server's list of hashes of known child sexual abuse material. It holds what a report to the authorities is written from, as `details`, and its `text` says the same in words:
 
 ```json
 { "messageId": "...", "kind": "csam_match_refused",
@@ -1293,13 +1423,13 @@ On a server that runs the `pdq` [trust plugin](TRUST_PLUGINS.md#images-of-known-
 | `userId`, `username` | Who sent the image. |
 | `at` | When. |
 | `ip`, `userAgent` | The address the request came from, as the server counts it, and its User-Agent header, cut at 160 characters. `userAgent` is absent if the request had none. |
-| `sentAs` | `post`, `update` or `comment`. For an update, `contentId` is the post it would have updated, and for a comment, the post it was on, in `details` and on the notice itself. |
+| `sentAs` | `post`, `update`, `comment` or `avatar`. For an update, `contentId` is the post it would have updated, and for a comment, the post it was on, in `details` and on the notice itself. An avatar has none. |
 | `filename`, `mimeType` | The image's name, cut at 160 characters and absent if it had none, and its type. |
 | `sha256` | The SHA-256 of the image as the server would store it: without its metadata, so not that of the file as it was sent. |
 | `pdq`, `quality` | The image's PDQ hash, and how much there is in the picture to tell it by, from 0 to 100. |
 | `listed`, `distance` | The hash of the list it matched, and in how many of their 256 bits the two differ. |
 | `frame` | Which frame of an animated image matched, from 0. 0 for a still image. |
-| `outcome` | `refused` or `held`, as the notice's `kind` says. |
+| `outcome` | `refused` or `held`, as the notice's `kind` says. An avatar is always `refused`. |
 
 - The server reports the match to nobody, and keeps no copy of a refused image: the notice and the server's log are what there is of it. Notices are deleted after `INBOX_RETENTION_DAYS` like any other.
 - An admin who has an unread notice of the same user and the same listed hash gets no second one, however often the image is sent. Marking it as read, or deleting it, lets the next one arrive.
@@ -1398,7 +1528,7 @@ Each record is `{ contentId, publisher: { userId, username }, mimeType, aiGenera
 - `moderated` is whether a moderator of the hashtag the record is listed under has [approved](#a-hashtags-queue) it there. It's per hashtag, so the same post can be `true` under one and `false` under another.
 - `preview` follows the post's type, as [previews](#previews) lists.
 - `mentions` is there on a record whose `preview.text` [mentions](#mentions) users: `[{ userId, username }]`, the ones that part of the text names. The preview is cut so that a mention is in it whole or not at all.
-- `publisher` is the user's current credit, so a renamed user shows under their new name everywhere at once.
+- `publisher` is the user's current credit, so a renamed user shows under their new name everywhere at once. A feed's credit doesn't have the user's [avatar](#the-avatar): `GET /users/<userId>/avatar` is where it's read.
 - `repost` and `origin` are there only on the records they apply to: `repost` on a record that is there because of a [repost](#post-repost), and `origin` on a repost of a [post on another server](#a-post-on-another-server).
 
 **Pagination:** the cursor says where the feed has got to: the last record it returned under each hashtag, with the end of the window, the algorithm, the related hashtags the first page added, the `aiGenerated` and `moderated` filters and the fresh-content seed. The next page reads the hashtags' indexes as they are by then, and carries on after those records. So:
@@ -1426,6 +1556,8 @@ The other reads that anyone can make without a key are limited by address as fee
 | [`GET /feed`](#get-feed) | 120 | `FEED_RATE_LIMIT_PER_MINUTE` |
 | [`GET /feed/following`](#get-feedfollowing) | 60 | `FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE` |
 | [`GET /content/:contentId`](#get-contentcontentid) | 300 | `CONTENT_RATE_LIMIT_PER_MINUTE` |
+| [`GET /users/:userId/posts`](#get-usersuseridposts) | 120 | `PROFILE_POSTS_RATE_LIMIT_PER_MINUTE` |
+| [`GET /users/:userId/avatar`](#the-avatar) | 300 | `AVATAR_RATE_LIMIT_PER_MINUTE` |
 | [`GET /content/:contentId/comments`](#reading-comments) | 120 | `COMMENTS_LIST_RATE_LIMIT_PER_MINUTE` |
 | [`GET /content/:contentId/comments/:commentId/replies`](#reading-comments) | 120 | `COMMENTS_LIST_RATE_LIMIT_PER_MINUTE` |
 | [`GET /content/:contentId/attestation`](#attestations) | 60 | `REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE` |
@@ -1514,7 +1646,7 @@ Whatever is compared is put in lowercase first, and its accents are taken off, i
 - **It's the start of the name that's matched,** not a part of it: `lice` doesn't find Alice. Each character of `q` stands for itself, a space inside it too, and none is a wildcard.
 - **Users come in the order of their names** as they're compared, and those whose names compare the same (José and jose) in the order of their ids.
 - **A user who changes their name** is found by the new one at once, and no more by the old.
-- **A user whose account is [deleted](#delete-usersuserid) isn't found,** from the moment it's deleted. A [banned](#bans) user still has their profile, and is.
+- **A user whose account is [deleted](#delete-usersuserid) isn't found,** from the moment it's deleted. A [banned](#bans) user still has their account, and is.
 - **A `q` with nothing in it to compare,** such as an accent on its own, gets `400`.
 
 ### Searching posts
@@ -1825,14 +1957,22 @@ A server moderator or an admin bans an account with `PUT /banned/:userId`, and e
 - `POST /content/:contentId/comments`, and `PATCH /content/:contentId/comments/:commentId` for an edit of one of their own;
 - `POST /like`, of a post or of a comment. The likes they made before the ban stay, and are still theirs to take back (`DELETE /like`);
 - `POST /messages`;
-- `POST /uploads`, since a link is for posting the file.
+- `POST /uploads`, since a link is for posting the file;
+- `PATCH /users/:userId` with a `bio` or `links`, and `PUT /users/:userId/avatar`: a banned user puts nothing on their [profile](#a-users-profile). The `403` says so: "your account is banned: you can take your bio, your links and your avatar away, and can't set them".
 
-That is all a ban stops. A banned user can still read their inbox, receive messages, delete their own posts and comments, take back their likes, change their settings and key, report posts, follow users, and [delete their account](#delete-usersuserid). A ban doesn't take down what was posted before it: a moderator deletes that as they would any content.
+That is all a ban stops. A banned user can still read their inbox, receive messages, delete their own posts and comments, take back their likes, change their settings and key, take their bio, links and avatar away, pin and unpin posts, report posts, follow users, and [delete their account](#delete-usersuserid). A ban doesn't take down what was posted before it: a moderator deletes that as they would any content.
+
+**A ban hides the user's profile.** While it lasts, nobody is shown what the user put on it:
+- [`GET /users/:userId`](#get-usersuserid-and-patch-usersuserid) says `banned: true`, and gives no bio, no links, no avatar and no pinned post. The name, the roles and `createdAt` are as before;
+- [`GET /users/:userId/avatar`](#the-avatar) is `404` ("this user is banned, so their avatar isn't shown"), and the user's credit on a post has no `avatarUrl`. A copy of the avatar that a reader or a cache got before the ban can last up to a day more;
+- [`GET /users/:userId/posts`](#get-usersuseridposts) says `banned: true`, and lists no post.
+
+Nothing of it is deleted: it's all shown again when the ban ends. The posts themselves stay in feeds and in searches, and are read by their ids.
 
 - A ban is of one account: an admin or a server moderator can't be banned (`403`) until their role has ended, and nobody can ban themselves (`400`).
 - The user gets a [notice](#notices), once: `user_banned`, and `user_unbanned` when the ban ends. A ban has an optional `reason` (at most 500 characters), which only server moderators and admins can read.
 - Banning a user who is banned changes nothing, and returns `200` with `alreadyBanned: true` and the first ban's time and reason. Ending a ban that isn't there returns `wasBanned: false`.
-- A user's own [`GET /whoami`](#get-whoami) says whether they're `banned`. It isn't part of their public profile.
+- A user's own [`GET /whoami`](#get-whoami) says whether they're `banned`, and so does their public profile. Why, and by whom, is in neither.
 - A ban doesn't remove a role: appointing a banned user as a moderator is allowed, but they can't then be banned again until the role ends.
 - The ban is a column of the account, so it takes effect with the next request, and doesn't change feeds.
 
@@ -1872,6 +2012,17 @@ That is all a ban stops. A banned user can still read their inbox, receive messa
 If what's left is exactly the content's hashtags, on a text or link post that's otherwise the same and going where the content already is, nothing is stored and the response is `unchanged: true` (with `removedTags`).
 
 **What happens to a comment.** A [comment](#post-contentcontentidcomments) goes through steps 1 and 2 as a post does: the same plugins score it, and the same two thresholds refuse it (`422`), hold it in the moderation queue (`202`) or publish it (`201`). An [edit](#patch-contentcontentidcommentscommentid) of a comment is scored the same way, on its new text (`200` where a new comment gets `201`). A plugin is told that it's looking at a comment, and on which post ([TRUST_PLUGINS.md](TRUST_PLUGINS.md)), so its refusal can say so: with `urlhaus` turned on, a comment with a listed link gets "the comment has a link that is known to spread malware, so it wasn't published". With `pdq` turned on, the image a comment comes with is checked as a post's images are, when the comment is sent: an edit keeps the comment's file, which isn't checked again. Steps 3 to 5 are about hashtags, which a comment doesn't have: a hashtag's blocked words and mutes don't apply to it. It's checked before the [limit on comments a minute](#limits-on-posts-and-comments), so a refused comment doesn't count towards it.
+
+**What happens to a profile.** A bio, links and an avatar go through step 1 as a post does, when the user sets them ([above](#a-users-profile)): the same plugins score them, each told that it's looking at a profile. There's no queue for a profile to wait in, so step 2 has two outcomes: a score of `TRUST_SCORE_ALLOW_FROM` or more saves it, and anything less refuses it (`422`), with nothing saved. A plugin's refusal says it's a profile:
+
+| What was refused | The `422` says |
+| --- | --- |
+| A bio, a link or an avatar's filename with one of the server's blocked words | "it contains a word or phrase this server doesn't allow, so it wasn't saved" |
+| With `urlhaus` turned on, a link, or a bio with a link, that's on its list | "it has a link that is known to spread malware, so it wasn't saved" |
+| With `pdq` turned on, an avatar that matches its list | "this server doesn't trust this enough to show it on a profile, so it wasn't saved", which doesn't say why. The admins get the [notice](#an-image-that-matches-the-servers-list). |
+| With `pdq` turned on, an avatar it can't decode | "the image couldn't be read to check it, so it wasn't saved" |
+
+A server that deletes nothing on arrival (`TRUST_SCORE_DELETE_BELOW=0`) refuses these too: what it would hold of a post, it refuses of a profile. Steps 3 to 5 are about hashtags, which a profile doesn't have.
 
 ### The moderation queue
 

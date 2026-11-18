@@ -303,7 +303,7 @@ The audit log is written by the functions that answer requests, in each request,
 
 ## Client addresses
 
-The limits on registrations, on feeds and on the other reads that need no key (`REGISTER_RATE_LIMIT_PER_HOUR`, `FEED_RATE_LIMIT_PER_MINUTE`, `FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE`, `CONTENT_RATE_LIMIT_PER_MINUTE`, `COMMENTS_LIST_RATE_LIMIT_PER_MINUTE`, `REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE`, `SEARCH_RATE_LIMIT_PER_MINUTE`) count by the client's address, which the server reads from `X-Forwarded-For`, as far from the end as there are proxies in front of it (`TRUST_PROXY`). Nothing can reach the functions except through the address in front, so a client can't make one up:
+The limits on registrations, on feeds and on the other reads that need no key (`REGISTER_RATE_LIMIT_PER_HOUR`, `FEED_RATE_LIMIT_PER_MINUTE`, `FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE`, `CONTENT_RATE_LIMIT_PER_MINUTE`, `PROFILE_POSTS_RATE_LIMIT_PER_MINUTE`, `AVATAR_RATE_LIMIT_PER_MINUTE`, `COMMENTS_LIST_RATE_LIMIT_PER_MINUTE`, `REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE`, `SEARCH_RATE_LIMIT_PER_MINUTE`) count by the client's address, which the server reads from `X-Forwarded-For`, as far from the end as there are proxies in front of it (`TRUST_PROXY`). Nothing can reach the functions except through the address in front, so a client can't make one up:
 
 - **AWS:** CloudFront sends a secret header (`X-Origin-Secret`) that the functions require, since the API Gateway's own address is public.
 - **GCP:** the Cloud Run services only admit the gateway's service account. There's no `allUsers` binding.

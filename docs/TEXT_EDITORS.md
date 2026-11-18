@@ -1,18 +1,19 @@
 # Text editors
 
-Posts, captions and comments can be formatted: bold, italic, struck through, code, links, quotes and lists. The format is a small subset of Markdown, and there's no HTML in it: `<b>` is three characters, shown as any others are. The same texts can [mention](#mentions) users, with `@` and a username.
+Posts, captions, comments and a profile's bio can be formatted: bold, italic, struck through, code, links, quotes and lists. The format is a small subset of Markdown, and there's no HTML in it: `<b>` is three characters, shown as any others are. Posts, captions and comments can also [mention](#mentions) users, with `@` and a username.
 
 This document is for whoever builds the box a user writes in, or the screen a text is shown on. It says where the format is used, what it is, and how to write and show it. How the server itself uses it is in [APP.md](APP.md#text-formatting).
 
 ## Where it's used
 
-Three texts are formatted, all sent in a field named `text`:
+Four texts are formatted. The first three are sent in a field named `text`, and a bio in `bio`:
 
 | Text | Sent with | Longest |
 | --- | --- | --- |
 | A text post's text | [`POST /store`](API.md#post-store), `type: "text"` | 40,000 characters |
 | An image's, video's or audio's caption | [`POST /store`](API.md#post-store), `type: "image"`, `"video"` or `"audio"` | 40,000 characters |
 | A comment's text | [`POST /content/:contentId/comments`](API.md#post-contentcontentidcomments), and `PATCH` to edit it | 2,000 characters |
+| A [profile](API.md#a-users-profile)'s bio | [`PATCH /users/:userId`](API.md#get-usersuserid-and-patch-usersuserid) | 500 characters |
 
 The server stores each as it was sent and returns it so. There's no flag to set and no second field: the formatting is part of the text, like its punctuation, and its characters count towards the limit. No text is refused for its formatting. Whatever doesn't fit the rules below is the characters it's written with.
 
@@ -23,10 +24,11 @@ A client reads the formatting wherever one of these texts comes back:
 | `text` | [`GET /content/:contentId`](API.md#get-contentcontentid) | The whole text or caption, as written. A text post's bytes (`contentUrl`) are the same text. |
 | `preview.text` | Feeds, `GET /content/:contentId`, and the response of `POST /store` | The start of the text or caption, itself a formatted text ([below](#previews)). |
 | `text` | A [comment](API.md#comments), in every list of them | The comment's text, as written. |
+| `bio` | [`GET /users/:userId`](API.md#get-usersuserid-and-patch-usersuserid) | The bio, as written. `null` for a user who has none. |
 
-Each comes with `mentions` where the text mentions users: the list a client reads the text with, to tell which of its `@` are mentions ([below](#mentions)). A feed record's `mentions` are the ones its `preview.text` names.
+Each comes with `mentions` where the text mentions users: the list a client reads the text with, to tell which of its `@` are mentions ([below](#mentions)). A feed record's `mentions` are the ones its `preview.text` names. A bio comes with none: it mentions nobody, and every `@` in it is the character.
 
-Everything else is plain text, shown as written: a link post's URL, hashtags, usernames, direct messages, the instance's rules, ads, and a notice's `text` and `excerpt`. An `excerpt` quotes a post or comment with its formatting already taken out.
+Everything else is plain text, shown as written: a link post's URL, a profile's links, hashtags, usernames, direct messages, the instance's rules, ads, and a notice's `text` and `excerpt`. An `excerpt` quotes a post or comment with its formatting already taken out.
 
 ## The format
 
@@ -80,7 +82,7 @@ The text alone doesn't say which of its `@` are mentions. A username can hold an
 - **The name is read as the text reads.** A character the text escapes is the character, so `@snake\_case` names `snake_case`.
 - **A mention is on one line,** and can be inside bold, italic or struck-through text, a quote or a list item. It isn't one in code, nor in the label of a link, which leads where the link does.
 - **`\@` is an `@` that mentions nobody.**
-- **A text read without its `mentions` has none:** every `@` is the character. A name that isn't in the list isn't a mention, even if a user has it by now.
+- **A text read without its `mentions` has none:** every `@` is the character. A name that isn't in the list isn't a mention, even if a user has it by now. That's how a bio is read, which mentions nobody and notifies nobody.
 
 A mention is shown as `@` and the name, and links to the profile of its `userId` ([`GET /users/:userId`](API.md#get-usersuserid-and-patch-usersuserid)): by the id, since the user may have changed their name since.
 
@@ -169,10 +171,10 @@ export function show(text, mentions, into) {
 
 - **A link's `url` is always `http` or `https`**: the parser makes a link.
 - **A mention's link is the client's to build,** from its `userId`: to its own screen for a profile, which reads [`GET /users/:userId`](API.md#get-usersuserid-and-patch-usersuserid).
-- **Pass the `mentions` that came with the text you show:** a post's with its `text`, a feed record's with its `preview.text`, a comment's with its `text`. Without them no `@` is a mention.
+- **Pass the `mentions` that came with the text you show:** a post's with its `text`, a feed record's with its `preview.text`, a comment's with its `text`. Without them no `@` is a mention, which is how a bio is shown: `show(bio, [], into)`.
 - **A client in another language** writes its own parser to the rules above.
 - **For a text without its formatting** join the `text` of the blocks' `text` and `code` nodes, with `@` and the `username` for a mention.
 
 ## What moderation reads
 
-Blocked words and [trust plugins](TRUST_PLUGINS.md) read a text as its readers do: without the characters that format it, and with each link's address after its label. `sp**am**` is the word "spam", and a link is read for where it leads as well as for what it says. A post or comment that's refused gets `422`, as [API.md](API.md#moderation) describes, however it was formatted.
+Blocked words and [trust plugins](TRUST_PLUGINS.md) read a text as its readers do: without the characters that format it, and with each link's address after its label. `sp**am**` is the word "spam", and a link is read for where it leads as well as for what it says. A post, a comment or a bio that's refused gets `422`, as [API.md](API.md#moderation) describes, however it was formatted.

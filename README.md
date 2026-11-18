@@ -264,6 +264,17 @@ Every instance serves the same API, so anyone can register on an instance direct
 
 When a user registers using the register endpoint(`POST /register`), unless pre-existing admin credentials are supplied (the CLI does this automatically), the instance responds with a challenge. Once the challenge is solved, the instance returns the user's id and an API key. The key is shown only once, so must be stored and kept safe. A user who still has their key can replace it with (`POST /users/:userId/key`, or `evieverse key rotate`). The details are in [API.md](docs/API.md#post-usersuseridkey).
 
+## Profiles
+
+Every user has a public profile (`GET /users/:userId`): their name, when their account was created, and what they choose to add to it.
+
+- A bio of up to 500 characters, which can be formatted as a post's text can.
+- Up to 10 links to where else they're found.
+- An avatar. The instance makes every avatar the same size and type, a 400×400 WebP, whatever image was sent.
+- Up to 5 of their own posts, pinned to the profile.
+
+Anyone can list a user's posts, newest first (`GET /users/:userId/posts`). A bio, links and an avatar are moderated as posts are, and nothing a banned user put on their profile is shown while the ban lasts. See [API.md](docs/API.md#a-users-profile).
+
 ## Content organization and moderation
 
 As on most social media, content is organized by tags (hashtags). An instance is deployed in one of two tagging modes:
