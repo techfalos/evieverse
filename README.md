@@ -213,16 +213,16 @@ Then create the first admin and install the CLI as in [Getting started](#2-creat
 
 Things to know:
 
-- **Only Caddy publishes ports:** 80 and 443, which is also how it gets its certificate. The server, Postgres and Valkey are reached from inside the stack alone. That's what makes `TRUST_PROXY: '1'` right: the server takes each client's address, which it limits requests by, from the one proxy in front of it, and nothing reaches it any other way.
-- **`PUBLIC_BASE_URL`** is what the links to media in feeds are made from, and the address the CLI installs from.
-- **Postgres takes its password when its volume is first made.** Changing `POSTGRES_PASSWORD` afterwards changes only what the server sends.
-- **More settings go in the `environment` of `app`.** A browser client on another origin needs `CORS_ORIGINS`. For the instance's posts to be reposted on other instances, it needs `REPOSTS_SIGNING_KEYS` (`openssl rand -base64 32`).
-- **Files are uploaded through the proxy,** in the request to `POST /store`, up to `MAX_UPLOAD_BYTES` (5 GiB). Caddy sets no limit on a request's size. Another proxy may: nginx's is 1 MB until you raise it.
-- **Videos are the CPU work.** Where they're common, the server wants 2 CPUs and 2 GB of memory. On a smaller one, `VIDEO_PROCESSING: 'false'` stores them as they're sent, and fewer `VIDEO_HEIGHTS` cut the work.
-- **Memory:** idle, the four containers took about 130 MB between them when this was tried. Valkey grows to 512 MB at most, as `compose.base.yml` sets it ([how much it needs](docs/DEPLOY.md#redis)).
-- **Back up the database and the `content` volume:** they are the instance. Valkey holds nothing that can't be made again: `docker compose -f docker-compose.prod.yml exec app node dist/compact/main.js --rebuild --once`.
-- **To upgrade,** `git pull`, then `docker compose -f docker-compose.prod.yml up -d --build`. The server brings the database up to date as it starts.
-- **More than one server container** needs Valkey, the compactor in one container only, and a content store they all reach ([APP.md](docs/APP.md#13-deployment-topology)).
+- Only Caddy publishes ports: 80 and 443, which is also how it gets its certificate. The server, Postgres and Valkey are reached from inside the stack alone. That's what makes `TRUST_PROXY: '1'` right: the server takes each client's address, which it limits requests by, from the one proxy in front of it, and nothing reaches it any other way.
+- `PUBLIC_BASE_URL` is what the links to media in feeds are made from, and the address the CLI installs from.
+- Postgres takes its password when its volume is first made. Changing `POSTGRES_PASSWORD` afterwards changes only what the server sends.
+- More settings go in the `environment` of `app`. A browser client on another origin needs `CORS_ORIGINS`. For the instance's posts to be reposted on other instances, it needs `REPOSTS_SIGNING_KEYS` (`openssl rand -base64 32`).
+- Files are uploaded through the proxy, in the request to `POST /store`, up to `MAX_UPLOAD_BYTES` (5 GiB). Caddy sets no limit on a request's size. Another proxy may: nginx's is 1 MB until you raise it.
+- Videos are the CPU work. Where they're common, the server wants 2 CPUs and 2 GB of memory. On a smaller one, `VIDEO_PROCESSING: 'false'` stores them as they're sent, and fewer `VIDEO_HEIGHTS` cut the work.
+- Memory: idle, the four containers took about 130 MB between them when this was tried. Valkey grows to 512 MB at most, as `compose.base.yml` sets it ([how much it needs](docs/DEPLOY.md#redis)).
+- Back up the database and the `content` volume: they are the instance. Valkey holds nothing that can't be made again: `docker compose -f docker-compose.prod.yml exec app node dist/compact/main.js --rebuild --once`.
+- To upgrade, `git pull`, then `docker compose -f docker-compose.prod.yml up -d --build`. The server brings the database up to date as it starts.
+- More than one server container needs Valkey, the compactor in one container only, and a content store they all reach ([APP.md](docs/APP.md#13-deployment-topology)).
 
 ### Where the files go
 
@@ -242,7 +242,7 @@ CONTENT_OPTIONS='{"bucket":"evieverse","region":"us-east-1","endpoint":"https://
 ```
 
 - Files can go between clients and the store directly: `GET /content/:id/raw` redirects to a signed link to the file, and `POST /uploads` gives a signed link to upload one with.
-- **`endpoint` must be an address clients reach too,** since the links are signed for it. With a name that only the containers resolve, such as `http://s3:9000`, the server itself works, and every link it gives fails outside the Docker network.
+- `endpoint` must be an address clients reach too, since the links are signed for it. With a name that only the containers resolve, such as `http://s3:9000`, the server itself works, and every link it gives fails outside the Docker network.
 - The bucket needs what the cloud deployments give theirs ([DEPLOY.md](docs/DEPLOY.md#uploads)): CORS, for clients in a browser, and rules that delete what's under `uploads/` after a day and under `staged/` after a week.
 - Changing the store doesn't move the files to it.
 
@@ -312,7 +312,7 @@ All of the moderation functions are available via the CLI [CLI](docs/CLI.md).
 
 ## Rules
 
-The CLI (and API) allows the admin to set the server rules, which come back in the public `GET /rules` endpoint. The rules also send the modification disclosure clause as appropriate. 
+The CLI (and API) allows the admin to set the server rules, which come back in the public `GET /rules` endpoint. The rules also send the modification disclosure clause as appropriate, and the server's minimum age: the one its operator set with `MINIMUM_AGE`, or "All Legal Ages Allowed" where none is set. 
 
 A tag can have rules of its own, which its moderators set (`evieverse tag-rules add <tag> <text>`) and anyone can read (`GET /tags/:tag/rules`).
 
@@ -376,7 +376,7 @@ A user can follow any other user, up to 1,000 of them by default. Followers and 
 
 ## Blocks
 
-A user can block another user. No message goes between the two, neither follows the other, and the blocked user can't comment on the blocker's posts, reply to the blocker's comments or repost the blocker's posts. See [API.md](docs/API.md#blocks).
+A user can block another user. No message goes between the two, neither follows the other, and the blocked user can't comment on the blocker's posts, reply to the blocker's comments or repost the blocker's posts. 
 
 ## Inbox
 
@@ -476,7 +476,7 @@ See [[LICENSE.md](LICENSE.md)]
 
 ## Public Evieverse Servers
 
-Running a server? Put it here!
+https://www.evieverse.com for a list
 
 ## Client Implementations
 

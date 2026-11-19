@@ -1,7 +1,12 @@
 import { readFileSync } from 'node:fs';
+import { copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_SUPPORT_EMAIL, loadConfig } from '../src/config.js';
+import { DEFAULT_SUPPORT_EMAIL, loadConfig, MAX_MINIMUM_AGE } from '../src/config.js';
+import { loadLanguages } from '../src/language.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { RELEASE } from '../src/release.js';
 import { MAX_RULE_CHARS, MAX_RULES } from '../src/routes/rules.js';
@@ -13,9 +18,11 @@ const SOURCE = 'https://git.example.com/our-evieverse';
 const SUPPORT = 'support@our-evieverse.example';
 /** What a server that runs a release says of itself, as every server does unless it is told otherwise. */
 const AS_RELEASED = { modified: false, release: RELEASE, sourceUrl: null };
+/** What a server says its minimum age is where its operator set none, as every server does unless it is told otherwise. */
+const ALL_AGES = 'All Legal Ages Allowed';
 
 type Rule = { ruleId: string; position: number; text: string; createdAt: string; updatedAt: string };
-type Rules = { modificationDisclosure: { modified: boolean; release: string; sourceUrl: string | null }; supportEmail: string; rules: Rule[] };
+type Rules = { modificationDisclosure: { modified: boolean; release: string; sourceUrl: string | null }; supportEmail: string; minimumAge: number | string; rules: Rule[] };
 
 for (const target of TARGETS) {
   describe(`rules (${target.name})`, () => {
@@ -49,7 +56,7 @@ for (const target of TARGETS) {
 
     it('gives the rules and the modification disclosure to anyone, with a key or without', async () => {
       const { root, alice } = await setup();
-      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, rules: [] });
 
       const at = now();
       const first = await add(root, '  Be kind.  ');
@@ -57,7 +64,7 @@ for (const target of TARGETS) {
       const second = await add(root, 'No spam.\nNot even a little.');
       expect(second).toMatchObject({ position: 2, text: 'No spam.\nNot even a little.' });
 
-      const expected = { modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, rules: [first, second] };
+      const expected = { modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, rules: [first, second] };
       expect(await published()).toEqual(expected);
       expect(ok(await req(alice, 'GET', '/rules'))).toEqual(expected);
       // The body's credentials are as good as the headers', as on every route.
@@ -67,9 +74,9 @@ for (const target of TARGETS) {
     it('says it runs a modified version, the release that is based on and where its source is, on a server whose operator says so', async () => {
       const { root } = await setup({ modified: true, sourceUrl: SOURCE });
       const modificationDisclosure = { modified: true, release: RELEASE, sourceUrl: SOURCE };
-      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, rules: [] });
       const rule = await add(root, 'Be kind.');
-      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, rules: [rule] });
+      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, rules: [rule] });
       // No request changes it: not an admin's, and not one that names it.
       ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', modified: false, modificationDisclosure: AS_RELEASED }));
       expect((await published()).modificationDisclosure).toEqual(modificationDisclosure);
@@ -77,7 +84,7 @@ for (const target of TARGETS) {
 
     it('says where its source is on a server that runs a release, if its operator says', async () => {
       await setup({ sourceUrl: SOURCE });
-      expect(await published()).toEqual({ modificationDisclosure: { ...AS_RELEASED, sourceUrl: SOURCE }, supportEmail: DEFAULT_SUPPORT_EMAIL, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: { ...AS_RELEASED, sourceUrl: SOURCE }, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, rules: [] });
     });
 
     it('gives the address to write to for support: the one its operator set, and a placeholder until they do', async () => {
@@ -92,6 +99,44 @@ for (const target of TARGETS) {
       const rule = await add(root, 'Be kind.');
       ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', supportEmail: 'someone@else.example' }));
       expect((await published()).supportEmail).toBe(SUPPORT);
+    });
+
+    it('gives the minimum age its operator set, as a number of years, and says that all legal ages are allowed until they set one', async () => {
+      await setup();
+      expect((await published()).minimumAge).toBe('All Legal Ages Allowed');
+      await ctx.close();
+
+      const { root, alice } = await setup({ minimumAge: 13 });
+      expect((await published()).minimumAge).toBe(13);
+      expect(ok(await req(alice, 'GET', '/rules')).minimumAge).toBe(13);
+      // It comes with the rest, and beside the rules, not among them.
+      const rule = await add(root, 'Be kind.');
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: 13, rules: [rule] });
+      // No request changes it: not an admin's, and not one that names it.
+      ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', minimumAge: 21 }));
+      ok(await req(root, 'POST', '/rules', { text: 'Be older.', minimumAge: 21 }), 201);
+      expect((await published()).minimumAge).toBe(13);
+    });
+
+    it('says that all legal ages are allowed in the language the request asks for, and a minimum age as the same number in any', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'evieverse-languages-'));
+      try {
+        await copyFile(fileURLToPath(new URL('../languages/en.json', import.meta.url)), join(dir, 'en.json'));
+        await writeFile(join(dir, 'es.json'), JSON.stringify({ name: 'Español', messages: { 'rule.all_ages': 'Se permiten todas las edades legales' } }));
+        const inSpanish = async () => (await ctx.app.inject({ method: 'GET', url: '/rules', headers: { 'accept-language': 'es-MX, en;q=0.5' } })).json() as Rules;
+
+        await setup({ languages: loadLanguages('en', dir) });
+        expect((await inSpanish()).minimumAge).toBe('Se permiten todas las edades legales');
+        expect((await published()).minimumAge).toBe(ALL_AGES);
+        // A language the server doesn't speak is answered in its default one.
+        expect(ok(await ctx.app.inject({ method: 'GET', url: '/rules', headers: { 'accept-language': 'fr' } })).minimumAge).toBe(ALL_AGES);
+        await ctx.close();
+
+        await setup({ languages: loadLanguages('en', dir), minimumAge: 16 });
+        expect((await inSpanish()).minimumAge).toBe(16);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     });
 
     it('has only an admin add, change and remove rules', async () => {
@@ -182,7 +227,7 @@ for (const target of TARGETS) {
       expect(await add(root, 'E', 2)).toMatchObject({ position: 2 });
       expect(await texts()).toEqual(['A', 'E', 'C', 'D']);
       for (const rule of (await published()).rules) ok(await req(root, 'DELETE', `/rules/${rule.ruleId}`));
-      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, rules: [] });
     });
 
     it(`has at most ${MAX_RULES} rules`, async () => {
@@ -240,6 +285,39 @@ describe('the support address', () => {
     for (const address of ['support', 'support@', '@example.com', 'support at example.com', 'https://example.com/support', 'a@example.com, b@example.com']) {
       expect(() => supportEmail({ SUPPORT_EMAIL: address }), address).toThrow(/SUPPORT_EMAIL is the address people write to for support/);
     }
+  });
+});
+
+describe('the minimum age', () => {
+  const minimumAge = (env: Record<string, string>, overrides = {}) => loadConfig(overrides, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).minimumAge;
+
+  it('is none unless MINIMUM_AGE says otherwise', () => {
+    expect(minimumAge({})).toBeNull();
+    // An empty value counts as unset, as it does for every setting, and a minimum of no years is none.
+    for (const unset of ['', '   ', '0', '00']) expect(minimumAge({ MINIMUM_AGE: unset }), `"${unset}"`).toBeNull();
+    for (const unset of ['', 0, null]) expect(minimumAge({}, { minimumAge: unset }), JSON.stringify(unset)).toBeNull();
+    expect(minimumAge({ MINIMUM_AGE: '13' })).toBe(13);
+    expect(minimumAge({ MINIMUM_AGE: ' 18 ' })).toBe(18);
+    expect(minimumAge({ MINIMUM_AGE: '1' })).toBe(1);
+    expect(minimumAge({ MINIMUM_AGE: String(MAX_MINIMUM_AGE) })).toBe(MAX_MINIMUM_AGE);
+    // As a config file has it: a number, or the same in a string.
+    expect(minimumAge({}, { minimumAge: 16 })).toBe(16);
+    expect(minimumAge({}, { minimumAge: '16' })).toBe(16);
+    // The environment is over the config file, and what a caller passes is over both.
+    expect(minimumAge({ MINIMUM_AGE: '13' }, { minimumAge: 21 })).toBe(21);
+    // Settings that were read can be read again, as a function's are from the server's.
+    for (const read of [minimumAge({}), minimumAge({ MINIMUM_AGE: '13' })]) expect(minimumAge({}, { minimumAge: read })).toBe(read);
+  });
+
+  it('does not start a server whose minimum age is no age in whole years', () => {
+    for (const age of ['thirteen', '13+', '13.5', '-13', '1e1', '0x12', '13 years', '13,18', String(MAX_MINIMUM_AGE + 1), '180']) {
+      expect(() => minimumAge({ MINIMUM_AGE: age }), age).toThrow(/MINIMUM_AGE is the youngest a person may be to use the server/);
+    }
+    for (const age of [13.5, -1, MAX_MINIMUM_AGE + 1]) {
+      expect(() => minimumAge({}, { minimumAge: age }), String(age)).toThrow(/MINIMUM_AGE is the youngest a person may be to use the server/);
+    }
+    // What isn't a number or the text of one is refused too, whatever it holds.
+    for (const age of [Infinity, NaN, true, [13], { years: 13 }]) expect(() => minimumAge({}, { minimumAge: age }), String(age)).toThrow();
   });
 });
 

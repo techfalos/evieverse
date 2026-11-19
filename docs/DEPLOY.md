@@ -58,8 +58,8 @@ At the end of `apply`, Terraform prints the instance `url` (for example `https:/
 
 Every `apply` that changes the image, a setting or the admin account first runs one step (a Lambda function on AWS, a job on GCP and Azure), waits for it, and only then updates the functions and the compactor. The step does two things, in this order:
 
-1. **It checks the settings.** It's given the settings the functions are about to get, and starts each route group with them as its function would. A setting the server refuses, such as a misspelt plugin name in `TRUST_OPTIONAL_PLUGINS` or a `TAGGING_MODE=server` with no hashtags, fails the step with the reason.
-2. **It runs the migrations,** and sets up the [admin account](#the-admin-account).
+1. It checks the settings. It's given the settings the functions are about to get, and starts each route group with them as its function would. A setting the server refuses, such as a misspelt plugin name in `TRUST_OPTIONAL_PLUGINS` or a `TAGGING_MODE=server` with no hashtags, fails the step with the reason.
+2. It runs the migrations, and sets up the [admin account](#the-admin-account).
 
 If the step fails, the `apply` stops there. Nothing else is changed: the functions and the compactor keep the image and the settings they have, and go on serving. Fix the setting and apply again, which runs the step again.
 
@@ -110,10 +110,10 @@ secrets     = { PDQ_HASH_LIST_AUTHORIZATION = "Bearer ..." }
 
 Each module makes the key the instance signs its posts with, which is what lets them be [reposted on other servers](API.md#a-post-on-another-server): 32 random bytes, kept with the instance's other secrets as `REPOSTS_SIGNING_KEYS`. There's nothing to set.
 
-- **To replace the key,** run `terraform apply -replace=random_bytes.repost_signing`. Nothing of the old key has to be kept: an attestation is asked for when it's used, and is good for 10 minutes at most. A server that has the old key asks for the instance's keys again when it meets the new one, at most once a minute, so at worst it refuses reposts of the instance's posts for a minute after the change.
-- **To sign with keys of your own,** put `REPOSTS_SIGNING_KEYS` in `secrets`, and the module's key isn't used. Several keys, separated by commas or spaces, change the key with no gap: the first signs, and all are published.
-- **To sign nothing,** set `REPOSTS_SIGNING_KEYS = ""` in `environment`. The instance's posts are then reposted only on the instance itself.
-- **The key is in the Terraform state,** in plain text, like the other secrets these modules create.
+- To replace the key, run `terraform apply -replace=random_bytes.repost_signing`. Nothing of the old key has to be kept: an attestation is asked for when it's used, and is good for 10 minutes at most. A server that has the old key asks for the instance's keys again when it meets the new one, at most once a minute, so at worst it refuses reposts of the instance's posts for a minute after the change.
+- To sign with keys of your own, put `REPOSTS_SIGNING_KEYS` in `secrets`, and the module's key isn't used. Several keys, separated by commas or spaces, change the key with no gap: the first signs, and all are published.
+- To sign nothing, set `REPOSTS_SIGNING_KEYS = ""` in `environment`. The instance's posts are then reposted only on the instance itself.
+- The key is in the Terraform state, in plain text, like the other secrets these modules create.
 - To check a repost of a post on another server, the functions ask that server for its public keys over `https`. That takes the same way out as above: the NAT gateway on AWS, and directly on GCP and Azure.
 - The [compactor](#compactor)'s container asks other servers too: about once a day, for the attestation of each post the instance holds a repost of (`REPOSTS_REFRESH_HOURS`). It takes the same way out.
 
@@ -123,9 +123,9 @@ Each module makes the key the instance signs its posts with, which is what lets 
 
 Initial deployment creates an [admin](API.md#moderation) account:
 
-1. **Terraform makes the account's id and API key,** in the format the server issues keys in. The key is random, and exists in two places only: the Terraform state, and the profile file below.
-2. **The migration step creates the account.** It's given the key's SHA-256, not the key (`BOOTSTRAP_ADMIN`), and after the migrations it creates the user if it isn't there, makes it an admin, and, if the key is new to the account, makes that key its only one. It runs again whenever the image, a setting or the account's values change, and changes nothing about the account when its values haven't.
-3. **The key is installed on the machine that applies,** once the account exists: Terraform writes `~/.evieverse/profiles/<name>.json` (`name` is the module's variable, `evieverse` by default, unless `admin_profile_name` gives the profile a name of its own), readable only by you. That's a profile of the server's [CLI](CLI.md), so after installing the CLI, it works as the admin with no sign-in:
+1. Terraform makes the account's id and API key, in the format the server issues keys in. The key is random, and exists in two places only: the Terraform state, and the profile file below.
+2. The migration step creates the account. It's given the key's SHA-256, not the key (`BOOTSTRAP_ADMIN`), and after the migrations it creates the user if it isn't there, makes it an admin, and, if the key is new to the account, makes that key its only one. It runs again whenever the image, a setting or the account's values change, and changes nothing about the account when its values haven't.
+3. The key is installed on the machine that applies, once the account exists: Terraform writes `~/.evieverse/profiles/<name>.json` (`name` is the module's variable, `evieverse` by default, unless `admin_profile_name` gives the profile a name of its own), readable only by you. That's a profile of the server's [CLI](CLI.md), so after installing the CLI, it works as the admin with no sign-in:
 
 ```sh
 curl -fsSL "$(terraform output -raw url)/cli/install.sh" | sh     # Windows: irm <url>/cli/install.ps1 | iex
@@ -156,11 +156,11 @@ Deployments with the same `name` that are applied from one machine write the sam
 
 Things to know:
 
-- **On another machine,** sign in with the outputs: `EVIEVERSE_API_KEY="$(terraform output -raw admin_api_key)" evieverse login "$(terraform output -raw url)" "$(terraform output -raw admin_user_id)"`. A machine that applies an existing deployment gets the profile file written too.
-- **The key is in the Terraform state,** in plain text, like the database password and the other secrets these modules create. Keep the state where only the deployment's operators can read it (an encrypted remote backend, rather than a file in the repo).
-- **To replace the key,** run `terraform apply -replace=random_password.admin_key`. The migration step gives the account the new key and revokes the old one, and the profile file is rewritten.
-- **A key replaced through the API lasts, but the deployment doesn't learn of it** (`[POST /users/:userId/key](API.md#post-usersuseridkey)`, or `evieverse key rotate`). Later applies leave the new key in place, and the deployment's key stays revoked. Terraform still holds the old key, so the `admin_api_key` output no longer works, and the next apply writes the old key back to the profile file, over the one `key rotate` saved there. To give the deployment a working key again, replace the key as above.
-- **The account is a break-glass one.** Make your own account an admin with it, and use that from day to day. It can't be locked out for good by the API: the server refuses to revoke or delete its only admin, and if this account's role is revoked while others remain, the next apply that runs the migration step restores it. If another admin replaces its key, replacing the key as above takes the account back. An admin can't ban it either. If its account is deleted while others remain, the migration step fails until the compactor has purged the account (which frees its username), and then creates it again.
+- On another machine, sign in with the outputs: `EVIEVERSE_API_KEY="$(terraform output -raw admin_api_key)" evieverse login "$(terraform output -raw url)" "$(terraform output -raw admin_user_id)"`. A machine that applies an existing deployment gets the profile file written too.
+- The key is in the Terraform state, in plain text, like the database password and the other secrets these modules create. Keep the state where only the deployment's operators can read it (an encrypted remote backend, rather than a file in the repo).
+- To replace the key, run `terraform apply -replace=random_password.admin_key`. The migration step gives the account the new key and revokes the old one, and the profile file is rewritten.
+- A key replaced through the API lasts, but the deployment doesn't learn of it (`[POST /users/:userId/key](API.md#post-usersuseridkey)`, or `evieverse key rotate`). Later applies leave the new key in place, and the deployment's key stays revoked. Terraform still holds the old key, so the `admin_api_key` output no longer works, and the next apply writes the old key back to the profile file, over the one `key rotate` saved there. To give the deployment a working key again, replace the key as above.
+- The account is a break-glass one. Make your own account an admin with it, and use that from day to day. It can't be locked out for good by the API: the server refuses to revoke or delete its only admin, and if this account's role is revoked while others remain, the next apply that runs the migration step restores it. If another admin replaces its key, replacing the key as above takes the account back. An admin can't ban it either. If its account is deleted while others remain, the migration step fails until the compactor has purged the account (which frees its username), and then creates it again.
 - `terraform destroy` removes the profile file with the deployment.
 
 
@@ -169,8 +169,8 @@ Things to know:
 
 These modules used to run the server as long-running containers. Applying them to a deployment made that way keeps the database, Redis and the bucket, and replaces what runs the server:
 
-- **AWS:** the address stays the same (the CloudFront distribution is kept and pointed at the gateway). The load balancer and the ECS service that ran the API are removed; the compactor is an ECS service again. Expect errors for a few minutes while that happens.
-- **GCP and Azure:** the address changes, to the gateway's (`*.gateway.dev`) or Front Door's (`*.azurefd.net`), and the old one stops working. Clients, and `PUBLIC_BASE_URL` if you set it yourself, need the new one. This server's own feeds build their links from `PUBLIC_BASE_URL` when they're read, so they follow.
+- AWS: the address stays the same (the CloudFront distribution is kept and pointed at the gateway). The load balancer and the ECS service that ran the API are removed; the compactor is an ECS service again. Expect errors for a few minutes while that happens.
+- GCP and Azure: the address changes, to the gateway's (`*.gateway.dev`) or Front Door's (`*.azurefd.net`), and the old one stops working. Clients, and `PUBLIC_BASE_URL` if you set it yourself, need the new one. This server's own feeds build their links from `PUBLIC_BASE_URL` when they're read, so they follow.
 - The variables for the containers' number and size (`app_count`, `app_cpu`, `app_memory` on AWS) are gone; `min_instances`, `max_instances`, `min_replicas` and `max_replicas` now apply to each group and have new defaults.
 
 Run `terraform plan` first and read what it will destroy.
@@ -179,9 +179,9 @@ Run `terraform plan` first and read what it will destroy.
 
 In earlier versions the requests wrote posts and comments to the bucket themselves. Now they commit to the database, and the [compactor](#compactor) writes everything out. The two don't mix: a function or a node of the version before still writes the bucket itself, beside a compactor that now does. So every function and the compactor change version together, with the migrations that go with them (`0002_pending_writes`, which changes what requests write, `0003_staged_removals`, which only adds a table, and `0004_unnumbered_writes`, which makes `pending_writes` again, with a key for the new comments and the likes of comments that take no write number, and copies its rows):
 
-- **With these modules,** one `apply` does it. It adds the rule that expires `staged/` to the bucket, and runs the migrations in its [first step](#deploy), before it updates the functions and the compactor. Between the migrations and the update, which is a few minutes, the functions of the version before run on the migrated database: they write a column that `0002_pending_writes` drops, so posts and updates sent then fail with a `500`. The compactor of the version before fails its passes for as long. Apply when the server is quiet, and have clients send again what failed.
-- **Where you run it yourself,** stop every API node and the compactor, migrate, and start them all on the new version. A rolling restart leaves the two versions writing at once for its length. Give the bucket a rule that deletes objects under `staged/` after 7 days, as the modules do.
-- **There's no way back with the same database.** The version before doesn't run on the migrated one.
+- With these modules, one `apply` does it. It adds the rule that expires `staged/` to the bucket, and runs the migrations in its [first step](#deploy), before it updates the functions and the compactor. Between the migrations and the update, which is a few minutes, the functions of the version before run on the migrated database: they write a column that `0002_pending_writes` drops, so posts and updates sent then fail with a `500`. The compactor of the version before fails its passes for as long. Apply when the server is quiet, and have clients send again what failed.
+- Where you run it yourself, stop every API node and the compactor, migrate, and start them all on the new version. A rolling restart leaves the two versions writing at once for its length. Give the bucket a rule that deletes objects under `staged/` after 7 days, as the modules do.
+- There's no way back with the same database. The version before doesn't run on the migrated one.
 
 This upgrade wasn't applied to a live deployment. The modules pass `terraform validate` with the new rule, and applying the writes that waited, and again after a pass that stopped, is covered by the server's tests, on SQLite.
 
@@ -189,10 +189,10 @@ This upgrade wasn't applied to a live deployment. The modules pass `terraform va
 
 Three things change on the first `apply` of a version whose API keys start with `ev_` and whose Redis keys start with `ev:` (they were `tu_` and `tu:`). It also runs migration `0005_origin_gone`, which adds two columns to `content` and changes nothing else.
 
-- **The feed index starts empty.** The modules don't set `REDIS_KEY_PREFIX`, so the functions and the compactor read and write under `ev:` from then on, where there's nothing yet: feeds are empty, and challenges and rate-limit counts start over. Run the [rebuild](#redis) straight after the apply, which fills the index from the database and the bucket. To skip that, keep the old prefix: `environment = { REDIS_KEY_PREFIX = "tu:" }`. The keys under `tu:` aren't deleted: those with no expiry (the index) stay in Redis until you delete them or flush it.
-- **The deployment's admin key is replaced.** Terraform makes the key in the server's format, so the same apply gives the [admin account](#the-admin-account) a key that starts with `ev_`, revokes the one it had, and rewrites the profile file and the `admin_api_key` output. A copy of the old key kept anywhere else stops working.
-- **Every other user's key keeps working.** The server still takes a key that starts with `tu_`; a key issued or replaced from now on starts with `ev_`.
-- **AWS: the functions get a cap on instances** ([below](#scaling-and-the-database)), which needs room in the account's Lambda quota. Check it before applying.
+- The feed index starts empty. The modules don't set `REDIS_KEY_PREFIX`, so the functions and the compactor read and write under `ev:` from then on, where there's nothing yet: feeds are empty, and challenges and rate-limit counts start over. Run the [rebuild](#redis) straight after the apply, which fills the index from the database and the bucket. To skip that, keep the old prefix: `environment = { REDIS_KEY_PREFIX = "tu:" }`. The keys under `tu:` aren't deleted: those with no expiry (the index) stay in Redis until you delete them or flush it.
+- The deployment's admin key is replaced. Terraform makes the key in the server's format, so the same apply gives the [admin account](#the-admin-account) a key that starts with `ev_`, revokes the one it had, and rewrites the profile file and the `admin_api_key` output. A copy of the old key kept anywhere else stops working.
+- Every other user's key keeps working. The server still takes a key that starts with `tu_`; a key issued or replaced from now on starts with `ev_`.
+- AWS: the functions get a cap on instances ([below](#scaling-and-the-database)), which needs room in the account's Lambda quota. Check it before applying.
 
 This upgrade wasn't applied to a live deployment either. The modules pass `terraform validate`, and the migration, old keys and the new settings are covered by the server's tests, on SQLite.
 
@@ -200,9 +200,9 @@ This upgrade wasn't applied to a live deployment either. The modules pass `terra
 
 The first `apply` of a version that has a user's [export](API.md#get-usersuseridexport) (`GET /users/:userId/export`) needs nothing set. What it does:
 
-- **It runs migration `0006_export_indexes`,** in its [first step](#deploy): three indexes (`content (user_id, created_at, id)`, `reposts (user_id, content_id)` and `inbox (sender_id, created_at, id)`), which let a page of an export read the rows it returns and no others. It changes no row.
-- **The [compactor](#compactor) indexes the comments the deployment already has,** once, by who wrote them and who liked them: comments are objects in the bucket, so that index is what finds a user's. It starts when the new compactor's container does, beside its passes, and reads every comment. A container that's replaced meanwhile leaves the work where it was, and the next one goes on from there; a failure is logged, and tried again a minute later. The compactor's log says when it starts ("indexing the comments and likes that are older than users' indexes of them") and when it's done ("users' indexes of their comments and likes hold everything").
-- **Until that's done, every export answers `503`,** with `Retry-After: 60`, so that no client takes an export without its old comments for a whole one. Nothing else waits for it. A new deployment has no comments to index, and answers exports as soon as its compactor first starts.
+- It runs migration `0006_export_indexes`, in its [first step](#deploy): three indexes (`content (user_id, created_at, id)`, `reposts (user_id, content_id)` and `inbox (sender_id, created_at, id)`), which let a page of an export read the rows it returns and no others. It changes no row.
+- The [compactor](#compactor) indexes the comments the deployment already has, once, by who wrote them and who liked them: comments are objects in the bucket, so that index is what finds a user's. It starts when the new compactor's container does, beside its passes, and reads every comment. A container that's replaced meanwhile leaves the work where it was, and the next one goes on from there; a failure is logged, and tried again a minute later. The compactor's log says when it starts ("indexing the comments and likes that are older than users' indexes of them") and when it's done ("users' indexes of their comments and likes hold everything").
+- Until that's done, every export answers `503`, with `Retry-After: 60`, so that no client takes an export without its old comments for a whole one. Nothing else waits for it. A new deployment has no comments to index, and answers exports as soon as its compactor first starts.
 
 A user can read 120 pages of their export a minute (`EXPORT_PAGES_PER_MINUTE`, through `environment`).
 
@@ -214,15 +214,15 @@ This upgrade wasn't applied to a live deployment either: the migration, the inde
 
 What the apply does:
 
-- **It runs migration `0009_search`,** in its [first step](#deploy): a table for the keywords (`search_terms`), and a column on `users` for the name as a search compares it (`username_folded`), which it fills with each username in lowercase. That writes every row of `users` once.
-- **The gateways get no new route.** `GET /search` is in the `api` [group](#route-groups), which is sent every path that has no route of its own.
-- **The compactor indexes what it writes out from then on:** new posts, updates, and the posts whose hashtags a repost or a moderator changed.
+- It runs migration `0009_search`, in its [first step](#deploy): a table for the keywords (`search_terms`), and a column on `users` for the name as a search compares it (`username_folded`), which it fills with each username in lowercase. That writes every row of `users` once.
+- The gateways get no new route. `GET /search` is in the `api` [group](#route-groups), which is sent every path that has no route of its own.
+- The compactor indexes what it writes out from then on: new posts, updates, and the posts whose hashtags a repost or a moderator changed.
 
 What that leaves, until the reindex has run:
 
-- **A post from before the upgrade is found by no search,** unless it has been written out again since.
-- **A name with an accent is found only by the letters before it.** The migration can put a name in lowercase, and can't take its accents off: `jos` finds José, and `jose` and `josé` don't.
-- **An account registered or renamed between the migration and the functions' update,** which is a few minutes, was written by the version before. It has no name to be found by.
+- A post from before the upgrade is found by no search, unless it has been written out again since.
+- A name with an accent is found only by the letters before it. The migration can put a name in lowercase, and can't take its accents off: `jos` finds José, and `jose` and `josé` don't.
+- An account registered or renamed between the migration and the functions' update, which is a few minutes, was written by the version before. It has no name to be found by.
 
 The reindex is `node dist/search/reindex.js`, run in the deployment's image with its settings. It reads every post's meta file from the bucket and every user, writes what's missing, and ends. It needs the database and the bucket, and no Redis. The modules keep no task of its own for it. On AWS and GCP, start the [rebuild](#redis)'s task or job with this command in place of its own. On Azure, run it in the compactor's container, which has the same image and settings:
 
@@ -240,18 +240,18 @@ az containerapp exec --resource-group evieverse-rg --name evieverse-compactor --
 node dist/search/reindex.js
 ```
 
-- **It runs beside the functions and the compactor.** It takes the compactor's lease for each 500 posts and leaves it free for as long between them, so passes go on while it works, about half as often: posts are published a little later meanwhile.
-- **Its log says where it is** (`1500 posts read...`), and ends with `Reindex complete:` and how many posts it indexed and usernames it changed. On Azure, keep the session open until then.
-- **It can be run again, at any time.** What's right already is read and left as it is, so one that was stopped is started again from the beginning.
-- **Run it again after changing `SEARCH_MAX_KEYWORDS`** (100, through `environment`), the most words a post is found by. The compactor applies a new value to the posts it writes out from then on, and the reindex to the rest.
-- **Where you run the server yourself,** it's `npm run reindex` from the built source, or `node dist/search/reindex.js` in a container, with the server's settings.
-- **A new deployment needs none of this:** it has no post or name from before.
+- It runs beside the functions and the compactor. It takes the compactor's lease for each 500 posts and leaves it free for as long between them, so passes go on while it works, about half as often: posts are published a little later meanwhile.
+- Its log says where it is (`1500 posts read...`), and ends with `Reindex complete:` and how many posts it indexed and usernames it changed. On Azure, keep the session open until then.
+- It can be run again, at any time. What's right already is read and left as it is, so one that was stopped is started again from the beginning.
+- Run it again after changing `SEARCH_MAX_KEYWORDS` (100, through `environment`), the most words a post is found by. The compactor applies a new value to the posts it writes out from then on, and the reindex to the rest.
+- Where you run the server yourself, it's `npm run reindex` from the built source, or `node dist/search/reindex.js` in a container, with the server's settings.
+- A new deployment needs none of this: it has no post or name from before.
 
 What search costs from then on:
 
-- **Rows in the database:** one for each distinct word of a post, up to `SEARCH_MAX_KEYWORDS`, and one for each of its hashtags. They're deleted with the post.
-- **Database reads that need no key:** every search is a query from the `api` group. One address gets 60 a minute (`SEARCH_RATE_LIMIT_PER_MINUTE`), counted by the [client's address](#client-addresses).
-- **A search of users reads more as the users grow.** PostgreSQL reads only the names that start with what was asked for where the database sorts text byte by byte (the `C` collation). With any other, it reads names past those too, in the index's order, until the page is full. A database these modules make has another: `en_US.utf8`, which the Azure module sets, and which is the default on RDS and Cloud SQL.
+- Rows in the database: one for each distinct word of a post, up to `SEARCH_MAX_KEYWORDS`, and one for each of its hashtags. They're deleted with the post.
+- Database reads that need no key: every search is a query from the `api` group. One address gets 60 a minute (`SEARCH_RATE_LIMIT_PER_MINUTE`), counted by the [client's address](#client-addresses).
+- A search of users reads more as the users grow. PostgreSQL reads only the names that start with what was asked for where the database sorts text byte by byte (the `C` collation). With any other, it reads names past those too, in the index's order, until the page is full. A database these modules make has another: `en_US.utf8`, which the Azure module sets, and which is the default on RDS and Cloud SQL.
 
 This upgrade wasn't applied to a live deployment either, and the three commands above weren't run on one. The migration, the search and the reindex are covered by the server's tests, on SQLite, so the note on PostgreSQL is read from the query and wasn't measured.
 
@@ -259,11 +259,11 @@ This upgrade wasn't applied to a live deployment either, and the three commands 
 
 A user can take back a like of a post or of a comment ([`DELETE /like`](API.md#delete-like)). The first `apply` of a version that has it needs nothing set, and nothing done by hand afterwards. What it does:
 
-- **It runs migration `0010_unlikes`,** in its [first step](#deploy): a column on `content` for when a post last lost a like (`unliked_at`), with an index, and a column on `pending_writes` for what a like of a comment that waits comes to (`net`). Both are empty on the rows that are there, and it changes no row.
-- **The gateways get no new route.** `DELETE /like` is in the `api` [group](#route-groups), which is sent every path that has no route of its own.
-- **The compactor has to be of the new version before a like of a comment is taken back.** The request commits the taking back as a row, which the compactor applies. A compactor of the version before reads such a row as a like: the like stays, or is made. So between the functions' update and the compactor's, which is a few minutes, a like of a comment that's taken back may be there still afterwards, and the user takes it back again. A post's likes don't wait for the compactor, and are taken back at once either way.
-- **The version before runs on the migrated database:** it writes neither column, and a like of a comment it commits meanwhile counts as any other.
-- **Where you run it yourself,** migrate, then start the compactor on the new version, and then the API nodes. In that order no taking back is committed before there's a compactor that can apply it.
+- It runs migration `0010_unlikes`, in its [first step](#deploy): a column on `content` for when a post last lost a like (`unliked_at`), with an index, and a column on `pending_writes` for what a like of a comment that waits comes to (`net`). Both are empty on the rows that are there, and it changes no row.
+- The gateways get no new route. `DELETE /like` is in the `api` [group](#route-groups), which is sent every path that has no route of its own.
+- The compactor has to be of the new version before a like of a comment is taken back. The request commits the taking back as a row, which the compactor applies. A compactor of the version before reads such a row as a like: the like stays, or is made. So between the functions' update and the compactor's, which is a few minutes, a like of a comment that's taken back may be there still afterwards, and the user takes it back again. A post's likes don't wait for the compactor, and are taken back at once either way.
+- The version before runs on the migrated database: it writes neither column, and a like of a comment it commits meanwhile counts as any other.
+- Where you run it yourself, migrate, then start the compactor on the new version, and then the API nodes. In that order no taking back is committed before there's a compactor that can apply it.
 
 This upgrade wasn't applied to a live deployment either. The migration and the likes taken back are covered by the server's tests, on SQLite, and the tests of likes were run on PostgreSQL and MySQL as well.
 
@@ -283,8 +283,8 @@ The limit is on the request, so an [album](API.md#albums) sent in one request ha
 
 Larger files go straight to the bucket: the client asks `[POST /uploads](API.md#post-uploads)` for a link, sends the file to it, and posts it with `/store` by its `uploadId`. Every module sets the bucket up for that:
 
-- **CORS:** pages on `upload_origins` (any origin by default) may send files to the bucket from a browser, and read from it the segments of a [processed video](#videos)'s stream. The link is the permission; this only tells browsers which pages may use one.
-- **Expiry:** an upload nobody posts is deleted after a day (`uploads/` in the bucket). A file that waits for the [compactor](#compactor) to write it out is kept for a week (`staged/`).
+- CORS: pages on `upload_origins` (any origin by default) may send files to the bucket from a browser, and read from it the segments of a [processed video](#videos)'s stream. The link is the permission; this only tells browsers which pages may use one.
+- Expiry: an upload nobody posts is deleted after a day (`uploads/` in the bucket). A file that waits for the [compactor](#compactor) to write it out is kept for a week (`staged/`).
 - `MAX_UPLOAD_BYTES` is the largest file `/store` accepts either way. To post an upload, `/store` copies it within the bucket, inside the request's time limit: 30 seconds on AWS, `request_timeout` on GCP (300) and Azure (240). AWS is set to 256 MiB, GCP to 1 GiB and Azure to 512 MiB. Those are estimates of what fits, not measurements; time a large upload on your own deployment before raising them through `environment`.
 
 On GCP, signing a link needs a private key, and Cloud Run's own credentials don't have one. So the services sign as their own service account through IAM (`signBlob`), with a key Google keeps: the module lets the account sign as itself (`roles/iam.serviceAccountTokenCreator`) and turns on the IAM Credentials API. There's no service account key to keep, in Secret Manager or in the Terraform state, so this also works in organisations that forbid them. The `direct_uploads` variable is gone: take it out of your variables if you set it. Each signature is a call to IAM, so a link to read a file with is given again for half the time it's good for, and if IAM can't be reached, `/uploads` answers `501` and files are read through the service for 30 seconds before it's asked again.
@@ -309,9 +309,9 @@ With the `pdq` trust plugin on, the server can keep the files that matched its l
 
 To have one:
 
-1. **Make a store for it yourself,** outside the module: a bucket or container that nothing else uses. Keep it private and encrypted, turn on its access log, and give it no lifecycle rule that deletes, since the server deletes what is due.
-2. **Let the server reach it, and nothing else.** The functions write files to it and read them for admins. The compactor writes a video's file, and deletes the files whose time is over. Either give the module's roles those rights on the bucket, or put credentials that have them in `QUARANTINE_OPTIONS`.
-3. **Pass its settings,** in the same `apply`:
+1. Make a store for it yourself, outside the module: a bucket or container that nothing else uses. Keep it private and encrypted, turn on its access log, and give it no lifecycle rule that deletes, since the server deletes what is due.
+2. Let the server reach it, and nothing else. The functions write files to it and read them for admins. The compactor writes a video's file, and deletes the files whose time is over. Either give the module's roles those rights on the bucket, or put credentials that have them in `QUARANTINE_OPTIONS`.
+3. Pass its settings, in the same `apply`:
 
 ```hcl
 environment = { TRUST_OPTIONAL_PLUGINS = "pdq", PDQ_HASH_LIST = "https://hashes.example.com/pdq.csv", QUARANTINE_SCHEME = "s3" }
@@ -320,11 +320,11 @@ secrets     = { QUARANTINE_OPTIONS = "{\"bucket\":\"my-quarantine\",\"region\":\
 
 What to know:
 
-- **The settings check doesn't reach the bucket.** It refuses a quarantine that is the content store, the summary store or the audit log, with the same options. A bucket that doesn't exist, or that the roles can't write, passes it: the first match then logs an error that starts `pdq:` and says the file couldn't be kept, the post is refused all the same, and nothing is kept. Read the log after you turn it on.
-- **A file is read through the function,** never by a link to the bucket: `GET /moderation/quarantine/:quarantineId/file`, which is in the `api` group. On AWS a Lambda response can be at most 6 MB, so expect a larger file, which a video usually is, not to come through that way: fetch it from the bucket with credentials of your own, and note that the server's record of who read the file doesn't have that reading. The bucket's own access log does, if you turned it on.
-- **Files are deleted by the compactor,** once a day, `QUARANTINE_RETENTION_DAYS` (365) after the report an admin recorded. A file no report was recorded of stays, and the compactor's log says once a day how many wait.
-- **Changing the bucket doesn't move the files.** The database goes on naming them: move them before you change `QUARANTINE_OPTIONS`.
-- **`terraform destroy` leaves the bucket,** since it isn't the module's. The record of what was kept and who read it is in the database, which is the module's and goes with it.
+- The settings check doesn't reach the bucket. It refuses a quarantine that is the content store, the summary store or the audit log, with the same options. A bucket that doesn't exist, or that the roles can't write, passes it: the first match then logs an error that starts `pdq:` and says the file couldn't be kept, the post is refused all the same, and nothing is kept. Read the log after you turn it on.
+- A file is read through the function, never by a link to the bucket: `GET /moderation/quarantine/:quarantineId/file`, which is in the `api` group. On AWS a Lambda response can be at most 6 MB, so expect a larger file, which a video usually is, not to come through that way: fetch it from the bucket with credentials of your own, and note that the server's record of who read the file doesn't have that reading. The bucket's own access log does, if you turned it on.
+- Files are deleted by the compactor, once a day, `QUARANTINE_RETENTION_DAYS` (365) after the report an admin recorded. A file no report was recorded of stays, and the compactor's log says once a day how many wait.
+- Changing the bucket doesn't move the files. The database goes on naming them: move them before you change `QUARANTINE_OPTIONS`.
+- `terraform destroy` leaves the bucket, since it isn't the module's. The record of what was kept and who read it is in the database, which is the module's and goes with it.
 
 The first `apply` of a version that has the quarantine runs migration `0016_quarantine`: two tables, for the files that are kept and for what was done with each, and two columns on the videos that wait, for where each was sent from. It runs whether or not you turn the quarantine on.
 
@@ -334,14 +334,14 @@ None of this was applied to a live account for this change. Keeping, reading, re
 
 The limits on registrations, on feeds and on the other reads that need no key (`REGISTER_RATE_LIMIT_PER_HOUR`, `FEED_RATE_LIMIT_PER_MINUTE`, `FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE`, `CONTENT_RATE_LIMIT_PER_MINUTE`, `PROFILE_POSTS_RATE_LIMIT_PER_MINUTE`, `AVATAR_RATE_LIMIT_PER_MINUTE`, `COMMENTS_LIST_RATE_LIMIT_PER_MINUTE`, `REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE`, `SEARCH_RATE_LIMIT_PER_MINUTE`) count by the client's address, which the server reads from `X-Forwarded-For`, as far from the end as there are proxies in front of it (`TRUST_PROXY`). Nothing can reach the functions except through the address in front, so a client can't make one up:
 
-- **AWS:** CloudFront sends a secret header (`X-Origin-Secret`) that the functions require, since the API Gateway's own address is public.
-- **GCP:** the Cloud Run services only admit the gateway's service account. There's no `allUsers` binding.
-- **Azure:** Front Door sends the same secret header, since each Container App's own address is public.
+- AWS: CloudFront sends a secret header (`X-Origin-Secret`) that the functions require, since the API Gateway's own address is public.
+- GCP: the Cloud Run services only admit the gateway's service account. There's no `allUsers` binding.
+- Azure: Front Door sends the same secret header, since each Container App's own address is public.
 
 The number of proxies was checked against a live deployment of each module (November 2026), by sending requests with and without an `X-Forwarded-For` of their own, over IPv4 and IPv6, and reading `remoteAddress` in the functions' request logs:
 
-- **AWS** (`TRUST_PROXY` fixed at 1) and **GCP** (`trust_proxy`, 2): every request was recorded under the sender's own address, whatever the header said.
-- **Azure** (`trust_proxy`, 2): the same, for every request an app was up for. A request that waited for an app to start from no replicas was recorded under an address of Front Door's own (in its `AzureFrontDoor.Backend` ranges, such as `69.15.x.x` and `147.243.x.x`), with the sender's address one entry further back: it looks as if Front Door sent the slow request again through a second address of its own, which adds a hop. Those few requests are limited and audited as that address. Don't raise `trust_proxy` for them: at 3, every other request could choose its own address. `min_replicas = 1` keeps an app up, and then there are none.
+- AWS (`TRUST_PROXY` fixed at 1) and GCP (`trust_proxy`, 2): every request was recorded under the sender's own address, whatever the header said.
+- Azure (`trust_proxy`, 2): the same, for every request an app was up for. A request that waited for an app to start from no replicas was recorded under an address of Front Door's own (in its `AzureFrontDoor.Backend` ranges, such as `69.15.x.x` and `147.243.x.x`), with the sender's address one entry further back: it looks as if Front Door sent the slow request again through a second address of its own, which adds a hop. Those few requests are limited and audited as that address. Don't raise `trust_proxy` for them: at 3, every other request could choose its own address. `min_replicas = 1` keeps an app up, and then there are none.
 
 A cloud can change what stands in front of a service, so it's worth a look after the first apply: make a request and read `remoteAddress` in the function's request log, which should be your own public address. If nearly every request shows a Google or Microsoft address, raise `trust_proxy` by one; if it's something a client could choose, lower it. While every reader is seen as one of a few such addresses, they share one address's limits, and most get `429` once those are used. The server logs a warning when it sees that: one address counted as the client, with 20 different public addresses just before it in `X-Forwarded-For`. Setting a limit to `"0"` in `environment` turns it off until the number is right.
 
@@ -361,16 +361,16 @@ The same container asks other servers, over `https`, for the attestations of the
 
 How it's paced:
 
-- **Never two passes at once, and never more than one in 5 seconds.** A pass starts `COMPACT_INTERVAL_SECONDS` (5) after the previous one started, or as soon as that one ends if it took longer. Being one process, it can't overlap itself. To change the pace, set `COMPACT_INTERVAL_SECONDS` through `environment`.
-- **Two containers still can't overlap.** Each pass takes the compactor's lease in the database, and a pass that finds it held is skipped. That covers the moments when two are up: a deploy that starts the new one before the old has gone (GCP and Azure can), or a rebuild started by hand. A pass renews the lease for as long as it runs, so a slow write to the bucket doesn't let a second container in.
-- **If it stops, the platform starts it again.** A container that's killed mid-pass leaves the lease held until it expires (`COMPACT_LEASE_SECONDS`, 60), and the next pass after that carries on from where the index was: what the killed pass wrote but hadn't published expires by itself.
-- **A deploy ends a pass cleanly where it can.** On being told to stop, the compactor finishes the writes it's making, starts no more, frees the lease and exits. That takes as long as the writes under way do, not the rest of the pass, and the next pass, of the container that replaces it, does what was left. AWS and Azure are set to give it two minutes for that. Cloud Run gives a container about ten seconds, and a compactor that hasn't exited by then is killed mid-pass, as above.
+- Never two passes at once, and never more than one in 5 seconds. A pass starts `COMPACT_INTERVAL_SECONDS` (5) after the previous one started, or as soon as that one ends if it took longer. Being one process, it can't overlap itself. To change the pace, set `COMPACT_INTERVAL_SECONDS` through `environment`.
+- Two containers still can't overlap. Each pass takes the compactor's lease in the database, and a pass that finds it held is skipped. That covers the moments when two are up: a deploy that starts the new one before the old has gone (GCP and Azure can), or a rebuild started by hand. A pass renews the lease for as long as it runs, so a slow write to the bucket doesn't let a second container in.
+- If it stops, the platform starts it again. A container that's killed mid-pass leaves the lease held until it expires (`COMPACT_LEASE_SECONDS`, 60), and the next pass after that carries on from where the index was: what the killed pass wrote but hadn't published expires by itself.
+- A deploy ends a pass cleanly where it can. On being told to stop, the compactor finishes the writes it's making, starts no more, frees the lease and exits. That takes as long as the writes under way do, not the rest of the pass, and the next pass, of the container that replaces it, does what was left. AWS and Azure are set to give it two minutes for that. Cloud Run gives a container about ten seconds, and a compactor that hasn't exited by then is killed mid-pass, as above.
 
 What waits for it:
 
-- **Only the compactor writes posts and comments to the bucket.** A request commits its write to the database, and stores a file it came with under `staged/` in the bucket. The next pass writes it out where it's kept (`content/`, `comments/`, `summaries/`), each post and each comment as the newest write of it has it. The staged file is deleted once it's copied, or where the store signs links to its files, once a link given to it can no longer be in use: `CONTENT_SIGNED_URL_SECONDS` (900) and a minute later, by a pass after that. [APP.md](APP.md#what-it-does-each-run) has the details.
-- **While it's down, writes are taken and wait.** A post, a comment or a like is answered as ever, and a post or a comment can be read by its id. No feed gets a new post or an update, and no list a new comment, until a pass has run. The passes after it's back write out everything that waited.
-- **A staged file is kept for a week.** Every module's bucket deletes what's under `staged/` after 7 days, which clears the files of requests that failed after storing one. A file that waited that long for the compactor goes too, so don't leave the compactor stopped for a week: a post whose file is gone can't be written out until it's next updated, a comment whose file is gone is published with its text alone, or removed if the file was all there was to it, and [APP.md](APP.md#11-consistency-failure-and-recovery) says what that leaves.
+- Only the compactor writes posts and comments to the bucket. A request commits its write to the database, and stores a file it came with under `staged/` in the bucket. The next pass writes it out where it's kept (`content/`, `comments/`, `summaries/`), each post and each comment as the newest write of it has it. The staged file is deleted once it's copied, or where the store signs links to its files, once a link given to it can no longer be in use: `CONTENT_SIGNED_URL_SECONDS` (900) and a minute later, by a pass after that. [APP.md](APP.md#what-it-does-each-run) has the details.
+- While it's down, writes are taken and wait. A post, a comment or a like is answered as ever, and a post or a comment can be read by its id. No feed gets a new post or an update, and no list a new comment, until a pass has run. The passes after it's back write out everything that waited.
+- A staged file is kept for a week. Every module's bucket deletes what's under `staged/` after 7 days, which clears the files of requests that failed after storing one. A file that waited that long for the compactor goes too, so don't leave the compactor stopped for a week: a post whose file is gone can't be written out until it's next updated, a comment whose file is gone is published with its text alone, or removed if the file was all there was to it, and [APP.md](APP.md#11-consistency-failure-and-recovery) says what that leaves.
 
 Its size is `compactor_cpu` and `compactor_memory` (half a CPU and 1 GB on AWS and Azure, one CPU and 1 GiB on GCP). It runs all the time, so unlike the functions it costs the same with or without traffic: about $18 a month on AWS at the default size, from Fargate's list prices in `us-east-1`. `terraform output compactor` names it, for finding its logs (on AWS, the log group too).
 
@@ -380,15 +380,15 @@ None of this was applied to a live account for this change: the modules pass `te
 
 The compactor's container also processes the videos users send ([API.md](API.md#videos)): it makes each an MP4 that plays anywhere, without its metadata, and for a post, a poster and an adaptive stream. The functions only mark a video to be processed, and serve what the compactor made. The settings are in [CONFIG.md](CONFIG.md#videos).
 
-- **The image has ffmpeg.** The compactor checks for it when it starts, and doesn't start without it. An image of your own needs `ffmpeg` and `ffprobe` with `libx264` and `aac`.
-- **The default size is small for it.** Encoding is CPU work, and at half a CPU a minute of 1080p video takes several minutes. Videos are processed one at a time, so they queue behind each other, and each post waits to be published until its own is done. Where videos are common, raise `compactor_cpu` to 2 CPUs or more and `compactor_memory` to at least 2 GB (4 GB for 4K sources), which raises the compactor's cost in proportion. Fewer or smaller `VIDEO_HEIGHTS` cut the work too.
-- **It needs disk for the video as it was sent, and for every size it's made in, twice over** (the MP4 and its stream's segments). On AWS that's the task's ephemeral storage (20 GB), and on Azure the replica's, which Container Apps sizes by its CPUs (2 GB at half a CPU, 8 GB above one). **On GCP the files count against `compactor_memory`,** since Cloud Run keeps an instance's files in memory: there, set `compactor_memory` to several times the largest video the server takes (`MAX_UPLOAD_BYTES`), or lower `MAX_UPLOAD_BYTES`.
-- **A video that takes longer than `VIDEO_TIMEOUT_SECONDS` (an hour) is given up,** and so is one the compactor was stopped on three times, which is what running out of memory looks like. Its publisher gets a notice. The compactor's log says why, in a line that starts `could not process a video`, and has `processed a video` with the time it took for each one that went through.
-- **Passes go on while a video is processed.** The video worker runs beside the passes in the same process, so posts and comments without a video are written out as ever, though more slowly on a machine whose CPUs the encoder is using.
-- **The stream's segments are read from the bucket** on AWS and GCP, by a redirect to a signed link, as `/raw` is. A player that fetches them by script (hls.js, in every browser but Safari) is held to the bucket's CORS rule, so the modules allow `GET` there for `upload_origins`. On Azure they're streamed through the Container App and Front Door.
-- **Processed videos take more room:** each rendition is stored twice, as the stream's segments and, for one of them, as the MP4. The file as it was sent isn't kept.
-- **To turn it off,** set `VIDEO_PROCESSING = "false"` in `environment`. It applies to the functions and the compactor alike, as every setting there does. Videos are then stored and served as they're sent.
-- **With the `pdq` trust plugin on, each video is checked before it's published,** against the plugin's list of hashes of known child sexual abuse material ([TRUST_PLUGINS.md](TRUST_PLUGINS.md#videos)). The compactor's container reads the list from `PDQ_HASH_LIST` itself, so it needs the way out to the list's host that the functions have, and room for the list in `compactor_memory`. While it has no list, videos wait unpublished. With `VIDEO_PROCESSING = "false"`, no video is checked.
+- The image has ffmpeg. The compactor checks for it when it starts, and doesn't start without it. An image of your own needs `ffmpeg` and `ffprobe` with `libx264` and `aac`.
+- The default size is small for it. Encoding is CPU work, and at half a CPU a minute of 1080p video takes several minutes. Videos are processed one at a time, so they queue behind each other, and each post waits to be published until its own is done. Where videos are common, raise `compactor_cpu` to 2 CPUs or more and `compactor_memory` to at least 2 GB (4 GB for 4K sources), which raises the compactor's cost in proportion. Fewer or smaller `VIDEO_HEIGHTS` cut the work too.
+- It needs disk for the video as it was sent, and for every size it's made in, twice over (the MP4 and its stream's segments). On AWS that's the task's ephemeral storage (20 GB), and on Azure the replica's, which Container Apps sizes by its CPUs (2 GB at half a CPU, 8 GB above one). On GCP the files count against `compactor_memory`, since Cloud Run keeps an instance's files in memory: there, set `compactor_memory` to several times the largest video the server takes (`MAX_UPLOAD_BYTES`), or lower `MAX_UPLOAD_BYTES`.
+- A video that takes longer than `VIDEO_TIMEOUT_SECONDS` (an hour) is given up, and so is one the compactor was stopped on three times, which is what running out of memory looks like. Its publisher gets a notice. The compactor's log says why, in a line that starts `could not process a video`, and has `processed a video` with the time it took for each one that went through.
+- Passes go on while a video is processed. The video worker runs beside the passes in the same process, so posts and comments without a video are written out as ever, though more slowly on a machine whose CPUs the encoder is using.
+- The stream's segments are read from the bucket on AWS and GCP, by a redirect to a signed link, as `/raw` is. A player that fetches them by script (hls.js, in every browser but Safari) is held to the bucket's CORS rule, so the modules allow `GET` there for `upload_origins`. On Azure they're streamed through the Container App and Front Door.
+- Processed videos take more room: each rendition is stored twice, as the stream's segments and, for one of them, as the MP4. The file as it was sent isn't kept.
+- To turn it off, set `VIDEO_PROCESSING = "false"` in `environment`. It applies to the functions and the compactor alike, as every setting there does. Videos are then stored and served as they're sent.
+- With the `pdq` trust plugin on, each video is checked before it's published, against the plugin's list of hashes of known child sexual abuse material ([TRUST_PLUGINS.md](TRUST_PLUGINS.md#videos)). The compactor's container reads the list from `PDQ_HASH_LIST` itself, so it needs the way out to the list's host that the functions have, and room for the list in `compactor_memory`. While it has no list, videos wait unpublished. With `VIDEO_PROCESSING = "false"`, no video is checked.
 
 The first `apply` of a version that processes videos runs migration `0007_media` (a table for the videos that wait, and a column on ads), adds `GET` and `HEAD` to the bucket's CORS rule, and replaces the compactor's container with one that has ffmpeg. Videos stored before it stay as they were sent: nothing processes them again.
 
@@ -398,8 +398,8 @@ None of this was applied to a live account for this change. The processing itsel
 
 Each group scales on its own, and the feed group holds no database connections. The other three groups do, and the database's connection limit is what bounds them:
 
-- **AWS:** the functions connect through RDS Proxy, which shares up to 75% of the database's connections among however many instances are running.
-- **GCP and Azure:** the small database sizes these modules default to have no built-in pooler, so the limit is arithmetic: `3 x max_instances x db_pool_size + 5` (or `max_replicas`) must stay within the database's connections, which is 50 on `db-g1-small` and 35 usable on `B_Standard_B1ms`. The defaults (3 instances of 4 connections; 3 replicas of 3) fit. To scale further, raise `db_tier` or `db_sku` with them.
+- AWS: the functions connect through RDS Proxy, which shares up to 75% of the database's connections among however many instances are running.
+- GCP and Azure: the small database sizes these modules default to have no built-in pooler, so the limit is arithmetic: `3 x max_instances x db_pool_size + 5` (or `max_replicas`) must stay within the database's connections, which is 50 on `db-g1-small` and 35 usable on `B_Standard_B1ms`. The defaults (3 instances of 4 connections; 3 replicas of 3) fit. To scale further, raise `db_tier` or `db_sku` with them.
 
 `min_instances` and `min_replicas` are 0, so a group with no traffic costs nothing and its next request waits for an instance to start. Set them to 1 to keep one warm.
 
@@ -411,17 +411,17 @@ Every group has a cap on instances, the feed group too. The limits by address ca
 | GCP   | `max_instances` (3) | `feed_max_instances` (10) |
 | Azure | `max_replicas` (3) | `feed_max_replicas` (10) |
 
-- **On AWS the cap is Lambda's reserved concurrency.** A Lambda instance takes one request at a time, so it's also how many requests a function answers at once, and the server's own bound on feeds at a time (`FEED_MAX_CONCURRENT`) is never reached there. One request more is refused by Lambda, and the gateway answers it with an error; it isn't queued.
-- **Reserved concurrency comes out of the account's quota,** which must keep 100 unreserved. The defaults reserve 250 (100 for feeds, 50 for each of the other three), so they need a quota of 350: `aws lambda get-account-settings` shows it. An established account has 1,000; a new one may have less, and the apply then fails on the functions. Lower the two variables, ask AWS for a larger quota, or set them to `null`, which sets no cap and reserves nothing.
+- On AWS the cap is Lambda's reserved concurrency. A Lambda instance takes one request at a time, so it's also how many requests a function answers at once, and the server's own bound on feeds at a time (`FEED_MAX_CONCURRENT`) is never reached there. One request more is refused by Lambda, and the gateway answers it with an error; it isn't queued.
+- Reserved concurrency comes out of the account's quota, which must keep 100 unreserved. The defaults reserve 250 (100 for feeds, 50 for each of the other three), so they need a quota of 350: `aws lambda get-account-settings` shows it. An established account has 1,000; a new one may have less, and the apply then fails on the functions. Lower the two variables, ask AWS for a larger quota, or set them to `null`, which sets no cap and reserves nothing.
 - GCP's and Azure's instances take many requests at a time each, so their caps are lower.
 
 ## What to expect
 
 Measured for this change, with the limits of each measurement:
 
-- **Latency once warm:** on one machine (1 vCPU and 1 GB per container; Valkey, Postgres and an S3-compatible store beside them), a 10-hashtag feed took 6 ms at the median from a group's own container and 10 ms through the Lambda runtime, against 6 ms from the whole server. A text post took 41 ms from either, against 44 ms. This compares the function code with the server, not one cloud's network with another's.
-- **Cold starts:** on AWS Lambda in `us-east-1`, a new instance took 1.0 to 1.6 seconds to start at 1,024 MB (the feed function; 1.1 to 2.3 for the store function), almost all of it loading the server's code, then answered in 30 to 60 ms. More memory made little difference. This was measured outside a VPC with no Redis or database to connect to, so a real cold start adds those connections. Cloud Run and Container Apps weren't measured; Container Apps starting from zero also pulls the image, which usually takes much longer.
-- **Cost:** functions swap the cost of containers that run all the time for a cost per request, plus the address in front. From list prices, with the database, Redis, bucket and data transfer left out as they don't change: AWS costs about $70 a month before any traffic (NAT gateway $33, RDS Proxy $22, the Secrets Manager endpoint $15) and about $1.45 per million requests after (API Gateway $1.00, Lambda $0.45), which is less than two always-on containers and a load balancer up to roughly 30 million requests a month and more beyond. On GCP the functions themselves are cheap, but API Gateway is $3.00 per million calls after the first 2 million. On Azure, Front Door adds $35 a month and $0.90 per million requests, the database's private endpoint about $7 a month, and four apps that each stay up for five minutes after a request cost more than one container until there's enough traffic to need several. For a busy server, compare a load balancer with path rules (GCP), or setting `min_replicas` and sizing by hand (Azure).
+- Latency once warm: on one machine (1 vCPU and 1 GB per container; Valkey, Postgres and an S3-compatible store beside them), a 10-hashtag feed took 6 ms at the median from a group's own container and 10 ms through the Lambda runtime, against 6 ms from the whole server. A text post took 41 ms from either, against 44 ms. This compares the function code with the server, not one cloud's network with another's.
+- Cold starts: on AWS Lambda in `us-east-1`, a new instance took 1.0 to 1.6 seconds to start at 1,024 MB (the feed function; 1.1 to 2.3 for the store function), almost all of it loading the server's code, then answered in 30 to 60 ms. More memory made little difference. This was measured outside a VPC with no Redis or database to connect to, so a real cold start adds those connections. Cloud Run and Container Apps weren't measured; Container Apps starting from zero also pulls the image, which usually takes much longer.
+- Cost: functions swap the cost of containers that run all the time for a cost per request, plus the address in front. From list prices, with the database, Redis, bucket and data transfer left out as they don't change: AWS costs about $70 a month before any traffic (NAT gateway $33, RDS Proxy $22, the Secrets Manager endpoint $15) and about $1.45 per million requests after (API Gateway $1.00, Lambda $0.45), which is less than two always-on containers and a load balancer up to roughly 30 million requests a month and more beyond. On GCP the functions themselves are cheap, but API Gateway is $3.00 per million calls after the first 2 million. On Azure, Front Door adds $35 a month and $0.90 per million requests, the database's private endpoint about $7 a month, and four apps that each stay up for five minutes after a request cost more than one container until there's enough traffic to need several. For a busy server, compare a load balancer with path rules (GCP), or setting `min_replicas` and sizing by hand (Azure).
 
 
 
@@ -535,8 +535,8 @@ Memorystore for Redis Cluster runs in cluster mode, so it isn't supported.
 
 ## Custom domains
 
-- **AWS:** add `aliases` and an ACM certificate (issued in `us-east-1`) to the CloudFront distribution.
-- **GCP:** put a global external load balancer in front of the gateway (a serverless NEG of the API Gateway type), with your certificate.
-- **Azure:** add `azurerm_cdn_frontdoor_custom_domain` to the Front Door profile, with a managed certificate, and associate it with the routes.
+- AWS: add `aliases` and an ACM certificate (issued in `us-east-1`) to the CloudFront distribution.
+- GCP: put a global external load balancer in front of the gateway (a serverless NEG of the API Gateway type), with your certificate.
+- Azure: add `azurerm_cdn_frontdoor_custom_domain` to the Front Door profile, with a managed certificate, and associate it with the routes.
 
 In every case, also set `PUBLIC_BASE_URL` through `environment` so that links the server generates use the new domain.

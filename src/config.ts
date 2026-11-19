@@ -8,6 +8,9 @@ import { parseTagList } from './tags.js';
 /** The support address GET /rules gives on a server whose operator has set none (SUPPORT_EMAIL). */
 export const DEFAULT_SUPPORT_EMAIL = 'noreply@yoururl.com';
 
+/** The highest minimum age a server can set (MINIMUM_AGE), in years: past it a number is no age, and more likely a slip of the keys (180 for 18). */
+export const MAX_MINIMUM_AGE = 120;
+
 /**
  * Which setting each environment variable sets, as the path of the setting's keys in the
  * configuration (`db.poolSize`). A variable that is unset or empty sets nothing (see setPath).
@@ -20,6 +23,7 @@ const ENV_MAP: Record<string, string> = {
   EVIEVERSE_MODIFIED: 'modified',
   EVIEVERSE_SOURCE_URL: 'sourceUrl',
   SUPPORT_EMAIL: 'supportEmail',
+  MINIMUM_AGE: 'minimumAge',
   DB_DIALECT: 'db.dialect',
   DATABASE_URL: 'db.url',
   DB_POOL_SIZE: 'db.poolSize',
@@ -225,6 +229,25 @@ const ConfigSchema = z.object({
       if (!v) return DEFAULT_SUPPORT_EMAIL;
       if (z.email().safeParse(v).success) return v;
       ctx.addIssue({ code: 'custom', message: `"${v}" is not an email address such as support@example.com: SUPPORT_EMAIL is the address people write to for support` });
+      return z.NEVER;
+    }),
+
+  /**
+   * The youngest a person may be to use the server, in whole years, which GET /rules gives to
+   * anyone who asks, beside the rules. It is the operator's own rule, and the server holds nobody
+   * to it: it asks nobody's age. Unset, empty or 0: there is none (null), and GET /rules says
+   * that all legal ages are allowed.
+   */
+  minimumAge: z
+    .union([z.number(), z.string()])
+    .nullable()
+    .default(null)
+    .transform((v, ctx) => {
+      const text = String(v ?? '').trim();
+      if (text === '') return null;
+      // Digits alone: a number as JavaScript reads one would also take 1e1, 0x12 and 18.5.
+      if (/^\d+$/.test(text) && Number(text) <= MAX_MINIMUM_AGE) return Number(text) || null;
+      ctx.addIssue({ code: 'custom', message: `"${text}" is not an age in whole years, from 1 to ${MAX_MINIMUM_AGE}, such as 13: MINIMUM_AGE is the youngest a person may be to use the server` });
       return z.NEVER;
     }),
 

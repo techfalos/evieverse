@@ -304,6 +304,7 @@
     "rule.nothing_to_update": "nothing to update: provide text or position",
     "rule.limit": "the server can have at most {max} rules: remove one first",
     "rule.tag_limit": "a hashtag can have at most {max} rules: remove one first",
+    "rule.all_ages": "All Legal Ages Allowed",
 
     "cli.outdated": "this server works with version {version} (build {build}) of the CLI: update it with `evieverse update`",
     "cli.not_built": "this server wasn't built with its CLI: `npm run build` builds both",

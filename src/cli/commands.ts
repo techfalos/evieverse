@@ -717,15 +717,18 @@ export const COMMANDS: Command[] = [
     request: ({ positionals: [tag] }) => ({ method: 'GET', path: path`/tags/${tag!}/rules` }),
     text: (d) => (d.rules.length ? table(d.rules.map((r) => [String(r.position), r.ruleId, r.text.replace(/\s+/g, ' ').trim()])) : `#${d.tag} has no rules.`),
   }),
-  endpoint<{ modificationDisclosure: ModificationDisclosure; supportEmail: string; rules: RuleRecord[] }>({
+  endpoint<{ modificationDisclosure: ModificationDisclosure; supportEmail: string; minimumAge: number | string; rules: RuleRecord[] }>({
     name: 'rules list',
     role: 'anyone',
     summary:
-      "Lists the server's rules, in their order, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is.",
+      "Lists the server's rules, in their order, its minimum age, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is.",
     request: () => ({ method: 'GET', path: '/rules' }),
     text: (d) =>
       [
         d.rules.length ? table(d.rules.map((r) => [String(r.position), r.ruleId, r.text.replace(/\s+/g, ' ').trim()])) : 'The server has no rules.',
+        '',
+        // A number of years, or the server's own words for having none.
+        `Minimum age: ${d.minimumAge}`,
         '',
         `Support: ${d.supportEmail}`,
         '',

@@ -26,6 +26,6 @@ If the problem is in the code and would affect every instance, it belongs here.
 
 ## Things that help to know
 
-- **API keys.** A key that may have leaked is replaced with `POST /users/:userId/key` or `evieverse key rotate`: the old one stops working at once ([API.md](docs/API.md#post-usersuseridkey)).
-- **The admin key and the signing key of a deployment** are in its Terraform state, in plain text ([DEPLOY.md](docs/DEPLOY.md#the-admin-account)). Keep the state where only the deployment's operators can read it.
-- **Requests to other servers.** An instance asks other servers for their public keys and for the attestations of posts it holds reposts of, at addresses users chose. Those requests are held to `https`, port 443 and public addresses, with no redirects ([APP.md](docs/APP.md#post-repost)). A way around those rules is a vulnerability.
+- API keys. A key that may have leaked is replaced with `POST /users/:userId/key` or `evieverse key rotate`: the old one stops working at once ([API.md](docs/API.md#post-usersuseridkey)).
+- The admin key and the signing key of a deployment are in its Terraform state, in plain text ([DEPLOY.md](docs/DEPLOY.md#the-admin-account)). Keep the state where only the deployment's operators can read it.
+- Requests to other servers. An instance asks other servers for their public keys and for the attestations of posts it holds reposts of, at addresses users chose. Those requests are held to `https`, port 443 and public addresses, with no redirects ([APP.md](docs/APP.md#post-repost)). A way around those rules is a vulnerability.

@@ -72,7 +72,7 @@ Names in capitals, such as `FEED_PAGE_SIZE`, are an instance's settings ([`.env.
 | [`GET /monetization/ads/:adId`](#keeping-the-ads) | Admins | One ad. |
 | [`PATCH /monetization/ads/:adId`](#keeping-the-ads) | Admins | Changes an ad. |
 | [`DELETE /monetization/ads/:adId`](#keeping-the-ads) | Admins | Deletes an ad, and its image. |
-| [`GET /rules`](#get-rules) | Anyone | The server's rules, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version. |
+| [`GET /rules`](#get-rules) | Anyone | The server's rules, its minimum age, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version. |
 | [`POST /rules`](#keeping-the-rules) | Admins | Adds a rule. |
 | [`PATCH /rules/:ruleId`](#keeping-the-rules) | Admins | Changes a rule's text, or its place among the others. |
 | [`DELETE /rules/:ruleId`](#keeping-the-rules) | Admins | Removes a rule. |
@@ -89,11 +89,11 @@ Names in capitals, such as `FEED_PAGE_SIZE`, are an instance's settings ([`.env.
 
 ## Conventions
 
-- **Base URL.** An instance's own address, such as `https://api.example.com`. The examples here use `localhost:3000`, where a server run from this repo listens.
-- **Bodies.** Requests and responses are JSON. The exceptions are files: `POST /store`, `POST /content/:contentId/comments` and `PUT /users/:userId/avatar` also take `multipart/form-data`, the two `/raw` endpoints return a post's bytes, and those of a comment's image or video, `GET /users/:userId/avatar` returns an [avatar](#the-avatar)'s, `/content/:contentId/video/…` returns the files of a [processed video](#videos), and [`GET /challenges/:challengeId/audio`](#get-challengeschallengeidaudio) returns a WAV.
-- **Time.** Every timestamp is UTC, as ISO-8601 with a `Z` suffix: `2026-11-10T14:02:00.000Z`.
-- **Ids.** Users, content and comments are identified by UUIDs.
-- **Pages.** An endpoint that returns a page at a time gives a `nextCursor` with it. Send that as `cursor` to get the next page. It's `null` when there are no more.
+- Base URL. An instance's own address, such as `https://api.example.com`. The examples here use `localhost:3000`, where a server run from this repo listens.
+- Bodies. Requests and responses are JSON. The exceptions are files: `POST /store`, `POST /content/:contentId/comments` and `PUT /users/:userId/avatar` also take `multipart/form-data`, the two `/raw` endpoints return a post's bytes, and those of a comment's image or video, `GET /users/:userId/avatar` returns an [avatar](#the-avatar)'s, `/content/:contentId/video/…` returns the files of a [processed video](#videos), and [`GET /challenges/:challengeId/audio`](#get-challengeschallengeidaudio) returns a WAV.
+- Time. Every timestamp is UTC, as ISO-8601 with a `Z` suffix: `2026-11-10T14:02:00.000Z`.
+- Ids. Users, content and comments are identified by UUIDs.
+- Pages. An endpoint that returns a page at a time gives a `nextCursor` with it. Send that as `cursor` to get the next page. It's `null` when there are no more.
 
 ### Authentication
 
@@ -146,9 +146,9 @@ To solve it, send the same request again within 120 seconds (`CHALLENGE_TTL_SECO
 - `challengeNonce`: the proof of work, which the client's software finds while the person reads or listens. It's any string that makes the SHA-256 of `prefix + nonce` (UTF-8) start with `bits` zero bits. Counting up from 0 finds one after about 2^`bits` hashes on average: at 18 bits, about 1.5 seconds in a desktop browser, and longer on slower devices.
 
 Rules:
-- **One answer per challenge.** Each challenge can be answered once, right or wrong. A wrong, late or incomplete answer gets `428` again, with a new challenge and an `error` that says what was wrong.
-- **Not too fast.** An answer sent less than `CHALLENGE_MIN_SOLVE_MS` (2 seconds) after the challenge was issued is refused, since no person reads or listens, and types it, that fast.
-- **None for an admin who registers a user.** A registration sent with an admin's credentials goes through without one ([`POST /register`](#post-register)).
+- One answer per challenge. Each challenge can be answered once, right or wrong. A wrong, late or incomplete answer gets `428` again, with a new challenge and an `error` that says what was wrong.
+- Not too fast. An answer sent less than `CHALLENGE_MIN_SOLVE_MS` (2 seconds) after the challenge was issued is refused, since no person reads or listens, and types it, that fast.
+- None for an admin who registers a user. A registration sent with an admin's credentials goes through without one ([`POST /register`](#post-register)).
 
 The server draws the image itself, with no third-party service. It's a PNG, so a robot can only read it from its pixels, and it's drawn to make that hard:
 - the six characters come from an alphabet with no look-alikes, and are drawn as strokes rather than from a font;
@@ -166,16 +166,16 @@ Returns a challenge's six characters read out, one after another: what the chall
 curl -o challenge.wav https://api.example.com/challenges/8f0c2d1e-…/audio
 ```
 
-- **A WAV** (`audio/wav`: 16-bit mono PCM at 16 kHz), about 6 seconds and 180 KB, which the major browsers play. An `<audio>` element plays the link as it is:
+- A WAV (`audio/wav`: 16-bit mono PCM at 16 kHz), about 6 seconds and 180 KB, which the major browsers play. An `<audio>` element plays the link as it is:
 
   ```html
   <audio controls preload="none" src="https://api.example.com/challenges/8f0c2d1e-…/audio"></audio>
   ```
-- **No key.** Whoever has the challenge has its id, and nobody else does, so the request takes no credentials.
-- **As often as it takes.** Listening doesn't answer the challenge or use it up, and it sounds the same every time. A `Range` header is answered with that part of it (`206`), or `416` for a part it doesn't have.
-- **Only while the challenge can be answered.** Once it has been answered, right or wrong, or is past its `expiresAt`, the link returns `404`. So does an id that was never a challenge's; one that isn't a UUID returns `400`.
-- **In the challenge's language.** The characters are said in the [language](#get-languages) the `428` was answered in, whatever the headers of this request say. A language the instance has no voice for is said in its default language's voice, or else in English.
-- **Never cached.** The response is `Cache-Control: no-store`.
+- No key. Whoever has the challenge has its id, and nobody else does, so the request takes no credentials.
+- As often as it takes. Listening doesn't answer the challenge or use it up, and it sounds the same every time. A `Range` header is answered with that part of it (`206`), or `416` for a part it doesn't have.
+- Only while the challenge can be answered. Once it has been answered, right or wrong, or is past its `expiresAt`, the link returns `404`. So does an id that was never a challenge's; one that isn't a UUID returns `400`.
+- In the challenge's language. The characters are said in the [language](#get-languages) the `428` was answered in, whatever the headers of this request say. A language the instance has no voice for is said in its default language's voice, or else in English.
+- Never cached. The response is `Cache-Control: no-store`.
 
 The voice is a speech synthesiser's, and each challenge is spoken a little differently: the characters faster or slower, higher or lower, with pauses of uneven length and a light hiss. That's kept light so people can make the characters out, which means the audio keeps robots out less well than the image does. A robot that listens still has to do the proof of work, gets one answer per challenge, and is held to the same limit on registrations from one address.
 
@@ -189,10 +189,10 @@ No challenge is asked for a post or a comment. What holds them is a limit a minu
 { "error": "you can post at most 3 times a minute; try again in 40 seconds", "retryAfterSeconds": 40 }
 ```
 
-- **New content, updates and reposts are posts.** Storing the same content again unchanged isn't.
-- **Only posts that are stored count.** One that's refused for any other reason, or that fails, doesn't.
-- **The minute slides.** A post goes through whenever fewer than 3 of your posts are less than a minute old, so no burst across the turn of a minute gets more through.
-- **Posts claim their place atomically,** in Redis: of several sent at once, no more get through than the limit allows.
+- New content, updates and reposts are posts. Storing the same content again unchanged isn't.
+- Only posts that are stored count. One that's refused for any other reason, or that fails, doesn't.
+- The minute slides. A post goes through whenever fewer than 3 of your posts are less than a minute old, so no burst across the turn of a minute gets more through.
+- Posts claim their place atomically, in Redis: of several sent at once, no more get through than the limit allows.
 
 **Nobody can comment more than 10 times in any minute** (`COMMENTS_PER_MINUTE`). Comments go by the same rule, with a number of their own: a comment past it is refused with `429`, with when to try again in a `Retry-After` header and in the body:
 
@@ -200,9 +200,9 @@ No challenge is asked for a post or a comment. What holds them is a limit a minu
 { "error": "too many comments; try again in 12 seconds", "retryAfterSeconds": 12 }
 ```
 
-- **An [edit](#patch-contentcontentidcommentscommentid) of a comment counts as a comment,** as an update of a post counts as a post.
-- **Only comments that were published or held count.** One that's refused, or that fails, doesn't.
-- **Posts and comments are counted apart.** A comment doesn't count towards the posts a user can send in a minute, nor a post towards the comments.
+- An [edit](#patch-contentcontentidcommentscommentid) of a comment counts as a comment, as an update of a post counts as a post.
+- Only comments that were published or held count. One that's refused, or that fails, doesn't.
+- Posts and comments are counted apart. A comment doesn't count towards the posts a user can send in a minute, nor a post towards the comments.
 
 ## Accounts
 
@@ -306,19 +306,19 @@ curl -X PUT localhost:3000/users/$USER_ID/avatar -H "Authorization: Bearer $KEY"
 { "userId": "...", "avatarUrl": "/users/.../avatar?v=..." }
 ```
 
-- **It's a JPEG, PNG, GIF or WebP image,** told by its bytes, whatever it was sent as: `400` for anything else. It can be at most 5 MiB, or `MAX_UPLOAD_BYTES` where that's less: `413` past that.
-- **Every avatar is the same size and type.** The server makes the avatar of the image: a square of 400 pixels a side, as a WebP file, whatever was sent. The image is turned the way it shows, cut to the largest square about its middle, and brought to the size, down for a large image and up for a small one. What was transparent stays so, and an animated image gives its first frame. None of the image's metadata is in it. An image whose pixels can't be read gets `400`.
-- **Setting another replaces it.** The one before is deleted.
-- **It's checked first,** as [above](#a-users-profile): `422` for one the instance doesn't trust, and nothing is stored. The image is checked as it was sent.
+- It's a JPEG, PNG, GIF or WebP image, told by its bytes, whatever it was sent as: `400` for anything else. It can be at most 5 MiB, or `MAX_UPLOAD_BYTES` where that's less: `413` past that.
+- Every avatar is the same size and type. The server makes the avatar of the image: a square of 400 pixels a side, as a WebP file, whatever was sent. The image is turned the way it shows, cut to the largest square about its middle, and brought to the size, down for a large image and up for a small one. What was transparent stays so, and an animated image gives its first frame. None of the image's metadata is in it. An image whose pixels can't be read gets `400`.
+- Setting another replaces it. The one before is deleted.
+- It's checked first, as [above](#a-users-profile): `422` for one the instance doesn't trust, and nothing is stored. The image is checked as it was sent.
 
 `DELETE /users/:userId/avatar` (authenticated, own profile only) takes it away, and returns `{ userId, avatarUrl: null, hadAvatar }`. `hadAvatar` is `false` if there was none, which changes nothing.
 
 `GET /users/:userId/avatar` returns the avatar, to anyone: its bytes, as `image/webp`, or a redirect to them on stores that support presigned URLs, as [`/raw`](#get-contentcontentid) does for a post's.
 
-- **`avatarUrl` is this address, with the avatar's id as `v`:** `/users/<userId>/avatar?v=<avatarId>`. Another avatar has another `v`, so what that address answers may be kept for a day (`Cache-Control: public, max-age=86400`).
-- **Without `v`, it's whatever avatar the user has now,** kept for five minutes. A client that knows only a user's id shows their avatar with it. So does an address with the `v` of an avatar the user had before.
-- **`404`** for a user who has no avatar, for one who isn't there, and for one who is [banned](#bans): the `error` says which.
-- **It goes out with the user's credit on their posts,** where a post is read on its own or in the list of its publisher's posts: `publisher.avatarUrl` in [`GET /content/:contentId`](#get-contentcontentid) and in [`GET /users/:userId/posts`](#get-usersuseridposts). Feeds and search results have the name alone: read the avatar there by the address without `v`.
+- `avatarUrl` is this address, with the avatar's id as `v`: `/users/<userId>/avatar?v=<avatarId>`. Another avatar has another `v`, so what that address answers may be kept for a day (`Cache-Control: public, max-age=86400`).
+- Without `v`, it's whatever avatar the user has now, kept for five minutes. A client that knows only a user's id shows their avatar with it. So does an address with the `v` of an avatar the user had before.
+- `404` for a user who has no avatar, for one who isn't there, and for one who is [banned](#bans): the `error` says which.
+- It goes out with the user's credit on their posts, where a post is read on its own or in the list of its publisher's posts: `publisher.avatarUrl` in [`GET /content/:contentId`](#get-contentcontentid) and in [`GET /users/:userId/posts`](#get-usersuseridposts). Feeds and search results have the name alone: read the avatar there by the address without `v`.
 - One address can ask for 300 avatars a minute (`AVATAR_RATE_LIMIT_PER_MINUTE`), then gets `429` ([below](#limits-on-reads-that-need-no-key)).
 
 #### `GET /users/:userId/posts`
@@ -341,12 +341,12 @@ It takes:
 - `cursor`: the previous page's `nextCursor`. It's `null` on the last page.
 
 What it returns:
-- **`posts` is the page.** Each post is a record as a [feed](#get-feed) gives one, with all of its likes, and without `moderated`, which is a hashtag's. Its `publisher` also has `avatarUrl`, if the user has an avatar.
-- **`pinned` is the posts the user [pinned](#pinned-posts),** the one pinned last first, as records like the others, and `[]` if they pinned none. Only the first page has it. A pinned post keeps its place among `posts` too.
-- **Only what anyone can read is listed:** no post set for deletion, none that waits in the [moderation queue](#the-moderation-queue), and no repost of a post on another server that is [gone there](#refreshing-a-repost).
-- **The user's own posts,** not what they [reposted](#post-repost), which are other users' posts.
-- **A new post is listed once the [compactor](APP.md#8-the-compactor) has written it,** which is when it's in feeds: seconds.
-- **`banned` is whether the user is [banned](#bans).** For a banned user it's `true` and the list is empty, on every page: `posts` is `[]`, `pinned` is `[]` and `nextCursor` is `null`. Their posts are still in feeds, and read by their ids.
+- `posts` is the page. Each post is a record as a [feed](#get-feed) gives one, with all of its likes, and without `moderated`, which is a hashtag's. Its `publisher` also has `avatarUrl`, if the user has an avatar.
+- `pinned` is the posts the user [pinned](#pinned-posts), the one pinned last first, as records like the others, and `[]` if they pinned none. Only the first page has it. A pinned post keeps its place among `posts` too.
+- Only what anyone can read is listed: no post set for deletion, none that waits in the [moderation queue](#the-moderation-queue), and no repost of a post on another server that is [gone there](#refreshing-a-repost).
+- The user's own posts, not what they [reposted](#post-repost), which are other users' posts.
+- A new post is listed once the [compactor](APP.md#8-the-compactor) has written it, which is when it's in feeds: seconds.
+- `banned` is whether the user is [banned](#bans). For a banned user it's `true` and the list is empty, on every page: `posts` is `[]`, `pinned` is `[]` and `nextCursor` is `null`. Their posts are still in feeds, and read by their ids.
 
 | Status | What happened |
 | --- | --- |
@@ -363,12 +363,12 @@ What it returns:
 curl -X PUT localhost:3000/users/$USER_ID/pinned/$CONTENT_ID -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID"
 ```
 
-- **A profile has 5 pinned posts at most.** One more gets `409`, until another is unpinned.
-- **Pinning a post that's pinned changes nothing:** `200`, with `alreadyPinned: true` and the `pinnedAt` it was first pinned at. It keeps its place among the pinned posts.
-- **Only the user's own posts:** `403` for anyone else's, and `404` for a post that isn't there, or is set for deletion.
-- **The profile names them** in `pinnedContentIds`, the one pinned last first, and the first page of the [user's posts](#get-usersuseridposts) gives them as records, in `pinned`, in the same order.
-- **A pinned post is shown as one only while anyone can read it.** One that waits in the moderation queue can be pinned, and is among the pinned posts once it's published. It counts towards the 5 meanwhile.
-- **Deleting a post unpins it.**
+- A profile has 5 pinned posts at most. One more gets `409`, until another is unpinned.
+- Pinning a post that's pinned changes nothing: `200`, with `alreadyPinned: true` and the `pinnedAt` it was first pinned at. It keeps its place among the pinned posts.
+- Only the user's own posts: `403` for anyone else's, and `404` for a post that isn't there, or is set for deletion.
+- The profile names them in `pinnedContentIds`, the one pinned last first, and the first page of the [user's posts](#get-usersuseridposts) gives them as records, in `pinned`, in the same order.
+- A pinned post is shown as one only while anyone can read it. One that waits in the moderation queue can be pinned, and is among the pinned posts once it's published. It counts towards the 5 meanwhile.
+- Deleting a post unpins it.
 
 `DELETE /users/:userId/pinned/:contentId` (authenticated, own profile only) unpins it, and returns `{ userId, contentId, wasPinned }`. `wasPinned` is `false` for a post that wasn't pinned, which changes nothing.
 
@@ -463,11 +463,11 @@ Every record says what it is in `type`. They come in this order, each kind in an
 
 What to know about it:
 
-- **Files aren't in the export.** A post's record has its `contentUrl`, an image post's has each of its `images` with its own `url`, and a comment's `media` has its `url`: whoever keeps the export fetches the bytes from there, as any reader does. The account's record has its `avatarUrl`, which answers `404` while the user is banned.
-- **It isn't a snapshot.** Each page reads what is there when it's asked for, while the account is in use. What is there throughout is in the export exactly once. What is written or deleted meanwhile is in it or not, by where the export had got to.
-- **A new post or an edit is in it at once.** A comment the user just sent, and a like of a comment, are in it after the [compactor](APP.md#8-the-compactor)'s next run, which is seconds. A like that was [taken back](#delete-like) isn't in it: a post's at once, and a comment's after that run.
-- **What it leaves out:** what moderators hold about the user and don't tell them (why they were banned, what was decided about their reports), what the user did as a moderator or an admin (decisions, blocked words, rules, ads), the operator's logs, counts that are kept for minutes (limits), and a file that was uploaded and never posted.
-- **Reading it changes nothing,** so it leaves no record in the [audit log](DEPLOY.md#audit-log). The server's own log has a line when an export is started.
+- Files aren't in the export. A post's record has its `contentUrl`, an image post's has each of its `images` with its own `url`, and a comment's `media` has its `url`: whoever keeps the export fetches the bytes from there, as any reader does. The account's record has its `avatarUrl`, which answers `404` while the user is banned.
+- It isn't a snapshot. Each page reads what is there when it's asked for, while the account is in use. What is there throughout is in the export exactly once. What is written or deleted meanwhile is in it or not, by where the export had got to.
+- A new post or an edit is in it at once. A comment the user just sent, and a like of a comment, are in it after the [compactor](APP.md#8-the-compactor)'s next run, which is seconds. A like that was [taken back](#delete-like) isn't in it: a post's at once, and a comment's after that run.
+- What it leaves out: what moderators hold about the user and don't tell them (why they were banned, what was decided about their reports), what the user did as a moderator or an admin (decisions, blocked words, rules, ads), the operator's logs, counts that are kept for minutes (limits), and a file that was uploaded and never posted.
+- Reading it changes nothing, so it leaves no record in the [audit log](DEPLOY.md#audit-log). The server's own log has a line when an export is started.
 
 | Status | What happened |
 | --- | --- |
@@ -504,9 +504,9 @@ An instance has one language per file of its `languages` folder, so adding a fil
 What the instance says is in one of these languages: the `error` of an error response, the `note` that comes with a new key, the `text` of a [notice](#notices). Posts and comments aren't: they stay as they were written. Machine-readable values, such as a `status`, are the same in every language, so a client should go by the status code and those, never by the wording of an `error`.
 
 The language of a response is:
-1. **The user's**, on a request that is [authenticated](#authentication): the one they [registered in](#post-register), or [changed to](#get-usersuserid-and-patch-usersuserid) since, whatever the request's headers say.
-2. Otherwise **the one the `Accept-Language` header asks for**, the most wanted of those the instance has. A regional variant is answered in the closest one there is: `es-MX` in `es`, and `pt` in `pt-BR`.
-3. Otherwise **the instance's default**.
+1. The user's, on a request that is [authenticated](#authentication): the one they [registered in](#post-register), or [changed to](#get-usersuserid-and-patch-usersuserid) since, whatever the request's headers say.
+2. Otherwise the one the `Accept-Language` header asks for, the most wanted of those the instance has. A regional variant is answered in the closest one there is: `es-MX` in `es`, and `pt` in `pt-BR`.
+3. Otherwise the instance's default.
 
 A language that lacks a message says it in the default language. Two things are in English whatever the language: most of what `details` says about the fields of a request that doesn't validate, and the errors of requests that never reach an endpoint (a body that isn't JSON, a path that isn't there).
 
@@ -542,8 +542,8 @@ A server takes all five types unless its operator turned some off (`POST_TYPE_TE
 | `comments` | Optional. Whether the post takes [comments](#comments): `true` or `false` (a JSON boolean, or the string in a form field). Defaults to `false` for new content. An update that leaves it out keeps the content's value, and changing only this is an update too. Turning it off closes and hides the post's comments without deleting them: they're back when it's turned on again. |
 
 The request is synchronous:
-1. **The post is [moderated](#moderation).** It gets a trust score, which says where it goes. With the default thresholds, a post containing a word or phrase the server blocks is refused with `422`, and so is one that none of its hashtags is allowed on: nothing is stored. Otherwise it keeps the hashtags that are allowed, and is either published or, if its score is between the thresholds, held in the [moderation queue](#the-moderation-queue).
-2. **If you already posted 3 times in the last minute** (`POST_RATE_LIMIT_PER_MINUTE`), the request is refused with `429` and when to try again ([above](#limits-on-posts-and-comments)), and nothing else is done. New content and updates are posts; storing the same content again unchanged isn't. A post that fails doesn't count either. Posts claim their place atomically, in Redis, so of several sent at once, no more get through than the limit allows.
+1. The post is [moderated](#moderation). It gets a trust score, which says where it goes. With the default thresholds, a post containing a word or phrase the server blocks is refused with `422`, and so is one that none of its hashtags is allowed on: nothing is stored. Otherwise it keeps the hashtags that are allowed, and is either published or, if its score is between the thresholds, held in the [moderation queue](#the-moderation-queue).
+2. If you already posted 3 times in the last minute (`POST_RATE_LIMIT_PER_MINUTE`), the request is refused with `429` and when to try again ([above](#limits-on-posts-and-comments)), and nothing else is done. New content and updates are posts; storing the same content again unchanged isn't. A post that fails doesn't count either. Posts claim their place atomically, in Redis, so of several sent at once, no more get through than the limit allows.
 3. An image's, video's or audio's file is written to the content store, under a name of the request's own (`staged/<writeId>`), where it waits. Each image of an album is written under a name of its own. The request writes nothing else of the post there, nor to the summary store or Redis.
 4. The post is committed to the database: its row, and the post as this request makes it (its description, with a text post's text or a link's URL), for the compactor to write out. If this fails, the request fails, the file of step 3 is removed (every image of an album), and nothing is added to any feed. An update that fails changed nothing: the content is as it was.
 5. The same commit queues the post for the feed index: one row for each of its hashtags, and one for its publisher's own index. The request is then done, and the post can be read at `GET /content/:contentId`, and its bytes at `/raw` (an album's images at `/raw` and `/raw/<n>`).
@@ -579,18 +579,18 @@ Audio files are stored as they're sent, metadata included, under the content typ
 
 An image can have an alt text: a description of what it shows, for people who can't see it. A screen reader reads it out in the image's place, so a client should put it in the image's `alt` attribute, or whatever its platform has for that.
 
-- **It's optional, and at most 1,500 characters,** trimmed of leading and trailing whitespace. A longer one gets `400`. An empty one is none.
-- **Only an image has one.** `alt` on a `text`, `video`, `audio` or `link` post gets `400`.
-- **It's plain text,** not a [formatted text](TEXT_EDITORS.md): it's read out as written.
-- **How to send it:**
+- It's optional, and at most 1,500 characters, trimmed of leading and trailing whitespace. A longer one gets `400`. An empty one is none.
+- Only an image has one. `alt` on a `text`, `video`, `audio` or `link` post gets `400`.
+- It's plain text, not a [formatted text](TEXT_EDITORS.md): it's read out as written.
+- How to send it:
   - For a post of one image, in the `alt` field, as JSON or as a form field.
   - For an [album](#albums) sent as JSON, in each item of `images`: `{ content, alt }` or `{ uploadId, alt }`. The post's own `alt` beside `images` gets `400`.
   - For an album sent as multipart, in one `alt` field for each file part, in the order of the parts. Send an empty `alt` for an image that has none, so the ones after it stay with their images. Fewer `alt` fields than files describe the first images; more get `400`.
-- **Where it's returned:**
+- Where it's returned:
   - In the post's [preview](#previews), as `alt`: a list with one string for each image, in the images' order, `""` for an image that has none. A post none of whose images has one has no `alt`.
   - In `images` of [`GET /content/:contentId`](#get-contentcontentid), as each image's own `alt`. An image without one has none.
-- **An update sends it again,** as it sends the whole post: an update without `alt` drops it. Changing only the alt text is an update too.
-- **It's [moderated](#moderation) as the caption is.** A word the server blocks is blocked there too.
+- An update sends it again, as it sends the whole post: an update without `alt` drops it. Changing only the alt text is an update too.
+- It's [moderated](#moderation) as the caption is. A word the server blocks is blocked there too.
 
 ```bash
 curl -X POST localhost:3000/store -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID" \
@@ -601,10 +601,10 @@ curl -X POST localhost:3000/store -H "Authorization: Bearer $KEY" -H "X-User-Id:
 
 A server processes the videos it's sent, unless its operator turned that off (`VIDEO_PROCESSING=false`). A video isn't published as it was sent:
 
-- **It's made an MP4 that plays anywhere:** H.264 video and AAC sound, upright, at most 720 pixels on its shorter side. That's the post's bytes, at `/raw`, and the post's `mimeType` is `video/mp4` whatever was sent.
-- **Its metadata is removed,** as an [image's](#images) is: where and when it was filmed, the device, its title and comments, chapters, subtitles and data tracks. Nothing of the file as it was sent is kept.
-- **It gets an adaptive stream** (HLS), in several sizes: 1080, 720, 480 and 240 pixels on the shorter side by default (`VIDEO_HEIGHTS`), leaving out the ones larger than the video. A player picks the size its connection carries, and changes as that changes.
-- **It gets a poster:** a JPEG of a frame near its start, to show before it plays.
+- It's made an MP4 that plays anywhere: H.264 video and AAC sound, upright, at most 720 pixels on its shorter side. That's the post's bytes, at `/raw`, and the post's `mimeType` is `video/mp4` whatever was sent.
+- Its metadata is removed, as an [image's](#images) is: where and when it was filmed, the device, its title and comments, chapters, subtitles and data tracks. Nothing of the file as it was sent is kept.
+- It gets an adaptive stream (HLS), in several sizes: 1080, 720, 480 and 240 pixels on the shorter side by default (`VIDEO_HEIGHTS`), leaving out the ones larger than the video. A player picks the size its connection carries, and changes as that changes.
+- It gets a poster: a JPEG of a frame near its start, to show before it plays.
 
 The server reads MP4, MOV, 3GP, WebM, Matroska, AVI, MPEG-TS, MPEG-PS, WMV, FLV and Ogg files. A picture larger than 8,192 pixels a side is refused.
 
@@ -638,13 +638,13 @@ A video the server didn't process (one stored before processing was on, or on a 
 
 An update of a video post:
 
-- **With another video,** the post says `processing: true` until the new one is processed. Read by its id, it's the update as written: the new caption and hashtags, and a `preview` with no `video`. `/raw` returns the old video until the new one is ready, the old video's poster and stream stay where they were, and feeds show the post as it was. Once the new one is ready, the old one's files are deleted, and their addresses answer `404`.
-- **With the same file,** the answer says `processing: true` too, but nothing is made again: the post keeps the video it has, and is ready as soon as the server has seen that the file is the same.
+- With another video, the post says `processing: true` until the new one is processed. Read by its id, it's the update as written: the new caption and hashtags, and a `preview` with no `video`. `/raw` returns the old video until the new one is ready, the old video's poster and stream stay where they were, and feeds show the post as it was. Once the new one is ready, the old one's files are deleted, and their addresses answer `404`.
+- With the same file, the answer says `processing: true` too, but nothing is made again: the post keeps the video it has, and is ready as soon as the server has seen that the file is the same.
 
 A video that can't be processed (a file that isn't a video, one that's broken, or one that takes longer than `VIDEO_TIMEOUT_SECONDS`) is reported to its publisher with a [notice](#notices):
 
-- **A new post is deleted.** It was never published.
-- **An update keeps the video the post had.** The rest of the update is made.
+- A new post is deleted. It was never published.
+- An update keeps the video the post had. The rest of the update is made.
 
 A video the server doesn't trust is given up the same way, with a notice that says so and not why: `video_refused` for a new post, `video_update_refused` for an update. That's a video of which a picture matches the server's list of hashes of known child sexual abuse material, on a server that runs the `pdq` [trust plugin](#moderation), which checks each video once it's decoded and before anything of it is published. The server's admins get a [notice](#an-image-that-matches-the-servers-list) of their own.
 
@@ -656,8 +656,8 @@ An image post can have several images, at most 10: an album, or carousel. They'r
 
 How to send them:
 
-- **As multipart:** one file part for each image, each named `content`, in the order they're shown. A file part with another name gets `400`.
-- **As JSON:** in `images`, a list with one item for each image:
+- As multipart: one file part for each image, each named `content`, in the order they're shown. A file part with another name gets `400`.
+- As JSON: in `images`, a list with one item for each image:
 
   | field | notes |
   | --- | --- |
@@ -671,14 +671,14 @@ How to send them:
 
 What holds for each image, and for all of them:
 
-- **Each image is held to what the one image of a post is.** It's a JPEG, PNG, GIF or WebP by its bytes, and is stored [without its metadata](#images). An album can mix the formats.
-- **The size limit is on each image,** not on the album: one larger than `MAX_UPLOAD_BYTES` gets `413`.
-- **If one image is refused, the post is,** and nothing of it is stored.
-- **More than 10 images get `400`.** So do several files on a `video` or `audio` post, and `images` on a post that isn't an `image` post.
-- **The post's `mimeType` and `size` are its first image's.** [`GET /content/:contentId`](#get-contentcontentid) lists every image with its own, in `images`.
-- **The [preview](#previews) says how many images there are,** in `imageCount`, and where the first is. The others are at the same address with their number after it.
-- **Each image can have its own [alt text](#alt-text).** The preview's `alt` lists them in the images' order.
-- **An update sends every image again,** as it sends the whole post: the images it leaves out are deleted. That's how images are added, removed and put in another order. Its first image must be of the content type the post has (an album that starts with a PNG is updated with one that starts with a PNG); the others can be of any of the four. A post of one image can become an album, and an album a post of one image.
+- Each image is held to what the one image of a post is. It's a JPEG, PNG, GIF or WebP by its bytes, and is stored [without its metadata](#images). An album can mix the formats.
+- The size limit is on each image, not on the album: one larger than `MAX_UPLOAD_BYTES` gets `413`.
+- If one image is refused, the post is, and nothing of it is stored.
+- More than 10 images get `400`. So do several files on a `video` or `audio` post, and `images` on a post that isn't an `image` post.
+- The post's `mimeType` and `size` are its first image's. [`GET /content/:contentId`](#get-contentcontentid) lists every image with its own, in `images`.
+- The [preview](#previews) says how many images there are, in `imageCount`, and where the first is. The others are at the same address with their number after it.
+- Each image can have its own [alt text](#alt-text). The preview's `alt` lists them in the images' order.
+- An update sends every image again, as it sends the whole post: the images it leaves out are deleted. That's how images are added, removed and put in another order. Its first image must be of the content type the post has (an album that starts with a PNG is updated with one that starts with a PNG); the others can be of any of the four. A post of one image can become an album, and an album a post of one image.
 
 ```bash
 curl -X POST localhost:3000/store -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID" \
@@ -777,21 +777,21 @@ A username can hold any characters, spaces among them, and its user can change i
   "mentions": [{ "userId": "...", "username": "alice" }, { "userId": "...", "username": "Ann Lee" }] }
 ```
 
-- **`mentions`** lists the users the text mentions, in the order it first names them: each with the `username` the text has them by, and the `userId` to link to. A text that mentions nobody has no `mentions`. The text itself is stored and returned as it was sent.
-- **It comes with every text:** in the response of [`POST /store`](#post-store), in [`GET /content/:contentId`](#get-contentcontentid), in a [comment](#comments) wherever one is returned, on a post or a comment in [the moderation queue](#the-moderation-queue), and in the user's [export](#get-usersuseridexport). A [feed](#get-feed) record has the ones its `preview.text` mentions.
-- **A client reads the text with its `mentions`:** an `@` followed by one of those names is a mention, and any other `@` is the character. [TEXT_EDITORS.md](TEXT_EDITORS.md#mentions) has the rules, which the server's parser follows.
-- **A mention is of a user by the name they have,** to the letter, capitals included. Of several names that fit, the longest is the one: `@Ann Lee` is Ann Lee where there's an Ann too. A name that is no user's is text.
-- **It's not a mention** after a letter or a digit (`mail@alice.example`), in code, in the label of a link, or written `\@`.
-- **A text mentions 10 users at most.** What it names after the tenth is text. Only the first 50 `@` of a text are looked at.
-- **An update or an edit goes on mentioning whom the text mentioned.** A name that was a mention in the text being replaced is the same user's in the new one, even if they have changed their name since and someone else has taken it. Any other name is looked up as it is then.
+- `mentions` lists the users the text mentions, in the order it first names them: each with the `username` the text has them by, and the `userId` to link to. A text that mentions nobody has no `mentions`. The text itself is stored and returned as it was sent.
+- It comes with every text: in the response of [`POST /store`](#post-store), in [`GET /content/:contentId`](#get-contentcontentid), in a [comment](#comments) wherever one is returned, on a post or a comment in [the moderation queue](#the-moderation-queue), and in the user's [export](#get-usersuseridexport). A [feed](#get-feed) record has the ones its `preview.text` mentions.
+- A client reads the text with its `mentions`: an `@` followed by one of those names is a mention, and any other `@` is the character. [TEXT_EDITORS.md](TEXT_EDITORS.md#mentions) has the rules, which the server's parser follows.
+- A mention is of a user by the name they have, to the letter, capitals included. Of several names that fit, the longest is the one: `@Ann Lee` is Ann Lee where there's an Ann too. A name that is no user's is text.
+- It's not a mention after a letter or a digit (`mail@alice.example`), in code, in the label of a link, or written `\@`.
+- A text mentions 10 users at most. What it names after the tenth is text. Only the first 50 `@` of a text are looked at.
+- An update or an edit goes on mentioning whom the text mentioned. A name that was a mention in the text being replaced is the same user's in the new one, even if they have changed their name since and someone else has taken it. Any other name is looked up as it is then.
 
 The notice is `post_mention` or `comment_mention`, with who wrote the text as its `from`:
 
-- **It's sent when the text is published:** at once for a post or comment that's published, and when it's accepted for one that waits in the moderation queue. One that's rejected tells nobody.
-- **Each user is told once** of a text that mentions them, however often it names them, and nobody is told of what they wrote themselves.
-- **An update or an edit tells only whom it newly mentions:** not those the text mentioned before, nor a user who still has the notice of an earlier mention in the same post or comment in their inbox.
-- **A [block](#blocks) stops it,** in either direction. The mention is still in the text, and still a link.
-- **It isn't a message.** Turning messages off (`messages: false`) doesn't turn it off, and it counts towards no limit on messages. What bounds it is the [limits on posts and comments](#limits-on-posts-and-comments), and the 10 mentions a text.
+- It's sent when the text is published: at once for a post or comment that's published, and when it's accepted for one that waits in the moderation queue. One that's rejected tells nobody.
+- Each user is told once of a text that mentions them, however often it names them, and nobody is told of what they wrote themselves.
+- An update or an edit tells only whom it newly mentions: not those the text mentioned before, nor a user who still has the notice of an earlier mention in the same post or comment in their inbox.
+- A [block](#blocks) stops it, in either direction. The mention is still in the text, and still a link.
+- It isn't a message. Turning messages off (`messages: false`) doesn't turn it off, and it counts towards no limit on messages. What bounds it is the [limits on posts and comments](#limits-on-posts-and-comments), and the 10 mentions a text.
 
 ### `GET /content/:contentId`
 
@@ -870,9 +870,9 @@ Nothing is copied. The post stays one post, with one like count, credited to its
 Authenticated. A [banned](#bans) user is refused (`403`), and so is a user the post's publisher [blocks](#blocks): "this post's publisher doesn't take reposts from you". An instance can turn reposts off (`REPOSTS=false`), and the request then gets `400`.
 
 What can be reposted:
-- **Any published post but your own.** Your own post gets other hashtags by an update ([`POST /store`](#post-store)), so a repost of it gets `400`. A post that waits in the [moderation queue](#the-moderation-queue), is set for deletion or isn't there gets `404`.
-- **Once.** A post you already reposted gets `409`.
-- **With a hashtag it doesn't have.** That keeps a repost from being a way to bring a post back to the top of the feeds it's already in.
+- Any published post but your own. Your own post gets other hashtags by an update ([`POST /store`](#post-store)), so a repost of it gets `400`. A post that waits in the [moderation queue](#the-moderation-queue), is set for deletion or isn't there gets `404`.
+- Once. A post you already reposted gets `409`.
+- With a hashtag it doesn't have. That keeps a repost from being a way to bring a post back to the top of the feeds it's already in.
 
 Each hashtag is then held to its own [moderation](#moderation), as a post's hashtags are, and the post gets the ones that pass. Those it doesn't get are listed in `removedTags`, each with a `reason`:
 
@@ -905,10 +905,10 @@ curl -X POST localhost:3000/repost -H "Authorization: Bearer $KEY" -H "X-User-Id
 The [CLI](CLI.md) does this with `evieverse repost <contentId> --tags "mumbai, travel"`.
 
 How a repost shows:
-- **After the compactor's next run,** as a new post does ([`POST /store`](#post-store)): from then on the post carries the hashtags, [`GET /content/:contentId`](#get-contentcontentid) lists them in `tags`, and the feeds show the post there.
-- **In a feed,** a record that is there because of a repost has `repost`: `{ at }`, the time of the repost, which is where the record is placed. In a [following feed](#get-feedfollowing) it also says who reposted: `{ at, by: { userId, username } }`. On such a record `likes` counts the likes since the repost, while `createdAt` and `publisher` are still the post's own.
-- **On the post,** `GET /content/:contentId` has `reposts`: one item per repost, oldest first, each `{ by: { userId, username }, tags, at }`. `tags` are the hashtags that repost gave and the post still has, and `by` is left out once the reposter's account is deleted. The post's `likes` is its whole count, wherever the likes were made.
-- **A hashtag a repost gave is the post's from then on.** An update's `tags` are the publisher's own, so the publisher keeps the reposted hashtags through updates and can't drop them. It takes a moderator of the hashtag, a server moderator or an admin to [remove](#a-hashtags-queue) one, and it stays when the reposter deletes their account. The hashtag's rules still apply: an update can lose the post a reposted hashtag its publisher is muted on, or whose blocked words the post now has.
+- After the compactor's next run, as a new post does ([`POST /store`](#post-store)): from then on the post carries the hashtags, [`GET /content/:contentId`](#get-contentcontentid) lists them in `tags`, and the feeds show the post there.
+- In a feed, a record that is there because of a repost has `repost`: `{ at }`, the time of the repost, which is where the record is placed. In a [following feed](#get-feedfollowing) it also says who reposted: `{ at, by: { userId, username } }`. On such a record `likes` counts the likes since the repost, while `createdAt` and `publisher` are still the post's own.
+- On the post, `GET /content/:contentId` has `reposts`: one item per repost, oldest first, each `{ by: { userId, username }, tags, at }`. `tags` are the hashtags that repost gave and the post still has, and `by` is left out once the reposter's account is deleted. The post's `likes` is its whole count, wherever the likes were made.
+- A hashtag a repost gave is the post's from then on. An update's `tags` are the publisher's own, so the publisher keeps the reposted hashtags through updates and can't drop them. It takes a moderator of the hashtag, a server moderator or an admin to [remove](#a-hashtags-queue) one, and it stays when the reposter deletes their account. The hashtag's rules still apply: an update can lose the post a reposted hashtag its publisher is muted on, or whose blocked words the post now has.
 
 #### A post on another server
 
@@ -943,19 +943,19 @@ To check the signature, the instance asks the original's server for its public k
 An original that is itself a repost of a post elsewhere isn't its server's to attest: `GET /content/:contentId/attestation` answers `409` for it, with the address of the post it reposts in `origin.url`. Ask that post's server instead, so a post has one address wherever it's reposted from.
 
 The first repost of an original makes the instance's entry for it: a post of the reposter's that is a link to the original, with the original's summary.
-- **It's a new post, and passes what a new post does.** Its type must be one the instance [takes](#post-store) (`400`). It's [moderated](#moderation): it gets a trust score from what there is of it to read (the preview's text or link, the original's address, its publisher's name), which can refuse it (`422`) or hold it in the [moderation queue](#the-moderation-queue), and its hashtags follow their rules. It's a post as far as the [limit on posts a minute](#limits-on-posts-and-comments) goes.
-- **The response** is `201` with `{ contentId, tags, preview, aiGenerated, origin }`, plus `removedTags` when moderation dropped some of its hashtags, or `202` with `status: "pending_review"` beside them when it's held. `contentId` is the entry's id here, and `preview` is the original's, as its server attested it, cut to this instance's [preview](#previews) length.
-- **It shows like any post, with `origin`.** Feed records and `GET /content/:contentId` carry `origin: { url, publisher: { userId, username } }`: the original's address, and who published it there. Their `publisher` is the user who reposted it here, whose post the entry is. `GET /content/:contentId` adds `origin.attestedAt`: when the original's server signed what is shown.
-- **Show the original's server beside its publisher's name.** `origin.publisher.username` is a name on the server at `origin.url`, and nothing more. The attestation says that server said it, not who the person is: anyone can run a server and attest posts under any name, one that is somebody's on this instance among them. So show the host of `origin.url` with the name (`Dana of the North` on `other.example`), never the name alone. And `origin.publisher.userId` is an id on that server: don't link it to a user of this instance, or show it as one.
-- **Its bytes stay where the original is.** An image's, video's or audio's `preview.url` is the original's, `<origin.url>/raw`, and `GET /content/:contentId/raw` redirects there (`302`). An album's other images are there too, at `<origin.url>/raw/<n>`, where `GET /content/:contentId/raw/<n>` redirects, and its `preview.imageCount` says how many there are. Its images' [alt texts](#alt-text) come with the preview, in `alt`. A [processed video](#videos)'s poster and stream are the original's too: `preview.video.poster` and `preview.video.hls` are addresses on the original's server, and `GET /content/:contentId/video/:videoId/:file` redirects there. `GET /content/:contentId` has no `size` for it, no whole `text`, and no `images`.
-- **It takes no comments, and has no update** (`400`): what it shows is the original's. Its owner deletes it like any post.
-- **The summary is the original's server's word, as of `origin.attestedAt`.** The instance checks who signed it, and never reads the original. So an edit or a deletion there shows here once the instance has a [later attestation](#refreshing-a-repost) of the original, which it asks that server for about once a day and which anybody can bring sooner; until then the entry says what the post was. And a server is free to say what it likes of its own posts. An image's, video's or audio's bytes aren't signed: they're read at the original's address.
+- It's a new post, and passes what a new post does. Its type must be one the instance [takes](#post-store) (`400`). It's [moderated](#moderation): it gets a trust score from what there is of it to read (the preview's text or link, the original's address, its publisher's name), which can refuse it (`422`) or hold it in the [moderation queue](#the-moderation-queue), and its hashtags follow their rules. It's a post as far as the [limit on posts a minute](#limits-on-posts-and-comments) goes.
+- The response is `201` with `{ contentId, tags, preview, aiGenerated, origin }`, plus `removedTags` when moderation dropped some of its hashtags, or `202` with `status: "pending_review"` beside them when it's held. `contentId` is the entry's id here, and `preview` is the original's, as its server attested it, cut to this instance's [preview](#previews) length.
+- It shows like any post, with `origin`. Feed records and `GET /content/:contentId` carry `origin: { url, publisher: { userId, username } }`: the original's address, and who published it there. Their `publisher` is the user who reposted it here, whose post the entry is. `GET /content/:contentId` adds `origin.attestedAt`: when the original's server signed what is shown.
+- Show the original's server beside its publisher's name. `origin.publisher.username` is a name on the server at `origin.url`, and nothing more. The attestation says that server said it, not who the person is: anyone can run a server and attest posts under any name, one that is somebody's on this instance among them. So show the host of `origin.url` with the name (`Dana of the North` on `other.example`), never the name alone. And `origin.publisher.userId` is an id on that server: don't link it to a user of this instance, or show it as one.
+- Its bytes stay where the original is. An image's, video's or audio's `preview.url` is the original's, `<origin.url>/raw`, and `GET /content/:contentId/raw` redirects there (`302`). An album's other images are there too, at `<origin.url>/raw/<n>`, where `GET /content/:contentId/raw/<n>` redirects, and its `preview.imageCount` says how many there are. Its images' [alt texts](#alt-text) come with the preview, in `alt`. A [processed video](#videos)'s poster and stream are the original's too: `preview.video.poster` and `preview.video.hls` are addresses on the original's server, and `GET /content/:contentId/video/:videoId/:file` redirects there. `GET /content/:contentId` has no `size` for it, no whole `text`, and no `images`.
+- It takes no comments, and has no update (`400`): what it shows is the original's. Its owner deletes it like any post.
+- The summary is the original's server's word, as of `origin.attestedAt`. The instance checks who signed it, and never reads the original. So an edit or a deletion there shows here once the instance has a [later attestation](#refreshing-a-repost) of the original, which it asks that server for about once a day and which anybody can bring sooner; until then the entry says what the post was. And a server is free to say what it likes of its own posts. An image's, video's or audio's bytes aren't signed: they're read at the original's address.
 
 An instance holds one entry per original, however many users repost it:
-- **A repost of an original the instance already has an entry for is a repost of that entry,** exactly as if it had named the entry's `contentId`: it gives the entry hashtags, shows it to the reposter's followers, and is answered as [above](#post-repost), with `repostedAt`. The user who made the entry has reposted the original already (`409`).
-- **While the entry waits in the moderation queue, or is set for deletion,** the original can't be reposted (`409`). Once it's deleted, the next repost makes a new entry.
-- **While the entry is hidden because the original was gone** ([below](#refreshing-a-repost)), a repost's attestation is first taken as a refresh, which brings the entry back, and the repost is then made of it. It can be refused as a refresh can, and gets `409` if what the post now says is held in the moderation queue.
-- **An address on this instance** names a post of its own, and is reposted as one, as if by its `contentId`. Its attestation is this instance's own, and is checked with this instance's own keys.
+- A repost of an original the instance already has an entry for is a repost of that entry, exactly as if it had named the entry's `contentId`: it gives the entry hashtags, shows it to the reposter's followers, and is answered as [above](#post-repost), with `repostedAt`. The user who made the entry has reposted the original already (`409`).
+- While the entry waits in the moderation queue, or is set for deletion, the original can't be reposted (`409`). Once it's deleted, the next repost makes a new entry.
+- While the entry is hidden because the original was gone ([below](#refreshing-a-repost)), a repost's attestation is first taken as a refresh, which brings the entry back, and the repost is then made of it. It can be refused as a refresh can, and gets `409` if what the post now says is held in the moderation queue.
+- An address on this instance names a post of its own, and is reposted as one, as if by its `contentId`. Its attestation is this instance's own, and is checked with this instance's own keys.
 
 An instance can refuse reposts of posts on other servers alone (`REPOSTS_REMOTE=false`): they get `400`, and reposts of its own posts stay on.
 
@@ -965,8 +965,8 @@ The [CLI](CLI.md) does both steps with `evieverse repost https://other.example/c
 
 An instance's entry for a post on another server holds the original's summary as it was when it was last attested. It learns what the original became from a later attestation, which reaches it in two ways:
 
-- **The instance asks for one itself,** every 24 hours for each entry (`REPOSTS_REFRESH_HOURS`; `0` turns it off): [`GET /content/:contentId/attestation`](#attestations) on the original's server. So an edit or a deletion of the original shows here within about a day with no client doing anything. While an entry is hidden because the post was gone, it asks every 6 hours.
-- **A client brings one sooner,** with `POST /repost/refresh`: it asks the original's server for the attestation, and sends what it got here, as a repost sends it. A client that shows a repost can compare `origin.attestedAt` with how fresh it wants it, and do this when it's older.
+- The instance asks for one itself, every 24 hours for each entry (`REPOSTS_REFRESH_HOURS`; `0` turns it off): [`GET /content/:contentId/attestation`](#attestations) on the original's server. So an edit or a deletion of the original shows here within about a day with no client doing anything. While an entry is hidden because the post was gone, it asks every 6 hours.
+- A client brings one sooner, with `POST /repost/refresh`: it asks the original's server for the attestation, and sends what it got here, as a repost sends it. A client that shows a repost can compare `origin.attestedAt` with how fresh it wants it, and do this when it's older.
 
 Either way the instance does the same with it. The request:
 
@@ -977,8 +977,8 @@ Either way the instance does the same with it. The request:
 Authenticated. Any user can send it, not only those who reposted the original: it's the original's server that says what the post is, and the user only carries its word. A [banned](#bans) user is refused (`403`).
 
 What to send is whichever the original's server gave:
-- **Its `attestation`,** if the post is there (`200`). The entry takes the post's summary as it is now: its publisher's name there, its AI declaration and its preview.
-- **Its `gone`,** if the post isn't (`404` there, with `gone` beside the `error`). It's sent in `origin.attestation` like the other, and has the entry hidden, not deleted.
+- Its `attestation`, if the post is there (`200`). The entry takes the post's summary as it is now: its publisher's name there, its AI declaration and its preview.
+- Its `gone`, if the post isn't (`404` there, with `gone` beside the `error`). It's sent in `origin.attestation` like the other, and has the entry hidden, not deleted.
 
 The attestation is [checked as a repost's is](#a-post-on-another-server), with the same refusals, except that one which says the post is gone is taken. Then:
 
@@ -995,15 +995,15 @@ The attestation is [checked as a repost's is](#a-post-on-another-server), with t
 | `422` | What it now says is something the instance doesn't trust enough to keep. The entry stays as it was. |
 | `429` | Your refreshes changed entries more than 10 times in a minute. `Retry-After` says when to try again. One that changes nothing isn't counted. |
 
-- **What the entry now says is [moderated](#moderation) as an update of a post is,** in the name of the entry's owner: it gets a trust score, and its hashtags are held to their rules. A hashtag whose blocked words it now has comes off it, one a repost gave it too, and is listed in `removedTags`.
-- **It shows as an update does:** `GET /content/:contentId` has it at once, with the new `origin.attestedAt`, and the feeds after the compactor's next run. The entry stays its owner's post, where it was, with the hashtags reposts gave it.
-- **A post that's gone has its entry hidden, and deleted only if it stays gone.** A server signs `gone` for whatever it doesn't publish at an address, which includes a post whose update waits in its moderation queue, so it's no proof that the post was deleted.
-  - **Hidden** is as a post that waits in the moderation queue is: `404` to everyone but its owner, server moderators and admins, in no feed, and not to be liked or reposted. The entry keeps its hashtags, the ones reposts gave it too. [`GET /content/:contentId`](#get-contentcontentid) shows it to those three with `status: "origin_gone"`.
-  - **A later attestation of the post brings it back** where it was, with all its hashtags, once the compactor has run. It's moderated like any refresh, so it can come back held (`202`).
-  - **After 7 days hidden** (`REPOSTS_GONE_DAYS`) with no such attestation, the instance deletes the entry, as [`DELETE /content/:contentId`](#delete-contentcontentid) would: that's `deleteAfter`. The days count from `goneAt`, whatever `gone` attestations arrive later. Once it's deleted, the original can be reposted anew if it's there again.
-- **Nobody is told.** The entry's owner gets no notice when it's changed, hidden or deleted this way.
-- **An original's server that doesn't answer changes nothing.** When the instance asks and gets no attestation it can check (the server is down, or answers with nothing signed), the entry stays as it is, and that server is asked again an hour later. Only a signed `gone` hides an entry.
-- **An instance that takes no reposts of posts on other servers** (`REPOSTS_REMOTE=false`, or `REPOSTS=false`) takes no refreshes from clients either (`400`). It still asks after the entries it has, unless `REPOSTS_REFRESH_HOURS=0`.
+- What the entry now says is [moderated](#moderation) as an update of a post is, in the name of the entry's owner: it gets a trust score, and its hashtags are held to their rules. A hashtag whose blocked words it now has comes off it, one a repost gave it too, and is listed in `removedTags`.
+- It shows as an update does: `GET /content/:contentId` has it at once, with the new `origin.attestedAt`, and the feeds after the compactor's next run. The entry stays its owner's post, where it was, with the hashtags reposts gave it.
+- A post that's gone has its entry hidden, and deleted only if it stays gone. A server signs `gone` for whatever it doesn't publish at an address, which includes a post whose update waits in its moderation queue, so it's no proof that the post was deleted.
+  - Hidden is as a post that waits in the moderation queue is: `404` to everyone but its owner, server moderators and admins, in no feed, and not to be liked or reposted. The entry keeps its hashtags, the ones reposts gave it too. [`GET /content/:contentId`](#get-contentcontentid) shows it to those three with `status: "origin_gone"`.
+  - A later attestation of the post brings it back where it was, with all its hashtags, once the compactor has run. It's moderated like any refresh, so it can come back held (`202`).
+  - After 7 days hidden (`REPOSTS_GONE_DAYS`) with no such attestation, the instance deletes the entry, as [`DELETE /content/:contentId`](#delete-contentcontentid) would: that's `deleteAfter`. The days count from `goneAt`, whatever `gone` attestations arrive later. Once it's deleted, the original can be reposted anew if it's there again.
+- Nobody is told. The entry's owner gets no notice when it's changed, hidden or deleted this way.
+- An original's server that doesn't answer changes nothing. When the instance asks and gets no attestation it can check (the server is down, or answers with nothing signed), the entry stays as it is, and that server is asked again an hour later. Only a signed `gone` hides an entry.
+- An instance that takes no reposts of posts on other servers (`REPOSTS_REMOTE=false`, or `REPOSTS=false`) takes no refreshes from clients either (`400`). It still asks after the entries it has, unless `REPOSTS_REFRESH_HOURS=0`.
 
 #### Attestations
 
@@ -1019,14 +1019,14 @@ curl localhost:3000/content/$CONTENT_ID/attestation
 { "attestation": "eyJ2IjoxLCJraWQiOiI….k3VwR2…" }
 ```
 
-- **Ask for it when you use it.** It's signed as of the request, and other servers take it for 10 minutes. It comes with `Cache-Control: no-store`.
-- **Send it on whole.** A client has no need to read it, and a change to it makes the signature wrong.
-- **Only a published post has one.** A post that isn't there, is set for deletion, or waits in the [moderation queue](#the-moderation-queue) gets `404`, to its publisher too. So does a new post whose video is still being [processed](#videos); a post whose update is being processed is attested as it was before the update.
-- **The `404` is signed too.** Beside its `error` it has `gone`: an attestation that says there's no post at the address, which the servers that hold a repost of one that was read when they ask, and a client can send them sooner ([`POST /repost/refresh`](#refreshing-a-repost) there). It's the same for all three, so it says no more than the `404` does. That's why those servers hide their repost on it and don't delete it: a post that an update sent to the moderation queue is hidden there while it waits, and is back once it's accepted and attested again.
-- **One address can ask for 60 attestations a minute** (`REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE`), then gets `429` ([below](#limits-on-reads-that-need-no-key)). A server that asks after the posts it holds reposts of sends at most 30 a minute.
-- **Only a post that is the instance's own has one.** Its entry for a [post on another server](#a-post-on-another-server) gets `409`, with `origin: { url }` beside the `error`: the address of the original, whose server is the one to ask.
-- **An instance that signs nothing gives none** (`400`): one with no signing key (`REPOSTS_SIGNING_KEYS`), or no address of its own (`PUBLIC_BASE_URL`). Its posts are reposted only on the instance itself, and its `404` has no `gone`. It still takes reposts of posts on servers that sign.
-- **An instance whose address names a port** (`PUBLIC_BASE_URL=https://api.example.com:8443`) signs attestations that other servers refuse: they ask for keys on port 443 only.
+- Ask for it when you use it. It's signed as of the request, and other servers take it for 10 minutes. It comes with `Cache-Control: no-store`.
+- Send it on whole. A client has no need to read it, and a change to it makes the signature wrong.
+- Only a published post has one. A post that isn't there, is set for deletion, or waits in the [moderation queue](#the-moderation-queue) gets `404`, to its publisher too. So does a new post whose video is still being [processed](#videos); a post whose update is being processed is attested as it was before the update.
+- The `404` is signed too. Beside its `error` it has `gone`: an attestation that says there's no post at the address, which the servers that hold a repost of one that was read when they ask, and a client can send them sooner ([`POST /repost/refresh`](#refreshing-a-repost) there). It's the same for all three, so it says no more than the `404` does. That's why those servers hide their repost on it and don't delete it: a post that an update sent to the moderation queue is hidden there while it waits, and is back once it's accepted and attested again.
+- One address can ask for 60 attestations a minute (`REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE`), then gets `429` ([below](#limits-on-reads-that-need-no-key)). A server that asks after the posts it holds reposts of sends at most 30 a minute.
+- Only a post that is the instance's own has one. Its entry for a [post on another server](#a-post-on-another-server) gets `409`, with `origin: { url }` beside the `error`: the address of the original, whose server is the one to ask.
+- An instance that signs nothing gives none (`400`): one with no signing key (`REPOSTS_SIGNING_KEYS`), or no address of its own (`PUBLIC_BASE_URL`). Its posts are reposted only on the instance itself, and its `404` has no `gone`. It still takes reposts of posts on servers that sign.
+- An instance whose address names a port (`PUBLIC_BASE_URL=https://api.example.com:8443`) signs attestations that other servers refuse: they ask for keys on port 443 only.
 
 An attestation is two parts in base64url with a dot between them: a JSON payload, and its Ed25519 signature. The payload:
 
@@ -1097,11 +1097,11 @@ A client that sends no body with a `DELETE` names the post in the query instead,
 curl -X DELETE "localhost:3000/like?contentId=$CONTENT_ID" -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID"
 ```
 
-- **The post has the new count at once** ([`GET /content/:contentId`](#get-contentcontentid)). Feeds show it, and the order it makes, after the next compactor run.
-- **Where a [repost](#post-repost) placed the post,** that record's `likes` are the ones since the repost. Taking back a like that was made before the repost leaves that number as it was.
-- **Content set for deletion** gets `404`: its likes go with it.
-- **Content that's withheld from readers,** because it waits in the [moderation queue](#the-moderation-queue) or its original is [gone from its own server](#refreshing-a-repost), still gives back a like to the user who has one there. Anyone else gets `404`, as from `POST /like`.
-- **A [banned](#bans) user isn't refused:** the like is theirs to take back.
+- The post has the new count at once ([`GET /content/:contentId`](#get-contentcontentid)). Feeds show it, and the order it makes, after the next compactor run.
+- Where a [repost](#post-repost) placed the post, that record's `likes` are the ones since the repost. Taking back a like that was made before the repost leaves that number as it was.
+- Content set for deletion gets `404`: its likes go with it.
+- Content that's withheld from readers, because it waits in the [moderation queue](#the-moderation-queue) or its original is [gone from its own server](#refreshing-a-repost), still gives back a like to the user who has one there. Anyone else gets `404`, as from `POST /like`.
+- A [banned](#bans) user isn't refused: the like is theirs to take back.
 
 **Taking back a like of a comment.** With `commentId` as well, in the body or in the query, the like is the user's of that [comment](#comments):
 
@@ -1178,8 +1178,8 @@ A comment is:
 #### Placeholders
 
 A comment that something replies to can't just go, or its replies would be under nothing. So two things leave a placeholder in a comment's place:
-- **Deleting a comment that has replies**, whoever deletes it: `status: "deleted"`.
-- **An edit that's held**, which takes a published comment back to the moderation queue until it's decided on: `status: "pending_review"`.
+- Deleting a comment that has replies, whoever deletes it: `status: "deleted"`.
+- An edit that's held, which takes a published comment back to the moderation queue until it's decided on: `status: "pending_review"`.
 
 A placeholder is returned as a comment is, in the lists and by its id, where the comment was: the same record with `author: null`, `text: ""`, `aiGenerated: false`, `media: null`, `likes: 0` and `editedAt: null`, with the comment's `replies`, and with the `status`. A client shows it as a gap with the replies under it. It isn't a comment: replying to it, liking it, reporting it, editing it or deleting it gets `404`, as for a comment that isn't there. The replies under it are read, liked and replied to as before.
 
@@ -1215,7 +1215,7 @@ What they count and list:
 - A post's `count` is every published comment on it, replies included, not just the ones on the page or at that level. A reply list's `count` is the replies to that comment alone, not the replies to those.
 - A placeholder is listed, and counted, as the comment it stands for.
 - A comment that waits in the moderation queue is in neither a list nor a count, unless it was published before: then its placeholder is.
-- **The lists and the counts show what the compactor has written.** A new comment, an edit, a like or its taking back, a deletion and a moderator's decision are in the lists, in `count` and `replies`, and in a listed record's `likes`, after the [compactor](APP.md#8-the-compactor)'s next run: `COMPACT_INTERVAL_SECONDS` later at most (5 by default), plus the time the run takes. Until then they show the comments as they were. A client that wants a new comment in the list at once puts the record the request returned there itself.
+- The lists and the counts show what the compactor has written. A new comment, an edit, a like or its taking back, a deletion and a moderator's decision are in the lists, in `count` and `replies`, and in a listed record's `likes`, after the [compactor](APP.md#8-the-compactor)'s next run: `COMPACT_INTERVAL_SECONDS` later at most (5 by default), plus the time the run takes. Until then they show the comments as they were. A client that wants a new comment in the list at once puts the record the request returned there itself.
 
 `GET /content/:contentId/comments/:commentId` returns one comment, or the placeholder in its place, as it is with every write the server has answered: a new comment can be read this way at once, an edit shows at once, and a deleted comment is gone at once, or is its placeholder if it has replies. A comment that waits in the [moderation queue](#the-moderation-queue) is returned whole, with `status: "pending_review"`, to its author, to server moderators and to admins, who send their credentials in the headers (`Authorization: Bearer <apiKey>` and `X-User-Id`). Anyone else gets `404` for it, or its placeholder if it was published before an edit took it back to the queue.
 
@@ -1252,11 +1252,11 @@ The file is held to what an image or video post's is: an image is a JPEG, PNG, G
 
 A comment's video is processed as a [post's](#videos) is, where the server processes videos, with less made of it:
 
-- **It's made one MP4** of H.264 and AAC, at most 720 pixels on its shorter side (`VIDEO_COMMENT_HEIGHT`), without its metadata. It has no stream and no poster.
-- **The response has `processing: true`,** and so has the comment read by its id, until the video is ready. Its `/raw` answers `404` until then, and `media.mimeType` and `media.size` are the file's as it was sent.
-- **The comment is in the [lists](#reading-comments) once the video is ready,** with `media.mimeType` `video/mp4`.
-- **A video that can't be processed is dropped.** The comment is published with its text alone, or not at all if the video was all of it, and its author gets a [notice](#notices).
-- **A video the server doesn't trust takes the comment with it.** On a server that runs the `pdq` [trust plugin](#moderation), a video of which a picture matches its list isn't published, and neither is the comment's text: its author gets the notice `comment_video_refused`, which doesn't say why.
+- It's made one MP4 of H.264 and AAC, at most 720 pixels on its shorter side (`VIDEO_COMMENT_HEIGHT`), without its metadata. It has no stream and no poster.
+- The response has `processing: true`, and so has the comment read by its id, until the video is ready. Its `/raw` answers `404` until then, and `media.mimeType` and `media.size` are the file's as it was sent.
+- The comment is in the [lists](#reading-comments) once the video is ready, with `media.mimeType` `video/mp4`.
+- A video that can't be processed is dropped. The comment is published with its text alone, or not at all if the video was all of it, and its author gets a [notice](#notices).
+- A video the server doesn't trust takes the comment with it. On a server that runs the `pdq` [trust plugin](#moderation), a video of which a picture matches its list isn't published, and neither is the comment's text: its author gets the notice `comment_video_refused`, which doesn't say why.
 
 The response is the comment:
 
@@ -1284,13 +1284,13 @@ curl -X POST "localhost:3000/content/$CONTENT_ID/comments" -H "Authorization: Be
 
 Edits a comment: its author gives it another text. Nobody else can, an admin included (`403`). `text` is required, at most 2,000 characters and trimmed, and replaces the text the comment has. `aiGenerated` is optional: the author's declaration of whether the comment was created with AI, `true` or `false`.
 
-- **An edit that leaves `aiGenerated` out keeps the comment's value.** One that says it changes it, and changing only that is an edit too: it's sent with the text the comment has, and is scored, counted and dated (`editedAt`) as any edit is.
-- **Nothing else is edited.** The image or video a comment came with is neither replaced nor taken away, and a comment that came without one is given none. A comment that has a file can be left with no text (`"text": ""`); one that hasn't needs one (`400`).
-- **The comment stays where it is.** It keeps its `commentId`, its `createdAt`, its place among the others, its replies and its likes. `editedAt` says when it was last edited. What it said before isn't kept.
-- **The edit shows by the comment's id at once, and in the [lists](#reading-comments) after the compactor's next run.** That goes for a held edit too: the lists show the comment as it was until that run, and its placeholder from then on.
-- **Of two edits sent at once, the last to commit wins.** An edit is of the comment as it is when the edit commits: one that was deleted meanwhile gets `404`, and one that another edit changed meanwhile is edited as that left it.
-- **The text it already has changes nothing,** with the `aiGenerated` it has or with none sent. The response is `200` with `{ contentId, commentId, unchanged: true }`, plus `status: "pending_review"` for a comment that waits in the moderation queue. It isn't scored and isn't counted.
-- **An edit counts as a comment.** It's scored by [moderation](#moderation) as a new comment is, then counted with the user's comments of the last minute ([above](#limits-on-posts-and-comments)).
+- An edit that leaves `aiGenerated` out keeps the comment's value. One that says it changes it, and changing only that is an edit too: it's sent with the text the comment has, and is scored, counted and dated (`editedAt`) as any edit is.
+- Nothing else is edited. The image or video a comment came with is neither replaced nor taken away, and a comment that came without one is given none. A comment that has a file can be left with no text (`"text": ""`); one that hasn't needs one (`400`).
+- The comment stays where it is. It keeps its `commentId`, its `createdAt`, its place among the others, its replies and its likes. `editedAt` says when it was last edited. What it said before isn't kept.
+- The edit shows by the comment's id at once, and in the [lists](#reading-comments) after the compactor's next run. That goes for a held edit too: the lists show the comment as it was until that run, and its placeholder from then on.
+- Of two edits sent at once, the last to commit wins. An edit is of the comment as it is when the edit commits: one that was deleted meanwhile gets `404`, and one that another edit changed meanwhile is edited as that left it.
+- The text it already has changes nothing, with the `aiGenerated` it has or with none sent. The response is `200` with `{ contentId, commentId, unchanged: true }`, plus `status: "pending_review"` for a comment that waits in the moderation queue. It isn't scored and isn't counted.
+- An edit counts as a comment. It's scored by [moderation](#moderation) as a new comment is, then counted with the user's comments of the last minute ([above](#limits-on-posts-and-comments)).
 - A [banned](#bans) user is refused (`403`), and so is a user the post's publisher [blocks](#blocks): they can't change what they wrote there, though they can still delete it. So is the author of a reply, if the author of the comment it replies to blocks them (`403`). The post must be published and take comments, otherwise `404`. A comment that isn't there gets `404`, and so does a [placeholder](#placeholders), and a comment that waits in the moderation queue for anyone who can't read it there.
 
 The response is the comment as it now is:
@@ -1310,9 +1310,9 @@ curl -X PATCH "localhost:3000/content/$CONTENT_ID/comments/$COMMENT_ID" -H "Auth
 ### `DELETE /content/:contentId/comments/:commentId`
 
 Authenticated. Deletes a comment, for good, and returns `{ contentId, commentId, status: "deleted" }`. By its id the comment is gone at once, or is its placeholder, and takes no reply, like or edit from then on; the post's [lists and counts](#reading-comments) show that after the compactor's next run. A comment that isn't there, or that another request deleted first, gets `404`. Who can:
-- **Its author**, whether it's published or waits in the moderation queue.
-- **The publisher of the post it's on**, if it's published. A comment that waits in the moderation queue isn't theirs to read, so it's `404` to them.
-- **An admin.**
+- Its author, whether it's published or waits in the moderation queue.
+- The publisher of the post it's on, if it's published. A comment that waits in the moderation queue isn't theirs to read, so it's `404` to them.
+- An admin.
 
 Anyone else gets `403`, a server moderator included: they [reject](#the-moderation-queue) a comment in the moderation queue, or [delete](#the-report-queue) one in the report queue. A [tag moderator](#moderation) has no say over comments.
 
@@ -1345,8 +1345,8 @@ Who can read the two lists:
 ## Inbox
 
 Every user has an inbox, which only they can read. Two things arrive in it:
-- **Notices** from the server, when a moderator or an admin does something to one of the user's posts or comments, or mutes them on a hashtag, when they're made a moderator of a hashtag or are one no more, when their [claim to a hashtag](#claiming-a-hashtag) is granted or refused, and when a post or a comment [mentions](#mentions) them. Admins and server moderators also get one when a user claims a hashtag, and an admin when the server finds an image or a video of known child sexual abuse material ([below](#notices)).
-- **Messages** from other users, unless the user turned those off or blocked the sender.
+- Notices from the server, when a moderator or an admin does something to one of the user's posts or comments, or mutes them on a hashtag, when they're made a moderator of a hashtag or are one no more, when their [claim to a hashtag](#claiming-a-hashtag) is granted or refused, and when a post or a comment [mentions](#mentions) them. Admins and server moderators also get one when a user claims a hashtag, and an admin when the server finds an image or a video of known child sexual abuse material ([below](#notices)).
+- Messages from other users, unless the user turned those off or blocked the sender.
 
 ### Reading the inbox
 
@@ -1502,9 +1502,9 @@ Blocks are private, and there's no setting that shows them: all three need the u
 
 **Reading goes by who asks.** The feeds and the lists of comments need no key, and a block is nobody's to know but the user who made it. So nothing is left out for a request without credentials: only a request that sends a user's own credentials in the headers (`Authorization: Bearer <apiKey>` and `X-User-Id`) is held to that user's blocks. One with a wrong key is answered as one with none, not with `401`.
 
-- **What is read by its id is given as it is:** a post, a comment, a comment's file, a profile. A blocked user still reads the blocker's posts, as anyone does.
-- **A hashtag feed isn't filtered** ([`GET /feed`](#get-feed)). A client that hides a blocked user's posts there does it by `publisher.userId`, with the list `GET /users/:userId/blocked` gives.
-- **Nor is a [search](#search),** of users or of posts: it takes no credentials.
+- What is read by its id is given as it is: a post, a comment, a comment's file, a profile. A blocked user still reads the blocker's posts, as anyone does.
+- A hashtag feed isn't filtered ([`GET /feed`](#get-feed)). A client that hides a blocked user's posts there does it by `publisher.userId`, with the list `GET /users/:userId/blocked` gives.
+- Nor is a [search](#search), of users or of posts: it takes no credentials.
 
 ## Feeds
 
@@ -1529,11 +1529,11 @@ curl "localhost:3000/feed?tags=news,mumbai&hours=24"
 
 How the feed is assembled:
 
-1. **Window:** the feed is of the posts created in the past `hours`, taken as one span of time. A post's place depends on its likes, or on when it was created, and never on which day that was. A page the window can't fill is left short: the feed doesn't reach back past its window.
-2. **Page size:** a page holds at most `limit` posts (50 by default).
-3. **Order:** each tag's posts are ordered by likes (most first), then recency.
-4. **Turns:** the requested tags take turns, so each gets an equal share of the page. A tag that runs out lets the others continue. Content carrying several requested tags appears once.
-5. **Fresh content:** so that new posts on busy tags aren't buried under liked ones (and can earn likes at all), the 2nd pick per tag, and then every `FEED_FRESH_EVERY`th (default 4), is new content with at most `FEED_FRESH_MAX_LIKES` likes (default 0). It's sampled from that tag's `FEED_FRESH_POOL` newest such records in the window (default 200), in an order that goes by a seed chosen per feed session, so different viewers see different new posts. A fresh slot is skipped once the likes order has already reached unliked content. `FEED_FRESH_EVERY=0` turns this off.
+1. Window: the feed is of the posts created in the past `hours`, taken as one span of time. A post's place depends on its likes, or on when it was created, and never on which day that was. A page the window can't fill is left short: the feed doesn't reach back past its window.
+2. Page size: a page holds at most `limit` posts (50 by default).
+3. Order: each tag's posts are ordered by likes (most first), then recency.
+4. Turns: the requested tags take turns, so each gets an equal share of the page. A tag that runs out lets the others continue. Content carrying several requested tags appears once.
+5. Fresh content: so that new posts on busy tags aren't buried under liked ones (and can earn likes at all), the 2nd pick per tag, and then every `FEED_FRESH_EVERY`th (default 4), is new content with at most `FEED_FRESH_MAX_LIKES` likes (default 0). It's sampled from that tag's `FEED_FRESH_POOL` newest such records in the window (default 200), in an order that goes by a seed chosen per feed session, so different viewers see different new posts. A fresh slot is skipped once the likes order has already reached unliked content. `FEED_FRESH_EVERY=0` turns this off.
 
 **Chronological** feeds work the same way, in order of time instead of likes. Each tag's posts are ordered newest first (step 3), and instead of the tags taking turns (step 4), the next post comes from whichever hashtag's is the newest. So the page is the newest `limit` posts of the hashtags together, and the next page carries on from there. There are no fresh slots (step 5), which exist to lift new posts out of a likes order.
 
@@ -1571,8 +1571,8 @@ Each record is `{ contentId, publisher: { userId, username }, mimeType, aiGenera
 - A cursor doesn't expire. One issued by an earlier release of the server gets `410`, and the client should start over; one that isn't valid gets `400`.
 
 **Limits:** a feed needs no key, so it's limited by the address it's asked from, and by how many feeds the instance is answering:
-- **One address can ask for 120 feeds a minute** (`FEED_RATE_LIMIT_PER_MINUTE`), whatever feeds they are, later pages included. One past that gets `429`, with when to try again in a `Retry-After` header. Every response says where the address stands, in the headers `x-ratelimit-limit`, `x-ratelimit-remaining` and `x-ratelimit-reset` (seconds until the count starts again). An IPv6 address is counted with the rest of its /64.
-- **An instance answers 100 feeds at a time** (`FEED_MAX_CONCURRENT`; each of its servers does, where it has several). One more gets `503` at once, rather than waiting behind them, with when to try again in a `Retry-After` header and in the body:
+- One address can ask for 120 feeds a minute (`FEED_RATE_LIMIT_PER_MINUTE`), whatever feeds they are, later pages included. One past that gets `429`, with when to try again in a `Retry-After` header. Every response says where the address stands, in the headers `x-ratelimit-limit`, `x-ratelimit-remaining` and `x-ratelimit-reset` (seconds until the count starts again). An IPv6 address is counted with the rest of its /64.
+- An instance answers 100 feeds at a time (`FEED_MAX_CONCURRENT`; each of its servers does, where it has several). One more gets `503` at once, rather than waiting behind them, with when to try again in a `Retry-After` header and in the body:
   ```json
   { "error": "the server is answering as many feeds as it can at once; try again in 1 second", "retryAfterSeconds": 1 }
   ```
@@ -1675,41 +1675,41 @@ Whatever is compared is put in lowercase first, and its accents are taken off, i
   ], "nextCursor": null }
 ```
 
-- **It's the start of the name that's matched,** not a part of it: `lice` doesn't find Alice. Each character of `q` stands for itself, a space inside it too, and none is a wildcard.
-- **Users come in the order of their names** as they're compared, and those whose names compare the same (José and jose) in the order of their ids.
-- **A user who changes their name** is found by the new one at once, and no more by the old.
-- **A user whose account is [deleted](#delete-usersuserid) isn't found,** from the moment it's deleted. A [banned](#bans) user still has their account, and is.
-- **A `q` with nothing in it to compare,** such as an accent on its own, gets `400`.
+- It's the start of the name that's matched, not a part of it: `lice` doesn't find Alice. Each character of `q` stands for itself, a space inside it too, and none is a wildcard.
+- Users come in the order of their names as they're compared, and those whose names compare the same (José and jose) in the order of their ids.
+- A user who changes their name is found by the new one at once, and no more by the old.
+- A user whose account is [deleted](#delete-usersuserid) isn't found, from the moment it's deleted. A [banned](#bans) user still has their account, and is.
+- A `q` with nothing in it to compare, such as an accent on its own, gets `400`.
 
 ### Searching posts
 
 `type=content` returns the posts that have every word of `q`, newest first, by when they were created: `{ results: [record, ...], nextCursor }`. Each record is shaped as in [`/feed`](#get-feed), with two differences:
 
-- **It has no `moderated` and no `repost`.** The first is per hashtag, and a search lists a post under none. A post is found once, as itself and at its own time, however often it was reposted.
-- **Its `likes` are all the post has now.** A feed's are as of the compactor's last run.
+- It has no `moderated` and no `repost`. The first is per hashtag, and a search lists a post under none. A post is found once, as itself and at its own time, however often it was reposted.
+- Its `likes` are all the post has now. A feed's are as of the compactor's last run.
 
 What a post is found by:
 
-- **The words of its text,** or of its caption if it's an image, a video or audio, read as its readers read it: without the characters that [format](TEXT_EDITORS.md#the-format) it.
-- **Its hashtags,** every one. These are the hashtags the post has (`tags`), as they are now: one a [repost](#post-repost) gave it finds it, and one a moderator took off it doesn't. A `#word` that's written in the text and isn't among the post's `tags` finds nothing.
-- **Not the whole of a long text.** A post keeps its 100 most frequent words (`SEARCH_MAX_KEYWORDS`), and of two as frequent the one that comes first. Common English words that say nothing of a post ("the", "and", "is") aren't kept, nor a single ASCII letter or digit, nor a word longer than 64 characters.
-- **Nothing else.** Not its comments, the alt text of its images, a link post's address, or its publisher's name. A link post has no text, so it's found by its hashtags. The instance's entry for a [post on another server](#a-post-on-another-server) is found by the start of the original's text, which is all of it the instance holds, and by its hashtags.
+- The words of its text, or of its caption if it's an image, a video or audio, read as its readers read it: without the characters that [format](TEXT_EDITORS.md#the-format) it.
+- Its hashtags, every one. These are the hashtags the post has (`tags`), as they are now: one a [repost](#post-repost) gave it finds it, and one a moderator took off it doesn't. A `#word` that's written in the text and isn't among the post's `tags` finds nothing.
+- Not the whole of a long text. A post keeps its 100 most frequent words (`SEARCH_MAX_KEYWORDS`), and of two as frequent the one that comes first. Common English words that say nothing of a post ("the", "and", "is") aren't kept, nor a single ASCII letter or digit, nor a word longer than 64 characters.
+- Nothing else. Not its comments, the alt text of its images, a link post's address, or its publisher's name. A link post has no text, so it's found by its hashtags. The instance's entry for a [post on another server](#a-post-on-another-server) is found by the start of the original's text, which is all of it the instance holds, and by its hashtags.
 
 How `q` is read:
 
-- **As a post's text is, into words,** and a post must have them all, in any order. There's no search for a phrase.
-- **Whole words only.** `flood` doesn't find "flooding", and a misspelt word finds what's misspelt the same way. A word with an apostrophe counts as the words on each side of it, so `mumbai` finds "Mumbai's".
-- **A word that starts with `#` is read as a hashtag is:** `#Central-Mumbai` looks for `centralmumbai`. A hashtag and a word are otherwise the same thing to look for, so `news` and `#news` find the same posts: those with the hashtag, and those whose text has the word.
-- **The common words are left out of `q` too,** so `the road to mumbai` is `road mumbai`. A `q` of nothing but such words is looked for as it is, and finds the posts that have them as hashtags.
-- **At most 8 words are looked for.** The ones after them are ignored.
-- **A `q` with no word in it,** such as `!!!` or a `#` alone, gets `400`.
+- As a post's text is, into words, and a post must have them all, in any order. There's no search for a phrase.
+- Whole words only. `flood` doesn't find "flooding", and a misspelt word finds what's misspelt the same way. A word with an apostrophe counts as the words on each side of it, so `mumbai` finds "Mumbai's".
+- A word that starts with `#` is read as a hashtag is: `#Central-Mumbai` looks for `centralmumbai`. A hashtag and a word are otherwise the same thing to look for, so `news` and `#news` find the same posts: those with the hashtag, and those whose text has the word.
+- The common words are left out of `q` too, so `the road to mumbai` is `road mumbai`. A `q` of nothing but such words is looked for as it is, and finds the posts that have them as hashtags.
+- At most 8 words are looked for. The ones after them are ignored.
+- A `q` with no word in it, such as `!!!` or a `#` alone, gets `400`.
 
 What it finds, and when:
 
-- **Only posts anyone can read.** Not one that's set for deletion or held in the [moderation queue](#the-moderation-queue), an entry whose original is [gone from its own server](#refreshing-a-repost), or a post of an account that's deleted. Those stop being found at once.
-- **A new post is found once it's in feeds:** after the compactor's next run, which is seconds. The same goes for what an update changed, for a hashtag a repost added, and for one a moderator removed: until that run the post is found by what it was.
-- **A post from before the instance had search** is found once its operator has indexed the posts that were there ([DEPLOY.md](DEPLOY.md#upgrading-to-search)).
-- **[Blocks](#blocks) leave nothing out.** A search takes no credentials, so it's the same for everyone.
+- Only posts anyone can read. Not one that's set for deletion or held in the [moderation queue](#the-moderation-queue), an entry whose original is [gone from its own server](#refreshing-a-repost), or a post of an account that's deleted. Those stop being found at once.
+- A new post is found once it's in feeds: after the compactor's next run, which is seconds. The same goes for what an update changed, for a hashtag a repost added, and for one a moderator removed: until that run the post is found by what it was.
+- A post from before the instance had search is found once its operator has indexed the posts that were there ([DEPLOY.md](DEPLOY.md#upgrading-to-search)).
+- [Blocks](#blocks) leave nothing out. A search takes no credentials, so it's the same for everyone.
 
 **Pagination:** the cursor names the last user or post of the page, and the next page starts just after it, so pages don't repeat one. A cursor doesn't expire. One that isn't valid gets `400`, and so does a cursor of one `type` sent with the other.
 
@@ -1805,16 +1805,16 @@ An ad is `{ adId, kind, imageUrl, imageAlt, text, url, tags, startsAt, endsAt, s
 | `createdAt`, `updatedAt` | When the ad was created, and when it was last changed. A click doesn't change `updatedAt`. |
 
 What else to know:
-- **Changes show after the compactor's next run.** Feeds and posts show the ads as the [compactor](APP.md#8-the-compactor) last published them, so an ad that was created, changed or deleted shows as it now is `COMPACT_INTERVAL_SECONDS` later at most (5 by default), plus the time the run takes. A schedule needs no run: an ad starts and ends on time. The link an ad leads to is the exception, and changes at once.
-- **At most 100 ads that haven't ended,** counting the ones yet to start. One more gets `409`, and so does a `PATCH` that brings an ended ad back. Ended ads take no room, and are kept until an admin deletes them.
-- **An ad can be created already over,** with both `startsAt` and `endsAt` in the past: it's kept, and never shown.
+- Changes show after the compactor's next run. Feeds and posts show the ads as the [compactor](APP.md#8-the-compactor) last published them, so an ad that was created, changed or deleted shows as it now is `COMPACT_INTERVAL_SECONDS` later at most (5 by default), plus the time the run takes. A schedule needs no run: an ad starts and ends on time. The link an ad leads to is the exception, and changes at once.
+- At most 100 ads that haven't ended, counting the ones yet to start. One more gets `409`, and so does a `PATCH` that brings an ended ad back. Ended ads take no room, and are kept until an admin deletes them.
+- An ad can be created already over, with both `startsAt` and `endsAt` in the past: it's kept, and never shown.
 - An ad that isn't there gets `404`, and an `adId` that isn't an id gets `400`.
 
 ## Rules
 
 ### `GET /rules`
 
-Gives the server's rules, the email address to write to for support, and its modification disclosure. It needs no key, so a client can show all three to someone before they register.
+Gives the server's rules, its minimum age, the email address to write to for support, and its modification disclosure. It needs no key, so a client can show all four to someone before they register.
 
 ```bash
 curl localhost:3000/rules
@@ -1824,6 +1824,7 @@ curl localhost:3000/rules
 {
   "modificationDisclosure": { "modified": true, "release": "0.1.0", "sourceUrl": "https://git.example.com/our-evieverse" },
   "supportEmail": "support@example.com",
+  "minimumAge": 13,
   "rules": [
     { "ruleId": "0b7c0f5e-…", "position": 1, "text": "Be kind.", "createdAt": "2026-11-15T14:02:00.000Z", "updatedAt": "2026-11-15T14:02:00.000Z" },
     { "ruleId": "5e1a9d42-…", "position": 2, "text": "No spam.", "createdAt": "2026-11-15T14:03:00.000Z", "updatedAt": "2026-11-15T14:03:00.000Z" }
@@ -1837,6 +1838,7 @@ curl localhost:3000/rules
 | `modificationDisclosure.release` | The release of Evieverse the server runs, or for a modified version, the release it's based on, such as `0.1.0`. |
 | `modificationDisclosure.sourceUrl` | Where the server's source code can be obtained: an `http` or `https` address (`EVIEVERSE_SOURCE_URL`). A modified version always gives one. Otherwise `null`, unless the operator set one. |
 | `supportEmail` | The email address to write to for support, which the server's operator sets (`SUPPORT_EMAIL`). It's always there: a server whose operator set none gives `noreply@yoururl.com`, a placeholder that nobody reads. The server sends it nothing, and no request changes it. |
+| `minimumAge` | The youngest a person may be to use the server, which the server's operator sets (`MINIMUM_AGE`): a number of years, such as `13`. A server whose operator set none gives the string `"All Legal Ages Allowed"` in its place, in the language the request's `Accept-Language` header asks for, so it's always there: a number is an age, and a string is what to show where there is none. The server asks nobody's age and holds nobody to it, and no request changes it. |
 | `rules` | Every rule, in the order the admins gave them. It's the whole list: there are no pages, and a server has at most 100. `[]` where there are none. |
 | `ruleId` | The rule's id, which the admin endpoints take. |
 | `position` | The rule's place in the list, counted from 1. |
@@ -1982,10 +1984,10 @@ It answers `201`, or `200` with `alreadyClaimed: true` if the caller's claim to 
 - Where no claim waits, `{ tag, wasClaimed: false, refused: false }`.
 
 What ends a claim otherwise:
-- **It's granted.** The user gets the notice `tag_claim_granted`. With `TAG_CLAIM_REVIEW_HOURS=0` that's the compactor's next run, seconds later, so the admins and server moderators learn of the claim as it's granted, and an admin can only undo it (`DELETE /tags/:tag/moderators/:userId`).
-- **The hashtag is given a moderator meanwhile.** Appointing anyone to the hashtag ends the claim to it. If it's the claim's own user who was appointed, they have what they asked for; otherwise the claim's user is told it was refused.
-- **The user is banned when the wait is over.** The claim isn't granted, and they're told it was refused.
-- **The user's account is closed.** The claim goes with it.
+- It's granted. The user gets the notice `tag_claim_granted`. With `TAG_CLAIM_REVIEW_HOURS=0` that's the compactor's next run, seconds later, so the admins and server moderators learn of the claim as it's granted, and an admin can only undo it (`DELETE /tags/:tag/moderators/:userId`).
+- The hashtag is given a moderator meanwhile. Appointing anyone to the hashtag ends the claim to it. If it's the claim's own user who was appointed, they have what they asked for; otherwise the claim's user is told it was refused.
+- The user is banned when the wait is over. The claim isn't granted, and they're told it was refused.
+- The user's account is closed. The claim goes with it.
 
 A claim made before a server was set to `TAGGING_MODE=server` is still granted, unless it's refused.
 
@@ -2068,8 +2070,8 @@ A server that deletes nothing on arrival (`TRUST_SCORE_DELETE_BELOW=0`) refuses 
 A post whose trust score is between the two thresholds is stored, but not published: `POST /store` answers `202` with `status: "pending_review"`, and the post is in no feed, not even its publisher's followers'. Only its publisher, server moderators and admins can read it ([`GET /content/:contentId`](#get-contentcontentid)), and nobody can like it.
 
 Server moderators and admins read the queue with `GET /moderation/queue`, longest waiting first, and decide on each post:
-- **Accept** (`POST /moderation/queue/:contentId/accept`) publishes it, under its hashtags and to its publisher's followers, as posted when it was sent: its `createdAt` doesn't change. It can be read at once, and is in feeds after the compactor's next run, like any post. It then waits in each of its hashtags' queues like any published post.
-- **Reject** (`POST /moderation/queue/:contentId/reject`) takes it down, as `DELETE /content` does.
+- Accept (`POST /moderation/queue/:contentId/accept`) publishes it, under its hashtags and to its publisher's followers, as posted when it was sent: its `createdAt` doesn't change. It can be read at once, and is in feeds after the compactor's next run, like any post. It then waits in each of its hashtags' queues like any published post.
+- Reject (`POST /moderation/queue/:contentId/reject`) takes it down, as `DELETE /content` does.
 
 The publisher can update a held post, or delete it. Each update is scored again:
 - One that's held too keeps the post's place in the queue.
@@ -2077,8 +2079,8 @@ The publisher can update a held post, or delete it. Each update is scored again:
 - An update of *published* content that's held takes the content out of every feed on the compactor's next run, until it's accepted, and makes it `404` by its id at once to everyone who can't read it in the queue. What the content was before isn't kept: content has one version.
 
 **Comments wait in the same queue.** A [comment](#comments) whose trust score is between the thresholds is stored, but not published: `POST /content/:contentId/comments` answers `202` with `status: "pending_review"`, and the comment is neither in the post's list of comments nor in its count. Only its author, server moderators and admins can read it. `GET /moderation/queue` lists it among the posts, in the one order, and each item's `kind` says which it is: `"post"` or `"comment"`. They decide on it as on a post:
-- **Accept** (`POST /moderation/queue/:contentId/comments/:commentId/accept`) publishes it, among the post's comments where it was sent, not where it was accepted: its `createdAt` doesn't change. Anyone can read it by its id at once, and it's in the post's [lists and counts](#reading-comments) after the compactor's next run. A reply is published under the comment it replies to, or under that comment's [placeholder](#placeholders) if it was deleted meanwhile. If nothing is left of that comment, not a placeholder, the reply has nowhere to go: it's deleted, and the request gets `404`, "the comment it replies to is gone, so this comment was deleted".
-- **Reject** (`POST /moderation/queue/:contentId/comments/:commentId/reject`) deletes it, for good: that comment, and none of the replies it may have. It's gone by its id at once. Where an edit had left its placeholder in the lists, they change after the compactor's next run.
+- Accept (`POST /moderation/queue/:contentId/comments/:commentId/accept`) publishes it, among the post's comments where it was sent, not where it was accepted: its `createdAt` doesn't change. Anyone can read it by its id at once, and it's in the post's [lists and counts](#reading-comments) after the compactor's next run. A reply is published under the comment it replies to, or under that comment's [placeholder](#placeholders) if it was deleted meanwhile. If nothing is left of that comment, not a placeholder, the reply has nowhere to go: it's deleted, and the request gets `404`, "the comment it replies to is gone, so this comment was deleted".
+- Reject (`POST /moderation/queue/:contentId/comments/:commentId/reject`) deletes it, for good: that comment, and none of the replies it may have. It's gone by its id at once. Where an edit had left its placeholder in the lists, they change after the compactor's next run.
 
 Its author is told of either with a [notice](#notices). The author can delete a comment that waits, which takes it out of the queue, or [edit](#patch-contentcontentidcommentscommentid) it. Each edit is scored again, as an update of a post is:
 - One that's held too keeps the comment's place in the queue.
@@ -2092,8 +2094,8 @@ A comment that waits on a post that is deleted leaves the queue with the post.
 Any user can report a published post ([`POST /report`](#post-report)). A post with a report nobody has decided on is in the report queue. It stays published while it waits, and its publisher isn't told.
 
 Server moderators and admins read the queue with `GET /moderation/reports`, longest reported first. Each post comes with how many such reports it has (`reports`) and since when (`reportedAt`), and `GET /moderation/reports/:contentId` lists them: who made each, when, and the reason they gave. They decide on each post:
-- **Accept** (`POST /moderation/reports/:contentId/accept`) leaves the post as it is, and settles the reports it had, which takes it out of the queue.
-- **Delete** (`POST /moderation/reports/:contentId/delete`) takes it down, as `DELETE /content` does. Its reports go with it.
+- Accept (`POST /moderation/reports/:contentId/accept`) leaves the post as it is, and settles the reports it had, which takes it out of the queue.
+- Delete (`POST /moderation/reports/:contentId/delete`) takes it down, as `DELETE /content` does. Its reports go with it.
 
 What happens next:
 - A user reports a post once, so those whose reports an acceptance settled can't put the post back in the queue. A report by anyone else does, at the end of the queue.
@@ -2101,8 +2103,8 @@ What happens next:
 - A reported post whose update is held in [the moderation queue](#the-moderation-queue) is in both queues, and each is decided on its own.
 
 **Comments wait in the same queue.** A published [comment](#comments) that a user reported ([`POST /report`](#post-report) with `commentId`) is listed by `GET /moderation/reports` among the posts, in the one order, with the same `reports` and `reportedAt`, and each item's `kind` says which it is: `"post"` or `"comment"`. `GET /moderation/reports/:contentId/comments/:commentId` lists a comment's reports. They decide on it as on a post:
-- **Accept** (`POST /moderation/reports/:contentId/comments/:commentId/accept`) leaves the comment as it is, and settles the reports it had.
-- **Delete** (`POST /moderation/reports/:contentId/comments/:commentId/delete`) deletes it, for good, with its reports: it's gone by its id at once, and from the post's lists and counts after the compactor's next run. Its author gets a [notice](#notices), which doesn't mention the reports.
+- Accept (`POST /moderation/reports/:contentId/comments/:commentId/accept`) leaves the comment as it is, and settles the reports it had.
+- Delete (`POST /moderation/reports/:contentId/comments/:commentId/delete`) deletes it, for good, with its reports: it's gone by its id at once, and from the post's lists and counts after the compactor's next run. Its author gets a [notice](#notices), which doesn't mention the reports.
 
 A comment that its author, the post's publisher or an admin deletes leaves the queue, and so do the comments of a post that is deleted. A post's reports and its comments' are decided on apart: accepting a post settles none of its comments' reports.
 
@@ -2117,8 +2119,8 @@ curl "localhost:3000/feed?tags=news&moderated=false&hours=2160"
 A feed is of its window, which is the past day unless it says. So a queue asks for the widest one, `hours=2160` (90 days), to get every post that waits and not only the last day's.
 
 A moderator of the hashtag, a server moderator or an admin takes a post out of its queue in one of two ways:
-- **Approve it** (`PUT /content/:contentId/tags/:tag`). Its records under that hashtag are `moderated: true` from then on. The approval is of the post as it was, so an update of the post puts it back in the queue.
-- **Remove the hashtag from it** (`DELETE /content/:contentId/tags/:tag`). The post leaves the hashtag's feeds, and loses the hashtag for good: the publisher's updates don't get it back (`removedTags` gives the reason `removed`). The moderator can say why, with `{ "reason": "..." }`.
+- Approve it (`PUT /content/:contentId/tags/:tag`). Its records under that hashtag are `moderated: true` from then on. The approval is of the post as it was, so an update of the post puts it back in the queue.
+- Remove the hashtag from it (`DELETE /content/:contentId/tags/:tag`). The post leaves the hashtag's feeds, and loses the hashtag for good: the publisher's updates don't get it back (`removedTags` gives the reason `removed`). The moderator can say why, with `{ "reason": "..." }`.
 
 Each of the two is written down on the post, where [`GET /content/:contentId`](#get-contentcontentid) gives it to whoever reads the post, as `moderation`: which hashtag was removed or approved, as what the moderator did it, when, and the reason a removal was given. Who the moderator was is given only to those who moderate the hashtag. All of a hashtag's decisions are its [log](#a-hashtags-log).
 
@@ -2153,12 +2155,12 @@ curl "localhost:3000/tags/cars/log?limit=50"
 | `action`, `tag`, `by`, `reason`, `at`, `text` | As in a post's [`moderation`](#get-contentcontentid). |
 | `moderator` | Who decided: `{ userId, username }`, or `null` once that account is deleted. Only for a caller who moderates the hashtag: one of its moderators, a server moderator or an admin. Nobody else gets the field. |
 
-- **Who decided is for those who moderate the hashtag.** They send their credentials in the headers (`Authorization: Bearer <apiKey>` and `X-User-Id`) and get `moderator` on every entry. Everyone else gets `by`, the role, and not the name: the public, the publishers of the posts, and a user who was the hashtag's moderator and isn't any more.
-- **Credentials are checked when they're sent.** A request that names no user is read as anyone's. One that names a user with a key that isn't theirs gets `401`.
-- **It takes `limit`** (100 by default, at most 1,000) **and `cursor`:** `nextCursor` is the cursor of the next page, and `null` on the last. A `cursor` that isn't valid gets `400`, and so does a `:tag` that isn't a hashtag. A hashtag nobody decided anything under has an empty `log`.
-- **It's of the posts that can be read.** A post that is deleted takes its entries with it, and they're left out from the moment it's set for deletion. The entries of a post that is withheld from readers (it waits in the [moderation queue](#the-moderation-queue), or it's a repost whose original is [gone from its own server](#refreshing-a-repost)) are given to server moderators and admins only, and are back for everyone once the post is.
-- **Only moderators' decisions about posts are in it,** as in a post's `moderation`: not mutes, blocked words, rules, or who was made a moderator.
-- **One address can ask for 120 pages a minute** (`TAG_LOG_RATE_LIMIT_PER_MINUTE`), whichever hashtags' logs they are, then gets `429` ([above](#limits-on-reads-that-need-no-key)).
+- Who decided is for those who moderate the hashtag. They send their credentials in the headers (`Authorization: Bearer <apiKey>` and `X-User-Id`) and get `moderator` on every entry. Everyone else gets `by`, the role, and not the name: the public, the publishers of the posts, and a user who was the hashtag's moderator and isn't any more.
+- Credentials are checked when they're sent. A request that names no user is read as anyone's. One that names a user with a key that isn't theirs gets `401`.
+- It takes `limit` (100 by default, at most 1,000) and `cursor`: `nextCursor` is the cursor of the next page, and `null` on the last. A `cursor` that isn't valid gets `400`, and so does a `:tag` that isn't a hashtag. A hashtag nobody decided anything under has an empty `log`.
+- It's of the posts that can be read. A post that is deleted takes its entries with it, and they're left out from the moment it's set for deletion. The entries of a post that is withheld from readers (it waits in the [moderation queue](#the-moderation-queue), or it's a repost whose original is [gone from its own server](#refreshing-a-repost)) are given to server moderators and admins only, and are back for everyone once the post is.
+- Only moderators' decisions about posts are in it, as in a post's `moderation`: not mutes, blocked words, rules, or who was made a moderator.
+- One address can ask for 120 pages a minute (`TAG_LOG_RATE_LIMIT_PER_MINUTE`), whichever hashtags' logs they are, then gets `429` ([above](#limits-on-reads-that-need-no-key)).
 
 Later pages of a [feed session](#get-feed) are of the queue as it is by then: a post approved or removed since the page before, once the compactor has run, isn't on them.
 
@@ -2172,12 +2174,12 @@ The server has a list of blocked words, which its admins keep, and so has each h
 
 **Patterns:** an entry written between slashes is a regular expression, and matches wherever it's found in a text, in the middle of a word too: `/scam\w*/` matches "scammers". That's the way to block a word of a script written without spaces between words, such as Chinese or Japanese. A whole run of such characters is one word, so a plain entry only matches all of it, where `/垃圾|广告/` matches "这是垃圾邮件".
 
-- **Syntax:** JavaScript's, always with the `i` and `u` flags: whatever the case, and with `\p{…}` for Unicode properties. Nothing follows the closing slash, so `/spam/i` is refused. In JSON a backslash is written twice: `"/scam\\w*/"`.
-- **Accents and full-width forms don't matter,** in the pattern or in the text: `/café/` matches "CAFE", and `/spam/` matches "ｓｐａｍ".
-- **Each text is checked on its own,** so `^` and `$` are the start and the end of the post's text, the URL, the filename or one hashtag. `.` doesn't match a line break.
-- **A pattern is stored as it was written,** slashes included. That's how it's listed, and how it's removed.
-- **Limits:** a pattern has at most 100 characters, slashes included, and can't match empty text, which would match every post. A list holds at most 100 patterns among its entries.
-- **Time:** a list's patterns get 100 ms to check a post. If they take longer, the post is treated as containing one of the list's blocked words, and the server's log names the pattern that ran out of time. Patterns that repeat a repetition, such as `(a+)+`, are the ones that do: write them another way.
+- Syntax: JavaScript's, always with the `i` and `u` flags: whatever the case, and with `\p{…}` for Unicode properties. Nothing follows the closing slash, so `/spam/i` is refused. In JSON a backslash is written twice: `"/scam\\w*/"`.
+- Accents and full-width forms don't matter, in the pattern or in the text: `/café/` matches "CAFE", and `/spam/` matches "ｓｐａｍ".
+- Each text is checked on its own, so `^` and `$` are the start and the end of the post's text, the URL, the filename or one hashtag. `.` doesn't match a line break.
+- A pattern is stored as it was written, slashes included. That's how it's listed, and how it's removed.
+- Limits: a pattern has at most 100 characters, slashes included, and can't match empty text, which would match every post. A list holds at most 100 patterns among its entries.
+- Time: a list's patterns get 100 ms to check a post. If they take longer, the post is treated as containing one of the list's blocked words, and the server's log names the pattern that ran out of time. Patterns that repeat a repetition, such as `(a+)+`, are the ones that do: write them another way.
 
 ### The quarantine
 

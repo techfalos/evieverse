@@ -103,7 +103,7 @@ A command exits with:
 | `claims add <tag>`                                                       | [Claims a hashtag](API.md#claiming-a-hashtag) that has no moderator, to moderate it, on a server where publishers choose their posts' hashtags. The server's admins and server moderators are told, and can refuse the claim until the time the command prints; after that you're the hashtag's moderator, and a notice in your inbox says so. |
 | `claims withdraw <tag>`                                                  | Withdraws your claim to a hashtag, while it waits.                                                                                                                                                       |
 | `tag-rules list <tag>`                                                   | A hashtag's own [rules](API.md#a-hashtags-rules), in their order: what its moderators ask of the posts under it.                                                                                         |
-| `rules list`                                                             | The server's [rules](API.md#rules), in their order, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is. |
+| `rules list`                                                             | The server's [rules](API.md#rules), in their order, its minimum age, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is. |
 | `inbox list [--unread] [--limit <n>] [--cursor <cursor>]`                | Your [inbox](API.md#inbox), newest first: the messages users sent you, and the notices of what moderators did to your posts and comments, of your mutes, of your claims to hashtags and of the hashtags you were made a moderator of or are one of no more, and of the posts and comments that [mention](API.md#mentions) you. Each row says who sent it: the user who wrote a message or mentioned you, with their id, to answer or block them, and "the server" for any other notice. With `--unread`, only what you haven't read. |
 | `inbox read [--message <messageId>]`                                     | Marks everything in your inbox as read, or with `--message`, one message or notice.                                                                                                                      |
 | `inbox delete <messageId>`                                               | Deletes a message or a notice from your inbox.                                                                                                                                                           |
@@ -208,6 +208,8 @@ evieverse rules list
 ```
 1  9a41c3d0-…  Read these first.
 2  0b7c0f5e-…  Be kind to each other.
+
+Minimum age: 13
 
 Support: support@example.com
 

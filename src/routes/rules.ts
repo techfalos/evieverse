@@ -7,6 +7,7 @@ import type { Db } from '../db/index.js';
 import type { ServerRulesTable } from '../db/schema.js';
 import type { AppDeps } from '../deps.types.js';
 import { badRequest, conflict, forbidden, notFound } from '../http/errors.js';
+import { say } from '../http/language.js';
 import { Credentials, Hashtag } from '../http/schemas.js';
 import { msg } from '../language.js';
 import type { Message } from '../language.types.js';
@@ -150,8 +151,8 @@ function changeRule(db: Db, list: RuleList, ruleId: string, body: { text?: strin
 }
 
 /**
- * The server's rules, its support address and its modification disclosure; and each hashtag's
- * rules.
+ * The server's rules, its minimum age, its support address and its modification disclosure; and
+ * each hashtag's rules.
  *
  * The rules are what the operator asks of the people who use the server, a list its admins keep
  * (`server_rules`): they add a rule, change its text or its place among the others, and remove
@@ -172,7 +173,12 @@ function changeRule(db: Db, list: RuleList, ruleId: string, body: { text?: strin
  * The support address is the email address people write to for support (`SUPPORT_EMAIL`), which
  * is the operator's to set too, and a placeholder until they do. The server sends it nothing.
  *
- * GET /rules gives all three to anyone, with a key or without, so a client can show them to
+ * The minimum age is the youngest a person may be to use the server, in years (`MINIMUM_AGE`):
+ * the operator's to set as well, and optional. A server whose operator set none says so in
+ * words, "All Legal Ages Allowed", in the language the request is answered in. The server holds
+ * nobody to it: it asks nobody's age.
+ *
+ * GET /rules gives all four to anyone, with a key or without, so a client can show them to
  * someone before they register. GET /tags/:tag/rules gives a hashtag's the same way.
  */
 export function rulesRoutes(app: FastifyInstance, deps: AppDeps) {
@@ -194,10 +200,16 @@ export function rulesRoutes(app: FastifyInstance, deps: AppDeps) {
   /** Notes that `user` changed a hashtag's rules, which is moderating it, and so part of what keeps a hashtag's moderator one (see recordAction). */
   const acted = (req: FastifyRequest, user: AuthUser, tag: string) => recordAction(deps, user.id, tag, req.log);
 
-  /** The rules, in their order, the support address and the modification disclosure. For anyone: it needs no key, and reads none. */
-  app.get('/rules', async () => ({
+  /**
+   * The rules, in their order, the minimum age, the support address and the modification
+   * disclosure. For anyone: it needs no key, and reads none. The minimum age is the number of
+   * years the operator set, or where they set none, the words that say so, in the language the
+   * request asks for.
+   */
+  app.get('/rules', async (req) => ({
     modificationDisclosure: { modified: config.modified, release: RELEASE, sourceUrl: config.sourceUrl },
     supportEmail: config.supportEmail,
+    minimumAge: config.minimumAge ?? say(req, msg('rule.all_ages')),
     rules: (await serverRules.inOrder(db)).map(record),
   }));
 

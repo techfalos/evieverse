@@ -28,7 +28,7 @@ npm run build
 
 Two more, depending on what you changed:
 
-- **A change to the database, or to what's kept in Redis:** run the tests against the real backends too.
+- A change to the database, or to what's kept in Redis: run the tests against the real backends too.
 
   ```bash
   docker compose up -d postgres mysql redis
@@ -37,7 +37,7 @@ Two more, depending on what you changed:
   TEST_REDIS_URL=redis://127.0.0.1:6379 npm test
   ```
 
-- **A change to what an API request does:** run the benchmark (`npm run bench`, which needs Docker and takes about 5 minutes) and commit the `BENCHMARKS.md` it writes. A pull request that touches API operations without it is rejected.
+- A change to what an API request does: run the benchmark (`npm run bench`, which needs Docker and takes about 5 minutes) and commit the `BENCHMARKS.md` it writes. A pull request that touches API operations without it is rejected.
 
 On a slow or busy machine a few of the longer tests can pass their 20-second limit when the whole suite runs at once. `npm test -- --no-file-parallelism` runs the files one at a time.
 
@@ -45,13 +45,13 @@ On a slow or busy machine a few of the longer tests can pass their 20-second lim
 
 `npm run check` holds `src` to the first three:
 
-- **A module's exported interfaces are in a file of their own beside it,** named after it: those of `src/feed/cursor.ts` are in `src/feed/cursor.types.ts`. Such a file holds types alone.
-- **Every module-level constant, exported function and interface has a JSDoc comment** right on top of it, which says what it's for.
-- **A module's constants are at the top of the file,** above its first function or class.
-- **Text a user reads goes through the languages.** A message is a key in `languages/en.json`, read with `msg('key')`, never a string in the code ([docs/LANGUAGES.md](docs/LANGUAGES.md)).
-- **A migration is portable SQL,** a new numbered file in `src/db/migrations` that runs on SQLite, Postgres and MySQL alike, with its tables and columns mirrored in `src/db/schema.ts`. A migration that has been released isn't edited.
-- **A change comes with its tests,** in `test/`, beside the ones of what it changes.
-- **A new setting** is added to `src/config.ts`, to `.env.example` and to [docs/CONFIG.md](docs/CONFIG.md), with its default.
+- A module's exported interfaces are in a file of their own beside it, named after it: those of `src/feed/cursor.ts` are in `src/feed/cursor.types.ts`. Such a file holds types alone.
+- Every module-level constant, exported function and interface has a JSDoc comment right on top of it, which says what it's for.
+- A module's constants are at the top of the file, above its first function or class.
+- Text a user reads goes through the languages. A message is a key in `languages/en.json`, read with `msg('key')`, never a string in the code ([docs/LANGUAGES.md](docs/LANGUAGES.md)).
+- A migration is portable SQL, a new numbered file in `src/db/migrations` that runs on SQLite, Postgres and MySQL alike, with its tables and columns mirrored in `src/db/schema.ts`. A migration that has been released isn't edited.
+- A change comes with its tests, in `test/`, beside the ones of what it changes.
+- A new setting is added to `src/config.ts`, to `.env.example` and to [docs/CONFIG.md](docs/CONFIG.md), with its default.
 
 ## Documentation
 

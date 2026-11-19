@@ -178,6 +178,8 @@ export async function createTestContext(
     sourceUrl?: string;
     /** The address GET /rules gives to write to for support. The server's default, unless given. */
     supportEmail?: string;
+    /** The minimum age GET /rules gives, in years. None, unless given. */
+    minimumAge?: number;
     corsOrigins?: string | string[];
     compact?: Partial<Config['compact']>;
     /**
@@ -255,6 +257,7 @@ export async function createTestContext(
       ...(opts.modified !== undefined && { modified: opts.modified }),
       ...(opts.sourceUrl !== undefined && { sourceUrl: opts.sourceUrl }),
       ...(opts.supportEmail !== undefined && { supportEmail: opts.supportEmail }),
+      ...(opts.minimumAge !== undefined && { minimumAge: opts.minimumAge }),
       ...(opts.corsOrigins && { corsOrigins: opts.corsOrigins }),
       ...(opts.compact && { compact: opts.compact }),
       video: { processing: false, ...opts.video },

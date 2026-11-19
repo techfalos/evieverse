@@ -61,6 +61,9 @@ services:
       EVIEVERSE_SOURCE_URL: ${EVIEVERSE_SOURCE_URL:-}
       # The email address people write to for support, which GET /rules gives beside the rules.
       SUPPORT_EMAIL: ${SUPPORT_EMAIL:-noreply@yoururl.com}
+      # The youngest a person may be to use the server, in years, which GET /rules gives beside the rules.
+      # None unless set: GET /rules then says "All Legal Ages Allowed".
+      MINIMUM_AGE: ${MINIMUM_AGE:-}
       # Ads in hashtag feeds and at the end of posts, which admins keep at /monetization/ads. Off unless set to true.
       MONETIZATION_FEED_ADS: ${MONETIZATION_FEED_ADS:-false}
       MONETIZATION_POST_ADS: ${MONETIZATION_POST_ADS:-false}
