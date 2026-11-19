@@ -12,8 +12,10 @@ import { HttpError } from './http/errors.js';
  *   messages   none goes between the two, either way (routes/inbox.ts);
  *   follows    neither follows the other: the block ends the follows there were, either way, and
  *              none is made while it stands (routes/inbox.ts, routes/follow.ts);
- *   comments   the blocked user comments on none of the blocker's posts, and edits none of the
- *              comments they made there (routes/comments.ts);
+ *   comments   the blocked user comments on none of the blocker's posts, replies to none of the
+ *              blocker's comments, on whoever's post, and edits none of the comments and replies
+ *              they made there (routes/comments.ts);
+ *   reposts    the blocked user reposts none of the posts the blocker wrote (routes/reposts.ts);
  *   mentions   neither is told that the other mentioned them, in a post or in a comment: the text
  *              mentions them all the same (mentions.ts);
  *   reading    what the blocked user wrote is left out of what the blocker is listed: the

@@ -4,10 +4,12 @@ import { isUniqueViolation, updateOnConflict, type Db } from '../db/index.js';
 import type { ModeratorRole, TagDecision } from '../db/schema.js';
 import type { AppDeps } from '../deps.types.js';
 import { notFound } from '../http/errors.js';
+import { listPage } from '../http/listCursor.js';
+import type { ListPage } from '../http/listCursor.types.js';
 import { msg, type MessageKey } from '../language.js';
 import type { Message } from '../language.types.js';
 import { iso } from '../time.js';
-import type { Moderator, Removal, TagAction } from './tagDecisions.types.js';
+import type { Moderator, Removal, TagAction, TagLogEntry } from './tagDecisions.types.js';
 
 /**
  * What a hashtag's moderators decide about the content under it. Every post is published under its
@@ -24,7 +26,15 @@ import type { Moderator, Removal, TagAction } from './tagDecisions.types.js';
  * a removal why, if they said. `tag_moderation` holds what stands now, and is written over; the
  * post's record is what happened, and stays as it is for as long as the post does. GET
  * /content/:contentId gives it with the post (see tagActions), for a client to show beside it.
- * It never names the moderator, as the notice the publisher is left doesn't.
+ *
+ * The rows that name a hashtag are the hashtag's log: what its moderators did, to whichever post,
+ * which GET /tags/:tag/log gives (see tagLog). What one moderator did to one post says little of
+ * how a hashtag is moderated; what they all did, to all of them, is where that shows.
+ *
+ * Both say as what a moderator decided, to anyone. Who it was, they say to those who moderate the
+ * hashtag it was decided under: its own moderators, server moderators and admins (see moderates).
+ * To nobody else, as the notice the publisher is left doesn't: a moderator answers to the others
+ * for what they do, and isn't to be found by whoever they did it to.
  */
 
 /** The longest reason a moderator gives for removing a hashtag from a post, which is what `tag_moderation_log.reason` holds. */
@@ -60,6 +70,16 @@ const record = (trx: Db, action: { contentId: string; tag: string; decision: Tag
       created_at: action.at,
     })
     .execute();
+
+/**
+ * The rows of the record as `tagActions` and `tagLog` read them: what was done, and who did it,
+ * if their account is still there. One that is being deleted is gone already, as it is anywhere else.
+ */
+const logged = (db: Db) =>
+  db
+    .selectFrom('tag_moderation_log as log')
+    .leftJoin('users as moderator', (join) => join.onRef('moderator.id', '=', 'log.moderator_id').on('moderator.deleted_at', 'is', null))
+    .select(['log.tag', 'log.decision', 'log.moderator_role', 'log.reason', 'log.created_at', 'moderator.id as moderator_id', 'moderator.username as moderator_username']);
 
 /**
  * The content a moderator of `tag` decides on: published (404 otherwise, as for content that waits
@@ -144,31 +164,60 @@ export async function removeTag(deps: Deps, contentId: string, tag: string, by: 
  * after update upon update.
  */
 export async function tagActions(db: Db, contentId: string): Promise<TagAction[]> {
-  const rows = await db
-    .selectFrom('tag_moderation_log')
-    .select(['tag', 'decision', 'moderator_role', 'reason', 'created_at'])
-    .where('content_id', '=', contentId)
-    .orderBy('created_at', 'desc')
+  const rows = await logged(db)
+    .where('log.content_id', '=', contentId)
+    .orderBy('log.created_at', 'desc')
     // Two at the same instant are told apart by their ids, so the list is the same each time it is read.
-    .orderBy('id', 'desc')
+    .orderBy('log.id', 'desc')
     .limit(MAX_TAG_ACTIONS)
     .execute();
   return rows.reverse();
 }
 
 /**
+ * A page of a hashtag's log: what moderators did to the posts under `tag`, newest first, each
+ * with the post it was done to and that post's publisher, and the cursor of the page after it.
+ *
+ * It is of the posts that are there to read. One set for deletion is gone, and its rows go with
+ * it. One that is withheld from readers, because it waits in the moderation queue or its original
+ * is gone from its own server, is left out unless `held`: it is for those who read such a post
+ * (server moderators and admins) to be told it is there.
+ */
+export async function tagLog(db: Db, tag: string, page: ListPage, { held }: { held: boolean }): Promise<{ entries: TagLogEntry[]; nextCursor: string | null }> {
+  let query = logged(db)
+    .innerJoin('content', 'content.id', 'log.content_id')
+    .innerJoin('users as publisher', 'publisher.id', 'content.user_id')
+    .select(['log.id', 'log.content_id', 'publisher.id as publisher_id', 'publisher.username as publisher_username'])
+    .where('log.tag', '=', tag)
+    .where('content.delete_requested_at', 'is', null);
+  if (!held) {
+    query = query
+      .where('content.origin_gone_at', 'is', null)
+      .where((eb) => eb.not(eb.exists(eb.selectFrom('moderation_queue').select('moderation_queue.content_id').whereRef('moderation_queue.content_id', '=', 'content.id'))));
+  }
+  const { rows, nextCursor } = await listPage(query, { createdAt: 'log.created_at', userId: 'log.id' }, page);
+  return { entries: rows, nextCursor };
+}
+
+/**
  * One thing a moderator did to a post, as GET /content/:contentId gives it: what was done
  * (`tag_approved` or `tag_removed`) under which hashtag, as what the moderator did it (`by`: a
- * moderator of the hashtag, a server moderator or an admin, and never who), when, the reason a
- * removal came with, and what it says (`text`), which `say` puts in the reader's language: the
- * words a client shows beside the post.
+ * moderator of the hashtag, a server moderator or an admin), when, the reason a removal came
+ * with, and what it says (`text`), which `say` puts in the reader's language: the words a client
+ * shows beside the post.
+ *
+ * `named`: the reader moderates the hashtag, and so is told who did it (`moderator`), which is
+ * null for one whose account is deleted. Nobody else is, and the words never say.
  */
-export function tagActionItem(action: TagAction, say: (text: Message) => string) {
+export function tagActionItem(action: TagAction, say: (text: Message) => string, named = false) {
   const params = { tag: action.tag, by: msg(ROLES[action.moderator_role]) };
   return {
     action: action.decision === 'removed' ? ('tag_removed' as const) : ('tag_approved' as const),
     tag: action.tag,
     by: action.moderator_role,
+    ...(named && {
+      moderator: action.moderator_id !== null && action.moderator_username !== null ? { userId: action.moderator_id, username: action.moderator_username } : null,
+    }),
     ...(action.reason !== null && { reason: action.reason }),
     at: iso(action.created_at),
     text: say(
@@ -178,5 +227,17 @@ export function tagActionItem(action: TagAction, say: (text: Message) => string)
           ? msg('tag_action.removed', params)
           : msg('tag_action.removed_for', { ...params, reason: action.reason }),
     ),
+  };
+}
+
+/**
+ * An entry of a hashtag's log, as GET /tags/:tag/log gives it: the post it is about and who
+ * published it, and what was done to it, as the post's own record says it (see tagActionItem).
+ */
+export function tagLogItem(entry: TagLogEntry, say: (text: Message) => string, named = false) {
+  return {
+    contentId: entry.content_id,
+    publisher: { userId: entry.publisher_id, username: entry.publisher_username },
+    ...tagActionItem(entry, say, named),
   };
 }

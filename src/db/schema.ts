@@ -216,6 +216,50 @@ export interface MediaJobsTable {
   claimed_until: Generated<number>;
   /** When the write was made. */
   created_at: number;
+  /** The address the write's request came from, kept for the notice of a video that matches the pdq plugin's list; null where the server checks no videos. */
+  client_ip: string | null;
+  /** That request's User-Agent header, cut short; null likewise, and for a request that sent none. */
+  client_user_agent: string | null;
+}
+
+/**
+ * A file that matched the pdq trust plugin's list and is kept in the quarantine (src/quarantine.ts):
+ * the object `files/<id>` of the quarantine's store.
+ */
+export interface QuarantineTable {
+  id: string;
+  /** Who sent the file. No foreign key: the row outlasts their account. */
+  user_id: string;
+  /** The SHA-256 of the file as it is kept; with `user_id`, the item. */
+  sha256: string;
+  /** What the file was sent as. */
+  mime_type: string;
+  size: number;
+  /** What the admins were told of the match when the file was first kept, as JSON (MatchFacts). */
+  facts: string;
+  /** How many times the file matched: one more each time its user sent it again. */
+  matches: Generated<number>;
+  created_at: number;
+  last_matched_at: number;
+  /** When the report of it was made, as the admin who recorded it said; null until one is recorded. The file is deleted `quarantine.retentionDays` after this. */
+  reported_at: number | null;
+  /** The admin who recorded the report. */
+  reported_by: string | null;
+  /** What the authority calls the report, if the admin gave it. */
+  report_id: string | null;
+}
+
+/** What was done with an item of the quarantine, and by whom: a row for each time, written before it is done, which outlasts the item. */
+export interface QuarantineAccessTable {
+  id: string;
+  quarantine_id: string;
+  /** stored, downloaded, reported, dismissed or expired (see QuarantineAction). */
+  action: string;
+  /** The admin; null where the server did it itself. */
+  user_id: string | null;
+  ip: string | null;
+  user_agent: string | null;
+  created_at: number;
 }
 
 /**
@@ -336,6 +380,13 @@ export interface TagModeratorsTable {
   tag: string;
   user_id: string;
   created_at: number;
+  /**
+   * When the moderator last did something as one on the hashtag (see recordAction), and when they
+   * became its moderator until they have: one who did nothing since for
+   * `tagging.moderatorInactiveDays` is one no more (src/moderation/activity.ts). Null on a row
+   * from before the server kept it, until the compactor's next run sets it to its own time.
+   */
+  acted_at: number | null;
 }
 
 /**
@@ -410,8 +461,9 @@ export type ModeratorRole = 'tag_moderator' | 'server_moderator' | 'admin';
 
 /**
  * What moderators did to a post under a hashtag, one row for each time: the post's own record of
- * it, which GET /content/:contentId gives with the post. `tag_moderation` holds what stands now;
- * these rows are never changed, and go with the post.
+ * it, which GET /content/:contentId gives with the post, and GET /tags/:tag/log with the
+ * hashtag's others. `tag_moderation` holds what stands now; these rows are never changed, and go
+ * with the post.
  */
 export interface TagModerationLogTable {
   id: string;
@@ -419,9 +471,9 @@ export interface TagModerationLogTable {
   tag: string;
   /** approved: the post was approved under the hashtag. removed: the hashtag was taken off the post. */
   decision: TagDecision;
-  /** Who did it, which no response gives; null once that user is gone. */
+  /** Who did it, which a response gives only to who moderates the hashtag (see moderates); null once that user is gone. */
   moderator_id: string | null;
-  /** As what they did it, which is what a response says of them. */
+  /** As what they did it, which is all a response says of them to anyone else. */
   moderator_role: ModeratorRole;
   /** Why, as the moderator said it, for a removal that came with a reason; null otherwise. */
   reason: string | null;
@@ -586,6 +638,8 @@ export interface Database {
   feed_queue: FeedQueueTable;
   pending_writes: PendingWritesTable;
   media_jobs: MediaJobsTable;
+  quarantine: QuarantineTable;
+  quarantine_access: QuarantineAccessTable;
   staged_removals: StagedRemovalsTable;
   reposts: RepostsTable;
   repost_removals: RepostRemovalsTable;

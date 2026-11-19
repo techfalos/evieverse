@@ -44,6 +44,8 @@ const ENV_MAP: Record<string, string> = {
   TAGGING_SERVER_TAGS: 'tagging.serverTags',
   TAG_CLAIM_REVIEW_HOURS: 'tagging.claimReviewHours',
   TAG_CLAIMS_PER_DAY: 'tagging.claimsPerDay',
+  TAG_MODERATOR_INACTIVE_DAYS: 'tagging.moderatorInactiveDays',
+  TAG_LOG_RATE_LIMIT_PER_MINUTE: 'tagging.logRateLimitPerMinute',
   POST_TYPE_TEXT: 'postTypes.text',
   POST_TYPE_IMAGE: 'postTypes.image',
   POST_TYPE_VIDEO: 'postTypes.video',
@@ -109,6 +111,9 @@ const ENV_MAP: Record<string, string> = {
   PDQ_MAX_DISTANCE: 'pdq.maxDistance',
   PDQ_MIN_QUALITY: 'pdq.minQuality',
   PDQ_REFRESH_MINUTES: 'pdq.refreshMinutes',
+  QUARANTINE_SCHEME: 'quarantine.scheme',
+  QUARANTINE_OPTIONS: 'quarantine.options',
+  QUARANTINE_RETENTION_DAYS: 'quarantine.retentionDays',
   REGISTER_RATE_LIMIT_PER_HOUR: 'registerRateLimitPerHour',
   POST_RATE_LIMIT_PER_MINUTE: 'postRateLimitPerMinute',
   MAX_FOLLOWING: 'maxFollowing',
@@ -145,6 +150,7 @@ const EMPTY_SECTIONS: Json = {
   trust: {},
   urlhaus: {},
   pdq: {},
+  quarantine: {},
   comments: {},
   inbox: {},
   export: {},
@@ -255,7 +261,7 @@ const ConfigSchema = z.object({
    * address that registrations, feeds and the reads that need no key are limited by
    * (`registerRateLimitPerHour`, `feed.rateLimitPerMinute`, `feed.followingRateLimitPerMinute`,
    * `contentRateLimitPerMinute`, `profilePostsRateLimitPerMinute`, `avatarRateLimitPerMinute`, `comments.listRateLimitPerMinute`,
-   * `reposts.attestationRateLimitPerMinute`) and that the audit log
+   * `reposts.attestationRateLimitPerMinute`, `tagging.logRateLimitPerMinute`) and that the audit log
    * and the request log record: how many of them there are, true for any, or their addresses and
    * CIDR ranges (separated by commas or spaces). Empty: none, so the address is the connection's
    * own. A count is only safe where the server can't be reached except through those proxies:
@@ -340,7 +346,21 @@ const ConfigSchema = z.object({
        */
       claimReviewHours: z.coerce.number().int().min(0).default(24),
       /** Hashtags one user can claim in a day; each claim leaves a notice with every admin and server moderator (0: no limit). */
-      claimsPerDay: z.coerce.number().int().min(0).default(5),
+      claimsPerDay: z.coerce.number().int().min(0).default(2),
+      /**
+       * Days a hashtag's moderator can go without doing anything as one on the hashtag before
+       * they are its moderator no more (src/moderation/activity.ts): a year, unless told
+       * otherwise. The compactor ends their time, and tells them. It goes for whoever has a row
+       * for the hashtag, however they came to moderate it, and in either tagging mode; admins
+       * and server moderators moderate every hashtag without one. 0: never.
+       */
+      moderatorInactiveDays: z.coerce.number().int().min(0).default(365),
+      /**
+       * Requests to GET /tags/:tag/log from one address in a minute, past which they are refused
+       * (0: no limit). A hashtag's log needs no key, and a page of it reads the database.
+       * Counted as feeds are (`feed.rateLimitPerMinute`), whichever hashtags' logs they ask for.
+       */
+      logRateLimitPerMinute: z.coerce.number().int().min(0).default(120),
     })
     .refine((t) => t.mode !== 'server' || t.serverTags.length > 0, {
       path: ['serverTags'],
@@ -700,6 +720,32 @@ const ConfigSchema = z.object({
   }),
 
   /**
+   * The quarantine (src/quarantine.ts): where the server keeps the files that matched the pdq
+   * plugin's list, each as it was read, for the report the operator may have to make of it and
+   * for as long as the law has a reported file kept afterwards. It is a store of its own, which
+   * nothing else is written to and nothing is served from: only an admin reads a file of it,
+   * through the API (/moderation/quarantine), and every such read is recorded. Unset: no file
+   * that matched is kept, as before there was a quarantine.
+   */
+  quarantine: z.object({
+    /**
+     * Any Apache OpenDAL scheme (fs, s3, gcs, azblob ...). Not the content store, nor the summaries'
+     * or the audit log's: a bucket or a folder that only the server's own processes reach, encrypted
+     * and with its own access log where the provider has them.
+     */
+    scheme: z.string().min(1).optional(),
+    options: z.preprocess(parseJson, z.record(z.string(), z.coerce.string())).optional(),
+    /**
+     * Days a file is kept after an admin recorded that it was reported (POST
+     * /moderation/quarantine/:id/report), counted from the time of the report: the compactor
+     * deletes it once they have passed, once a day. A year is what United States law has a
+     * provider keep what it reported to the CyberTipline for (18 U.S.C. 2258A(h)); the law
+     * elsewhere may ask for another time. A file nobody reported is not deleted by this.
+     */
+    retentionDays: int(365),
+  }),
+
+  /**
    * Requests to /register from one address in an hour, past which they are refused. Every attempt
    * counts, an admin's included, so registering takes two: one for the challenge, one with its answer.
    * The address is the connection's own, or the one `trustProxy` has read from X-Forwarded-For.
@@ -792,7 +838,43 @@ const ConfigSchema = z.object({
 }).refine((c) => !c.trust.optionalPlugins.includes('pdq') || c.trust.allowFrom > 0, {
   path: ['trust', 'allowFrom'],
   message: 'TRUST_OPTIONAL_PLUGINS turns on pdq, which needs TRUST_SCORE_ALLOW_FROM above 0: at 0 every post is published whatever its score, an image that matches the list too',
+}).refine((c) => c.quarantine.scheme === undefined || sharedStore(c) === null, {
+  path: ['quarantine', 'scheme'],
+  message:
+    'QUARANTINE_SCHEME and QUARANTINE_OPTIONS name a store that another setting names too (CONTENT_SCHEME, SUMMARY_SCHEME or AUDIT_SCHEME, with the same options): the quarantine needs a store of its own, which nothing else is read from or written to',
 });
+
+/** The settings that each name a store: what `sharedStore` compares the quarantine's with. */
+type Stores = {
+  storage: { content: Store; summaries: Partial<Store> };
+  audit: Partial<Store>;
+  quarantine: Partial<Store>;
+};
+/** A store as the settings name one: an OpenDAL scheme and its options. */
+type Store = { scheme: string; options: Record<string, string> };
+
+/** Where a store's options say it is, in one form: the options in the order of their names, with a path's trailing slashes left out. */
+function placeOf({ scheme, options }: Partial<Store>): string {
+  const entries = Object.entries(options ?? {})
+    .map(([name, value]) => [name, value.replace(/\/+$/, '')])
+    .sort(([a], [b]) => (a! < b! ? -1 : a! > b! ? 1 : 0));
+  return JSON.stringify([scheme, entries]);
+}
+
+/**
+ * The variable of the store that the quarantine's settings name too, or null if they name one of
+ * their own. The same scheme with the same options is the same store: files that matched the
+ * list would then lie among the posts' own, or in a log, where whatever reads those reads them.
+ * It tells no more than that: a folder inside another store's, or a second name for one bucket,
+ * is the operator's to avoid.
+ */
+function sharedStore({ storage, audit, quarantine }: Stores): string | null {
+  const place = placeOf(quarantine);
+  if (place === placeOf(storage.content)) return 'CONTENT_SCHEME';
+  if (storage.summaries.scheme !== undefined && place === placeOf(storage.summaries)) return 'SUMMARY_SCHEME';
+  if (audit.scheme !== undefined && place === placeOf(audit)) return 'AUDIT_SCHEME';
+  return null;
+}
 
 export type Config = z.infer<typeof ConfigSchema>;
 

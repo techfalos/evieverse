@@ -129,6 +129,27 @@ for (const target of TARGETS) {
       expect((await req(carol, 'GET', '/whoami')).statusCode).toBe(200);
     });
 
+    it('has a repeat that finds the posts deleted and the account not yet delete the account itself: 200, and 404 from then on', async () => {
+      ctx = await createTestContext(target);
+      const root = await admin();
+      const alice = await ctx.register('alice');
+      const contentId = await post(alice, 'Something #news');
+
+      const first = ok(await remove(alice, alice.userId), 202);
+      expect(first).toEqual({ userId: alice.userId, status: 'pending_deletion', requestedAt: now() });
+      expect(ok(await remove(root, alice.userId), 202)).toEqual(first);
+
+      // Where a run of the compactor is between deleting the post's row and settling the accounts (settleAccounts), which a request can come in the middle of.
+      await ctx.db.deleteFrom('content').where('id', '=', contentId).execute();
+      expect(await userRow(alice.userId)).toBeDefined();
+
+      expect(ok(await remove(root, alice.userId), 200)).toEqual({ userId: alice.userId, status: 'deleted' });
+      expect(await userRow(alice.userId)).toBeUndefined();
+      expect(await refused(remove(root, alice.userId))).toEqual([404, 'user not found']);
+      // Gone for good, so the name is free.
+      ok(await register('alice'), 201);
+    });
+
     it('never deletes the only admin, and takes a deleted admin out of the list of admins', async () => {
       ctx = await createTestContext(target);
       const root = await admin('root');

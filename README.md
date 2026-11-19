@@ -284,7 +284,7 @@ As on most social media, content is organized by tags (hashtags). An instance is
 
 In both modes, a post with no valid tags is rejected.
 
-**Auto-moderation.** Every new post and update gets a trust score when it arrives. Depending on the score, the post is published, held in the moderation queue until someone reviews it, or rejected outright. Out of the box, a post containing a blocked word is assigned a trust score of zero. Additional [trust plugins](docs/TRUST_PLUGINS.md) may be used to modify the trust score further. Two optional plugins ship with the server: `urlhaus` refuses posts and comments with a link that spreads malware, and `pdq` gives a trust score of zero to one with an image that matches a list of known child sexual abuse material, and notifies the admins.
+**Auto-moderation.** Every new post and update gets a trust score when it arrives. Depending on the score, the post is published, held in the moderation queue until someone reviews it, or rejected outright. Out of the box, a post containing a blocked word is assigned a trust score of zero. Additional [trust plugins](docs/TRUST_PLUGINS.md) may be used to modify the trust score further. Two optional plugins ship with the server: `urlhaus` refuses posts and comments with a link that spreads malware, and `pdq` gives a trust score of zero to one with an image that matches a list of known child sexual abuse material, and notifies the admins. Where the server processes videos, `pdq` also checks each video against the same list before it's published. Matched files can be kept in an opt-in quarantine (`QUARANTINE_SCHEME`): a separate store that only admins can read, with every access recorded, so the file can be sent with a report and is deleted a year after the report is recorded. See [TRUST_PLUGINS.md](docs/TRUST_PLUGINS.md#the-quarantine).
 
 **Moderators** 
 
@@ -294,7 +294,11 @@ In both modes, a post with no valid tags is rejected.
 
 **Claiming a tag.** In the user-supplied tagging mode, a user can claim a tag that has no moderator (`evieverse claims add <tag>`). The admins and server moderators are notified in their inbox, and any of them can refuse the claim within 24 hours (`TAG_CLAIM_REVIEW_HOURS`). A claim nobody refused is granted, and the user becomes the tag's moderator. Users are notified when their claim is granted or refused, and when they are made a tag's moderator or removed as one. See [API.md](docs/API.md#claiming-a-hashtag).
 
-**Moderation record.** When a tag moderator approves a post under a tag or removes a tag from it, that is recorded on the post, and anyone reading the post (`GET /content/:contentId`) gets it: which tag, whether a tag moderator, a server moderator or an admin did it (never who), when, and the reason a removal was given. See [API.md](docs/API.md#get-contentcontentid).
+**Inactive tag moderators.** A tag moderator who takes no moderation action on a tag for 365 days (`TAG_MODERATOR_INACTIVE_DAYS`) stops being its moderator, and is notified. It is counted for each tag separately, and a tag left with no moderator can be claimed again. See [API.md](docs/API.md#a-hashtags-moderators).
+
+**Moderation record.** When a tag moderator approves a post under a tag or removes a tag from it, that is recorded on the post, and anyone reading the post (`GET /content/:contentId`) gets it: which tag, whether a tag moderator, a server moderator or an admin did it, when, and the reason a removal was given. See [API.md](docs/API.md#get-contentcontentid).
+
+**Moderation log.** Each tag has a log of the same records, for all the posts under it, newest first (`GET /tags/:tag/log`), which anyone can read. Who the moderator was is shown only to those who moderate that tag: its tag moderators, server moderators and admins. Everyone else, the post's publisher included, sees the role and not the name. See [API.md](docs/API.md#a-hashtags-log).
 
 **Bans.** A server moderator or an admin can ban a user (`evieverse bans add <userId>`). A banned user can't post, comment or send messages, but can still read, receive messages, and delete their own posts and account. The user is notified of being banned and unbanned in their inbox. Admins and server moderators can't be banned until their role ends. See [API.md](docs/API.md#bans).
 
@@ -372,7 +376,7 @@ A user can follow any other user, up to 1,000 of them by default. Followers and 
 
 ## Blocks
 
-A user can block another user. No message goes between the two, neither follows the other, and the blocked user can't comment on the blocker's posts. See [API.md](docs/API.md#blocks).
+A user can block another user. No message goes between the two, neither follows the other, and the blocked user can't comment on the blocker's posts, reply to the blocker's comments or repost the blocker's posts. See [API.md](docs/API.md#blocks).
 
 ## Inbox
 

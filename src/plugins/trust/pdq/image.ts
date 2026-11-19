@@ -15,9 +15,9 @@ type Sharp = (typeof import('sharp'))['default'];
  * the whole of a large image down to that is slow, and tells nothing more. The hash of such an
  * image is within a few bits of what the reference's tool gives it (2 of 256, measured), and of
  * what hashing it at its full size gives (up to 14), both well inside the distance hashes are
- * matched at.
+ * matched at. The pictures of a video are hashed at the same size (see checkVideo).
  */
-const MAX_SIDE = 512;
+export const MAX_SIDE = 512;
 /**
  * The most frames of an animated GIF or WebP that are read: its first ones. Each is hashed, as a
  * picture of its own. What comes after them in a longer animation isn't looked at.

@@ -11,6 +11,11 @@ import type { AppDeps } from '../deps.types.js';
 import { notify } from '../inbox.js';
 import { nextSeq, payloadOf } from '../pending.js';
 import type { CommentPutPayload, PostPayload } from '../pending.types.js';
+import { knownHashes, type KnownHashes } from '../plugins/trust/pdq/list.js';
+import type { HashList } from '../plugins/trust/pdq/list.types.js';
+import { report } from '../plugins/trust/pdq/report.js';
+import type { Sent } from '../plugins/trust/pdq/report.types.js';
+import { checkVideo } from '../plugins/trust/pdq/video.js';
 import { MEDIA_FILE, type ContentMeta, type StoredVideo } from '../storage/index.js';
 import { isNotFound } from '../storage/opendal.js';
 import { MINUTE } from '../time.js';
@@ -60,6 +65,24 @@ import type { VideoOutcome, VideoWorker } from './worker.types.js';
  * - an update keeps the video the post had, and is made in everything else it said;
  * - a comment is published with its text alone, or not at all if the video was all of it.
  *
+ * On a server that runs the pdq trust plugin (TRUST_OPTIONAL_PLUGINS), a video is checked
+ * against the plugin's list of hashes of known child sexual abuse material here, as an image is
+ * checked by the plugin when it is sent: the pictures of it are not there to read until it is
+ * decoded, which is this worker's work. Once the renditions are made, and before anything of
+ * the video is written anywhere, the keyframes of the largest are hashed and matched (see
+ * checkVideo). A video of which one matches is refused, as an image is:
+ *
+ * - the admins are told as they are of an image, with who sent the video and from where, which
+ *   the job kept for this (see jobClient), and on a server that has a quarantine the file as
+ *   it was sent is kept there (see the plugin's `report`);
+ * - nothing of the video is published, and the file is deleted from where it waited;
+ * - what was sent with it goes the way of a video that can't be processed, but for a comment,
+ *   which is not published even with a text: a new post is deleted, and an update keeps the
+ *   video the post had. Its author is told that the video wasn't trusted, and not why.
+ *
+ * No video is published unchecked there: while the process has no list to check with, since it
+ * couldn't be read, a video waits, and is tried again, without that counting against it.
+ *
  * Several processes may run a worker: a job is one worker's at a time (see claimVideoJob), and
  * each takes one at a time, since one ffmpeg already uses every core there is.
  */
@@ -100,6 +123,12 @@ const HARMLESS_TAGS: ReadonlySet<string> = new Set(['major_brand', 'minor_versio
 /** What stops a job whose write is gone: nothing of it is anybody's any more. */
 class Dropped extends Error {}
 
+/** What stops a job whose video matched the list of the pdq trust plugin: the admins are told by then, and the video is refused. */
+class Untrusted extends Error {}
+
+/** What stops a job whose video can't be checked against that list, since the process has none: the video waits, and nothing of it is published. */
+class Unchecked extends Error {}
+
 /** The SHA-256 of a local file, in hex. */
 async function hashFile(path: string): Promise<string> {
   const hash = createHash('sha256');
@@ -134,10 +163,44 @@ function withFile(meta: ContentMeta, { mimeType, size, sha256, video }: ReturnTy
  * a server that takes videos it can never publish is worse than one that doesn't start. The
  * remedy is in the error: install ffmpeg, or turn processing off (`VIDEO_PROCESSING=false`),
  * and videos are stored and served as they are sent.
+ *
+ * `hashes` is the list videos are checked against where the server runs the pdq trust plugin:
+ * the process's own, unless a test gives another.
  */
-export function createVideoWorker(deps: Pick<AppDeps, 'config' | 'db' | 'content' | 'now'>, log: FastifyBaseLogger): VideoWorker {
+export function createVideoWorker(deps: Pick<AppDeps, 'config' | 'db' | 'content' | 'now'>, log: FastifyBaseLogger, hashes: KnownHashes = knownHashes()): VideoWorker {
   const { config, db, content, now = Date.now } = deps;
   const { video: settings } = config;
+  /** Whether videos are checked against the pdq trust plugin's list: where the server runs the plugin. */
+  const checks = config.trust.optionalPlugins.includes('pdq');
+
+  /** The list to check a video against, or null on a server that checks none. Throws Unchecked where there is none to be had. */
+  async function hashList(): Promise<HashList | null> {
+    if (!checks) return null;
+    try {
+      return await hashes.get({ config, now, log });
+    } catch (err) {
+      throw new Unchecked('there is no list of hashes to check the video against', { cause: err });
+    }
+  }
+
+  /**
+   * Checks a video against the list, by the largest rendition made of it (see checkVideo), and
+   * does nothing more with one that doesn't match. One that does is told to the admins, and
+   * kept in the quarantine where the server has one, as the file `source` that was sent (see
+   * the plugin's `report`, which never fails); and Untrusted is thrown, which refuses it.
+   */
+  async function matchVideo(job: VideoJob, list: HashList | null, rendition: Rendition, sent: Sent, file: { source: string; mimeType: string; sha256: string }, signal: AbortSignal): Promise<void> {
+    if (!list) return;
+    const match = await checkVideo(settings, rendition, list, config.pdq, signal);
+    if (!match) return;
+    const { source, mimeType, sha256 } = file;
+    await report(
+      sent,
+      { db, config, now, log, client: job.client ?? undefined },
+      { ...match, image: { mimeType, filename: null, file: async () => source, sha256: async () => sha256 }, sha256, video: { seconds: match.seconds, sentAt: job.createdAt } },
+    );
+    throw new Untrusted(`the picture the video shows ${match.seconds} seconds in matches the list of hashes of known child sexual abuse material`);
+  }
 
   /** The write's row of a post's job, if it is there and still waits for its video. */
   async function postWrite(job: VideoJob): Promise<{ meta: ContentMeta; staged: string } | null> {
@@ -194,6 +257,8 @@ export function createVideoWorker(deps: Pick<AppDeps, 'config' | 'db' | 'content
     const write = await postWrite(job);
     if (!write || !(await live(job.contentId)) || (await superseded(db, job))) throw new Dropped();
     const { meta, staged } = write;
+    // Before any work is done: a video that can't be checked isn't processed either.
+    const list = await hashList();
 
     const source = join(dir, 'source');
     await content.fetchTo({ staged }, source);
@@ -210,9 +275,16 @@ export function createVideoWorker(deps: Pick<AppDeps, 'config' | 'db' | 'content
     const out = join(dir, 'out');
     await mkdir(out);
     const made = await renditions(source, video, renditionSizes(video, settings.heights), out, signal);
+    const [largest] = made;
+    // Checked before anything of it is written anywhere. An update is of a post that was there before this write.
+    if (list) {
+      const post = await db.selectFrom('content').select(['user_id', 'created_at']).where('id', '=', job.contentId).executeTakeFirst();
+      if (!post) throw new Dropped();
+      const sent: Sent = { userId: post.user_id, ...(Number(post.created_at) === job.createdAt ? { created: job.contentId } : { contentId: job.contentId }) };
+      await matchVideo(job, list, largest!, sent, { source, mimeType: meta.mimeType, sha256 }, signal);
+    }
     for (const rendition of made) await segmentVideo(settings, rendition, signal);
     await writeFile(join(out, 'master.m3u8'), masterPlaylist(made));
-    const [largest] = made;
     await posterOf(settings, largest!, Math.min(video.duration * POSTER_AT, POSTER_SECONDS), POSTER_SHORT, join(out, 'poster.jpg'), signal);
 
     // The stream and the poster, under the job's id, which no write names yet. Then the MP4, where a write's file waits.
@@ -296,9 +368,10 @@ export function createVideoWorker(deps: Pick<AppDeps, 'config' | 'db' | 'content
 
   /**
    * Gives up a post's video (see the top of this file). An update keeps the video the post
-   * had (see keepVideo). A post that has none is a new one, and is deleted.
+   * had (see keepVideo). A post that has none is a new one, and is deleted. `refused` is for a
+   * video that matched the pdq plugin's list, whose author is told that it wasn't trusted.
    */
-  async function failPost(job: VideoJob): Promise<void> {
+  async function failPost(job: VideoJob, refused = false): Promise<void> {
     const write = await postWrite(job);
     if (!write) return removeVideoJob(db, job.id);
     const { staged } = write;
@@ -314,7 +387,8 @@ export function createVideoWorker(deps: Pick<AppDeps, 'config' | 'db' | 'content
     await unstage(staged, job.contentId);
     await unwrite(job);
     // Nobody did this to them: `by` is nobody's id.
-    if (userId) await notify(deps, { userId, kind: kept ? 'video_update_failed' : 'video_failed', contentId: job.contentId, by: '' }, log);
+    const kind = refused ? (kept ? 'video_update_refused' : 'video_refused') : kept ? 'video_update_failed' : 'video_failed';
+    if (userId) await notify(deps, { userId, kind, contentId: job.contentId, by: '' }, log);
   }
 
   /** The rows that put the job's comment as it is, oldest first, and whether a removal of it has committed. */
@@ -363,6 +437,7 @@ export function createVideoWorker(deps: Pick<AppDeps, 'config' | 'db' | 'content
     const { first, removed } = await commentWrites(db, job);
     if (!first || !(await live(job.contentId))) throw new Dropped();
     const staged = first.staged!;
+    const list = removed ? null : await hashList();
     if (removed) {
       // Removed before it was ever published: nothing of the video is, and the comment's writes go their way without it.
       await content.removeStaged(staged);
@@ -376,6 +451,10 @@ export function createVideoWorker(deps: Pick<AppDeps, 'config' | 'db' | 'content
     const out = join(dir, 'out');
     await mkdir(out);
     const [made] = await renditions(source, video, renditionSizes(video, [settings.commentHeight]).slice(0, 1), out, signal);
+    if (list) {
+      const { comment } = first.payload;
+      await matchVideo(job, list, made!, { userId: comment.userId, commentOn: job.contentId }, { source, mimeType: comment.media?.mimeType ?? 'application/octet-stream', sha256: await hashFile(source) }, signal);
+    }
     signal.throwIfAborted();
     const mp4 = await content.stageFile(randomUUID(), made!.path, 'video/mp4');
 
@@ -395,15 +474,25 @@ export function createVideoWorker(deps: Pick<AppDeps, 'config' | 'db' | 'content
    * Gives up a comment's video: the file is deleted from where it waits, and the comment's
    * writes are the compactor's to apply, which publishes a comment whose file is gone with its
    * text alone, or removes it if it had none (see applyComments).
+   *
+   * `refused` is for a video that matched the pdq plugin's list: nothing of that comment is
+   * published, as nothing is of a comment whose image matched. Its writes are made ones of a
+   * comment with no text, which the compactor then removes, as it does one whose file was all
+   * of it; and its author is told that the video wasn't trusted.
    */
-  async function failComment(job: VideoJob): Promise<void> {
+  async function failComment(job: VideoJob, refused = false): Promise<void> {
     const { first } = await commentWrites(db, job);
     if (!first) return removeVideoJob(db, job.id);
     const { comment } = first.payload;
     // The file first: once the mark is off, the compactor publishes whatever is there.
     await content.removeStaged(first.staged!);
-    if (!(await rewriteComment(job, first.staged!, null, ({ process: _, ...payload }) => payload))) return;
-    await notify(deps, { userId: comment.userId, kind: 'comment_video_failed', contentId: job.contentId, comment: comment.text, by: '' }, log);
+    const change = ({ process: _, ...payload }: CommentPutPayload): CommentPutPayload => {
+      if (!refused) return payload;
+      const { mentions: __, ...rest } = payload.comment;
+      return { ...payload, comment: { ...rest, text: '' } };
+    };
+    if (!(await rewriteComment(job, first.staged!, null, change))) return;
+    await notify(deps, { userId: comment.userId, kind: refused ? 'comment_video_refused' : 'comment_video_failed', contentId: job.contentId, comment: comment.text, by: '' }, log);
   }
 
   /** Works on a job the worker has taken, in a folder of its own, for no longer than `video.timeoutSeconds`, and keeps the job its own meanwhile. */
@@ -456,17 +545,26 @@ export function createVideoWorker(deps: Pick<AppDeps, 'config' | 'db' | 'content
         await db.updateTable('media_jobs').set((eb) => ({ claimed_until: 0, attempts: eb('attempts', '-', 1) })).where('id', '=', job.id).execute();
         return true;
       }
+      if (err instanceof Unchecked) {
+        // No list to check it with: the video waits for one, however long, and this try doesn't count against it.
+        if (job.commentId === null) await unwrite(job);
+        log.error({ err: err.cause, ...about }, 'could not check a video against the list of hashes of known child sexual abuse material, which could not be read (PDQ_HASH_LIST); nothing of it is published, and it is tried again');
+        await db.updateTable('media_jobs').set((eb) => ({ claimed_until: now() + RETRY_MS, attempts: eb('attempts', '-', 1) })).where('id', '=', job.id).execute();
+        return true;
+      }
+      const refused = err instanceof Untrusted;
       // The staged file is gone: expired, after a week with no worker. There is nothing to try again with.
-      const final = err instanceof VideoError || isNotFound(err) || job.attempts >= MAX_ATTEMPTS;
+      const final = refused || err instanceof VideoError || isNotFound(err) || job.attempts >= MAX_ATTEMPTS;
       if (job.commentId === null) await unwrite(job);
       if (!final) {
         log.error({ err, ...about }, 'could not process a video; it is tried again');
         await releaseVideoJob(db, job.id, now() + RETRY_MS);
         return true;
       }
-      log.error({ err, ...about }, 'could not process a video; it is given up, and its author is told');
+      if (refused) log.warn({ ...about, why: (err as Error).message }, 'a video matches the list of hashes of known child sexual abuse material; it is refused, and its author is told that it was not trusted');
+      else log.error({ err, ...about }, 'could not process a video; it is given up, and its author is told');
       try {
-        await fail(job);
+        await fail(job, refused);
       } catch (cause) {
         log.error({ err: cause, ...about }, 'could not give up a video that can not be processed; it is tried again');
         await releaseVideoJob(db, job.id, now() + RETRY_MS);

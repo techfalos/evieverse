@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Transaction } from 'kysely';
 import { z } from 'zod';
-import { authenticate } from '../auth/apiKey.js';
+import { authenticate, authenticateIfNamed } from '../auth/apiKey.js';
 import type { AuthUser } from '../auth/apiKey.types.js';
 import { removeComment, removeCommentRows } from '../comments.js';
 import { loadContent } from '../content.js';
@@ -10,15 +10,18 @@ import type { Database } from '../db/schema.js';
 import { setForDeletion } from '../deletion.js';
 import type { RouteDeps } from '../deps.types.js';
 import { badRequest, conflict, forbidden, notFound } from '../http/errors.js';
+import { say } from '../http/language.js';
 import { listPage, listQuery } from '../http/listCursor.js';
+import { perMinute } from '../http/rateLimitStore.js';
 import { Credentials, Flag, Hashtag, ListQuery } from '../http/schemas.js';
 import { excerpt, excerptOf, notify } from '../inbox.js';
 import { msg } from '../language.js';
 import { notifyMentions } from '../mentions.js';
+import { recordAction } from '../moderation/activity.js';
 import { claimItem, claimTag, closeClaim, endClaim, pendingClaim } from '../moderation/claims.js';
 import { moderates, moderatesServer, moderatorRole } from '../moderation/policy.js';
 import { kindColumn, queueItems } from '../moderation/queues.js';
-import { approveTag, MAX_REASON_CHARS, removeTag } from '../moderation/tagDecisions.js';
+import { approveTag, MAX_REASON_CHARS, removeTag, tagLog, tagLogItem } from '../moderation/tagDecisions.js';
 import { isPattern, MAX_LIST_PATTERNS, MAX_LIST_WORDS, MAX_PHRASE_WORDS, MAX_WORD_CHARS, normalizeWord, SERVER_LIST } from '../moderation/words.js';
 import { effectiveComment, insertPending, pendingComment, writePending, type PendingReader } from '../pending.js';
 import { iso } from '../time.js';
@@ -79,7 +82,8 @@ const adminOnly = () => forbidden(msg('moderation.admin_only'));
  * Whoever it is done to is told: a notice goes to the inbox (src/inbox.ts) of a user who is muted
  * or unmuted, of one who is made a hashtag's moderator or is one no more, of one whose repost is removed, of the publisher of a post that loses a hashtag, or is accepted or rejected in the
  * moderation queue, and of the author of a comment that is accepted or rejected there. And what a
- * tag's moderator decides about a post is written down on the post, for its readers
+ * tag's moderator decides about a post is written down on the post, for its readers, and in the
+ * hashtag's log (GET /tags/:tag/log), which says who decided to those who moderate the hashtag
  * (src/moderation/tagDecisions.ts).
  */
 export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
@@ -117,6 +121,14 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (!own) throw forbidden(msg('moderation.own_moderator_only', { tag }));
     return { user, since: own.created_at };
   }
+
+  /**
+   * Notes that `user` did something as a moderator of `tag`: what a request below calls once it
+   * has done what it was asked, where that is more than reading. It is what keeps a hashtag's
+   * moderator one (see recordAction), and nothing to an admin or a server moderator with no row
+   * for the hashtag.
+   */
+  const acted = (req: FastifyRequest, user: AuthUser, tag: string) => recordAction(deps, user.id, tag, req.log);
 
   /** A user who is there: one whose account was deleted isn't, though its row may be for a while. */
   async function findUser(userId: string) {
@@ -389,8 +401,11 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
         handler: async (req) => {
           const { list, named, allow } = open(req);
           const body = Body.parse(req.body ?? {});
-          await allow(body);
-          return { ...named, words: await change(list, body) };
+          const user = await allow(body);
+          const words = await change(list, body);
+          // Keeping a hashtag's list is moderating the hashtag; reading it isn't.
+          if (method !== 'GET' && list !== SERVER_LIST) await acted(req, user, list);
+          return { ...named, words };
         },
       });
     }
@@ -436,9 +451,11 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     const { at, already } = await addOnce(
       now,
       () => db.selectFrom('tag_moderators').select('created_at').where('tag', '=', tag).where('user_id', '=', userId).executeTakeFirst(),
-      (createdAt) => db.insertInto('tag_moderators').values({ tag, user_id: userId, created_at: createdAt }).execute(),
+      // The time they have to do something as its moderator starts with it (src/moderation/activity.ts).
+      (createdAt) => db.insertInto('tag_moderators').values({ tag, user_id: userId, created_at: createdAt, acted_at: createdAt }).execute(),
     );
     await closeClaim(deps, tag, userId, user, req.log);
+    await acted(req, user, tag);
     if (!already) await notify(deps, { userId, kind: 'tag_moderator_added', tag, by: user.id }, req.log);
     return reply.status(already ? 200 : 201).send({ tag, userId, since: iso(at), alreadyModerator: already });
   });
@@ -459,6 +476,8 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
       if (other && other.created_at <= since) throw forbidden(msg('moderation.joined_before', { tag }));
     }
     const wasModerator = Number((await db.deleteFrom('tag_moderators').where('tag', '=', tag).where('user_id', '=', userId).executeTakeFirst()).numDeletedRows) > 0;
+    // One who left has no row left to note it on.
+    await acted(req, user, tag);
     if (wasModerator) await notify(deps, { userId, kind: 'tag_moderator_removed', tag, by: user.id }, req.log);
     return { tag, userId, wasModerator };
   });
@@ -537,6 +556,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     const moderator = await asModerator(req, tag, Credentials.parse(req.body ?? {}));
     await findUser(userId);
     const { at, already } = await mute(tag, userId);
+    await acted(req, moderator, tag);
     if (!already) await notify(deps, { userId, kind: 'tag_muted', tag, by: moderator.id }, req.log);
     return reply.status(already ? 200 : 201).send({ tag, userId, mutedAt: iso(at), alreadyMuted: already });
   });
@@ -546,6 +566,7 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     const { tag, userId } = TagUserParams.parse(req.params);
     const moderator = await asModerator(req, tag, Credentials.parse(req.body ?? {}));
     const wasMuted = Number((await db.deleteFrom('tag_mutes').where('user_id', '=', userId).where('tag', '=', tag).executeTakeFirst()).numDeletedRows) > 0;
+    await acted(req, moderator, tag);
     if (wasMuted) await notify(deps, { userId, kind: 'tag_unmuted', tag, by: moderator.id }, req.log);
     return { tag, userId, wasMuted };
   });
@@ -554,12 +575,14 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   // It is read from the feed (GET /feed?tags=<tag>&moderated=false); these two routes are the decisions.
 
   // Each is written down on the post, which GET /content/:contentId gives with it (`moderation`): what was done, as what, and for a removal why.
+  // The hashtag's log is the same rows, of all its posts.
 
   /** Approves content under a hashtag (see approveTag), which takes it out of the hashtag's queue. Its moderators, server moderators and admins. */
   app.put('/content/:contentId/tags/:tag', async (req, reply) => {
     const { contentId, tag } = ContentTagParams.parse(req.params);
     const moderator = await asModerator(req, tag, Credentials.parse(req.body ?? {}));
     const { alreadyApproved } = await approveTag(deps, contentId, tag, { id: moderator.id, role: moderatorRole(moderator) });
+    await acted(req, moderator, tag);
     return reply.status(alreadyApproved ? 200 : 201).send({ contentId, tag, moderated: true, alreadyApproved });
   });
 
@@ -575,9 +598,36 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     const moderator = await asModerator(req, tag, body);
     const { userId, tags } = await removeTag(deps, contentId, tag, { id: moderator.id, role: moderatorRole(moderator) }, body.reason);
     const muted = body.mute ? await mute(tag, userId) : null;
+    await acted(req, moderator, tag);
     await notify(deps, { userId, kind: tags.length ? 'tag_removed' : 'last_tag_removed', contentId, tag, by: moderator.id }, req.log);
     if (muted && !muted.already) await notify(deps, { userId, kind: 'tag_muted', tag, by: moderator.id }, req.log);
     return { contentId, tag, tags, muted: body.mute };
+  });
+
+  /**
+   * A hashtag's log: what moderators did to the posts under it, newest first, a page at a time
+   * (see tagLog). Each entry is one decision, as the post's own record gives it (GET
+   * /content/:contentId, `moderation`), with the post it is about and who published it. Public,
+   * like the posts' own records: it needs no key.
+   *
+   * Who made each decision (`moderator`) is given to a caller who moderates the hashtag: one of
+   * its moderators, a server moderator or an admin. Anyone else gets as what they made it (`by`),
+   * and nothing more. `401` for credentials that aren't a user's.
+   *
+   * The entries of a post that waits in the moderation queue, or whose original is gone from its
+   * own server, are given to server moderators and admins only, who are who reads such a post.
+   *
+   * One address gets `tagging.logRateLimitPerMinute` requests a minute, whichever hashtags' logs
+   * they are for, and is refused past that (429) before anything is read for it (see app.ts): it
+   * needs no key, and a page of it reads the database.
+   */
+  app.get('/tags/:tag/log', { config: perMinute(config.tagging.logRateLimitPerMinute) }, async (req) => {
+    const { tag } = TagParams.parse(req.params);
+    const page = listQuery(req.query);
+    const user = await authenticateIfNamed(db, req, Credentials.parse(req.body ?? {}));
+    const named = user !== null && (await moderates(db, user, tag));
+    const { entries, nextCursor } = await tagLog(db, tag, page, { held: user !== null && moderatesServer(user) });
+    return { tag, log: entries.map((entry) => tagLogItem(entry, (text) => say(req, text), named)), nextCursor };
   });
 
   // A repost is a server moderator's to take down, on its own: the post it is of stays.

@@ -28,9 +28,21 @@ export async function moderates(db: Db, user: AuthUser, tag: string): Promise<bo
 }
 
 /**
+ * The hashtags among `tags` that `user` moderates (see moderates): all of them for an admin or a
+ * server moderator, and for anyone else the ones they are a moderator of. None for no user. They
+ * are the hashtags whose moderators the user is told by name, where a post's record says what
+ * was decided about it (see tagActionItem).
+ */
+export async function moderatedAmong(db: Db, user: AuthUser | null, tags: string[]): Promise<Set<string>> {
+  if (!user || !tags.length) return new Set();
+  if (moderatesServer(user)) return new Set(tags);
+  return new Set((await db.selectFrom('tag_moderators').select('tag').where('user_id', '=', user.id).where('tag', 'in', tags).execute()).map((r) => r.tag));
+}
+
+/**
  * As what `user` moderates a hashtag, for one who does (see moderates): an admin, a server
  * moderator, or with neither role, one of the hashtag's own moderators. It is what a post's record
- * of a decision says of who made it (`tag_moderation_log`).
+ * of a decision says of who made it (`tag_moderation_log`), to those it doesn't name them to.
  */
 export const moderatorRole = (user: AuthUser): ModeratorRole => (user.admin ? 'admin' : user.moderator ? 'server_moderator' : 'tag_moderator');
 

@@ -13,6 +13,7 @@ import { likeRoutes } from '../routes/like.js';
 import { moderationRoutes } from '../routes/moderation.js';
 import { monetizationRoutes } from '../routes/monetization.js';
 import { profileRoutes } from '../routes/profile.js';
+import { quarantineRoutes } from '../routes/quarantine.js';
 import { registerRoutes } from '../routes/register.js';
 import { reportRoutes } from '../routes/reports.js';
 import { repostRoutes } from '../routes/reposts.js';
@@ -58,7 +59,8 @@ interface WithoutDatabase {
  *            which brings such a link up to what its original is now; GET /repost/keys, this
  *            server's own), follows and the following feed (GET /feed/following, which asks the database who may
  *            read it), inboxes, messages and blocks, tagging and tags, search (GET /search, of
- *            users and of posts, which reads the database), moderation, reports, the
+ *            users and of posts, which reads the database), moderation, the quarantine
+ *            (/moderation/quarantine, which only admins read), reports, the
  *            server's rules and its modification disclosure (/rules),
  *            DELETE /content/:id, writing, editing and deleting comments, the server's ads,
  *            their images and the links they are followed by (/monetization/ads), and the CLI's
@@ -101,6 +103,7 @@ export const GROUPS = {
       deletionRoutes(app, deps);
       commentWriteRoutes(app, deps);
       moderationRoutes(app, deps);
+      quarantineRoutes(app, deps);
       monetizationRoutes(app, deps);
       reportRoutes(app, deps);
       rulesRoutes(app, deps);

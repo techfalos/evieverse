@@ -12,7 +12,7 @@ import { iso } from './time.js';
  * A user's inbox (the table `inbox`) holds what they have been sent: the messages other users
  * wrote them, and the server's notices of what moderation did to their posts, of their mutes
  * on hashtags, of the claims to moderate a hashtag (src/moderation/claims.ts), of being made a
- * hashtag's moderator or no longer being one, and of the posts
+ * hashtag's moderator or no longer being one (src/moderation/activity.ts), and of the posts
  * and comments that mention them (src/mentions.ts). This is what a
  * notice is, and how one is left; the routes are in routes/inbox.ts.
  */
@@ -46,6 +46,13 @@ const EXCERPT_CHARS = 200;
  *                      every admin, by the plugin (src/plugins/trust/pdq/report.ts): see DETAILED
  *   csam_match_held    ...or was stored, and waits in the moderation queue, on a server that deletes
  *                      nothing on arrival
+ *   csam_video_refused the video worker found a video of which a picture matches that list
+ *                      (src/plugins/trust/pdq/video.ts), and the video was refused. Left for every
+ *                      admin, as the two above are
+ *   video_refused      the post's video matched, so the post was deleted: what its publisher is
+ *                      told, which doesn't say why (as a refused image's sender isn't told)
+ *   video_update_refused   ...or the update's video did, and the post keeps the one it had
+ *   comment_video_refused  ...or the comment's video did, and the comment wasn't published
  *   post_mention       a post that was published mentions the user (`@` and their name, in its text
  *                      or caption). Left by notifyMentions (src/mentions.ts), with who published
  *                      it as the row's sender: see MENTIONS
@@ -58,6 +65,9 @@ const EXCERPT_CHARS = 200;
  *   tag_claim_refused  ...or an admin or a server moderator refused it
  *   tag_moderator_added    an admin, or a moderator of the hashtag, made the user a moderator of it
  *   tag_moderator_removed  ...or ended their time as one
+ *   tag_moderator_lapsed   the user's time as a moderator of the hashtag ended by itself: they did
+ *                          nothing as one for TAG_MODERATOR_INACTIVE_DAYS. Left by the compactor
+ *                          (src/moderation/activity.ts)
  */
 export const NOTICES = {
   post_accepted: 'notice.post_accepted',
@@ -74,10 +84,14 @@ export const NOTICES = {
   video_failed: 'notice.video_failed',
   video_update_failed: 'notice.video_update_failed',
   comment_video_failed: 'notice.comment_video_failed',
+  video_refused: 'notice.video_refused',
+  video_update_refused: 'notice.video_update_refused',
+  comment_video_refused: 'notice.comment_video_refused',
   user_banned: 'notice.user_banned',
   user_unbanned: 'notice.user_unbanned',
   csam_match_refused: 'notice.csam_match_refused',
   csam_match_held: 'notice.csam_match_held',
+  csam_video_refused: 'notice.csam_video_refused',
   post_mention: 'notice.post_mention',
   comment_mention: 'notice.comment_mention',
   tag_claimed: 'notice.tag_claimed',
@@ -85,6 +99,7 @@ export const NOTICES = {
   tag_claim_refused: 'notice.tag_claim_refused',
   tag_moderator_added: 'notice.tag_moderator_added',
   tag_moderator_removed: 'notice.tag_moderator_removed',
+  tag_moderator_lapsed: 'notice.tag_moderator_lapsed',
 } as const satisfies Record<string, MessageKey>;
 
 export type NoticeKind = keyof typeof NOTICES;
@@ -98,7 +113,14 @@ export const MESSAGE = 'message';
  * place of an excerpt, and the notice's message says them by their names ({username}, {at}).
  * The notice of a claim to a hashtag is one: who claims it, and until when the claim can be refused.
  */
-const DETAILED: ReadonlySet<string> = new Set<NoticeKind>(['csam_match_refused', 'csam_match_held', 'tag_claimed']);
+const DETAILED: ReadonlySet<string> = new Set<NoticeKind>(['csam_match_refused', 'csam_match_held', 'csam_video_refused', 'tag_claimed']);
+
+/**
+ * The notices of a file that matched the pdq plugin's list, whose facts name the item of the
+ * quarantine the file is kept as (`quarantineId`) on a server that has one: their message then
+ * goes on to say where an admin reads the file, and where they record the report of it.
+ */
+const QUARANTINED: ReadonlySet<string> = new Set<NoticeKind>(['csam_match_refused', 'csam_match_held', 'csam_video_refused']);
 
 /**
  * The notices of a mention, which are the ones that have a sender: who wrote the post or the
@@ -153,6 +175,9 @@ export function inboxItem(r: InboxRow, say: (text: Message) => string) {
   }
   // A notice is worded by its kind, and a mention whose sender is gone in words that name nobody.
   const key = !isNotice(r.kind) ? null : isMention(r.kind) && !from ? MENTIONS[r.kind] : NOTICES[r.kind];
+  const params = { ...details, tag: r.tag ?? '', ...(from && { username: from.username }) };
+  // A match whose file is kept says where, after what it says of the match.
+  const kept = QUARANTINED.has(r.kind) && details?.quarantineId !== undefined ? ` ${say(msg('notice.csam_match_quarantined', params))}` : '';
   return {
     messageId: r.id,
     kind: r.kind,
@@ -162,7 +187,7 @@ export function inboxItem(r: InboxRow, say: (text: Message) => string) {
     ...(r.tag !== null && { tag: r.tag }),
     ...(details ? { details } : r.body !== null && { excerpt: r.body }),
     // A kind this build doesn't know (left by a newer one) is shown by its name.
-    text: key ? say(msg(key, { ...details, tag: r.tag ?? '', ...(from && { username: from.username }) })) : r.kind,
+    text: key ? `${say(msg(key, params))}${kept}` : r.kind,
     ...times,
   };
 }

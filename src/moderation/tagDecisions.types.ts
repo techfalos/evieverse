@@ -19,9 +19,23 @@ export interface Removal {
 export interface TagAction {
   tag: string;
   decision: TagDecision;
-  /** As what the moderator did it. Who they are isn't read: no response names them. */
+  /** As what the moderator did it. */
   moderator_role: ModeratorRole;
+  /** Who did it, which only who moderates the hashtag is told (see tagActionItem). Null once their account is deleted. */
+  moderator_id: string | null;
+  /** Their username, and null, as `moderator_id` is. */
+  moderator_username: string | null;
   /** Why, for a removal that came with a reason. */
   reason: string | null;
   created_at: number;
+}
+
+/** A row of a hashtag's log, as `tagLog` reads it and `tagLogItem` gives it: a row of a post's record, with the post it is of. */
+export interface TagLogEntry extends TagAction {
+  /** The row's own id, which tells two rows of one instant apart in a page's cursor. */
+  id: string;
+  content_id: string;
+  /** The post's publisher. */
+  publisher_id: string;
+  publisher_username: string;
 }

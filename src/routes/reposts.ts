@@ -4,10 +4,11 @@ import { z } from 'zod';
 import { MAX_ATTESTATION_CHARS, type AttestedPost } from '../attestation.js';
 import { authenticate } from '../auth/apiKey.js';
 import type { AuthUser } from '../auth/apiKey.types.js';
+import { blocks } from '../blocks.js';
 import { loadPublished, ORIGIN_GONE, PENDING_REVIEW, requireMeta } from '../content.js';
 import { isUniqueViolation } from '../db/index.js';
 import type { RouteDeps } from '../deps.types.js';
-import { badRequest, conflict, tooManyRequests, unprocessable } from '../http/errors.js';
+import { badRequest, conflict, forbidden, tooManyRequests, unprocessable } from '../http/errors.js';
 import { Credentials } from '../http/schemas.js';
 import { msg } from '../language.js';
 import { moderatePost, moderateRepost, refuseBanned } from '../moderation/policy.js';
@@ -126,8 +127,8 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
    *
    * Either way the repost has to name the hashtags it gives (400), in server tagging mode from the
    * server's own. It is a post as far as the posts-a-minute limit goes. A banned user
-   * is refused (403). REPOSTS=false turns the route off (400), and REPOSTS_REMOTE=false the second
-   * kind.
+   * is refused (403), and so is one the post's publisher blocks (see repostHere). REPOSTS=false
+   * turns the route off (400), and REPOSTS_REMOTE=false the second kind.
    */
   app.post('/repost', async (req, reply) => {
     const body = Body.parse(req.body ?? {});
@@ -254,6 +255,13 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
    * hashtags are theirs to change with an update; and a post the user reposted before (409), which
    * the first to repost a post from another server has, by making the server's entry for it.
    *
+   * Refused too (403): a post whose publisher blocks the user (src/blocks.ts), which a repost
+   * would show to the reposter's followers, under hashtags of the reposter's choosing. It is one
+   * lookup, and goes by who wrote the post: the server's entry for a post on another server is
+   * its first reposter's content, but not their post, and whom they block reposts the original
+   * like anyone. What the user reposted before the block stays, as their comments do. A block
+   * made while a repost is being sent may not stop it: it applies to the ones sent after it.
+   *
    * The repost's hashtags are held to what the hashtags' moderators keep, as a post's are (see
    * moderateRepost), and one the post has already isn't given again. What it doesn't get is
    * answered in `removedTags`, with why. A repost left with no hashtag is refused (422): it would
@@ -268,6 +276,7 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
   async function repostHere(req: FastifyRequest, reply: FastifyReply, user: AuthUser, contentId: string, tags: string[]) {
     const row = await loadPublished(db, contentId);
     if (row.user_id === user.id) throw row.origin_hash !== null ? alreadyReposted() : badRequest(msg('repost.own'));
+    if (row.origin_hash === null && (await blocks(db, row.user_id, user.id))) throw forbidden(msg('repost.not_taken'));
     const [meta, places] = await Promise.all([requireMeta({ db, content }, contentId), repostsOf(db, contentId)]);
     if (places.some((r) => r.tag === authorIndex(user.id))) throw alreadyReposted();
 

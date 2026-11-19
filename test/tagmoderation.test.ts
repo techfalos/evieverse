@@ -1,24 +1,27 @@
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
+import { idleModerators, retireModerator } from '../src/moderation/activity.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { MAX_REASON_CHARS } from '../src/moderation/tagDecisions.js';
 import { MAX_RULE_CHARS, MAX_RULES } from '../src/routes/rules.js';
 import { as, createTestContext, readAudit, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
 const NO_RULE = '00000000-0000-4000-8000-000000000000';
 
 type Claim = { tag: string; userId: string; username: string; claimedAt: string; reviewUntil: string };
 type Rule = { tag: string; ruleId: string; position: number; text: string; createdAt: string; updatedAt: string };
-type Action = { action: string; tag: string; by: string; reason?: string; at: string; text: string };
+type Action = { action: string; tag: string; by: string; moderator?: { userId: string; username: string } | null; reason?: string; at: string; text: string };
+type Entry = Action & { contentId: string; publisher: { userId: string; username: string } };
 
 for (const target of TARGETS) {
   describe(`tag moderation (${target.name})`, () => {
     let ctx: TestContext;
     afterEach(() => ctx.close());
 
-    const { post } = requests(() => ctx);
+    const { post, storeText } = requests(() => ctx);
     const req = (u: User | null, method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', url: string, payload?: Record<string, unknown>) =>
       ctx.app.inject({ method, url, headers: u ? as(u) : {}, ...(payload && { payload }) });
     const ok = (res: LightMyRequestResponse, status = 200) => {
@@ -384,6 +387,210 @@ for (const target of TARGETS) {
       });
     });
 
+    describe('a moderator who leaves their hashtag unmoderated', () => {
+      const LAPSED = (tag: string) => ['tag_moderator_lapsed', tag, `You are no longer a moderator of #${tag}: you went too long without moderating it.`];
+      const appoint = (by: User, tag: string, u: User) => req(by, 'PUT', `/tags/${tag}/moderators/${u.userId}`);
+      const names = async (tag: string) => (await moderatorsOf(tag)).moderators.map((m) => m.username);
+      /** A user's notices of no longer moderating a hashtag, oldest first: the kind of each, its hashtag, and what it says. */
+      const told = async (u: User) =>
+        (ok(await req(u, 'GET', `/users/${u.userId}/inbox`)).inbox as { kind: string; tag?: string; text: string }[])
+          .filter((m) => m.kind === 'tag_moderator_lapsed' || m.kind === 'tag_moderator_removed')
+          .map((m) => [m.kind, m.tag, m.text])
+          .reverse();
+      /** When `u` last did something as a moderator of `tag`, as their row has it: undefined for one who has none. */
+      const actedAt = async (tag: string, u: User) =>
+        (await ctx.db.selectFrom('tag_moderators').select('acted_at').where('tag', '=', tag).where('user_id', '=', u.userId).executeTakeFirst())?.acted_at;
+
+      it('ends the time of a moderator who did nothing as one for a year, tells them, and leaves the hashtag to be claimed again', async () => {
+        const { root, alice, bob } = await setup();
+        ok(await appoint(root, 'cars', alice), 201);
+        expect(await actedAt('cars', alice)).toBe(ctx.clock.now);
+
+        // A day short of the year, they are its moderator still.
+        ctx.clock.now += 364 * DAY;
+        await ctx.compact();
+        expect(await names('cars')).toEqual(['alice']);
+        expect(await told(alice)).toEqual([]);
+
+        ctx.clock.now += DAY;
+        await ctx.compact();
+        expect(await names('cars')).toEqual([]);
+        expect(await moderates(alice, 'cars')).toBe(false);
+        expect(await told(alice)).toEqual([LAPSED('cars')]);
+        // Once: the runs after it find nothing to end.
+        await ctx.compact();
+        expect(await told(alice)).toEqual([LAPSED('cars')]);
+
+        // The hashtag has no moderator, so it is anyone's to claim, and whoever a claim makes its moderator is counted from then.
+        ok(await claim(bob, 'cars'), 201);
+        ctx.clock.now += 25 * HOUR;
+        await ctx.compact();
+        expect(await names('cars')).toEqual(['bob']);
+        expect(await actedAt('cars', bob)).toBe(Date.parse((await moderatorsOf('cars')).moderators[0]!.since));
+        ctx.clock.now += 364 * DAY;
+        await ctx.compact();
+        expect(await names('cars')).toEqual(['bob']);
+        ctx.clock.now += DAY;
+        await ctx.compact();
+        expect(await names('cars')).toEqual([]);
+        expect(await told(bob)).toEqual([LAPSED('cars')]);
+      });
+
+      it('counts the year from the last thing a moderator did as one, whatever it was, and neither reading nor a request that is refused is one', async () => {
+        const { root, alice, bob, carol } = await setup();
+        ok(await appoint(root, 'cars', alice), 201);
+        ok(await appoint(root, 'cars', bob), 201);
+        const since = ctx.clock.now;
+        const contentId = await post(carol, 'A car #cars');
+        let ruleId = '';
+        const words = { words: ['spam'] };
+
+        const actions: [string, () => Promise<LightMyRequestResponse>][] = [
+          ['approves a post under it', () => req(alice, 'PUT', `/content/${contentId}/tags/cars`)],
+          ['approves it again, which changes nothing', () => req(alice, 'PUT', `/content/${contentId}/tags/cars`)],
+          ['removes the hashtag from a post', () => req(alice, 'DELETE', `/content/${contentId}/tags/cars`, { reason: 'No car.' })],
+          ['mutes a user on it', () => req(alice, 'PUT', `/tags/cars/muted/${carol.userId}`)],
+          ['ends a mute', () => req(alice, 'DELETE', `/tags/cars/muted/${carol.userId}`)],
+          ['adds to its blocked words', () => req(alice, 'POST', '/tags/cars/blocked-words', words)],
+          ['takes from its blocked words', () => req(alice, 'DELETE', '/tags/cars/blocked-words', words)],
+          ['adds a rule', async () => {
+            const res = await req(alice, 'POST', '/tags/cars/rules', { text: 'Cars only.' });
+            ruleId = res.json().ruleId;
+            return res;
+          }],
+          ['changes a rule', () => req(alice, 'PATCH', `/tags/cars/rules/${ruleId}`, { text: 'Cars, and only cars.' })],
+          ['removes a rule', () => req(alice, 'DELETE', `/tags/cars/rules/${ruleId}`)],
+          ['appoints a moderator', () => appoint(alice, 'cars', carol)],
+          ['removes a moderator', () => req(alice, 'DELETE', `/tags/cars/moderators/${carol.userId}`)],
+        ];
+        for (const [what, act] of actions) {
+          ctx.clock.now += DAY;
+          const res = await act();
+          expect(res.statusCode, `${what}: ${res.body}`).toBeLessThan(300);
+          expect(await actedAt('cars', alice), what).toBe(ctx.clock.now);
+        }
+        const last = ctx.clock.now;
+
+        // Reading what a moderator reads is not moderating.
+        ctx.clock.now += DAY;
+        for (const url of ['/tags/cars/muted', '/tags/cars/blocked-words', '/tags/cars/rules', '/tags/cars/moderators', '/tags/cars/log']) ok(await req(alice, 'GET', url));
+        // Nor is asking for what is refused: a moderator who became one at the same moment isn't theirs to remove, and another hashtag isn't theirs at all.
+        expect((await req(alice, 'DELETE', `/tags/cars/moderators/${bob.userId}`)).statusCode).toBe(403);
+        expect((await req(alice, 'POST', '/tags/trucks/blocked-words', words)).statusCode).toBe(403);
+        expect((await req(alice, 'POST', '/tags/cars/rules', { text: '' })).statusCode).toBe(400);
+        expect(await actedAt('cars', alice)).toBe(last);
+        // What one moderator does says nothing of another, and an admin, who has no row, leaves none.
+        expect(await actedAt('cars', bob)).toBe(since);
+        expect(await actedAt('cars', root)).toBeUndefined();
+
+        // A year after they became its moderators: the one who did nothing since is one no more, and the other is.
+        ctx.clock.now = since + 365 * DAY;
+        await ctx.compact();
+        expect(await names('cars')).toEqual(['alice']);
+        expect(await told(bob)).toEqual([LAPSED('cars')]);
+        expect(await told(alice)).toEqual([]);
+        // And a year after the last thing they did, so is the other.
+        ctx.clock.now = last + 364 * DAY;
+        await ctx.compact();
+        expect(await names('cars')).toEqual(['alice']);
+        ctx.clock.now = last + 365 * DAY;
+        await ctx.compact();
+        expect(await names('cars')).toEqual([]);
+        expect(await told(alice)).toEqual([LAPSED('cars')]);
+      });
+
+      it('counts each hashtag by itself: one a moderator leaves is lost, and one they moderate is kept', async () => {
+        const { root, mod, alice } = await setup();
+        ok(await appoint(root, 'cars', alice), 201);
+        ok(await appoint(root, 'trucks', alice), 201);
+        // A server moderator who is appointed to a hashtag has a row for it, which they lose as anyone does.
+        ok(await appoint(root, 'trucks', mod), 201);
+
+        ctx.clock.now += 200 * DAY;
+        ok(await req(alice, 'POST', '/tags/cars/blocked-words', { words: ['spam'] }));
+        ctx.clock.now += 200 * DAY;
+        await ctx.compact();
+
+        expect(await names('cars')).toEqual(['alice']);
+        expect(await names('trucks')).toEqual([]);
+        expect(await told(alice)).toEqual([LAPSED('trucks')]);
+        expect(await told(mod)).toEqual([LAPSED('trucks')]);
+        // Their role is what it was: they moderate every hashtag still.
+        expect(await moderates(mod, 'trucks')).toBe(true);
+        expect(await moderates(alice, 'trucks')).toBe(false);
+      });
+
+      it('takes the number of days from TAG_MODERATOR_INACTIVE_DAYS', async () => {
+        const { root, alice } = await setup({ tagging: { moderatorInactiveDays: 30 } });
+        ok(await appoint(root, 'cars', alice), 201);
+        ctx.clock.now += 29 * DAY;
+        await ctx.compact();
+        expect(await names('cars')).toEqual(['alice']);
+        ctx.clock.now += DAY;
+        await ctx.compact();
+        expect(await names('cars')).toEqual([]);
+        expect(await told(alice)).toEqual([LAPSED('cars')]);
+      });
+
+      it("ends no moderator's time where the setting is 0", async () => {
+        const { root, alice } = await setup({ tagging: { moderatorInactiveDays: 0 } });
+        ok(await appoint(root, 'cars', alice), 201);
+        ctx.clock.now += 10 * 365 * DAY;
+        await ctx.compact();
+        expect(await names('cars')).toEqual(['alice']);
+        expect(await told(alice)).toEqual([]);
+
+        // It counts all the same, so a server that sets a number of days later finds every moderator counted.
+        await ctx.db.updateTable('tag_moderators').set({ acted_at: null }).execute();
+        await ctx.compact();
+        expect(await actedAt('cars', alice)).toBe(ctx.clock.now);
+      });
+
+      it('counts a moderator there was before the server counted from its next run, however long they were one', async () => {
+        const { root, alice } = await setup();
+        ok(await appoint(root, 'cars', alice), 201);
+        // As the migration leaves the rows it finds: a moderator of ten years, of whom nothing is known.
+        await ctx.db.updateTable('tag_moderators').set({ created_at: ctx.clock.now - 10 * 365 * DAY, acted_at: null }).execute();
+
+        await ctx.compact();
+        const counted = ctx.clock.now;
+        expect(await actedAt('cars', alice)).toBe(counted);
+        expect(await names('cars')).toEqual(['alice']);
+        expect(await told(alice)).toEqual([]);
+
+        ctx.clock.now = counted + 364 * DAY;
+        await ctx.compact();
+        expect(await names('cars')).toEqual(['alice']);
+        ctx.clock.now = counted + 365 * DAY;
+        await ctx.compact();
+        expect(await names('cars')).toEqual([]);
+        expect(await told(alice)).toEqual([LAPSED('cars')]);
+      });
+
+      it('keeps a moderator who did something after a run found them idle, and before it ended their time', async () => {
+        const { root, alice, bob } = await setup();
+        ok(await appoint(root, 'cars', alice), 201);
+        ok(await appoint(root, 'cars', bob), 201);
+        ctx.clock.now += 366 * DAY;
+        const before = ctx.clock.now - 365 * DAY;
+        const deps = { db: ctx.db, content: ctx.content, now: () => ctx.clock.now };
+
+        // What a run reads, longest idle first.
+        const idle = await idleModerators(ctx.db, before, 10);
+        expect(idle).toEqual([alice, bob].map((u) => ({ tag: 'cars', user_id: u.userId })).sort((a, b) => a.user_id.localeCompare(b.user_id)));
+        expect(await idleModerators(ctx.db, before, 1)).toHaveLength(1);
+
+        ok(await req(alice, 'POST', '/tags/cars/blocked-words', { words: ['spam'] }));
+        expect(await retireModerator(deps, { tag: 'cars', user_id: alice.userId }, before)).toBe(false);
+        expect(await retireModerator(deps, { tag: 'cars', user_id: bob.userId }, before)).toBe(true);
+        // One who is gone already is not told twice.
+        expect(await retireModerator(deps, { tag: 'cars', user_id: bob.userId }, before)).toBe(false);
+        expect(await names('cars')).toEqual(['alice']);
+        expect(await told(alice)).toEqual([]);
+        expect(await told(bob)).toEqual([LAPSED('cars')]);
+      });
+    });
+
     describe("a hashtag's rules", () => {
       const rulesOf = async (tag: string, u: User | null = null) => ok(await req(u, 'GET', `/tags/${tag}/rules`)) as { tag: string; rules: Omit<Rule, 'tag'>[] };
       const texts = async (tag: string) => (await rulesOf(tag)).rules.map((r) => r.text);
@@ -506,7 +713,7 @@ for (const target of TARGETS) {
         ctx.db.selectFrom('tag_moderation_log').select(['tag', 'decision', 'moderator_id', 'moderator_role', 'reason']).where('content_id', '=', contentId).orderBy('created_at').execute();
 
       it('says on the post which hashtag a moderator approved it under or removed from it, as what, when and why', async () => {
-        const { root, mod, alice, bob } = await setup();
+        const { root, mod, alice, bob, carol } = await setup();
         ok(await req(root, 'PUT', `/tags/cars/moderators/${bob.userId}`), 201);
         const contentId = await post(alice, 'A boat, mostly #cars #news #boats');
         expect(await read(contentId)).not.toHaveProperty('moderation');
@@ -544,12 +751,12 @@ for (const target of TARGETS) {
         ok(await req(root, 'DELETE', `/content/${contentId}/tags/boats`, { reason: 'Not a boat either.', mute: true }));
         const all = [approved, removed, byMod, byAdmin];
 
-        // To anyone who reads the post: its publisher, another user, and someone with no key. Nobody is told who.
+        // To anyone who reads the post: its publisher, another user, and someone with no key. None of them is told who.
         expect((await read(contentId)).moderation).toEqual(all);
         expect((await read(contentId, alice)).moderation).toEqual(all);
-        expect((await read(contentId, bob)).moderation).toEqual(all);
+        expect((await read(contentId, carol)).moderation).toEqual(all);
         expect(JSON.stringify((await read(contentId)).moderation)).not.toContain(bob.userId);
-        // The row says who, for the server's own record.
+        // The row says who, which is for those who moderate the hashtag to be told.
         expect(await rows(contentId)).toEqual([
           { tag: 'cars', decision: 'approved', moderator_id: bob.userId, moderator_role: 'tag_moderator', reason: null },
           { tag: 'cars', decision: 'removed', moderator_id: bob.userId, moderator_role: 'tag_moderator', reason: 'it has no cars in it' },
@@ -562,6 +769,43 @@ for (const target of TARGETS) {
         const after = await read(contentId);
         expect(after.tags).toEqual([]);
         expect(after.moderation).toEqual(all);
+      });
+
+      it('says who decided to those who moderate the hashtag it was decided under, and to nobody else', async () => {
+        const { root, mod, alice, bob, carol } = await setup();
+        ok(await req(root, 'PUT', `/tags/cars/moderators/${bob.userId}`), 201);
+        ok(await req(root, 'PUT', `/tags/cars/moderators/${carol.userId}`), 201);
+        const contentId = await post(alice, 'A boat, mostly #cars #news');
+        ctx.clock.now += 1000;
+        ok(await req(bob, 'PUT', `/content/${contentId}/tags/cars`), 201);
+        ctx.clock.now += 1000;
+        ok(await req(mod, 'DELETE', `/content/${contentId}/tags/news`, { reason: 'Not news.' }));
+        /** Each decision's hashtag, as what it was made, and who made it, as far as `u` is told. */
+        const who = async (u: User | null) => (await read(contentId, u)).moderation!.map((a) => [a.tag, a.by, a.moderator]);
+        const bobs = { userId: bob.userId, username: 'bob' };
+        const mods = { userId: mod.userId, username: 'mod' };
+
+        // The hashtag's other moderator, and the one who decided: of what was decided under their hashtag, and not under another.
+        const underCars = [['cars', 'tag_moderator', bobs], ['news', 'server_moderator', undefined]];
+        expect(await who(carol)).toEqual(underCars);
+        expect(await who(bob)).toEqual(underCars);
+        // Server moderators and admins moderate every hashtag.
+        const all = [['cars', 'tag_moderator', bobs], ['news', 'server_moderator', mods]];
+        expect(await who(mod)).toEqual(all);
+        expect(await who(root)).toEqual(all);
+
+        // Not the post's publisher, not a reader with no key, and not one whose key is wrong, who reads the post as anyone does.
+        for (const u of [alice, null, { ...carol, apiKey: alice.apiKey }]) {
+          const { moderation } = await read(contentId, u);
+          expect(moderation).toHaveLength(2);
+          for (const action of moderation!) expect(action).not.toHaveProperty('moderator');
+        }
+        // The words say as what, to everyone.
+        expect((await read(contentId, root)).moderation!.map((a) => a.text)).toEqual((await read(contentId)).moderation!.map((a) => a.text));
+
+        // One who moderates the hashtag no more is told no more.
+        ok(await req(root, 'DELETE', `/tags/cars/moderators/${carol.userId}`));
+        expect(await who(carol)).toEqual([['cars', 'tag_moderator', undefined], ['news', 'server_moderator', undefined]]);
       });
 
       it('takes a reason of a few words, and none that is empty or too long', async () => {
@@ -599,6 +843,11 @@ for (const target of TARGETS) {
         expect(await ctx.db.selectFrom('users').select('id').where('id', '=', bob.userId).execute()).toEqual([]);
         expect((await read(contentId)).moderation).toMatchObject([{ action: 'tag_removed', tag: 'news', by: 'tag_moderator', reason: 'Old news.' }]);
         expect(await rows(contentId)).toMatchObject([{ moderator_id: null, moderator_role: 'tag_moderator' }]);
+        // Who it was is gone with them, which those who would be told are told.
+        expect((await read(contentId)).moderation![0]).not.toHaveProperty('moderator');
+        expect((await read(contentId, root)).moderation).toMatchObject([{ by: 'tag_moderator', moderator: null }]);
+        const log = ok(await req(root, 'GET', '/tags/news/log')).log as Entry[];
+        expect(log.map((e) => [e.contentId, e.action, e.moderator]).sort()).toEqual([[contentId, 'tag_removed', null], [other, 'tag_approved', null]].sort());
 
         ok(await req(alice, 'DELETE', `/content/${contentId}`), 202);
         for (let i = 0; i < 3; i++) await ctx.compact();
@@ -607,20 +856,156 @@ for (const target of TARGETS) {
         expect(await rows(other)).toHaveLength(1);
       });
     });
+
+    describe("a hashtag's log", () => {
+      const logOf = async (tag: string, u: User | null = null, query = '') => ok(await req(u, 'GET', `/tags/${tag}/log${query}`)) as { tag: string; log: Entry[]; nextCursor: string | null };
+      /** The posts of a hashtag's log as `u` is given it, newest decision first. */
+      const listed = async (tag: string, u: User | null = null) => (await logOf(tag, u)).log.map((e) => e.contentId);
+
+      it('lists what moderators did to the posts under a hashtag, newest first, to anyone, and says who did it to those who moderate the hashtag', async () => {
+        const { root, mod, alice, bob, carol } = await setup();
+        ok(await req(root, 'PUT', `/tags/cars/moderators/${bob.userId}`), 201);
+        ok(await req(root, 'PUT', `/tags/trucks/moderators/${carol.userId}`), 201);
+        const car = await post(alice, 'A car #cars #news');
+        const boat = await post(carol, 'A boat #cars');
+        ctx.clock.now += 1000;
+        const approvedAt = now();
+        ok(await req(bob, 'PUT', `/content/${car}/tags/cars`), 201);
+        ctx.clock.now += 1000;
+        const removedAt = now();
+        ok(await req(mod, 'DELETE', `/content/${boat}/tags/cars`, { reason: 'A boat.' }));
+        ctx.clock.now += 1000;
+        ok(await req(root, 'DELETE', `/content/${car}/tags/news`));
+
+        const approved: Entry = {
+          contentId: car,
+          publisher: { userId: alice.userId, username: 'alice' },
+          action: 'tag_approved',
+          tag: 'cars',
+          by: 'tag_moderator',
+          at: approvedAt,
+          text: 'This post was approved under #cars by a moderator of the hashtag.',
+        };
+        const removed: Entry = {
+          contentId: boat,
+          publisher: { userId: carol.userId, username: 'carol' },
+          action: 'tag_removed',
+          tag: 'cars',
+          by: 'server_moderator',
+          reason: 'A boat.',
+          at: removedAt,
+          text: '#cars was removed from this post by a server moderator: A boat.',
+        };
+
+        // To anyone, with a key or without, and however the hashtag is written: as what each was done, and not by whom.
+        const unnamed = { tag: 'cars', log: [removed, approved], nextCursor: null };
+        expect(await logOf('cars')).toEqual(unnamed);
+        expect(await logOf('%23Cars', alice)).toEqual(unnamed);
+        // A moderator of another hashtag is anyone, here.
+        expect(await logOf('cars', carol)).toEqual(unnamed);
+
+        // Those who moderate it are told who: its own moderators, server moderators and admins.
+        const named = { tag: 'cars', log: [{ ...removed, moderator: { userId: mod.userId, username: 'mod' } }, { ...approved, moderator: { userId: bob.userId, username: 'bob' } }], nextCursor: null };
+        for (const u of [bob, mod, root]) expect(await logOf('cars', u)).toEqual(named);
+
+        // A hashtag's log is its own, and one nobody decided under has none.
+        expect((await logOf('news')).log).toMatchObject([{ contentId: car, action: 'tag_removed', tag: 'news', by: 'admin' }]);
+        expect(await logOf('trucks', carol)).toEqual({ tag: 'trucks', log: [], nextCursor: null });
+
+        // A key that isn't the user's is refused, as anywhere else, and so is what isn't a hashtag.
+        expect((await req({ ...bob, apiKey: alice.apiKey }, 'GET', '/tags/cars/log')).statusCode).toBe(401);
+        expect((await req(null, 'GET', '/tags/not-a-tag/log')).statusCode).toBe(400);
+      });
+
+      it('gives the log a page at a time, each decision once', async () => {
+        const { root, alice } = await setup();
+        const posts: string[] = [];
+        for (const n of [1, 2, 3]) {
+          posts.push(await post(alice, `Post ${n} #news`));
+          ctx.clock.now += 1000;
+          ok(await req(root, 'PUT', `/content/${posts[n - 1]}/tags/news`), 201);
+        }
+        // Two at the same instant.
+        ok(await req(root, 'DELETE', `/content/${posts[2]}/tags/news`));
+
+        const first = await logOf('news', null, '?limit=3');
+        expect(first.log.map((e) => [e.contentId, e.action]).sort()).toEqual([[posts[1], 'tag_approved'], [posts[2], 'tag_approved'], [posts[2], 'tag_removed']].sort());
+        expect(first.log[2]).toMatchObject({ contentId: posts[1] });
+        expect(first.nextCursor).toEqual(expect.any(String));
+        const second = await logOf('news', null, `?limit=3&cursor=${first.nextCursor}`);
+        expect(second.log.map((e) => [e.contentId, e.action])).toEqual([[posts[0], 'tag_approved']]);
+        expect(second.nextCursor).toBeNull();
+
+        // One at a time, the two of one instant are each given once.
+        const seen: string[] = [];
+        for (let cursor: string | null = '', pages = 0; cursor !== null && pages < 10; pages++) {
+          const page = await logOf('news', null, `?limit=1${cursor && `&cursor=${cursor}`}`);
+          seen.push(...page.log.map((e) => `${e.contentId} ${e.action}`));
+          cursor = page.nextCursor;
+        }
+        expect(seen).toHaveLength(4);
+        expect(new Set(seen).size).toBe(4);
+        expect(seen.slice(2)).toEqual([`${posts[1]} tag_approved`, `${posts[0]} tag_approved`]);
+
+        expect((await req(null, 'GET', '/tags/news/log?cursor=nope')).statusCode).toBe(400);
+        expect((await req(null, 'GET', '/tags/news/log?limit=0')).statusCode).toBe(400);
+      });
+
+      it('leaves out a post that is being deleted, and gives one that is withheld from readers to server moderators and admins only', async () => {
+        const { root, mod, alice, bob } = await setup({ trust: { deleteBelow: 0 } });
+        ok(await req(root, 'POST', '/moderation/blocked-words', { words: ['spam'] }));
+        ok(await req(root, 'PUT', `/tags/news/moderators/${bob.userId}`), 201);
+        const kept = await post(alice, 'Kept #news');
+        const held = await post(alice, 'To be held #news');
+        const gone = await post(alice, 'Soon gone #news');
+        for (const contentId of [kept, held, gone]) {
+          ctx.clock.now += 1000;
+          ok(await req(bob, 'PUT', `/content/${contentId}/tags/news`), 201);
+        }
+        expect(await listed('news')).toEqual([gone, held, kept]);
+
+        // An update the server holds takes the post from its readers, and its entries with it: they are for who reads it in the queue.
+        ok(await storeText(alice, 'Spam, as of now #news', { contentId: held }), 202);
+        expect((await req(null, 'GET', `/content/${held}`)).statusCode).toBe(404);
+        expect(await listed('news')).toEqual([gone, kept]);
+        expect(await listed('news', bob)).toEqual([gone, kept]);
+        expect(await listed('news', mod)).toEqual([gone, held, kept]);
+        expect(await listed('news', root)).toEqual([gone, held, kept]);
+        // Once it is accepted, it is back for everyone.
+        ok(await req(mod, 'POST', `/moderation/queue/${held}/accept`));
+        expect(await listed('news')).toEqual([gone, held, kept]);
+
+        // A post that is being deleted is gone, for everyone, before its rows are.
+        ok(await req(alice, 'DELETE', `/content/${gone}`), 202);
+        expect(await listed('news')).toEqual([held, kept]);
+        expect(await listed('news', root)).toEqual([held, kept]);
+        for (let i = 0; i < 3; i++) await ctx.compact();
+        expect(await listed('news', root)).toEqual([held, kept]);
+      });
+    });
   });
 }
 
 describe('the settings of claims', () => {
   const tagging = (env: Record<string, string>, overrides = {}) => loadConfig(overrides, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).tagging;
 
-  it('gives a claim a day to be refused, and a user five claims a day, unless told otherwise', () => {
-    expect(tagging({})).toMatchObject({ mode: 'user', claimReviewHours: 24, claimsPerDay: 5 });
+  it('gives a claim a day to be refused, and a user two claims a day, unless told otherwise', () => {
+    expect(tagging({})).toMatchObject({ mode: 'user', claimReviewHours: 24, claimsPerDay: 2 });
     expect(tagging({ TAG_CLAIM_REVIEW_HOURS: '72', TAG_CLAIMS_PER_DAY: '1' })).toMatchObject({ claimReviewHours: 72, claimsPerDay: 1 });
     expect(tagging({ TAG_CLAIM_REVIEW_HOURS: '0', TAG_CLAIMS_PER_DAY: '0' })).toMatchObject({ claimReviewHours: 0, claimsPerDay: 0 });
-    expect(tagging({}, { tagging: { claimReviewHours: 1 } })).toMatchObject({ claimReviewHours: 1, claimsPerDay: 5 });
+    expect(tagging({}, { tagging: { claimReviewHours: 1 } })).toMatchObject({ claimReviewHours: 1, claimsPerDay: 2 });
     for (const bad of ['-1', '1.5', 'soon']) {
       expect(() => tagging({ TAG_CLAIM_REVIEW_HOURS: bad }), bad).toThrow();
       expect(() => tagging({ TAG_CLAIMS_PER_DAY: bad }), bad).toThrow();
     }
+  });
+
+  it("gives a hashtag's moderator a year to do something as one, unless told otherwise", () => {
+    expect(tagging({})).toMatchObject({ moderatorInactiveDays: 365 });
+    expect(tagging({ TAG_MODERATOR_INACTIVE_DAYS: '90' })).toMatchObject({ moderatorInactiveDays: 90 });
+    // 0: a moderator's time never ends this way.
+    expect(tagging({ TAG_MODERATOR_INACTIVE_DAYS: '0' })).toMatchObject({ moderatorInactiveDays: 0 });
+    expect(tagging({}, { tagging: { moderatorInactiveDays: 30 } })).toMatchObject({ moderatorInactiveDays: 30, claimsPerDay: 2 });
+    for (const bad of ['-1', '1.5', 'never']) expect(() => tagging({ TAG_MODERATOR_INACTIVE_DAYS: bad }), bad).toThrow();
   });
 });

@@ -144,7 +144,7 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
    * Returns the hashtags the write gives the content: the ones it came with (`summary.tags`),
    * but for those of a repost that was removed meanwhile.
    */
-  async function write({ publisher, previous, seenSeq, recheck, summary, meta, stageBytes, processVideo, queued, given = [], droppedReposts = [], originHash }: ContentWrite): Promise<string[]> {
+  async function write({ publisher, previous, seenSeq, recheck, summary, meta, stageBytes, processVideo, client, queued, given = [], droppedReposts = [], originHash }: ContentWrite): Promise<string[]> {
     const { contentId, createdAt, updatedAt: ts, aiGenerated } = summary;
     const own = authorIndex(publisher.userId);
 
@@ -242,7 +242,7 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
         // A video the server processes waits as it was sent: the row says so, and the job is what the video worker finds it by.
         const process = processVideo === true && first !== undefined;
         await insertPending(trx, { contentId, seq, kind: 'post', payload: { meta: written, ...(process && { process: true }) }, stagedKey: first?.key, at: ts });
-        if (process) await addVideoJob(trx, { contentId, seq, at: ts });
+        if (process) await addVideoJob(trx, { contentId, seq, at: ts, client });
         // The images after the first, of an image post of several: a row each, under the write's number, which names where the image waits.
         for (const [i, { key }] of staged.entries()) {
           if (i > 0) await insertPending(trx, { contentId, seq, kind: 'post_file', image: i + 1, stagedKey: key, at: ts });

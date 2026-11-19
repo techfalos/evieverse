@@ -57,7 +57,7 @@ Names in capitals, such as `FEED_PAGE_SIZE`, are an instance's settings ([`.env.
 | [`POST /users/:userId/inbox/read`](#reading-the-inbox) | The user | Marks what's in the inbox as read. |
 | [`DELETE /users/:userId/inbox/:messageId`](#reading-the-inbox) | The user | Deletes a message or a notice from the inbox. |
 | [`POST /messages`](#post-messages) | Any user | Sends another user a message. |
-| [`PUT /users/:userId/blocked/:blockedId`](#blocks) | The user | Blocks a user: no message goes between the two, neither follows the other, and the blocked user can't comment on the user's posts. |
+| [`PUT /users/:userId/blocked/:blockedId`](#blocks) | The user | Blocks a user: no message goes between the two, neither follows the other, and the blocked user can't comment on the user's posts, reply to the user's comments or repost the user's posts. |
 | [`DELETE /users/:userId/blocked/:blockedId`](#blocks) | The user | Ends a block. |
 | [`GET /users/:userId/blocked`](#blocks) | The user | Lists whom the user blocks. |
 | [`GET /feed`](#get-feed) | Anyone | A feed of one or more hashtags. |
@@ -82,7 +82,8 @@ Names in capitals, such as `FEED_PAGE_SIZE`, are an instance's settings ([`.env.
 | [`DELETE /tags/:tag/rules/:ruleId`](#a-hashtags-rules) | The hashtag's moderators, server moderators, and admins | Removes one of the hashtag's rules. |
 | [`POST /tags/:tag/claim`](#claiming-a-hashtag) | Any user, where publishers choose their posts' hashtags | Claims a hashtag that has no moderator, to moderate it. |
 | [`DELETE /tags/:tag/claim`](#claiming-a-hashtag) | The claim's user, server moderators, and admins | Withdraws a claim that waits, or refuses it. |
-| [The moderation endpoints](#moderation-endpoints) | Mostly admins and moderators | Roles, bans, blocked words, mutes, a hashtag's moderators and the claims to hashtags, the two kinds of moderation queue, and the report queue. |
+| [The moderation endpoints](#moderation-endpoints) | Mostly admins and moderators | Roles, bans, blocked words, mutes, a hashtag's moderators and the claims to hashtags, the two kinds of moderation queue, a hashtag's log, and the report queue. |
+| [`/moderation/quarantine` and the endpoints under it](#the-quarantine) | Admins | The files that matched the server's list of hashes of known child sexual abuse material, where the server keeps them: listing them, reading one, recording the report made of it, and deleting one that was never reported. |
 | [`GET /cli` and the files under it](#the-cli-download) | Anyone | The CLI the instance ships. |
 | `GET /health` | Anyone | `{ "ok": true }`, for a load balancer to check. |
 
@@ -400,8 +401,10 @@ curl -X DELETE localhost:3000/users/$USER_ID -H "Authorization: Bearer $KEY" -H 
 ```
 
 The response says whether the account is gone yet:
-- `200` with `{ userId, status: "deleted" }`: the account had no posts, and is gone.
-- `202` with `{ userId, status: "pending_deletion", requestedAt }`: the account has posts. They're set for deletion as [`DELETE /content/:contentId`](#delete-contentcontentid) sets one, and the account goes with the last of them, when the [compactor](APP.md) next runs. A repeat of the request gets the same answer, with the same `requestedAt`.
+- `200` with `{ userId, status: "deleted" }`: the account has no posts, and is gone. It had none, or, for a repeat of the request, the last of them has just been deleted (below).
+- `202` with `{ userId, status: "pending_deletion", requestedAt }`: the account has posts. They're set for deletion as [`DELETE /content/:contentId`](#delete-contentcontentid) sets one, and the account goes with the last of them, when the [compactor](APP.md) next runs.
+
+A repeat of the request is an admin's to make, since the account's own key no longer works (`401`). It gets the same `202`, with the same `requestedAt`, for as long as a post of the account is left, and `404` once the account is gone. One that comes between the two, when the compactor has deleted the last post and not yet the account, deletes the account itself and gets the `200`. Either of `200` and `404` says the account is gone.
 
 From the response on, as far as anyone can tell the account is gone, whichever it is:
 - Its keys stop working (`401`), and it isn't a user to look up (`404`), follow, message, block, ban or appoint to a role. Its [profile](#a-users-profile) goes with it: its avatar and the list of its posts are `404` too.
@@ -643,6 +646,8 @@ A video that can't be processed (a file that isn't a video, one that's broken, o
 - **A new post is deleted.** It was never published.
 - **An update keeps the video the post had.** The rest of the update is made.
 
+A video the server doesn't trust is given up the same way, with a notice that says so and not why: `video_refused` for a new post, `video_update_refused` for an update. That's a video of which a picture matches the server's list of hashes of known child sexual abuse material, on a server that runs the `pdq` [trust plugin](#moderation), which checks each video once it's decoded and before anything of it is published. The server's admins get a [notice](#an-image-that-matches-the-servers-list) of their own.
+
 While a post is processing it can be liked, reposted and commented on, as any post that's read by its id can.
 
 #### Albums
@@ -810,7 +815,8 @@ A post that a hashtag's moderator decided about has `moderation`: what moderator
 | --- | --- |
 | `action` | `tag_removed`: a moderator [removed the hashtag from the post](#a-hashtags-queue). `tag_approved`: one approved the post under it. |
 | `tag` | The hashtag. |
-| `by` | As what the moderator did it: `tag_moderator` (one of the hashtag's own), `server_moderator` or `admin`. Never who: the post doesn't name the moderator, to its publisher or to anyone else. |
+| `by` | As what the moderator did it: `tag_moderator` (one of the hashtag's own), `server_moderator` or `admin`. Everyone gets this. |
+| `moderator` | Who did it: `{ userId, username }`, or `null` once that account is deleted. Only for a reader who moderates the hashtag (one of its moderators, a server moderator or an admin), who sends their credentials in the headers (`Authorization: Bearer <apiKey>` and `X-User-Id`). Nobody else gets the field, the post's publisher included. |
 | `reason` | Why the hashtag was removed, where the moderator said: at most 500 characters. Whoever can read the post can read it. |
 | `at` | When. |
 | `text` | All of it in words, in the reader's [language](#get-languages): "#cars was removed from this post by a moderator of the hashtag", with the reason after it where there is one, or "This post was approved under #news by an admin." |
@@ -820,6 +826,8 @@ A post that a hashtag's moderator decided about has `moderation`: what moderator
 - It lists the 100 most recent, which is all of them for all but a post approved again after update upon update.
 - Only what a moderator decided about this post is in it. A hashtag the post didn't get when it was written, for the hashtag's [blocked words](#blocked-words) or a mute of its publisher, isn't: the response to `POST /store` says that, in `removedTags`.
 - A post no moderator decided about has no `moderation`, and feed records never have it.
+- `moderator` is given hashtag by hashtag: a moderator of `#cars` gets it on what was decided under `#cars`, and not on what was decided under the post's other hashtags. Credentials that aren't a user's don't refuse the request: the post is read as anyone reads it, without `moderator`. `text` names nobody, so it's the same for every reader.
+- A hashtag's decisions on all its posts are its [log](#a-hashtags-log).
 
 `GET /content/:contentId/raw` streams the content's bytes as they are now, with their content type. The link stays the same across updates, so a cache or CDN in front decides how long a copy is good for. On stores that support presigned URLs (S3, GCS, ...), it redirects to one instead, valid for `CONTENT_SIGNED_URL_SECONDS` (900). Azure Blob Storage isn't one of them: the server signs links to upload with there, but streams the bytes to read. Bytes the server streams itself come with `X-Content-Type-Options: nosniff` and a `Content-Security-Policy` that sandboxes them: a browser shows or plays the file, and a page opened on it runs no script.
 
@@ -859,7 +867,7 @@ Nothing is copied. The post stays one post, with one like count, credited to its
 | `origin` | In place of `contentId`: a post on another server, as that server signed it: `{ attestation }` ([below](#a-post-on-another-server)). |
 | `tags` | Required: the hashtags the repost gives the post, at least one and at most 10, written as a post's are: a list, or one string separated by commas or spaces. In `server` [tagging mode](#hashtags) they must be among the server's. Otherwise `400`. |
 
-Authenticated. A [banned](#bans) user is refused (`403`). An instance can turn reposts off (`REPOSTS=false`), and the request then gets `400`.
+Authenticated. A [banned](#bans) user is refused (`403`), and so is a user the post's publisher [blocks](#blocks): "this post's publisher doesn't take reposts from you". An instance can turn reposts off (`REPOSTS=false`), and the request then gets `400`.
 
 What can be reposted:
 - **Any published post but your own.** Your own post gets other hashtags by an update ([`POST /store`](#post-store)), so a repost of it gets `400`. A post that waits in the [moderation queue](#the-moderation-queue), is set for deletion or isn't there gets `404`.
@@ -1228,7 +1236,7 @@ curl "localhost:3000/content/$CONTENT_ID/comments/$COMMENT_ID/replies"
 { "userId": "...", "apiKey": "...", "text": "Lovely light." }
 ```
 
-Comments on a post, or with `parentId`, replies to a comment on it. Send it as JSON, or as `multipart/form-data` with the file in a part named `content`, as a post is sent to [`POST /store`](#post-store). The post must be published and take comments, otherwise `404`. A [banned](#bans) user is refused (`403`), and so is a user the post's publisher [blocks](#blocks): "this post's publisher doesn't take comments from you".
+Comments on a post, or with `parentId`, replies to a comment on it. Send it as JSON, or as `multipart/form-data` with the file in a part named `content`, as a post is sent to [`POST /store`](#post-store). The post must be published and take comments, otherwise `404`. A [banned](#bans) user is refused (`403`), and so is a user the post's publisher [blocks](#blocks): "this post's publisher doesn't take comments from you". A reply is refused too (`403`) if the author of the comment it replies to blocks the user, on whoever's post that comment is: "this comment's author doesn't take replies from you".
 
 | field | notes |
 | --- | --- |
@@ -1248,6 +1256,7 @@ A comment's video is processed as a [post's](#videos) is, where the server proce
 - **The response has `processing: true`,** and so has the comment read by its id, until the video is ready. Its `/raw` answers `404` until then, and `media.mimeType` and `media.size` are the file's as it was sent.
 - **The comment is in the [lists](#reading-comments) once the video is ready,** with `media.mimeType` `video/mp4`.
 - **A video that can't be processed is dropped.** The comment is published with its text alone, or not at all if the video was all of it, and its author gets a [notice](#notices).
+- **A video the server doesn't trust takes the comment with it.** On a server that runs the `pdq` [trust plugin](#moderation), a video of which a picture matches its list isn't published, and neither is the comment's text: its author gets the notice `comment_video_refused`, which doesn't say why.
 
 The response is the comment:
 
@@ -1282,7 +1291,7 @@ Edits a comment: its author gives it another text. Nobody else can, an admin inc
 - **Of two edits sent at once, the last to commit wins.** An edit is of the comment as it is when the edit commits: one that was deleted meanwhile gets `404`, and one that another edit changed meanwhile is edited as that left it.
 - **The text it already has changes nothing,** with the `aiGenerated` it has or with none sent. The response is `200` with `{ contentId, commentId, unchanged: true }`, plus `status: "pending_review"` for a comment that waits in the moderation queue. It isn't scored and isn't counted.
 - **An edit counts as a comment.** It's scored by [moderation](#moderation) as a new comment is, then counted with the user's comments of the last minute ([above](#limits-on-posts-and-comments)).
-- A [banned](#bans) user is refused (`403`), and so is a user the post's publisher [blocks](#blocks): they can't change what they wrote there, though they can still delete it. The post must be published and take comments, otherwise `404`. A comment that isn't there gets `404`, and so does a [placeholder](#placeholders), and a comment that waits in the moderation queue for anyone who can't read it there.
+- A [banned](#bans) user is refused (`403`), and so is a user the post's publisher [blocks](#blocks): they can't change what they wrote there, though they can still delete it. So is the author of a reply, if the author of the comment it replies to blocks them (`403`). The post must be published and take comments, otherwise `404`. A comment that isn't there gets `404`, and so does a [placeholder](#placeholders), and a comment that waits in the moderation queue for anyone who can't read it there.
 
 The response is the comment as it now is:
 
@@ -1336,7 +1345,7 @@ Who can read the two lists:
 ## Inbox
 
 Every user has an inbox, which only they can read. Two things arrive in it:
-- **Notices** from the server, when a moderator or an admin does something to one of the user's posts or comments, or mutes them on a hashtag, when they're made a moderator of a hashtag or are one no more, when their [claim to a hashtag](#claiming-a-hashtag) is granted or refused, and when a post or a comment [mentions](#mentions) them. Admins and server moderators also get one when a user claims a hashtag, and an admin when the server finds an image of known child sexual abuse material ([below](#notices)).
+- **Notices** from the server, when a moderator or an admin does something to one of the user's posts or comments, or mutes them on a hashtag, when they're made a moderator of a hashtag or are one no more, when their [claim to a hashtag](#claiming-a-hashtag) is granted or refused, and when a post or a comment [mentions](#mentions) them. Admins and server moderators also get one when a user claims a hashtag, and an admin when the server finds an image or a video of known child sexual abuse material ([below](#notices)).
 - **Messages** from other users, unless the user turned those off or blocked the sender.
 
 ### Reading the inbox
@@ -1380,6 +1389,7 @@ A notice has no `from`, except the notice of a [mention](#mentions): its `from` 
 | `tag_unmuted` | A moderator ended the mute. | `tag` |
 | `tag_moderator_added` | An admin, or a moderator of the hashtag, made the user a [moderator of it](#a-hashtags-moderators). | `tag` |
 | `tag_moderator_removed` | One of them ended the user's time as a moderator of the hashtag. | `tag` |
+| `tag_moderator_lapsed` | The user's time as a moderator of the hashtag ended by itself: they [did nothing as its moderator](#a-hashtags-moderators) for too long (`TAG_MODERATOR_INACTIVE_DAYS`). | `tag` |
 | `tag_claimed` | For admins and server moderators: a user [claimed a hashtag](#claiming-a-hashtag), and becomes its moderator at `reviewUntil` unless one of them refuses the claim before (`DELETE /tags/:tag/claim`). | `tag`, `details` |
 | `tag_claim_granted` | The user's claim to a hashtag went through: they're a moderator of it now. | `tag` |
 | `tag_claim_refused` | The user's claim to a hashtag was refused: by an admin or a server moderator, because the hashtag was given another moderator meanwhile, or because the user was banned while it waited. | `tag` |
@@ -1389,12 +1399,16 @@ A notice has no `from`, except the notice of a [mention](#mentions): its `from` 
 | `video_failed` | The video of a new post couldn't be [processed](#videos): the post was never published, and is deleted. | `contentId`, `excerpt` |
 | `video_update_failed` | The video an update came with couldn't be processed: the post keeps the video it had, and the rest of the update is made. | `contentId`, `excerpt` |
 | `comment_video_failed` | The video of the user's comment couldn't be processed: the comment is published with its text alone, or not at all if the video was all of it. | `contentId`, `excerpt` |
+| `video_refused` | The server didn't trust the video of a new post enough to keep it: the post was never published, and is deleted. The notice doesn't say why. | `contentId`, `excerpt` |
+| `video_update_refused` | The server didn't trust the video an update came with: the post keeps the video it had, and the rest of the update is made. | `contentId`, `excerpt` |
+| `comment_video_refused` | The server didn't trust the video of the user's comment: the comment isn't published, its text neither. | `contentId`, `excerpt` |
 | `user_banned` | A server moderator or an admin [banned](#bans) the user. | |
 | `user_unbanned` | They ended the ban. | |
 | `post_mention` | A post that was published [mentions](#mentions) the user, in its text or caption. | `from`, `contentId`, `excerpt` |
 | `comment_mention` | A comment that was published mentions the user. `contentId` is the post it's on, and `excerpt` the start of the comment. | `from`, `contentId`, `commentId`, `excerpt` |
 | `csam_match_refused` | For admins, on a server that runs the `pdq` [trust plugin](#moderation): an image someone sent matches the server's list of hashes of known child sexual abuse material, and the post or comment was refused. | `details`, and `contentId` for an update or a comment |
 | `csam_match_held` | The same, on a server that deletes nothing on arrival (`TRUST_SCORE_DELETE_BELOW=0`): the post or comment is stored, and waits in [the moderation queue](#the-moderation-queue). | `details`, and `contentId` for an update or a comment |
+| `csam_video_refused` | For admins, on a server that runs `pdq` and [processes videos](#videos): a picture of a video someone sent matches the list, and the video was refused. | `details`, `contentId` |
 
 - A notice doesn't say which moderator or admin it was, and a `comment_deleted` notice doesn't say whether it was one of them or the post's publisher.
 - Nobody gets a notice of what they did themselves: a moderator who removes a hashtag from their own post, say, or one who stops moderating a hashtag, or a user who withdraws their claim.
@@ -1430,8 +1444,23 @@ On a server that runs the `pdq` [trust plugin](TRUST_PLUGINS.md#images-of-known-
 | `listed`, `distance` | The hash of the list it matched, and in how many of their 256 bits the two differ. |
 | `frame` | Which frame of an animated image matched, from 0. 0 for a still image. |
 | `outcome` | `refused` or `held`, as the notice's `kind` says. An avatar is always `refused`. |
+| `quarantineId` | On a server that has a [quarantine](#the-quarantine): the item the file is kept as. Absent where the server has none, and where the file couldn't be kept. |
 
-- The server reports the match to nobody, and keeps no copy of a refused image: the notice and the server's log are what there is of it. Notices are deleted after `INBOX_RETENTION_DAYS` like any other.
+**A video** that matches, on a server that [processes videos](#videos), has the notice `csam_video_refused`. Its `details` are the same, with these differences:
+
+| In `details` | What it is |
+| --- | --- |
+| `media` | `"video"`. An image's notice has no `media`. |
+| `seconds` | How far into the video the picture that matched is, in seconds. One picture every two seconds is checked, and this is the first that matched. |
+| `frame` | Which of the checked pictures that was, from 0. |
+| `at`, `ip`, `userAgent` | When the video was sent, and from where: the request that sent it, not the time it was processed. |
+| `sentAs`, `contentId` | `post`, `update` or `comment`. `contentId` is always there: the post the video was sent as, which is deleted, the post it would have updated, or the post the comment was on. |
+| `sha256` | The SHA-256 of the file as it was sent, which is the file the quarantine keeps. |
+| `pdq`, `quality` | The hash and quality of the picture that matched. |
+| `filename` | Absent. |
+| `outcome` | Always `refused`. |
+
+- The server reports the match to nobody. Without a quarantine it keeps no copy of a refused image or video: the notice and the server's log are what there is of it. With one, the notice's `text` ends by saying where the file is kept, how to read it, and how to record the report. Notices are deleted after `INBOX_RETENTION_DAYS` like any other; a quarantined item keeps the same facts.
 - An admin who has an unread notice of the same user and the same listed hash gets no second one, however often the image is sent. Marking it as read, or deleting it, lets the next one arrive.
 - Every admin gets it, one who sent the image too.
 
@@ -1460,14 +1489,16 @@ A user can block other users. With a block between two users:
 | Messages | None goes between them, in either direction: [`POST /messages`](#post-messages) gets `403`. Messages that already arrived stay in the inbox. |
 | Follows | Neither follows the other. The block ends the follows there were, in both directions, and a new one gets `403` while it stands: "you blocked this user: unblock them to follow them" for the one who blocked, and "you can't follow this user" for the one who is blocked. |
 | Comments | The blocked user can't [comment](#comments) on the blocker's posts, nor edit the comments they made there: `403`, "this post's publisher doesn't take comments from you". This one goes one way: the blocker can still comment on the blocked user's posts. Comments made before the block stay, and their author can still delete them. |
+| Replies | The blocked user can't reply to the blocker's comments, on anyone's post, nor edit the replies they made to them: `403`, "this comment's author doesn't take replies from you". It goes by the comment replied to, and no further up: a reply to someone else's reply under the blocker's comment is taken. One way too: the blocker can still reply to the blocked user's comments. Replies made before the block stay, and their author can still delete them. |
+| Reposts | The blocked user can't [repost](#post-repost) the blocker's posts: `403`, "this post's publisher doesn't take reposts from you". One way too: the blocker can still repost the blocked user's posts. Reposts made before the block stay. A post on another server that the blocker reposted here isn't the blocker's post, and the blocked user can still repost it. |
 | Mentions | Neither gets the notice of a [mention](#mentions) by the other. The text mentions them all the same, and links to their profile. |
 | Reading | What the blocked user wrote is left out of what the blocker is listed: their [following feed](#get-feedfollowing), and the [lists of a post's comments](#reading-comments), which give a blocked user's comment as a placeholder with `status: "blocked"`. |
 
 - `PUT /users/:userId/blocked/:blockedId` (authenticated as `userId`) blocks `blockedId`. It returns `201` with `{ userId, blockedId, blockedAt, alreadyBlocked: false }`, or `200` with `alreadyBlocked: true` and the original `blockedAt` if they were already blocked. If it returns `503`, the block is made and the follows between the two are gone, but the following feeds couldn't be updated: send the request again.
-- `DELETE /users/:userId/blocked/:blockedId` ends the block, and returns `{ userId, blockedId, wasBlocked }`. From then on messages, follows and comments go as between any two users. It brings back no follow that the block ended.
+- `DELETE /users/:userId/blocked/:blockedId` ends the block, and returns `{ userId, blockedId, wasBlocked }`. From then on messages, follows, comments and reposts go as between any two users. It brings back no follow that the block ended.
 - `GET /users/:userId/blocked` lists whom the user blocks, most recently blocked first: `{ userId, blocked: [{ userId, username, blockedAt }], nextCursor }`. It takes `limit` (100 by default, at most 1,000) and `cursor`.
 
-Blocks are private, and there's no setting that shows them: all three need the user's own key, and a path naming another user gets `403`. Blocking yourself gets `400`, and blocking a user who doesn't exist gets `404`. The blocked user isn't told: what they can see of it is the `403` when they follow, write or comment. Admins and moderators can be blocked like anyone, which stops their messages but not the server's notices.
+Blocks are private, and there's no setting that shows them: all three need the user's own key, and a path naming another user gets `403`. Blocking yourself gets `400`, and blocking a user who doesn't exist gets `404`. The blocked user isn't told: what they can see of it is the `403` when they follow, write, comment or repost. Admins and moderators can be blocked like anyone, which stops their messages but not the server's notices.
 
 **Reading goes by who asks.** The feeds and the lists of comments need no key, and a block is nobody's to know but the user who made it. So nothing is left out for a request without credentials: only a request that sends a user's own credentials in the headers (`Authorization: Bearer <apiKey>` and `X-User-Id`) is held to that user's blocks. One with a wrong key is answered as one with none, not with `401`.
 
@@ -1562,6 +1593,7 @@ The other reads that anyone can make without a key are limited by address as fee
 | [`GET /content/:contentId/comments/:commentId/replies`](#reading-comments) | 120 | `COMMENTS_LIST_RATE_LIMIT_PER_MINUTE` |
 | [`GET /content/:contentId/attestation`](#attestations) | 60 | `REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE` |
 | [`GET /search`](#search) | 60 | `SEARCH_RATE_LIMIT_PER_MINUTE` |
+| [`GET /tags/:tag/log`](#a-hashtags-log) | 120 | `TAG_LOG_RATE_LIMIT_PER_MINUTE` |
 
 One past its limit gets `429`, with when to try again in a `Retry-After` header, and every response has the `x-ratelimit-limit`, `x-ratelimit-remaining` and `x-ratelimit-reset` headers. An IPv6 address is counted with the rest of its /64. A request with a key is counted the same: it's the address that's counted, not the user. `0` turns a limit off.
 
@@ -1879,6 +1911,7 @@ Admins and moderators can do all of it with the [CLI](CLI.md) the server ships, 
 - keep the hashtag's list of blocked words;
 - mute users on the hashtag, so that the user's new posts and updates don't get it;
 - work through [the hashtag's queue](#a-hashtags-queue): approve the content under it, or remove the hashtag from content;
+- read, in [the hashtag's log](#a-hashtags-log), which moderator made each of those decisions;
 - set the hashtag's [rules](#a-hashtags-rules);
 - appoint other moderators of the hashtag, and remove the ones who became one after them.
 
@@ -1905,7 +1938,13 @@ Anyone else gets `403` from both, a server moderator included, unless they're al
 
 The user is told, by a [notice](#notices): `tag_moderator_added` when they're made a moderator, and `tag_moderator_removed` when they're one no more. Neither says who did it. There's none for a request that changed nothing, or for a moderator who left of their own accord.
 
-A hashtag whose last moderator left or was removed has none, and can be claimed again.
+**Inactivity.** A hashtag's moderator stays one by moderating it. One who does nothing as its moderator for 365 days (`TAG_MODERATOR_INACTIVE_DAYS`; `0`: never) is its moderator no more, and gets the notice `tag_moderator_lapsed`.
+- What counts is a request they make as the hashtag's moderator that the server carries out: approving content under the hashtag or removing the hashtag from content, muting a user on it or ending a mute, adding to its blocked words or taking from them, adding, changing or removing one of its rules, and appointing or removing a moderator of it. A request that found nothing to change counts too. One that was refused doesn't, and nor does reading.
+- It's counted for each hashtag by itself, from when the user became its moderator: moderating one hashtag doesn't keep another.
+- The compactor ends their time, on its first run after the days are over.
+- Admins and server moderators moderate every hashtag whatever they do. One who was also appointed to a hashtag loses that appointment as anyone does, and nothing else.
+
+A hashtag whose last moderator left, was removed or went this way has none, and can be claimed again.
 
 ### Claiming a hashtag
 
@@ -1932,7 +1971,7 @@ It answers `201`, or `200` with `alreadyClaimed: true` if the caller's claim to 
 | `409` | The caller is an admin or a server moderator, who moderate every hashtag already. |
 | `409` | The hashtag has a moderator. Only a hashtag with none can be claimed: its moderators, or an admin, appoint the others. |
 | `409` | Another user's claim to the hashtag waits. A hashtag has one claim at a time. |
-| `429` | The caller already made 5 claims in a day (`TAG_CLAIMS_PER_DAY`). The response says when to try again, in a `Retry-After` header and as `retryAfterSeconds`. A claim that was refused for another reason doesn't count, and nor does claiming a hashtag again. |
+| `429` | The caller already made 2 claims in a day (`TAG_CLAIMS_PER_DAY`). The response says when to try again, in a `Retry-After` header and as `retryAfterSeconds`. A claim that was refused for another reason doesn't count, and nor does claiming a hashtag again. |
 
 **Every admin and server moderator gets a notice** (`tag_claimed`) that says who claimed which hashtag and until when the claim can be refused, with `details: { userId, username, reviewUntil }`. `GET /moderation/tag-claims` lists the claims that wait, for them, and `GET /tags/:tag/moderators` shows a hashtag's, to anyone, as `claim`: `{ tag, userId, username, claimedAt, reviewUntil }`.
 
@@ -1982,7 +2021,7 @@ Nothing of it is deleted: it's all shown again when the ban ends. The posts them
 1. The post gets a **trust score**, from 0 (not trusted at all) to 100. It starts at 100 and goes through each of the [trust plugins](TRUST_PLUGINS.md) the server runs, which can only lower it. The server comes with three:
    - `blocked_words`, which every server runs: a post containing a word or phrase on the server's list, or matching one of its patterns, scores 0.
    - `urlhaus`, which is optional and runs only on a server that turns it on (`TRUST_OPTIONAL_PLUGINS=urlhaus`): a post with a link on [URLhaus](https://urlhaus.abuse.ch)'s list of malware URLs scores 0. Every link counts: a link post's URL, and the links written in a text or a caption. The server never follows a link; it looks it up in its own copy of the list.
-   - `pdq`, which is optional too (`TRUST_OPTIONAL_PLUGINS=pdq`): an image post with an image whose [PDQ](https://github.com/facebook/ThreatExchange/tree/main/pdq) hash is on the server's list of hashes of known child sexual abuse material scores 0, and the server's admins get a [notice](#an-image-that-matches-the-servers-list). Every image of an [album](#albums) counts, and each frame of an animated one, up to the 32nd. An image the server can't decode, and so can't check, scores one less than `TRUST_SCORE_ALLOW_FROM`.
+   - `pdq`, which is optional too (`TRUST_OPTIONAL_PLUGINS=pdq`): an image post with an image whose [PDQ](https://github.com/facebook/ThreatExchange/tree/main/pdq) hash is on the server's list of hashes of known child sexual abuse material scores 0, and the server's admins get a [notice](#an-image-that-matches-the-servers-list). Every image of an [album](#albums) counts, and each frame of an animated one, up to the 32nd. An image the server can't decode, and so can't check, scores one less than `TRUST_SCORE_ALLOW_FROM`. A video has no score from it: where the server [processes videos](#videos), each is checked against the same list once it's decoded, and one that matches is refused then, whatever the thresholds are.
 2. The score says where the post goes, by two thresholds:
 
    | Score | Where the post goes |
@@ -2081,11 +2120,45 @@ A moderator of the hashtag, a server moderator or an admin takes a post out of i
 - **Approve it** (`PUT /content/:contentId/tags/:tag`). Its records under that hashtag are `moderated: true` from then on. The approval is of the post as it was, so an update of the post puts it back in the queue.
 - **Remove the hashtag from it** (`DELETE /content/:contentId/tags/:tag`). The post leaves the hashtag's feeds, and loses the hashtag for good: the publisher's updates don't get it back (`removedTags` gives the reason `removed`). The moderator can say why, with `{ "reason": "..." }`.
 
-Each of the two is written down on the post, where [`GET /content/:contentId`](#get-contentcontentid) gives it to whoever reads the post, as `moderation`: which hashtag was removed or approved, as what the moderator did it (never who), when, and the reason a removal was given.
+Each of the two is written down on the post, where [`GET /content/:contentId`](#get-contentcontentid) gives it to whoever reads the post, as `moderation`: which hashtag was removed or approved, as what the moderator did it, when, and the reason a removal was given. Who the moderator was is given only to those who moderate the hashtag. All of a hashtag's decisions are its [log](#a-hashtags-log).
 
 Both are recorded at once, and show in the hashtag's feeds after the compactor's next run, which applies them: it flags the post as moderated in the hashtag's index, or takes the hashtag off the post.
 
 Moderation is per hashtag: a post under `#news` and `#mumbai` waits in both queues, and approving it under one leaves it in the other's. A feed of several hashtags with `moderated=false` returns the posts not approved under at least one of the hashtags asked for.
+
+### A hashtag's log
+
+`GET /tags/:tag/log` lists what moderators did to the posts under a hashtag, newest first: every approval and every removal, each as the post's own [`moderation`](#get-contentcontentid) gives it, with the post it was done to. Anyone can read it, with a key or without. One decision says little about how a hashtag is moderated; the log shows all of them together: whose posts lose the hashtag, for what reasons, and who decided.
+
+```bash
+curl "localhost:3000/tags/cars/log?limit=50"
+```
+
+```json
+{ "tag": "cars",
+  "log": [
+    { "contentId": "...", "publisher": { "userId": "...", "username": "alice" },
+      "action": "tag_removed", "tag": "cars", "by": "tag_moderator",
+      "moderator": { "userId": "...", "username": "bob" },
+      "reason": "it has no cars in it", "at": "2026-11-18T09:30:00.000Z",
+      "text": "#cars was removed from this post by a moderator of the hashtag: it has no cars in it" }
+  ],
+  "nextCursor": null }
+```
+
+| field | notes |
+| --- | --- |
+| `contentId` | The post the decision was about. |
+| `publisher` | Who published that post: `{ userId, username }`. |
+| `action`, `tag`, `by`, `reason`, `at`, `text` | As in a post's [`moderation`](#get-contentcontentid). |
+| `moderator` | Who decided: `{ userId, username }`, or `null` once that account is deleted. Only for a caller who moderates the hashtag: one of its moderators, a server moderator or an admin. Nobody else gets the field. |
+
+- **Who decided is for those who moderate the hashtag.** They send their credentials in the headers (`Authorization: Bearer <apiKey>` and `X-User-Id`) and get `moderator` on every entry. Everyone else gets `by`, the role, and not the name: the public, the publishers of the posts, and a user who was the hashtag's moderator and isn't any more.
+- **Credentials are checked when they're sent.** A request that names no user is read as anyone's. One that names a user with a key that isn't theirs gets `401`.
+- **It takes `limit`** (100 by default, at most 1,000) **and `cursor`:** `nextCursor` is the cursor of the next page, and `null` on the last. A `cursor` that isn't valid gets `400`, and so does a `:tag` that isn't a hashtag. A hashtag nobody decided anything under has an empty `log`.
+- **It's of the posts that can be read.** A post that is deleted takes its entries with it, and they're left out from the moment it's set for deletion. The entries of a post that is withheld from readers (it waits in the [moderation queue](#the-moderation-queue), or it's a repost whose original is [gone from its own server](#refreshing-a-repost)) are given to server moderators and admins only, and are back for everyone once the post is.
+- **Only moderators' decisions about posts are in it,** as in a post's `moderation`: not mutes, blocked words, rules, or who was made a moderator.
+- **One address can ask for 120 pages a minute** (`TAG_LOG_RATE_LIMIT_PER_MINUTE`), whichever hashtags' logs they are, then gets `429` ([above](#limits-on-reads-that-need-no-key)).
 
 Later pages of a [feed session](#get-feed) are of the queue as it is by then: a post approved or removed since the page before, once the compactor has run, isn't on them.
 
@@ -2105,6 +2178,67 @@ The server has a list of blocked words, which its admins keep, and so has each h
 - **A pattern is stored as it was written,** slashes included. That's how it's listed, and how it's removed.
 - **Limits:** a pattern has at most 100 characters, slashes included, and can't match empty text, which would match every post. A list holds at most 100 patterns among its entries.
 - **Time:** a list's patterns get 100 ms to check a post. If they take longer, the post is treated as containing one of the list's blocked words, and the server's log names the pattern that ran out of time. Patterns that repeat a repetition, such as `(a+)+`, are the ones that do: write them another way.
+
+### The quarantine
+
+On a server that runs the `pdq` [trust plugin](TRUST_PLUGINS.md#images-of-known-child-sexual-abuse-material) and has a quarantine (`QUARANTINE_SCHEME`, which is off unless the operator sets it), the file that matched the server's list of hashes of known child sexual abuse material is kept: an image as the server read it, which is without its metadata, and a video as it was sent. It's kept so that the operator can send it with a report to the authorities, and preserve it afterwards for as long as the law asks ([TRUST_PLUGINS.md](TRUST_PLUGINS.md#the-quarantine)). The admins' [notice](#an-image-that-matches-the-servers-list) of the match names the item, as `quarantineId`.
+
+These endpoints are for admins alone. Everyone else gets `403`, a server moderator and the user who sent the file included. On a server that has no quarantine, every one of them answers `404`, as for an item that isn't there. They authenticate as every endpoint that needs a key does, and a `GET` takes it from the headers ([authentication](#authentication)).
+
+| Endpoint | What it does |
+| --- | --- |
+| `GET /moderation/quarantine` | Lists the items, newest first: `{ items, nextCursor }`. Takes `limit` (50 by default, at most 100) and `cursor`, and `reported`: `false` for the items that wait for a report, `true` for the others. The files aren't in it. |
+| `GET /moderation/quarantine/:quarantineId` | One item, with `access`: what was done with it. |
+| `GET /moderation/quarantine/:quarantineId/file` | The item's file. |
+| `POST /moderation/quarantine/:quarantineId/report` | Records that the file was reported, which starts the time after which it's deleted. Returns the item. |
+| `DELETE /moderation/quarantine/:quarantineId` | Deletes an item that was never reported, and its file: `204`. |
+
+An item, here with `access` as `GET /moderation/quarantine/:quarantineId` gives it:
+
+```json
+{ "quarantineId": "...", "userId": "...", "sha256": "<64 hex>", "mimeType": "image/jpeg", "size": 48213,
+  "matches": 2, "storedAt": "2026-11-10T14:02:00.000Z", "lastMatchedAt": "2026-11-10T14:09:00.000Z",
+  "facts": { "userId": "...", "username": "mallory", "at": "2026-11-10T14:02:00.000Z", "ip": "203.0.113.7", "sentAs": "post", "…": "…" },
+  "report": { "reportedAt": "2026-11-11T09:30:00.000Z", "reportedBy": "...", "reportId": "123456789",
+              "deleteAfter": "2027-11-11T09:30:00.000Z" },
+  "access": [
+    { "action": "reported", "by": "...", "ip": "198.51.100.7", "userAgent": "curl/8.7.1", "at": "2026-11-11T09:31:00.000Z" },
+    { "action": "downloaded", "by": "...", "ip": "198.51.100.7", "userAgent": "curl/8.7.1", "at": "2026-11-11T09:12:00.000Z" },
+    { "action": "stored", "by": null, "ip": null, "userAgent": null, "at": "2026-11-10T14:02:00.000Z" }
+  ] }
+```
+
+| field | notes |
+| --- | --- |
+| `userId` | Who sent the file. It stays when that account is deleted. |
+| `sha256`, `mimeType`, `size` | The file as it's kept: its SHA-256, which is the one in the notice, its type, and its size in bytes. |
+| `matches`, `lastMatchedAt` | How many times that user sent this same file, and when they last did. It's kept once. |
+| `storedAt` | When it was first kept. |
+| `facts` | The `details` of the [notice](#an-image-that-matches-the-servers-list) the admins got when it was first kept, without `quarantineId`. |
+| `report` | `null` until a report is recorded. Then when the report was made (`reportedAt`), the admin who recorded it (`reportedBy`), the report's id if one was given (`reportId`), and when the file's time is over (`deleteAfter`): `QUARANTINE_RETENTION_DAYS` (365) after `reportedAt`, as the server is set now. |
+| `access` | Only on one item: the newest 200 things done with it, newest first. `action` is `stored` (the server kept the file), `downloaded` (an admin read it) or `reported` (an admin recorded a report), with the admin (`by`), their address and their User-Agent, which are `null` for what the server did itself. |
+
+**Reading the file.** `GET /moderation/quarantine/:quarantineId/file` returns the bytes as they're kept, as a file to save: `Content-Type: application/octet-stream`, whatever the file is, and `Content-Disposition: attachment`, with a name made of its SHA-256. It's never a redirect to the store, never compressed, and not to be cached (`Cache-Control: private, no-store`). That the admin read it is recorded before a byte is sent, so a request that is cut short is recorded too.
+
+**Recording the report.** The server reports nothing itself, and doesn't know of a report until an admin says so:
+
+```bash
+curl -X POST localhost:3000/moderation/quarantine/$ID/report -H 'content-type: application/json' \
+  -d '{"userId":"…","apiKey":"…","reportId":"123456789","reportedAt":"2026-11-11T09:30:00Z"}'
+```
+
+| field | notes |
+| --- | --- |
+| `reportId` | Optional: what the authority calls the report, such as a CyberTipline report's number. Up to 200 characters. |
+| `reportedAt` | Optional: when the report was made, as an ISO 8601 time with its offset. Now, unless given. A time before the file was kept, or one yet to come, gets `400`. |
+
+From then on the file is kept until `deleteAfter`, and deleted by the server's compactor on its first run of a day after that. Sent again, the request records the report as it's said now, which is how a mistake is corrected: a `reportId` that is left out is then recorded as none.
+
+**Deleting an item** is for a file that an admin has looked at and found isn't what the list took it for. It deletes the file and the item, and answers `204`. An item with a report recorded gets `409`: it's kept for its time, and deleted by that alone.
+
+- A file with no report recorded is never deleted by the server, however old.
+- What was done with an item stays on record in the server's database after the item is gone, its deletion included. The API gives that record only while the item is there.
+- `quarantineId` is a UUID: anything else gets `400`.
 
 ### Moderation endpoints
 
@@ -2136,6 +2270,7 @@ They authenticate as the other write endpoints do. `:tag` is a hashtag as `/feed
 | `DELETE /tags/:tag/muted/:userId` | The hashtag's moderators, server moderators, and admins | `{ tag, userId, wasMuted }` |
 | `PUT /content/:contentId/tags/:tag` | The hashtag's moderators, server moderators, and admins | Approves the content under the hashtag: `201` with `{ contentId, tag, moderated: true, alreadyApproved: false }`, or `200` with `alreadyApproved: true`. |
 | `DELETE /content/:contentId/tags/:tag` | The hashtag's moderators, server moderators, and admins | Removes the hashtag from the content (below). With `{ "mute": true }`, it also mutes the content's publisher on the hashtag. With `{ "reason": "..." }` (1 to 500 characters), it says why, on the post. |
+| `GET /tags/:tag/log` | Anyone | The hashtag's [log](#a-hashtags-log), newest first: `{ tag, log: [{ contentId, publisher, action, tag, by, reason, at, text }], nextCursor }`, with `moderator` on each entry for a caller who moderates the hashtag. Takes `limit` (100 by default, at most 1,000) and `cursor`. |
 | `GET /moderation/queue` | Server moderators, and admins | The posts and comments in the moderation queue, longest waiting first: `{ queue: [...], nextCursor }`. Each has a `kind`. A `"post"` is a feed record (without `moderated`), with `text` (the whole text or caption); a `"comment"` is a [comment](#comments) as its post's list gives it. Both have `trustScore` and `queuedAt`. Takes `limit` (50 by default, at most 100) and `cursor`. |
 | `POST /moderation/queue/:contentId/accept` | Server moderators, and admins | Publishes the post: `{ contentId, status: "published", tags }`. |
 | `POST /moderation/queue/:contentId/reject` | Server moderators, and admins | Takes the post down: `202` with `{ contentId, status: "pending_deletion", requestedAt }`. |

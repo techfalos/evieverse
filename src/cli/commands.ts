@@ -794,10 +794,13 @@ export const COMMANDS: Command[] = [
     name: 'blocks add',
     positionals: ['userId'],
     role: 'anyone',
-    summary: "Blocks a user: no message goes between the two of you, neither follows the other, they can't comment on your posts, and what they wrote is left out of what you're listed.",
+    summary:
+      "Blocks a user: no message goes between the two of you, neither follows the other, they can't comment on your posts, reply to your comments or repost your posts, and what they wrote is left out of what you're listed.",
     request: ({ positionals: [userId] }, me) => ({ method: 'PUT', path: path`/users/${me}/blocked/${userId!}` }),
     text: (d) =>
-      d.alreadyBlocked ? `You already blocked ${d.blockedId}.` : `You block ${d.blockedId}: no message goes between the two of you, neither follows the other, and they can't comment on your posts.`,
+      d.alreadyBlocked
+        ? `You already blocked ${d.blockedId}.`
+        : `You block ${d.blockedId}: no message goes between the two of you, neither follows the other, and they can't comment on your posts, reply to your comments or repost your posts.`,
   }),
   own<{ blockedId: string; wasBlocked: boolean }>({
     name: 'blocks remove',

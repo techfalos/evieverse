@@ -181,7 +181,9 @@ The server only writes records. Moving them to cold storage is the bucket's own 
 | `TAGGING_MODE`        | `tagging.mode`       | choice | `user`  | `user`: a post can have any hashtags. `server`: only those of `TAGGING_SERVER_TAGS`, and a post with another is refused.                                                                       |
 | `TAGGING_SERVER_TAGS` | `tagging.serverTags` | list   | empty   | The hashtags posts can have in server mode, as many as you like, such as `news,local,sports`. Required in server mode, which doesn't start without one. `GET /tagging` lists them for clients. |
 | `TAG_CLAIM_REVIEW_HOURS` | `tagging.claimReviewHours` | number | `24` | In user mode, a user can [claim a hashtag](API.md#claiming-a-hashtag) that has no moderator, to moderate it. Every admin and server moderator is told, and any of them can refuse the claim for this many hours. A claim nobody refused in that time is granted. `0`: the compactor's next run grants it, so a claim can only be undone, by an admin. |
-| `TAG_CLAIMS_PER_DAY` | `tagging.claimsPerDay` | number | `5` | Hashtags one user can claim in a day (0: no limit). |
+| `TAG_CLAIMS_PER_DAY` | `tagging.claimsPerDay` | number | `2` | Hashtags one user can claim in a day (0: no limit). |
+| `TAG_MODERATOR_INACTIVE_DAYS` | `tagging.moderatorInactiveDays` | number | `365` | A hashtag's moderator who does nothing as one on the hashtag for this many days [is no longer its moderator](API.md#a-hashtags-moderators), and is told by a notice. It's counted for each hashtag by itself, from when they became its moderator, and for the moderators there were before this setting, from the first run of the compactor after the upgrade. Admins and server moderators, who moderate every hashtag, aren't counted. `0`: never. |
+| `TAG_LOG_RATE_LIMIT_PER_MINUTE` | `tagging.logRateLimitPerMinute` | number | `120` | Requests to [`GET /tags/:tag/log`](API.md#a-hashtags-log) from one address in a minute, past which they get `429` (0: no limit). A hashtag's log needs no key, and a page of it reads the database. Counted as feeds are (`FEED_RATE_LIMIT_PER_MINUTE`), whichever hashtags' logs they ask for. |
 
 
 
@@ -367,6 +369,8 @@ These are the settings of the `urlhaus` trust plugin, which refuses posts and co
 
 These are the settings of the `pdq` trust plugin, which refuses posts and comments with an image whose PDQ hash is on a list of hashes of known child sexual abuse material, and tells the server's admins ([Trust plugins](TRUST_PLUGINS.md#images-of-known-child-sexual-abuse-material)). The plugin is optional: it runs only with `TRUST_OPTIONAL_PLUGINS=pdq`, and the settings aren't used otherwise.
 
+Where the server processes videos (`VIDEO_PROCESSING=true`), the process that runs the compactor checks each video against the same list before it's published ([Trust plugins](TRUST_PLUGINS.md#videos)), so that process takes `TRUST_OPTIONAL_PLUGINS` and these settings too, with the same values as the processes that serve the API. With `VIDEO_PROCESSING=false`, no video is checked.
+
 
 | Variable                      | File key              | Format | Default | What it does |
 | ----------------------------- | --------------------- | ------ | ------- | ------------ |
@@ -377,6 +381,25 @@ These are the settings of the `pdq` trust plugin, which refuses posts and commen
 | `PDQ_REFRESH_MINUTES`         | `pdq.refreshMinutes`  | number | `60`    | Minutes between two readings of the list, by each process. At least 1. A file that hasn't changed isn't read again. |
 
 The plugin also needs `TRUST_SCORE_ALLOW_FROM` above 0: the server doesn't start with `pdq` named and a threshold that publishes every post whatever its score.
+
+
+### Quarantine
+
+The quarantine is where the server keeps the files that matched the `pdq` plugin's list: an image as the server read it, a video as it was sent ([Trust plugins](TRUST_PLUGINS.md#the-quarantine)). It's off unless `QUARANTINE_SCHEME` is set, and nothing of a matched file is kept then. Only admins read what it holds, through the [quarantine endpoints](API.md#the-quarantine), and every reading is recorded.
+
+
+| Variable                    | File key                   | Format | Default | What it does |
+| --------------------------- | -------------------------- | ------ | ------- | ------------ |
+| `QUARANTINE_SCHEME`         | `quarantine.scheme`        | text   | unset   | Where the files are kept: any Apache OpenDAL scheme (`fs`, `s3`, `gcs`, `azblob`, ...). Unset: there is no quarantine. It must be a store of its own: the server doesn't start if this and `QUARANTINE_OPTIONS` name the same store as `CONTENT_SCHEME`, `SUMMARY_SCHEME` or `AUDIT_SCHEME` with their options. |
+| `QUARANTINE_OPTIONS`        | `quarantine.options`       | JSON   | unset   | The scheme's options, such as `{"bucket":"ev-quarantine","region":"us-east-1"}`. It's where credentials go, so on a deployment it belongs in `secrets`. |
+| `QUARANTINE_RETENTION_DAYS` | `quarantine.retentionDays` | number | `365`   | Days a file is kept after the report an admin recorded of it, counted from the time of that report. At least 1. The compactor deletes the files whose days are over, once a day. Raising it keeps the files there are for longer too. A file with no report recorded isn't deleted by this, however old. |
+
+
+- **Every process takes the same values.** The processes that serve the API write the files and read them for admins. The one that runs the compactor writes a video's file, and deletes the files whose time is over.
+- **The server can't check that the store is locked down.** That is the operator's to set up: private, encrypted, with its access logged, reached by the server's own roles alone, and with no lifecycle rule that deletes. The check on `QUARANTINE_SCHEME` only catches the very same scheme and options as another store's: a folder inside another store's, or a second name for one bucket, gets past it.
+- **Changing these doesn't move the files.** The database goes on naming the items that were kept, and their files are then in a store the server no longer reads: move them first.
+- **A year is the default** because that's how long United States law has a provider preserve what it reported to the CyberTipline (18 U.S.C. 2258A(h)). The law elsewhere may ask for another time: this isn't legal advice.
+- A server that starts with `pdq` on and no quarantine says so in its log.
 
 
 
@@ -534,7 +557,7 @@ Things to know:
 - `**secrets` on AWS are read by version.** They're kept in Secrets Manager, not in a function's configuration. A function reads them as an instance starts, and the compactor's task is given them as it starts, each by the version the apply wrote, not the current one. So a changed secret is a new function configuration and a new task definition, which wait for the settings check like any other change, and the compactor restarts with the new value by itself.
 - `**secrets` on GCP are read by version.** Each value in `secrets` is a version of a secret in Secret Manager, and the services, the compactor and the jobs read the version the apply wrote, by its number, not the latest. So a changed secret is a new revision, which waits for the settings check like any other change, and the version before it is deleted once the services read the new one.
 - **The signing key for reposts is the module's too.** Each module makes a key and gives it to the functions as `REPOSTS_SIGNING_KEYS` ([DEPLOY.md](DEPLOY.md#deploy)). To sign with keys of your own, put `REPOSTS_SIGNING_KEYS` in `secrets`; to sign nothing, set it to `""` in `environment`.
-- **Changing where data lives doesn't move it.** `CONTENT_SCHEME`, `CONTENT_OPTIONS`, `SUMMARY_SCHEME`, `SUMMARY_OPTIONS`, `AUDIT_SCHEME` and `AUDIT_OPTIONS` point the server at another store, which starts empty. Likewise, a new `REDIS_KEY_PREFIX` points it at an empty index, which the [rebuild](DEPLOY.md#redis) fills from the database and the content store.
+- **Changing where data lives doesn't move it.** `CONTENT_SCHEME`, `CONTENT_OPTIONS`, `SUMMARY_SCHEME`, `SUMMARY_OPTIONS`, `AUDIT_SCHEME` and `AUDIT_OPTIONS` point the server at another store, which starts empty, and so do `QUARANTINE_SCHEME` and `QUARANTINE_OPTIONS` ([Quarantine](#quarantine)). Likewise, a new `REDIS_KEY_PREFIX` points it at an empty index, which the [rebuild](DEPLOY.md#redis) fills from the database and the content store.
 - `**PUBLIC_BASE_URL` for a custom domain** goes in `environment` too ([Custom domains](DEPLOY.md#custom-domains)).
 - **Leave** `BOOTSTRAP_ADMIN`**,** `FUNCTION_GROUP`**,** `FUNCTION_EDGE_SECRET`**,** `AUDIT_SCHEME` **and** `AUDIT_OPTIONS` **out of** `environment`**.** The modules set them, and the admin account has [variables of its own](DEPLOY.md#the-admin-account).
 - **Keep** `terraform.tfvars` **and the state where only the people who deploy can read them.** The secrets are in the state in plain text.

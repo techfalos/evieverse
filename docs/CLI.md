@@ -110,7 +110,7 @@ A command exits with:
 | `messages send <userId> <text>`                                          | Sends a user a message (quote the text). Refused if either of you turned messages off or blocked the other.                                                                                              |
 | `messages on`, `messages off`                                            | Turns messages between users on or off for your account. With them off you're sent none and send none. Notices still arrive.                                                                             |
 | `blocks list [--limit <n>] [--cursor <cursor>]`                          | The users you block, most recently blocked first.                                                                                                                                                        |
-| `blocks add <userId>`                                                    | [Blocks](API.md#blocks) a user: no message goes between the two of you, neither follows the other, they can't comment on your posts, and what they wrote is left out of what you're listed.           |
+| `blocks add <userId>`                                                    | [Blocks](API.md#blocks) a user: no message goes between the two of you, neither follows the other, they can't comment on your posts, reply to your comments or repost your posts, and what they wrote is left out of what you're listed. |
 | `blocks remove <userId>`                                                 | Unblocks a user.                                                                                                                                                                                         |
 
 

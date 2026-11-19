@@ -472,6 +472,7 @@ for (const target of TARGETS) {
         contentRateLimitPerMinute: 3,
         comments: { listRateLimitPerMinute: 2 },
         reposts: { attestationRateLimitPerMinute: 1 },
+        tagging: { logRateLimitPerMinute: 2 },
       });
       const alice = await ctx.register('alice');
       const stored = await ctx.app.inject({ method: 'POST', url: '/store', payload: { ...alice, type: 'text', text: 'Talk to me #news', tags: ['news'], comments: true } });
@@ -492,6 +493,10 @@ for (const target of TARGETS) {
       expect(await statuses(`/content/${contentId}/comments/00000000-0000-4000-8000-000000000000/replies`, 3)).toEqual([[404, 404, 429], '2', LIMITED]);
       // The attestation is refused here for another reason first (the server signs nothing), and that counts too.
       expect(await statuses(`/content/${contentId}/attestation`, 2)).toEqual([[400, 429], '1', LIMITED]);
+      // A hashtag's log is counted by the address, whichever hashtag's it is, and with a key or without.
+      expect(await statuses('/tags/news/log', 2)).toEqual([[200, 200], '2', undefined]);
+      const third = await ctx.app.inject({ method: 'GET', url: '/tags/sports/log' });
+      expect([third.statusCode, third.headers['x-ratelimit-limit'], third.json().error]).toEqual([429, '2', LIMITED]);
       // The hashtag feed has its own limit, which is off here, and what isn't one of these has none.
       for (const url of ['/feed?tags=news', `/content/${contentId}/raw`, '/tags', `/users/${alice.userId}`]) {
         const res = await ctx.app.inject({ method: 'GET', url });
@@ -505,12 +510,12 @@ for (const target of TARGETS) {
 
       // The settings are the server's own unless it is given others.
       const config = loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json' });
-      expect([config.feed.followingRateLimitPerMinute, config.contentRateLimitPerMinute, config.comments.listRateLimitPerMinute, config.reposts.attestationRateLimitPerMinute]).toEqual([60, 300, 120, 60]);
+      expect([config.feed.followingRateLimitPerMinute, config.contentRateLimitPerMinute, config.comments.listRateLimitPerMinute, config.reposts.attestationRateLimitPerMinute, config.tagging.logRateLimitPerMinute]).toEqual([60, 300, 120, 60, 120]);
       const set = loadConfig(
         {},
-        { EVIEVERSE_CONFIG: '/nonexistent.json', FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE: '5', CONTENT_RATE_LIMIT_PER_MINUTE: '0', COMMENTS_LIST_RATE_LIMIT_PER_MINUTE: '7', REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE: '9' },
+        { EVIEVERSE_CONFIG: '/nonexistent.json', FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE: '5', CONTENT_RATE_LIMIT_PER_MINUTE: '0', COMMENTS_LIST_RATE_LIMIT_PER_MINUTE: '7', REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE: '9', TAG_LOG_RATE_LIMIT_PER_MINUTE: '11' },
       );
-      expect([set.feed.followingRateLimitPerMinute, set.contentRateLimitPerMinute, set.comments.listRateLimitPerMinute, set.reposts.attestationRateLimitPerMinute]).toEqual([5, 0, 7, 9]);
+      expect([set.feed.followingRateLimitPerMinute, set.contentRateLimitPerMinute, set.comments.listRateLimitPerMinute, set.reposts.attestationRateLimitPerMinute, set.tagging.logRateLimitPerMinute]).toEqual([5, 0, 7, 9, 11]);
     });
 
     it('warns once of a forwarded address it was not told to trust, and of proxies it was not told to count', async () => {

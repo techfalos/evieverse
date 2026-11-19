@@ -1,8 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import type { Transaction } from 'kysely';
+import type { Config } from '../config.js';
 import type { Db } from '../db/index.js';
 import type { Database } from '../db/schema.js';
+import type { TrustClient } from '../moderation/trust.types.js';
 import type { VideoJob, VideoJobWrite } from './jobs.types.js';
+
+/** How much of a request's address a job keeps, in characters: any address fits. */
+const CLIENT_IP_CHARS = 64;
+/** How much of a request's User-Agent header a job keeps, in characters. */
+const CLIENT_USER_AGENT_CHARS = 255;
 
 /**
  * The videos that wait to be processed (`media_jobs`): the video worker's queue (see
@@ -21,10 +28,32 @@ import type { VideoJob, VideoJobWrite } from './jobs.types.js';
  * Adds the job for the video a write staged, in the write's transaction. Returns the job's id,
  * which for a post's video is the id its processed version is kept under (see StoredVideo.id).
  */
-export async function addVideoJob(trx: Transaction<Database>, { contentId, seq, key = '', commentId, at }: VideoJobWrite): Promise<string> {
+export async function addVideoJob(trx: Transaction<Database>, { contentId, seq, key = '', commentId, at, client }: VideoJobWrite): Promise<string> {
   const id = randomUUID();
-  await trx.insertInto('media_jobs').values({ id, content_id: contentId, seq, write_key: key, comment_id: commentId ?? null, created_at: at }).execute();
+  await trx
+    .insertInto('media_jobs')
+    .values({
+      id,
+      content_id: contentId,
+      seq,
+      write_key: key,
+      comment_id: commentId ?? null,
+      created_at: at,
+      client_ip: client?.ip.slice(0, CLIENT_IP_CHARS) ?? null,
+      client_user_agent: client?.userAgent?.slice(0, CLIENT_USER_AGENT_CHARS) ?? null,
+    })
+    .execute();
   return id;
+}
+
+/**
+ * Who sent a request that came with a video, for the write to keep with the video's job; nothing
+ * on a server that checks no videos against a list (the pdq trust plugin), which is where a
+ * notice of a match says it. So a request's address is kept with a job only where it is used,
+ * and goes with the job.
+ */
+export function jobClient(config: Config, client: TrustClient): TrustClient | undefined {
+  return config.video.processing && config.trust.optionalPlugins.includes('pdq') ? client : undefined;
 }
 
 /**
@@ -46,7 +75,16 @@ export async function claimVideoJob(db: Db, now: number, leaseMs: number): Promi
     if (Number(taken.numUpdatedRows) !== 1) continue;
     const job = await db.selectFrom('media_jobs').selectAll().where('id', '=', id).executeTakeFirst();
     if (!job) continue;
-    return { id, contentId: job.content_id, seq: Number(job.seq), key: job.write_key, commentId: job.comment_id, attempts: Number(job.attempts) };
+    return {
+      id,
+      contentId: job.content_id,
+      seq: Number(job.seq),
+      key: job.write_key,
+      commentId: job.comment_id,
+      attempts: Number(job.attempts),
+      createdAt: Number(job.created_at),
+      client: job.client_ip === null ? null : { ip: job.client_ip, userAgent: job.client_user_agent },
+    };
   }
   return null;
 }

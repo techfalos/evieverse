@@ -1018,7 +1018,7 @@ describe('the CLI', () => {
     // ...and a block is between two users.
     expect(await by('bob', 'blocks', 'list')).toBe('You block nobody.');
     expect(await by('bob', 'blocks', 'add', alice.userId)).toBe(
-      `You block ${alice.userId}: no message goes between the two of you, neither follows the other, and they can't comment on your posts.`,
+      `You block ${alice.userId}: no message goes between the two of you, neither follows the other, and they can't comment on your posts, reply to your comments or repost your posts.`,
     );
     expect(await by('bob', 'blocks', 'add', alice.userId)).toBe(`You already blocked ${alice.userId}.`);
     expect(await by('bob', 'blocks', 'list')).toMatch(new RegExp(`^${alice.userId}  alice  blocked 2026-\\S+$`));

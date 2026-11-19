@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { stat } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
-import type { ProbedVideo, Rendition, VideoTools } from './ffmpeg.types.js';
+import type { ProbedVideo, Rendition, VideoFrame, VideoTools } from './ffmpeg.types.js';
 
 /**
  * What the server does to a video with ffmpeg (see createVideoWorker): reads what it is, makes
@@ -90,6 +90,56 @@ function run(program: string, args: string[], { signal, cwd }: { signal?: AbortS
       reject(new VideoError(`${basename(program)} failed (${code}): ${err.trim() || 'it said nothing'}`));
     });
   });
+}
+
+/**
+ * Runs one of the programs, and gives what it writes to its output as it writes it, in pieces
+ * of `size` bytes each: the pictures of a video, one at a time, so that no more than one is
+ * held. It ends when the program does, and fails as `run` fails if the program did. Whoever
+ * stops reading before the end stops the program.
+ */
+async function* pieces(program: string, args: string[], size: number, signal?: AbortSignal): AsyncGenerator<Buffer> {
+  const child = spawn(program, args, { signal, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
+  let err = '';
+  child.stderr.on('data', (chunk: Buffer) => {
+    err = (err + chunk.toString('utf8')).slice(-ERROR_CHARS);
+  });
+  const closed = new Promise<{ code: number | null; killed: NodeJS.Signals | null; cause?: Error }>((resolve) => {
+    let cause: Error | undefined;
+    child.on('error', (failure) => {
+      cause = failure;
+      // A program that never started has no `close` to wait for.
+      if (child.pid === undefined) resolve({ code: null, killed: null, cause });
+    });
+    child.on('close', (code, killed) => resolve({ code, killed, cause }));
+  });
+  let ended = false;
+  try {
+    let held: Buffer = Buffer.alloc(0);
+    try {
+      for await (const chunk of child.stdout as AsyncIterable<Buffer>) {
+        held = held.length ? Buffer.concat([held, chunk]) : chunk;
+        let at = 0;
+        for (; held.length - at >= size; at += size) yield held.subarray(at, at + size);
+        held = held.subarray(at);
+      }
+    } catch (failure) {
+      // The output of a program that was stopped ends as it likes: what stopped it is what is said.
+      if (!signal?.aborted) throw failure;
+    }
+    const { code, killed, cause } = await closed;
+    ended = true;
+    if (code === 0) return;
+    if (signal?.aborted) throw signal.reason ?? cause ?? new Error(`${basename(program)} was stopped`);
+    if (cause) throw cause;
+    if (killed) throw new Error(`${basename(program)} was killed by ${killed}`);
+    throw new VideoError(`${basename(program)} failed (${code}): ${err.trim() || 'it said nothing'}`);
+  } finally {
+    if (!ended) {
+      child.kill('SIGKILL');
+      await closed;
+    }
+  }
 }
 
 /**
@@ -269,6 +319,31 @@ export function masterPlaylist(renditions: Rendition[]): string {
     ...renditions.flatMap((r) => [`#EXT-X-STREAM-INF:BANDWIDTH=${r.bitrate},RESOLUTION=${r.width}x${r.height}`, `${r.name}.m3u8`]),
     '',
   ].join('\n');
+}
+
+/**
+ * The keyframes of a rendition the server made, one at a time, as pixels: the picture the video
+ * shows every KEYFRAME_SECONDS, from its first, which is where encodeVideo put a keyframe
+ * whatever the file that was sent had. Only those are decoded, so this costs a small part of
+ * what making the rendition did. What checks a video against a list of pictures reads them
+ * (see checkVideo in src/plugins/trust/pdq/video.ts).
+ *
+ * Each is 3 bytes a pixel (red, green, blue), row after row, at the rendition's size, or, of a
+ * rendition with a side longer than `maxSide`, brought down to `maxSide` by `maxSide`
+ * whatever its shape was. The last picture may come twice.
+ */
+export async function* keyframesOf({ ffmpegPath }: VideoTools, { path, width, height }: Pick<Rendition, 'path' | 'width' | 'height'>, maxSide: number, signal?: AbortSignal): AsyncGenerator<VideoFrame> {
+  const [w, h] = width > maxSide || height > maxSide ? [maxSide, maxSide] : [width, height];
+  const args = [
+    '-nostdin', '-hide_banner', '-loglevel', 'error',
+    // Only the keyframes are decoded, and one picture is taken for each KEYFRAME_SECONDS, which is how far apart they are.
+    '-skip_frame', 'nokey', '-i', path,
+    '-map', '0:v:0', '-an', '-sn', '-dn',
+    '-vf', `fps=1/${KEYFRAME_SECONDS},scale=${w}:${h}:flags=lanczos`,
+    '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1',
+  ];
+  let index = 0;
+  for await (const pixels of pieces(ffmpegPath, args, w * h * 3, signal)) yield { pixels, width: w, height: h, seconds: index++ * KEYFRAME_SECONDS };
 }
 
 /**

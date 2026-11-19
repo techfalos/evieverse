@@ -223,3 +223,15 @@ export class KnownHashes {
     });
   }
 }
+
+/** The list of this process, once something asked for it (see knownHashes). */
+let shared: KnownHashes | undefined;
+
+/**
+ * The one list of a process: the plugin's, as the server loads it, and the video worker's, where
+ * both run in one process (COMPACT_IN_PROCESS), so that the list is held once. Made when it is
+ * first asked for, and read when it is first needed.
+ */
+export function knownHashes(): KnownHashes {
+  return (shared ??= new KnownHashes());
+}

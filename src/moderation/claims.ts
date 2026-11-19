@@ -20,7 +20,9 @@ import { moderatesServer, refuseBanned } from './policy.js';
  * told. A claim nobody refused is granted by the compactor's first run after the wait
  * (see grantClaim): its user becomes a moderator of the hashtag, as one an admin appointed is (a
  * row of `tag_moderators`), and is told so. An admin can end that like any moderator's time
- * (DELETE /tags/:tag/moderators/:userId).
+ * (DELETE /tags/:tag/moderators/:userId), and it ends by itself if they then leave the hashtag
+ * unmoderated for long enough (src/moderation/activity.ts), which is what keeps a claim from
+ * holding a hashtag for good.
  *
  * A hashtag has one claim at a time, and only while it has no moderator: the first to moderate a
  * hashtag claims it, and whoever joins them is appointed, by them or by an admin (PUT
@@ -189,7 +191,9 @@ export async function grantClaim(deps: Pick<AppDeps, 'db' | 'config' | 'content'
     // An account that was closed has no claim left (see retire); one that is there and banned has.
     if (!user || user.banned_at !== null) return false;
     // They may moderate it already: they were appointed as the claim was being granted.
-    await ignoreConflicts(trx.insertInto('tag_moderators').values({ tag, user_id: userId, created_at: now() }), config.db.dialect).execute();
+    const at = now();
+    // The time they have to do something as its moderator starts now (src/moderation/activity.ts).
+    await ignoreConflicts(trx.insertInto('tag_moderators').values({ tag, user_id: userId, created_at: at, acted_at: at }), config.db.dialect).execute();
     return true;
   });
   if (granted === null) return;

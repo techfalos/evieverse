@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { attest, signingKeys } from '../attestation.js';
 import { authenticate } from '../auth/apiKey.js';
-import { contentNotFound, creditOf, imageNotFound, imagesOf, loadPublished, loadReadable, ORIGIN_GONE, PENDING_REVIEW, PROCESSING, publisherOf, requireMeta, requirePost, takesComments, videoProcessing } from '../content.js';
+import { contentNotFound, creditOf, imageNotFound, imagesOf, loadPublished, loadReadable, ORIGIN_GONE, PENDING_REVIEW, PROCESSING, publisherOf, readerOf, requireMeta, requirePost, takesComments, videoProcessing } from '../content.js';
 import { setForDeletion } from '../deletion.js';
 import type { AppDeps } from '../deps.types.js';
 import { badRequest, forbidden, HttpError, notFound } from '../http/errors.js';
@@ -12,6 +12,7 @@ import { perMinute } from '../http/rateLimitStore.js';
 import { Credentials } from '../http/schemas.js';
 import { notify } from '../inbox.js';
 import { msg } from '../language.js';
+import { moderatedAmong } from '../moderation/policy.js';
 import { tagActionItem, tagActions } from '../moderation/tagDecisions.js';
 import { adRecord, eligibleAds } from '../monetization.js';
 import type { PublishedAd } from '../monetization.types.js';
@@ -140,9 +141,12 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    * `moderation`, on a post a hashtag's moderator decided about (src/moderation/tagDecisions.ts):
    * the post's record of it, oldest first. Each says what was done (`tag_removed`, or
    * `tag_approved`) under which hashtag, as what the moderator did it (`by`: `tag_moderator`,
-   * `server_moderator` or `admin`, and never who), when, the `reason` a removal was given, and
+   * `server_moderator` or `admin`), when, the `reason` a removal was given, and
    * the words to show a reader (`text`), in the language the request is answered in: "#cars was
-   * removed from this post by a moderator of the hashtag: it has no cars in it".
+   * removed from this post by a moderator of the hashtag: it has no cars in it". Who did it
+   * (`moderator`) is given to a reader who moderates that hashtag, by the credentials in the
+   * request's headers: one of its moderators, a server moderator or an admin (see moderatedAmong).
+   * To nobody else, the post's publisher included.
    *
    * `images`, on an image post: its images in their order, each with where it is read
    * (`contentUrl` for the first, and `contentUrl`/2, /3 and so on for the ones after it), its
@@ -177,6 +181,8 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
     // The row says whose the content is and how liked; what it is, is in the meta file beside its bytes.
     const [{ meta, processing }, reposts, actions] = await Promise.all([requirePost({ db, content }, contentId), repostsMade(contentId), tagActions(db, contentId)]);
     const ad = row.queued || row.gone ? undefined : await postAd(req, meta.tags);
+    // Only a post that has a record asks who reads it: who decided is for those who moderate the hashtag it was decided under.
+    const named = actions.length > 0 ? await moderatedAmong(db, await readerOf(db, req), [...new Set(actions.map((action) => action.tag))]) : null;
     return {
       publisher: creditOf(row, config.publicBaseUrl),
       contentId: row.id,
@@ -197,7 +203,7 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
       createdAt: iso(row.created_at),
       updatedAt: iso(meta.updatedAt),
       ...(reposts.length > 0 && { reposts }),
-      ...(actions.length > 0 && { moderation: actions.map((action) => tagActionItem(action, (text) => say(req, text))) }),
+      ...(named && { moderation: actions.map((action) => tagActionItem(action, (text) => say(req, text), named.has(action.tag))) }),
       ...(meta.origin && {
         origin: {
           ...meta.origin,

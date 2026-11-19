@@ -25,6 +25,7 @@ import { repostsOf } from '../src/reposts.js';
 import type { HotStore } from '../src/storage/index.js';
 import type { TrustPlugin } from '../src/moderation/trust.types.js';
 import type { CliRelease } from '../src/routes/cli.types.js';
+import { KnownHashes } from '../src/plugins/trust/pdq/list.js';
 import { createVideoWorker } from '../src/video/worker.js';
 
 export interface TestTarget {
@@ -69,6 +70,8 @@ export const TABLES = [
   'repost_removals',
   'reposts',
   'staged_removals',
+  'quarantine_access',
+  'quarantine',
   'media_jobs',
   'pending_writes',
   // What 0004_unnumbered_writes leaves behind if it stops halfway, where a database commits each statement of a migration.
@@ -143,6 +146,7 @@ export async function createTestContext(
     audit?: boolean;
     publicBaseUrl?: string;
     challenge?: Partial<Config['challenge']>;
+    /** How posts are tagged, and the settings of claims. Requests to a hashtag's log from one address have no limit, unless `logRateLimitPerMinute` sets one. */
     tagging?: Partial<Config['tagging']>;
     /** The types of post the server takes: all of them, but for the ones turned off here. */
     postTypes?: Partial<Config['postTypes']>;
@@ -152,6 +156,8 @@ export async function createTestContext(
     urlhaus?: Partial<Config['urlhaus']>;
     /** Where the pdq trust plugin reads its list of hashes, and how it matches. No list, so the plugin is off, unless given. */
     pdq?: Partial<Config['pdq']>;
+    /** Keeps the files that match the pdq plugin's list, in `quarantine/` in the test's directory: with true, or with how long a reported file is kept. Off unless asked for. */
+    quarantine?: boolean | Pick<Config['quarantine'], 'retentionDays'>;
     /** Requests to /register from one address in an hour, of which a registration takes two. More than any test makes, unless given. */
     registerRateLimitPerHour?: number;
     postRateLimitPerMinute?: number;
@@ -231,12 +237,13 @@ export async function createTestContext(
       avatarRateLimitPerMinute: opts.avatarRateLimitPerMinute ?? 0,
       search: { rateLimitPerMinute: 0, ...opts.search },
       challenge: { powBits: 8, minSolveMs: 0, ...opts.challenge },
-      ...(opts.tagging && { tagging: opts.tagging }),
+      tagging: { logRateLimitPerMinute: 0, ...opts.tagging },
       ...(opts.postTypes && { postTypes: opts.postTypes }),
       reposts: { attestationRateLimitPerMinute: 0, ...opts.reposts },
       ...(opts.trust && { trust: opts.trust }),
       ...(opts.urlhaus && { urlhaus: opts.urlhaus }),
       ...(opts.pdq && { pdq: opts.pdq }),
+      ...(opts.quarantine && { quarantine: { scheme: 'fs', options: { root: join(dir, 'quarantine') }, ...(opts.quarantine !== true && opts.quarantine) } }),
       registerRateLimitPerHour: opts.registerRateLimitPerHour ?? 1_000_000,
       postRateLimitPerMinute: opts.postRateLimitPerMinute ?? 0,
       ...(opts.maxFollowing && { maxFollowing: opts.maxFollowing }),
@@ -283,7 +290,8 @@ export async function createTestContext(
   });
   const graceMs = config.compact.graceSeconds * 1000;
   // What processes the videos users send, as the compactor's process runs it: here a test runs each job itself.
-  const videoWorker = createVideoWorker(deps, pino({ level: 'silent' }));
+  // With a list of its own where it checks videos against one (the pdq plugin's), read as this test's clock and settings have it.
+  const videoWorker = createVideoWorker(deps, pino({ level: 'silent' }), new KnownHashes());
 
   // One at a time, in the order they were asked for, as a compactor's runs are.
   let applying: Promise<unknown> = Promise.resolve();

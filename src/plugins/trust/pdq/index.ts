@@ -4,7 +4,7 @@ import { MIN_TRUST_SCORE } from '../../../moderation/trust.js';
 import type { TrustAlgorithm } from '../../../moderation/trust.types.js';
 import { pdqHash, toHex } from './hash.js';
 import { framesOf, UnreadableImage } from './image.js';
-import { KnownHashes, nearest } from './list.js';
+import { knownHashes, KnownHashes, nearest } from './list.js';
 import { report } from './report.js';
 
 /**
@@ -28,8 +28,11 @@ import { report } from './report.js';
  * had when it was sent. Nothing of an image, and no hash, is sent to anyone.
  *
  * What a match leads to is the score's doing: 0, which the server's thresholds refuse (422, with
- * nothing kept) unless it deletes nothing on arrival, and then hold in the moderation queue. The
- * sender is told what anyone whose post isn't trusted is told, and not why: no `reason` is given.
+ * nothing kept as a post or a comment) unless it deletes nothing on arrival, and then hold in
+ * the moderation queue. The sender is told what anyone whose post isn't trusted is told, and
+ * not why: no `reason` is given. On a server that has a quarantine (QUARANTINE_SCHEME,
+ * src/quarantine.ts) the file that matched is kept there, for the report its operator may have
+ * to make of it, where only an admin reads it; on any other, nothing of it is kept.
  *
  * The plugin is optional: it runs on a server that names it in TRUST_OPTIONAL_PLUGINS, and on no
  * other. Where it runs, no image is published unchecked. While the process has no list, because
@@ -40,14 +43,19 @@ import { report } from './report.js';
  * server has no queue. An avatar has no queue to wait in: it is refused either way, a match
  * and an image that can't be decoded alike.
  *
- * What it doesn't see: a video or an audio file, an image that was mirrored, rotated or cropped
- * far (its hash is another), the frames of an animation past the 32nd, an ad's image, and the
- * image of a repost of a post on another server, which this server never holds.
+ * A video is not the plugin's to check, as its pictures aren't there to read while its request
+ * waits: the video worker checks it, with this folder's `checkVideo` (video.ts), before
+ * anything of it is published, on a server that processes videos (VIDEO_PROCESSING).
+ *
+ * What it doesn't see: an audio file, a video on a server that publishes videos as they are
+ * sent, an image that was mirrored, rotated or cropped far (its hash is another), the frames of
+ * an animation past the 32nd, an ad's image, and the image of a repost of a post on another
+ * server, which this server never holds.
  *
  * `fetcher` is what downloads a list that is at an address: fetch, unless a test gives its own.
+ * `known` is the list it checks against: one of its own, unless it is given the process's.
  */
-export function pdq(fetcher?: typeof fetch): TrustAlgorithm {
-  const known = new KnownHashes(fetcher);
+export function pdq(fetcher?: typeof fetch, known: KnownHashes = new KnownHashes(fetcher)): TrustAlgorithm {
   return {
     optional: true,
     async assess(post, ctx) {
@@ -90,4 +98,4 @@ export function pdq(fetcher?: typeof fetch): TrustAlgorithm {
   };
 }
 
-export default pdq();
+export default pdq(undefined, knownHashes());

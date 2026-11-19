@@ -10,6 +10,7 @@ import { badRequest, conflict, forbidden, notFound } from '../http/errors.js';
 import { Credentials, Hashtag } from '../http/schemas.js';
 import { msg } from '../language.js';
 import type { Message } from '../language.types.js';
+import { recordAction } from '../moderation/activity.js';
 import { moderates } from '../moderation/policy.js';
 import { RELEASE } from '../release.js';
 import { iso } from '../time.js';
@@ -174,7 +175,9 @@ function changeRule(db: Db, list: RuleList, ruleId: string, body: { text?: strin
  * GET /rules gives all three to anyone, with a key or without, so a client can show them to
  * someone before they register. GET /tags/:tag/rules gives a hashtag's the same way.
  */
-export function rulesRoutes(app: FastifyInstance, { db, config, now = Date.now }: AppDeps) {
+export function rulesRoutes(app: FastifyInstance, deps: AppDeps) {
+  const { db, config, now = Date.now } = deps;
+
   async function asAdmin(req: FastifyRequest, body: Credentials): Promise<AuthUser> {
     const user = await authenticate(db, req, body);
     if (!user.admin) throw forbidden(msg('moderation.admin_only'));
@@ -187,6 +190,9 @@ export function rulesRoutes(app: FastifyInstance, { db, config, now = Date.now }
     if (!(await moderates(db, user, tag))) throw forbidden(msg('moderation.tag_moderator_only', { tag }));
     return user;
   }
+
+  /** Notes that `user` changed a hashtag's rules, which is moderating it, and so part of what keeps a hashtag's moderator one (see recordAction). */
+  const acted = (req: FastifyRequest, user: AuthUser, tag: string) => recordAction(deps, user.id, tag, req.log);
 
   /** The rules, in their order, the support address and the modification disclosure. For anyone: it needs no key, and reads none. */
   app.get('/rules', async () => ({
@@ -240,22 +246,28 @@ export function rulesRoutes(app: FastifyInstance, { db, config, now = Date.now }
   app.post('/tags/:tag/rules', async (req, reply) => {
     const { tag } = TagParams.parse(req.params);
     const body = AddBody.parse(req.body ?? {});
-    await asModerator(req, tag, body);
-    return reply.status(201).send({ tag, ...(await addRule(db, tagRules(tag), body, now())) });
+    const moderator = await asModerator(req, tag, body);
+    const rule = await addRule(db, tagRules(tag), body, now());
+    await acted(req, moderator, tag);
+    return reply.status(201).send({ tag, ...rule });
   });
 
   /** Changes a rule of a hashtag's: its text, its place among the hashtag's others, or both, as PATCH /rules/:ruleId changes one of the server's. Its moderators, server moderators and admins. */
   app.patch('/tags/:tag/rules/:ruleId', async (req) => {
     const { tag, ruleId } = TagRuleParams.parse(req.params);
     const body = UpdateBody.parse(req.body ?? {});
-    await asModerator(req, tag, body);
-    return { tag, ...(await changeRule(db, tagRules(tag), ruleId, body, now())) };
+    const moderator = await asModerator(req, tag, body);
+    const rule = await changeRule(db, tagRules(tag), ruleId, body, now());
+    await acted(req, moderator, tag);
+    return { tag, ...rule };
   });
 
   /** Removes a rule of a hashtag's, which moves the ones after it up by one. Its moderators, server moderators and admins. One that isn't there changes nothing. */
   app.delete('/tags/:tag/rules/:ruleId', async (req) => {
     const { tag, ruleId } = TagRuleParams.parse(req.params);
-    await asModerator(req, tag, Credentials.parse(req.body ?? {}));
-    return { tag, ruleId, wasThere: await tagRules(tag).remove(db, ruleId) };
+    const moderator = await asModerator(req, tag, Credentials.parse(req.body ?? {}));
+    const wasThere = await tagRules(tag).remove(db, ruleId);
+    await acted(req, moderator, tag);
+    return { tag, ruleId, wasThere };
   });
 }

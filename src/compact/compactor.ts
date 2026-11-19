@@ -4,10 +4,12 @@ import { summaryOf, withheld } from '../content.js';
 import type { Database, TagDecision } from '../db/schema.js';
 import type { AppDeps } from '../deps.types.js';
 import { syncFollowing } from '../follows.js';
+import { idleModerators, retireModerator, startCounting } from '../moderation/activity.js';
 import { dueClaims, grantClaim } from '../moderation/claims.js';
 import { publishedAd } from '../monetization.js';
 import { pendingImages } from '../pending.js';
 import { MAX_POST_IMAGES } from '../posts.js';
+import { expireQuarantine } from '../quarantine.js';
 import { repostedTags, repostTimes, type Repost } from '../reposts.js';
 import { indexContent } from '../search/index.js';
 import type { ContentMeta, Summary } from '../storage/index.js';
@@ -327,7 +329,8 @@ const addTo = (ids: Map<number, Set<string>>, day: number, id: string) => {
  *
  * And it grants the claims to hashtags (src/moderation/claims.ts): a user who claimed one becomes
  * its moderator in the first run after the time admins and server moderators had to refuse the
- * claim (see grantClaims).
+ * claim (see grantClaims). And it ends the time of a hashtag's moderators who did nothing as one
+ * for TAG_MODERATOR_INACTIVE_DAYS (src/moderation/activity.ts, see retireModerators).
  *
  * A run that is killed leaves nothing that lasts: what it wrote for a hashtag expires unless the
  * hashtag's head was swapped, and what it hadn't finished is found again by the next run.
@@ -509,12 +512,15 @@ export class Compactor {
     }
     await this.settleAccounts(lease);
     await this.grantClaims(lease, runStart);
+    await this.retireModerators(lease, runStart);
 
-    // Once a UTC day, what is past its retention goes: inbox messages and notices, then summaries.
+    // Once a UTC day, what is past its retention goes: inbox messages and notices, the quarantined files a year past their report, then summaries.
     if (state.summariesPurgedBefore !== minDay) {
       await lease.check();
       const expired = await db.deleteFrom('inbox').where('created_at', '<', runStart - this.cfg.inbox.retentionDays * DAY).executeTakeFirst();
       if (Number(expired.numDeletedRows) > 0) this.deps.log?.info({ messages: Number(expired.numDeletedRows) }, 'deleted inbox messages past retention');
+      // The quarantined files whose time after their report is over, where the server has a quarantine. One that fails is tomorrow's, and stops nothing here.
+      await expireQuarantine({ db, config: this.cfg, now: () => runStart }, this.deps.log).catch((err: unknown) => this.deps.log?.error({ err }, 'could not delete the quarantined files whose time is over; it is tried again tomorrow'));
       const purged = await summaries.purgeBefore(minDay);
       if (purged.length) this.deps.log?.info({ days: purged.length }, 'deleted summaries past retention');
       await lease.check();
@@ -576,6 +582,43 @@ export class Compactor {
         if (err instanceof LeaseLostError) throw err;
         log?.error({ err, tag: claim.tag, userId: claim.user_id }, 'could not grant a claim to a hashtag');
       }
+    }
+  }
+
+  /**
+   * Ends the time of the hashtags' moderators who did nothing as one on their hashtag for
+   * `tagging.moderatorInactiveDays` (see src/moderation/activity.ts), and tells each. Up to BATCH
+   * of them a run, longest idle first; the rest wait for the next, and so does one that fails.
+   * After the claims are granted, so a moderator a claim just made is counted from this run.
+   *
+   * First it starts counting the moderators of whom nothing is known: the rows from before the
+   * server kept when a moderator last did anything are counted from this run, whatever the
+   * setting says, so that turning it on later finds them counted since then. A failure is
+   * logged and left for the next run, as nothing else a run does depends on it.
+   */
+  private async retireModerators(lease: CompactorLease, runStart: number) {
+    const { db, log } = this.deps;
+    const days = this.cfg.tagging.moderatorInactiveDays;
+    try {
+      await lease.check();
+      const started = await startCounting(db, runStart);
+      if (started > 0) log?.info({ moderators: started }, "started counting the time since hashtags' moderators last did anything, for those it wasn't known of");
+      // 0: no moderator's time ends this way.
+      if (days === 0) return;
+      const before = runStart - days * DAY;
+      const retire = { ...this.deps, now: this.now };
+      for (const moderator of await idleModerators(db, before, BATCH)) {
+        await lease.check();
+        try {
+          await retireModerator(retire, moderator, before, log);
+        } catch (err) {
+          if (err instanceof LeaseLostError) throw err;
+          log?.error({ err, tag: moderator.tag, userId: moderator.user_id }, "could not end an idle moderator's time on a hashtag");
+        }
+      }
+    } catch (err) {
+      if (err instanceof LeaseLostError) throw err;
+      log?.error({ err }, "could not end the time of the hashtags' idle moderators; the next run tries again");
     }
   }
 

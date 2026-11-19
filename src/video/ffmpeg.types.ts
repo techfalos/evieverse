@@ -19,6 +19,17 @@ export interface ProbedVideo {
   tags: Record<string, string>;
 }
 
+/** One picture of a video, as pixels (see keyframesOf). */
+export interface VideoFrame {
+  /** 3 bytes a pixel (red, green, blue), row after row. Good until the next picture is asked for. */
+  pixels: Uint8Array;
+  /** The size the picture is given at, in pixels, which may not be the video's own. */
+  width: number;
+  height: number;
+  /** Where in the video the picture is, in seconds from its start. */
+  seconds: number;
+}
+
 /** One size a video is made in (see encodeVideo): named by the shorter side of its picture, as "720p" is. */
 export interface Rendition {
   /** The shorter side of its picture, in pixels. */

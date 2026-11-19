@@ -1,9 +1,17 @@
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { attest, signingKeys, type Attestable } from '../src/attestation.js';
+import type { SigningKey } from '../src/attestation.types.js';
 import { HOUR } from '../src/time.js';
 import { as, createTestContext, requests, TARGETS, type FeedItem, type TestContext, type User } from './helpers.js';
 
 const NOT_TAKEN = "this post's publisher doesn't take comments from you";
+const REPLY_NOT_TAKEN = "this comment's author doesn't take replies from you";
+const NO_REPOST = "this post's publisher doesn't take reposts from you";
+/** Another server, the key it signs the attestations of its posts with, and a post there. */
+const OTHER = 'https://other.example';
+const [OTHER_KEY] = signingKeys([Buffer.alloc(32, 1).toString('base64')]) as [SigningKey];
+const ELSEWHERE = `${OTHER}/content/3f2b8c1e-9a4d-4e6f-8b7a-1c2d3e4f5a6b`;
 const NO_FOLLOW = "you can't follow this user";
 const UNBLOCK_FIRST = 'you blocked this user: unblock them to follow them';
 
@@ -47,6 +55,11 @@ for (const target of TARGETS) {
       ok(await req(reader, 'GET', `/content/${contentId}/comments/${commentId}/replies`));
     /** What a list says of each of its comments: who wrote it, what it says, and its status, if it has one. */
     const shown = (page: { comments: CommentItem[] }) => page.comments.map((c) => [c.author?.username ?? null, c.text, ...(c.status ? [c.status] : [])]);
+    /** POST /repost as `u`. */
+    const repost = (u: User, payload: Record<string, unknown>) => ctx.app.inject({ method: 'POST', url: '/repost', payload: { ...u, ...payload } });
+    /** The reposts of a post, oldest first: who made each, and the hashtags it gave. */
+    const reposts = async (contentId: string) =>
+      ((ok(await req(null, 'GET', `/content/${contentId}`)).reposts ?? []) as { by: { username: string }; tags: string[] }[]).map((r) => [r.by.username, r.tags]);
 
     it('ends the follows between the two, either way, and takes none while it stands', async () => {
       ctx = await createTestContext(target);
@@ -159,6 +172,109 @@ for (const target of TARGETS) {
       ok(await unblock(alice, bob));
       const after = ok(await comment(bob, contentId, 'After it ended'), 201).commentId as string;
       expect(ok(await edit(bob, contentId, after, 'After it ended, edited'))).toMatchObject({ text: 'After it ended, edited' });
+    });
+
+    it("takes no reply to a user's comments from someone they block, on anyone's post, and no edit of the replies that are there", async () => {
+      ctx = await createTestContext(target);
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const carol = await ctx.register('carol');
+      // The post is carol's, who blocks nobody: alice only comments on it.
+      const contentId = await post(carol, "Carol's own #news", { comments: true });
+      const fromAlice = ok(await comment(alice, contentId, 'From alice'), 201).commentId as string;
+      const alsoAlice = ok(await comment(alice, contentId, 'Also from alice'), 201).commentId as string;
+      const fromCarol = ok(await comment(carol, contentId, 'From carol'), 201).commentId as string;
+      const before = ok(await comment(bob, contentId, 'Bob to alice, before the block', fromAlice), 201).commentId as string;
+      const underAlso = ok(await comment(bob, contentId, 'Bob to alice again, before the block', alsoAlice), 201).commentId as string;
+      const carolToAlice = ok(await comment(carol, contentId, 'Carol to alice', fromAlice), 201).commentId as string;
+
+      ok(await block(alice, bob), 201);
+      // Not a reply to her comment, and not by changing the one he made before: sent again as it is, too.
+      expect(refusal(await comment(bob, contentId, 'Bob to alice, after the block', fromAlice))).toEqual([403, REPLY_NOT_TAKEN]);
+      expect(refusal(await edit(bob, contentId, before, 'Changed after the block'))).toEqual([403, REPLY_NOT_TAKEN]);
+      expect(refusal(await edit(bob, contentId, before, 'Bob to alice, before the block'))).toEqual([403, REPLY_NOT_TAKEN]);
+      expect(shown(await replies(null, contentId, fromAlice))).toEqual([['bob', 'Bob to alice, before the block'], ['carol', 'Carol to alice']]);
+      // Nothing of a refused reply is kept.
+      expect(await ctx.db.selectFrom('pending_writes').select('content_id').execute()).toEqual([]);
+
+      // It goes by the comment replied to: he still comments on the post, replies to carol, and to her reply under alice's comment.
+      const onPost = ok(await comment(bob, contentId, 'On the post'), 201).commentId as string;
+      ok(await comment(bob, contentId, 'Bob to carol', fromCarol), 201);
+      ok(await comment(bob, contentId, 'Bob to carol, under alice', carolToAlice), 201);
+      expect(ok(await edit(bob, contentId, onPost, 'On the post, edited'))).toMatchObject({ text: 'On the post, edited' });
+      // And it is one way, between the two: carol replies to alice, and alice to him.
+      ok(await comment(carol, contentId, 'Carol to alice again', fromAlice), 201);
+      ok(await comment(alice, contentId, 'Alice to bob', before), 201);
+
+      // What is left of a comment she deleted is nobody's: his reply under it is his to edit again.
+      expect(refusal(await edit(bob, contentId, underAlso, 'Changed after the block'))).toEqual([403, REPLY_NOT_TAKEN]);
+      expect(ok(await req(alice, 'DELETE', `/content/${contentId}/comments/${alsoAlice}`))).toMatchObject({ status: 'deleted' });
+      expect(ok(await edit(bob, contentId, underAlso, 'After she deleted hers'))).toMatchObject({ text: 'After she deleted hers' });
+      // What he wrote before the block is still his to delete.
+      expect(ok(await req(bob, 'DELETE', `/content/${contentId}/comments/${underAlso}`))).toMatchObject({ status: 'deleted' });
+
+      ok(await unblock(alice, bob));
+      ok(await comment(bob, contentId, 'Bob to alice, after it ended', fromAlice), 201);
+      expect(ok(await edit(bob, contentId, before, 'Before the block, edited'))).toMatchObject({ text: 'Before the block, edited' });
+    });
+
+    it("takes no repost of a user's posts from someone they block", async () => {
+      ctx = await createTestContext(target);
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const carol = await ctx.register('carol');
+      const first = await post(alice, 'First from alice #news');
+      const second = await post(alice, 'Second from alice #news');
+      const carols = await post(carol, "Carol's own #news");
+      const bobs = await post(bob, "Bob's own #news");
+      ok(await repost(bob, { contentId: first, tags: 'dunks' }), 201);
+
+      ok(await block(alice, bob), 201);
+      expect(refusal(await repost(bob, { contentId: second, tags: 'dunks' }))).toEqual([403, NO_REPOST]);
+      // Nothing of a refused repost is kept: the post has no hashtag from it, and is in no index of his.
+      expect(await reposts(second)).toEqual([]);
+      expect(await ctx.db.selectFrom('reposts').select('content_id').where('content_id', '=', second).execute()).toEqual([]);
+
+      // It is between the two, and one way: everyone else reposts her posts, he everyone else's, and she his.
+      ok(await repost(carol, { contentId: second, tags: 'weather' }), 201);
+      ok(await repost(bob, { contentId: carols, tags: 'weather' }), 201);
+      ok(await repost(alice, { contentId: bobs, tags: 'weather' }), 201);
+      expect(await reposts(second)).toEqual([['carol', ['weather']]]);
+      // The repost he made before the block stays.
+      expect(await reposts(first)).toEqual([['bob', ['dunks']]]);
+
+      ok(await unblock(alice, bob));
+      ctx.clock.now += HOUR;
+      ok(await repost(bob, { contentId: second, tags: 'dunks' }), 201);
+      expect(await reposts(second)).toEqual([['carol', ['weather']], ['bob', ['dunks']]]);
+    });
+
+    it("holds a repost by its address to the block too, and leaves a post on another server to whoever reposts it", async () => {
+      ctx = await createTestContext(target, {
+        publicBaseUrl: 'https://api.example.com',
+        reposts: { signingKeys: [Buffer.alloc(32, 3).toString('base64')] },
+        keyFetcher: async () => ({ keys: [{ id: OTHER_KEY.id, publicKey: OTHER_KEY.publicKey, algorithm: 'ed25519' }] }),
+      });
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const own = await post(alice, 'Written here #news');
+      /** What a client sends of the post on the other server: that server's attestation of it, signed just now. */
+      const elsewhere = () => ({
+        attestation: attest(OTHER_KEY, { url: ELSEWHERE, publisher: { userId: '11111111-1111-4111-8111-111111111111', username: 'dana' }, aiGenerated: false, preview: { kind: 'text', text: 'Flooding closes the coast road.' } } as Attestable, ctx.clock.now),
+      });
+      // Alice is the first to repost the other server's post, so this server's entry for it is hers.
+      const entry = ok(await repost(alice, { origin: elsewhere(), tags: 'coast' }), 201).contentId as string;
+
+      ok(await block(alice, bob), 201);
+      // Her post, named by its address and this server's own attestation of it, is the post it is by its id.
+      const attestation = ok(await req(null, 'GET', `/content/${own}/attestation`));
+      expect(refusal(await repost(bob, { origin: attestation, tags: 'dunks' }))).toEqual([403, NO_REPOST]);
+      expect(refusal(await repost(bob, { contentId: own, tags: 'dunks' }))).toEqual([403, NO_REPOST]);
+      expect(await reposts(own)).toEqual([]);
+
+      // The entry is her content, but not her post: he reposts the original as anyone does.
+      expect(ok(await repost(bob, { origin: elsewhere(), tags: 'floods' }), 201)).toMatchObject({ contentId: entry, tags: ['floods'] });
+      expect(await reposts(entry)).toEqual([['bob', ['floods']]]);
     });
 
     it('lists the comments of a blocked user as placeholders to whoever blocks them, and to nobody else', async () => {

@@ -103,6 +103,8 @@ secrets     = { PDQ_HASH_LIST_AUTHORIZATION = "Bearer ..." }
 - Each function instance reads the list when its first post or comment arrives, and keeps it while it lives, about 100 bytes a hash: count a long list in the functions' memory. A post or a comment with an image that reaches a new instance waits for that download, on top of the cold start.
 - The functions need a way out to the list's host, which the three modules give them as they do for URLhaus. If the list can't be read, posts and comments with an image fail with `500` on instances that have no list yet.
 - A match is told to the deployment's [admin](#the-admin-account), in its inbox, and to every other admin, and is a warning in the function's log. The server reports it to nobody else: that is yours to do.
+- Videos are checked too, by the [compactor](#videos)'s container, before they're published. It gets `environment` and `secrets` as the functions do, so there is nothing more to set, and it reads the list itself: count the list in `compactor_memory` as well.
+- The file that matched is kept only if you set up a [quarantine](#quarantine), which the modules don't do for you.
 
 **The signing key for reposts**
 
@@ -301,6 +303,33 @@ Nothing moves records by default: `audit_archive_after_days` is unset (the same 
 
 The audit log is written by the functions that answer requests, in each request, before it is answered: a failed write is logged as an error and doesn't fail the request. The log of the functions themselves (CloudWatch, Cloud Logging, Log Analytics) also gets a line for each record, naming its object, for as long as that log is kept.
 
+## Quarantine
+
+With the `pdq` trust plugin on, the server can keep the files that matched its list, for the report you may have to make and for the time the law has you keep a reported file afterwards ([TRUST_PLUGINS.md](TRUST_PLUGINS.md#the-quarantine)). **The modules don't set this up:** they make no bucket for it, give no role access to one, and set none of its settings. Until you do, a matched file is refused and nothing of it is kept, and the server says so in its log when it starts with `pdq` on.
+
+To have one:
+
+1. **Make a store for it yourself,** outside the module: a bucket or container that nothing else uses. Keep it private and encrypted, turn on its access log, and give it no lifecycle rule that deletes, since the server deletes what is due.
+2. **Let the server reach it, and nothing else.** The functions write files to it and read them for admins. The compactor writes a video's file, and deletes the files whose time is over. Either give the module's roles those rights on the bucket, or put credentials that have them in `QUARANTINE_OPTIONS`.
+3. **Pass its settings,** in the same `apply`:
+
+```hcl
+environment = { TRUST_OPTIONAL_PLUGINS = "pdq", PDQ_HASH_LIST = "https://hashes.example.com/pdq.csv", QUARANTINE_SCHEME = "s3" }
+secrets     = { QUARANTINE_OPTIONS = "{\"bucket\":\"my-quarantine\",\"region\":\"us-east-1\",\"access_key_id\":\"...\",\"secret_access_key\":\"...\"}" }
+```
+
+What to know:
+
+- **The settings check doesn't reach the bucket.** It refuses a quarantine that is the content store, the summary store or the audit log, with the same options. A bucket that doesn't exist, or that the roles can't write, passes it: the first match then logs an error that starts `pdq:` and says the file couldn't be kept, the post is refused all the same, and nothing is kept. Read the log after you turn it on.
+- **A file is read through the function,** never by a link to the bucket: `GET /moderation/quarantine/:quarantineId/file`, which is in the `api` group. On AWS a Lambda response can be at most 6 MB, so expect a larger file, which a video usually is, not to come through that way: fetch it from the bucket with credentials of your own, and note that the server's record of who read the file doesn't have that reading. The bucket's own access log does, if you turned it on.
+- **Files are deleted by the compactor,** once a day, `QUARANTINE_RETENTION_DAYS` (365) after the report an admin recorded. A file no report was recorded of stays, and the compactor's log says once a day how many wait.
+- **Changing the bucket doesn't move the files.** The database goes on naming them: move them before you change `QUARANTINE_OPTIONS`.
+- **`terraform destroy` leaves the bucket,** since it isn't the module's. The record of what was kept and who read it is in the database, which is the module's and goes with it.
+
+The first `apply` of a version that has the quarantine runs migration `0016_quarantine`: two tables, for the files that are kept and for what was done with each, and two columns on the videos that wait, for where each was sent from. It runs whether or not you turn the quarantine on.
+
+None of this was applied to a live account for this change. Keeping, reading, reporting and deleting files are covered by the server's tests, against a folder on disk and SQLite; a quarantine in a bucket, the roles' rights on it, and reading a file through a function weren't tried.
+
 ## Client addresses
 
 The limits on registrations, on feeds and on the other reads that need no key (`REGISTER_RATE_LIMIT_PER_HOUR`, `FEED_RATE_LIMIT_PER_MINUTE`, `FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE`, `CONTENT_RATE_LIMIT_PER_MINUTE`, `PROFILE_POSTS_RATE_LIMIT_PER_MINUTE`, `AVATAR_RATE_LIMIT_PER_MINUTE`, `COMMENTS_LIST_RATE_LIMIT_PER_MINUTE`, `REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE`, `SEARCH_RATE_LIMIT_PER_MINUTE`) count by the client's address, which the server reads from `X-Forwarded-For`, as far from the end as there are proxies in front of it (`TRUST_PROXY`). Nothing can reach the functions except through the address in front, so a client can't make one up:
@@ -359,6 +388,7 @@ The compactor's container also processes the videos users send ([API.md](API.md#
 - **The stream's segments are read from the bucket** on AWS and GCP, by a redirect to a signed link, as `/raw` is. A player that fetches them by script (hls.js, in every browser but Safari) is held to the bucket's CORS rule, so the modules allow `GET` there for `upload_origins`. On Azure they're streamed through the Container App and Front Door.
 - **Processed videos take more room:** each rendition is stored twice, as the stream's segments and, for one of them, as the MP4. The file as it was sent isn't kept.
 - **To turn it off,** set `VIDEO_PROCESSING = "false"` in `environment`. It applies to the functions and the compactor alike, as every setting there does. Videos are then stored and served as they're sent.
+- **With the `pdq` trust plugin on, each video is checked before it's published,** against the plugin's list of hashes of known child sexual abuse material ([TRUST_PLUGINS.md](TRUST_PLUGINS.md#videos)). The compactor's container reads the list from `PDQ_HASH_LIST` itself, so it needs the way out to the list's host that the functions have, and room for the list in `compactor_memory`. While it has no list, videos wait unpublished. With `VIDEO_PROCESSING = "false"`, no video is checked.
 
 The first `apply` of a version that processes videos runs migration `0007_media` (a table for the videos that wait, and a column on ads), adds `GET` and `HEAD` to the bucket's CORS rule, and replaces the compactor's container with one that has ffmpeg. Videos stored before it stay as they were sent: nothing processes them again.
 

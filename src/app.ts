@@ -67,7 +67,7 @@ export async function buildApp(
     });
   }
   // Only for the routes that ask for it (POST /register, and the reads that need no key and cost
-  // the server most: both feeds, a post, its attestation, and the lists of comments; see
+  // the server most: both feeds, a post, its attestation, the lists of comments, and a hashtag's log; see
   // perMinute), each counted apart, by the client's address: an IPv4 address by itself, one written as IPv6 (::ffff:a.b.c.d) as the same,
   // and an IPv6 address with the rest of its /64, as that many are one host's to send from.
   await app.register(rateLimit, {
@@ -109,6 +109,18 @@ export async function buildApp(
     originKeys: new OriginKeys(deps.hot, keyFetcher, deps.now, app.log),
   };
   if (writing) app.log.info({ trustPlugins: writing.trustPlugins.map((plugin) => plugin.name) }, 'trust plugins loaded');
+  // Said once, as the app starts: what a server that matches files against the pdq plugin's list doesn't do with them, as it is set up.
+  if (writing?.trustPlugins.some((plugin) => plugin.name === 'pdq')) {
+    const { quarantine, video, postTypes } = deps.config;
+    if (quarantine.scheme === undefined) {
+      app.log.warn(
+        'pdq is on and the quarantine is off: a file that matches the list is refused and no copy of it is kept, so there is nothing to send with a report of it, or to keep afterwards. Where the law has you keep what you report (in the United States, for a year), set QUARANTINE_SCHEME and QUARANTINE_OPTIONS',
+      );
+    }
+    if (!video.processing && postTypes.video) {
+      app.log.warn('pdq is on and VIDEO_PROCESSING is off: videos are published as they are sent, and none is checked against the list. Only the video worker checks them');
+    }
+  }
   for (const name of new Set(groups)) {
     const group = GROUPS[name];
     if (!group.database) group.register(app, deps);

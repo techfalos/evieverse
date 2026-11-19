@@ -14,6 +14,7 @@ import { notifyMentions, resolveMentions } from '../mentions.js';
 import type { Mention } from '../mentions.types.js';
 import { moderatePost, refuseBanned } from '../moderation/policy.js';
 import type { RemovedTag } from '../moderation/policy.types.js';
+import type { TrustClient } from '../moderation/trust.types.js';
 import { altsOf, LinkUrl, MAX_ALT_CHARS, MAX_POST_IMAGES, MAX_TEXT_CHARS, mediaUrl, POST_TYPES, previewCutter } from '../posts.js';
 import { MAX_REPOSTED_TAGS, repostedTags, repostsOf, type Repost } from '../reposts.js';
 import { admitting } from '../sendLimit.js';
@@ -22,6 +23,7 @@ import { allowedTags, MAX_TAGS, parseTagList, sameTags } from '../tags.js';
 import { filesOf, oneFile, readMultipart, readPost, readUploaded, requirePostType, textOf, trustImage, type Post } from '../upload.js';
 import type { SentFile, Upload } from '../upload.types.js';
 import { allDone } from '../util.js';
+import { jobClient } from '../video/jobs.js';
 import { assertUpdatable } from '../write.js';
 
 /**
@@ -384,6 +386,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
           given,
           droppedReposts,
           mentions,
+          { ip: req.ip, userAgent: req.headers['user-agent'] ?? null },
         ),
       );
       stored = true;
@@ -422,6 +425,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
     given: string[],
     droppedReposts: string[],
     mentions: Mention[],
+    client: TrustClient,
   ): Promise<Summary> {
     const contentId = existing?.row.id ?? randomUUID();
     const ts = now();
@@ -487,6 +491,8 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
       // A text's and a link's bytes are in the meta file, which is all the compactor needs to write them.
       ...(post.type !== 'text' && post.type !== 'link' && { stageBytes: files.map((sent) => (writeId: string) => sent.file.stage(content, writeId, sent.mimeType)) }),
       processVideo: processes(post),
+      // Who sent it goes with the video's job, where the server checks videos against a list, for the notice of a match.
+      ...(processes(post) && { client: jobClient(config, client) }),
       queued,
       given,
       droppedReposts,

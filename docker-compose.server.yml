@@ -74,6 +74,12 @@ services:
       # operator gets (see .env.example): an http(s) address, or the path of a file mounted into the container.
       PDQ_HASH_LIST: ${PDQ_HASH_LIST:-}
       PDQ_HASH_LIST_AUTHORIZATION: ${PDQ_HASH_LIST_AUTHORIZATION:-}
+      # Where the files that matched are kept for the report and after it (see .env.example): a store of its
+      # own, such as QUARANTINE_SCHEME=fs with QUARANTINE_OPTIONS={"root":"/app/data/quarantine"}. Unset: nothing
+      # of a file that matches is kept.
+      QUARANTINE_SCHEME: ${QUARANTINE_SCHEME:-}
+      QUARANTINE_OPTIONS: ${QUARANTINE_OPTIONS:-}
+      QUARANTINE_RETENTION_DAYS: ${QUARANTINE_RETENTION_DAYS:-365}
     volumes: [content:/app/data]
 
 volumes:

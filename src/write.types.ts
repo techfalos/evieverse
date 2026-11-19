@@ -1,3 +1,4 @@
+import type { TrustClient } from './moderation/trust.types.js';
 import type { ContentMeta, Publisher, StagedBytes, Summary } from './storage/index.js';
 
 /**
@@ -44,6 +45,12 @@ export interface ContentWrite {
    * has made the staged file what is published.
    */
   processVideo?: boolean;
+  /**
+   * Who sent the request, for a write with a video the server processes and checks against the
+   * pdq plugin's list (see jobClient): kept with the video's job, for the notice of a match,
+   * and nowhere else. Absent on a server that checks no videos.
+   */
+  client?: TrustClient;
   /**
    * The write's trust score sent it to the moderation queue: the content is stored, but has no
    * summary and is in no feed index until an admin accepts it. Absent: it is published.

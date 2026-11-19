@@ -1,5 +1,6 @@
 import type { FastifyRequest } from 'fastify';
 import { authenticate } from './auth/apiKey.js';
+import type { AuthUser } from './auth/apiKey.types.js';
 import type { Db } from './db/index.js';
 import { mentionsIn } from './format.js';
 import { HttpError, notFound } from './http/errors.js';
@@ -122,15 +123,24 @@ export async function loadReadable(db: Db, req: FastifyRequest, contentId: strin
 }
 
 /**
+ * Who reads something anyone may read, where some are given more of it: the user whose
+ * credentials the request's headers carry, or null. No credentials, or wrong ones, are answered
+ * like anyone else: the request is one they can make all the same.
+ */
+export function readerOf(db: Db, req: FastifyRequest): Promise<AuthUser | null> {
+  return authenticate(db, req).catch((err) => {
+    if (err instanceof HttpError && err.statusCode === 401) return null;
+    throw err;
+  });
+}
+
+/**
  * Whether the caller may read something that waits in the moderation queue: who sent it (`ownerId`),
  * a server moderator or an admin, by the credentials in the request's headers. No credentials, or
  * wrong ones, are answered like anyone else, so nothing says the thing is there.
  */
 export async function readsHeld(db: Db, req: FastifyRequest, ownerId: string): Promise<boolean> {
-  const user = await authenticate(db, req).catch((err) => {
-    if (err instanceof HttpError && err.statusCode === 401) return null;
-    throw err;
-  });
+  const user = await readerOf(db, req);
   return user !== null && (user.id === ownerId || moderatesServer(user));
 }
 

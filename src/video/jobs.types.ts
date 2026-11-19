@@ -1,3 +1,5 @@
+import type { TrustClient } from '../moderation/trust.types.js';
+
 /** A video to process, as the write that staged it names it to addVideoJob. */
 export interface VideoJobWrite {
   /** The post the video is of, or the post the comment it came with is on. */
@@ -10,6 +12,8 @@ export interface VideoJobWrite {
   commentId?: string;
   /** When the write was made: jobs are taken oldest first. */
   at: number;
+  /** Who sent the write's request, on a server that checks videos against a list (see jobClient); none on any other. */
+  client?: TrustClient;
 }
 
 /** A job a worker has taken (see claimVideoJob): a row of `media_jobs`, its until the lease it took runs out. */
@@ -24,4 +28,8 @@ export interface VideoJob {
   commentId: string | null;
   /** How many times the job has been taken, this time included. */
   attempts: number;
+  /** When the job's write was made, which is when its video was sent. */
+  createdAt: number;
+  /** Who sent the video, where the job's write kept it (see jobClient); null where it didn't. */
+  client: TrustClient | null;
 }

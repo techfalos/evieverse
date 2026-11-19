@@ -23,7 +23,7 @@ import { admitting } from '../sendLimit.js';
 import { commentPlaceholder, type Comment, type CommentMedia } from '../storage/index.js';
 import { readCommentFile, readMultipart, readUploaded, trustImage } from '../upload.js';
 import type { CommentFile, Upload } from '../upload.types.js';
-import { addVideoJob } from '../video/jobs.js';
+import { addVideoJob, jobClient } from '../video/jobs.js';
 import { sendBytes } from './content.js';
 
 /** The path of a post's comments: the post's id. */
@@ -313,6 +313,18 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
   }
 
   /**
+   * Refuses (403) a reply, or an edit of one, by a user whom the author of the comment it replies
+   * to blocks: they write nothing more under that user's comments, on whoever's post, as they
+   * write nothing under that user's posts (see refuseBlocked). It goes by the comment replied
+   * to, and no further up: a reply to someone else's reply under the blocker's comment is taken.
+   * What they replied before the block stays, theirs to delete. `parent` is that comment as it
+   * is now, if it is still there: what is left of a deleted one is nobody's.
+   */
+  async function refuseBlockedReply(parent: Comment | undefined, user: { id: string }): Promise<void> {
+    if (parent && parent.userId !== user.id && (await blocks(db, parent.userId, user.id))) throw forbidden(msg('comment.reply_not_taken'));
+  }
+
+  /**
    * Comments on a post, or with `parentId`, replies to a comment on it, which must be published:
    * 201 with the comment, or 202 with `status: "pending_review"` for one that waits in the
    * moderation queue, which nobody but its author and the queue's moderators reads until it is
@@ -341,7 +353,8 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
    * One that can't be processed is told to its author by a notice, and the comment is
    * published with its text alone, or not at all if the video was all of it.
    *
-   * A banned user is refused (403), and so is one the post's publisher blocks (see refuseBlocked).
+   * A banned user is refused (403), and so is one the post's publisher blocks (see refuseBlocked),
+   * and a reply to a comment whose author blocks them (see refuseBlockedReply).
    *
    * 429 for a comment past the most a user sends in a minute (see commentWriteRoutes). Only the
    * comments that are stored count. One that was refused is sent again with the same `uploadId`
@@ -376,8 +389,15 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
       refuseBanned(user);
       await refuseBlocked(await commentable(contentId), user);
       // A reply is to a comment anyone can read: not to one that waits in the moderation queue, or was deleted.
-      const answerable = async (reader: PendingReader) => parentId === undefined || (await current(reader, contentId, parentId))?.held === false;
-      if (!(await answerable(db))) throw commentNotFound();
+      const answered = async (reader: PendingReader, id: string) => {
+        const parent = await current(reader, contentId, id);
+        return parent?.held === false ? parent.comment : undefined;
+      };
+      if (parentId !== undefined) {
+        const parent = await answered(db, parentId);
+        if (!parent) throw commentNotFound();
+        await refuseBlockedReply(parent, user);
+      }
       // An upload is kept under its user's id, so it is only looked for once the request is known to be theirs.
       if (uploadId) upload = await readUploaded(content, user.id, uploadId, config.storage);
       file = await readCommentFile(body, upload, config.storage, config.postTypes);
@@ -416,10 +436,10 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
           await writeUnnumbered(db, config.db.dialect, contentId, { reply: parentId !== undefined }, async (trx) => {
             // The comment it replies to was deleted, or taken back to the queue, while this was under way. Read again
             // here, where the compactor waits for this reply before it decides what a removal of that comment leaves.
-            if (parentId !== undefined && !(await answerable(trx))) throw commentNotFound();
+            if (parentId !== undefined && !(await answered(trx, parentId))) throw commentNotFound();
             if (held) await queue(trx, comment, trustScore, createdAt);
             await insertPending(trx, { contentId, key: commentId, kind: 'comment_put', commentId, payload: { comment, held, ...(process && { process: true }) }, stagedKey: staged?.key, at: createdAt });
-            if (process) await addVideoJob(trx, { contentId, seq: UNNUMBERED, key: commentId, commentId, at: createdAt });
+            if (process) await addVideoJob(trx, { contentId, seq: UNNUMBERED, key: commentId, commentId, at: createdAt, client: jobClient(config, { ip: req.ip, userAgent: req.headers['user-agent'] ?? null }) });
           });
         } catch (err) {
           // A COMMIT can fail yet still be applied, e.g. if the connection dropped mid-commit: the comment is then there, with its file.
@@ -475,9 +495,10 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
    *
    * A banned user is refused (403), and a post that doesn't take comments (404), as for a new
    * comment. So is the comment's author once the post's publisher blocks them (403, see
-   * refuseBlocked): an edit would be a new text under the post. An edit is limited as a new
-   * comment is, and counted with them: 429 where a new comment would get one (see
-   * commentWriteRoutes).
+   * refuseBlocked): an edit would be a new text under the post. And so is the author of a reply
+   * once the author of the comment it replies to blocks them (403, see refuseBlockedReply): it
+   * would be a new text under that comment. An edit is limited as a new comment is, and counted
+   * with them: 429 where a new comment would get one (see commentWriteRoutes).
    */
   app.patch('/content/:contentId/comments/:commentId', async (req, reply) => {
     const { contentId, commentId } = CommentParams.parse(req.params);
@@ -492,6 +513,7 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (!own) throw forbidden(msg('comment.edit_own_only'));
     await refuseBlocked(post, user);
     const { comment } = seen;
+    if (comment.parentId !== undefined) await refuseBlockedReply((await current(db, contentId, comment.parentId))?.comment, user);
     // The text it has, with the declaration it has, or with none said: nothing to write.
     const declares = body.aiGenerated !== undefined && body.aiGenerated !== (comment.aiGenerated === true);
     if (body.text === comment.text && !declares) return { contentId, commentId, unchanged: true, ...(seen.held && PENDING_REVIEW) };
