@@ -287,9 +287,9 @@ for (const target of TARGETS) {
       const res = await storeText(alice, source);
       expect(res.statusCode).toBe(201);
       const { contentId, preview } = res.json();
-      // Its first 100 words, with the bold that the cut leaves open closed.
-      expect(preview.text).toMatch(/^<b>Not bold<\/b>, \*\*bold\*\*, and \[a link\]\(https:\/\/example\.com\/page\)\. \*\*w0 w1 .* w93\*\* …$/);
-      expect(preview.text.split(' ')).toHaveLength(101);
+      // Its first 160 characters, with the bold that the cut leaves open closed: what closes it is two of the 160.
+      expect(preview.text).toMatch(/^<b>Not bold<\/b>, \*\*bold\*\*, and \[a link\]\(https:\/\/example\.com\/page\)\. \*\*w0 w1 .* w24\*\* …$/);
+      expect(preview.text).toHaveLength(160 + ' …'.length);
       expect((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}` })).json()).toMatchObject({ text: source, preview });
       expect((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}/raw` })).body).toBe(source);
     });

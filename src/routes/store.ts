@@ -15,7 +15,7 @@ import type { Mention } from '../mentions.types.js';
 import { moderatePost, refuseBanned } from '../moderation/policy.js';
 import type { RemovedTag } from '../moderation/policy.types.js';
 import type { TrustClient } from '../moderation/trust.types.js';
-import { altsOf, LinkUrl, MAX_ALT_CHARS, MAX_POST_IMAGES, MAX_TEXT_CHARS, mediaUrl, POST_TYPES, previewCutter } from '../posts.js';
+import { altsOf, LinkUrl, MAX_ALT_CHARS, MAX_POST_IMAGES, MAX_TEXT_CHARS, MAX_TITLE_CHARS, mediaUrl, POST_TYPES, previewCutter, shownTitle, titleLine } from '../posts.js';
 import { MAX_REPOSTED_TAGS, repostedTags, repostsOf, type Repost } from '../reposts.js';
 import { admitting } from '../sendLimit.js';
 import type { ContentMeta, Preview, Publisher, Summary } from '../storage/index.js';
@@ -60,6 +60,12 @@ const Fields = Credentials.extend({
   contentId: z.string().uuid().optional(),
   /** What the post is: an image (or several: an album), video or audio file, with an optional caption in `text`; text; or a link. */
   type: z.enum(POST_TYPES),
+  /**
+   * The post's title: one line of plain text, MAX_TITLE_CHARS at most as it is kept (see
+   * titleLine). Whether a post has one, and whether it has to, is the server's setting
+   * (POST_TITLES, which GET /rules gives as `postTitles`): the route holds it to that.
+   */
+  title: z.string().optional(),
   /** A text post's text, or an image's, video's or audio's caption. */
   text: z.string().max(MAX_TEXT_CHARS).optional(),
   /** A link post's URL. */
@@ -160,6 +166,27 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
   }
   const tagsRequired = () => badRequest(msg(allowed ? 'post.tags_required_allowed' : 'post.tags_required'));
 
+  /**
+   * The title the post is sent with, as it is kept (see titleLine), held to what the server does
+   * with titles (POST_TITLES): where they are required, a post without one is refused; where they
+   * are off, a post with one is; and one longer than MAX_TITLE_CHARS is refused wherever titles
+   * are on. Undefined for a post that is sent with none, or with one that is only white space.
+   * New or an update: an update says the post's title again, as it says all of the post.
+   */
+  function sentTitle(fields: Fields): string | undefined {
+    const title = titleLine(fields.title);
+    if (config.postTitles === 'off') {
+      if (title !== undefined) throw badRequest(msg('post.titles_off'));
+      return undefined;
+    }
+    if (title === undefined) {
+      if (config.postTitles === 'on_required') throw badRequest(msg('post.title_required'));
+      return undefined;
+    }
+    if (title.length > MAX_TITLE_CHARS) throw badRequest(msg('post.title_too_long', { max: MAX_TITLE_CHARS }));
+    return title;
+  }
+
   /** Whether the post's file is one the server processes before it is published: a video's, where it processes videos (`video.processing`). */
   const processes = (post: Post) => post.type === 'video' && config.video.processing;
 
@@ -196,6 +223,15 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
    *
    * A post of a type the server has turned off (POST_TYPE_TEXT and the like) is refused (400), new
    * or an update, before its file, text or link is read.
+   *
+   * A post has a title where the server's titles are on (POST_TITLES, `postTitles` of GET /rules):
+   * one line of plain text, MAX_TITLE_CHARS at most, kept in the meta file and the summary and
+   * shown wherever the post is. With `on_required` a post without one is refused (400), new or an
+   * update; with `on_optional` it is stored without; with `off` a post that sends one is refused
+   * (400), and the answer has none. An update says the title again, as it says all of the post:
+   * one that leaves it out takes the title off, where titles are optional. Where they are off, a
+   * post that was given a title before keeps it through an update, though nobody is shown it.
+   * The title is read by moderation as the text is.
    *
    * A banned user is refused (403), before anything else of the post is looked at: whatever it is,
    * a new post or an update, it is theirs no more to write.
@@ -250,6 +286,8 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
     try {
       const fields = Fields.parse(raw);
       requirePostType(config.postTypes, fields.type);
+      // Before anything of the post is read: one whose title the server doesn't take is refused for nothing.
+      const givenTitle = sentTitle(fields);
       const parts = [...uploads];
       if (parts.length && fields.content !== undefined) throw badRequest(msg('post.file_or_field'));
       const { uploadId, images } = fields;
@@ -330,12 +368,15 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
       const aiGenerated = fields.aiGenerated ?? (row?.ai_generated === 1);
       // The post's own two flags: the declaration that it was created with AI, and whether it takes comments.
       const flags: PostFlags = { aiGenerated, comments: fields.comments ?? (existing !== undefined && takesComments(existing.meta)) };
+      // The post's title: the one it is sent with, or where titles are off, the one the content was given before, which an update keeps.
+      const title = config.postTitles === 'off' ? existing?.meta.title : givenTitle;
       const unchanged = ({ row, queued }: Existing, removedTags: RemovedTag[] = []) => {
         stored = true;
         return { contentId: row.id, unchanged: true, ...(queued && PENDING_REVIEW), ...(removedTags.length > 0 && { removedTags }) };
       };
-      const sameFlags = existing !== undefined && aiGenerated === (existing.row.ai_generated === 1) && flags.comments === takesComments(existing.meta);
-      // The post is the content as it is: its flags, its hashtags (the publisher's own make it an update only if
+      // With its title, which is the post's as its flags are: said beside what the post is.
+      const sameFlags = existing !== undefined && aiGenerated === (existing.row.ai_generated === 1) && flags.comments === takesComments(existing.meta) && title === existing.meta.title;
+      // The post is the content as it is: its flags and title, its hashtags (the publisher's own make it an update only if
       // they aren't the content's own), and its body, compared last, since a file's can take reading it.
       if (existing && sameFlags && sameTags(own(sent), own(existing.meta.tags)) && (await sameBody(post, existing.meta))) return unchanged(existing);
 
@@ -348,8 +389,8 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
           userId: user.id,
           contentId: existing?.row.id,
           tags: [...own(sent), ...given],
-          // With what describes its images: text of the post's as its caption is, to those it is read out to.
-          texts: [post.type === 'link' ? post.url : post.text && plainText(post.text, true), ...filesOf(post).flatMap(({ filename, alt }) => [filename, alt])],
+          // Its title first. With what describes its images: text of the post's as its caption is, to those it is read out to.
+          texts: [title, post.type === 'link' ? post.url : post.text && plainText(post.text, true), ...filesOf(post).flatMap(({ filename, alt }) => [filename, alt])],
           // An image post's images, which a trust plugin that looks at pictures reads (see trustImage).
           ...(post.type === 'image' && { images: filesOf(post).map(trustImage) }),
         },
@@ -380,6 +421,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
           { userId: user.id, username: user.username },
           admitted,
           flags,
+          title,
           existing,
           moderated.tags,
           queued ? { trustScore: moderated.trustScore } : undefined,
@@ -402,6 +444,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
         ...(queued && PENDING_REVIEW),
         tags: s.tags,
         ...(removedTags.length > 0 && { removedTags }),
+        ...shownTitle(s, config.postTitles),
         preview: s.preview,
         ...(mentions.length > 0 && { mentions }),
         aiGenerated: s.aiGenerated,
@@ -419,6 +462,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
     publisher: Publisher,
     post: Post,
     { aiGenerated, comments }: PostFlags,
+    title: string | undefined,
     existing: Existing | undefined,
     tags: string[],
     queued: { trustScore: number } | undefined,
@@ -465,6 +509,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
       aiGenerated,
       comments,
       tags,
+      ...(title !== undefined && { title }),
       preview,
     };
     const written = await writer.write({
@@ -482,6 +527,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
         ...(album && { images: files.map((image, i) => ({ mimeType: image.mimeType, size: image.file.size, ...(hashes[i] != null && { sha256: hashes[i]! }) })) }),
         aiGenerated,
         comments,
+        ...(title !== undefined && { title }),
         preview,
         ...(text !== undefined && { text }),
         ...(mentions.length > 0 && { mentions }),

@@ -92,23 +92,28 @@ pub struct TrustPost {
     /// For a comment: the post it is on. None for a post, and for a profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment_on: Option<String>,
-    /// True for what a user puts on their profile: a bio, links, or an avatar, whichever the
-    /// request sets. It is neither a post nor a comment, and has no moderation queue to wait
-    /// in: a score that doesn't publish it refuses it.
+    /// True for what a user puts on their profile: a bio, links, an avatar, or a splash image,
+    /// whichever the request sets. It is neither a post nor a comment, and has no moderation
+    /// queue to wait in: a score that doesn't publish it refuses it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub profile: bool,
+    /// True for a profile whose image (`images`) is its splash image: the image of any other
+    /// profile is its avatar.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub splash: bool,
     /// The hashtags it was sent with, normalised, before moderation drops any. A comment has
     /// none, and neither has a profile.
     #[serde(default)]
     pub tags: Vec<String>,
     /// What there is of it to read: its text or caption or link, and its filename. A comment's
     /// text, and the name of its image or video. A profile's bio and links, and the name of
-    /// its avatar. A text, a caption, a comment's text and a bio are as their readers read
-    /// them: without their formatting, and with each link's address after its label.
+    /// its avatar or its splash image. A text, a caption, a comment's text and a bio are as
+    /// their readers read them: without their formatting, and with each link's address after
+    /// its label.
     #[serde(default)]
     pub texts: Vec<String>,
     /// Its images: those of an image post, in their order, the one a comment comes with, and a
-    /// profile's avatar. None for anything else.
+    /// profile's avatar or its splash image (see `splash`). None for anything else.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<TrustImage>,
 }

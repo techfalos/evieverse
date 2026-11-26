@@ -276,7 +276,7 @@ for (const target of TARGETS) {
       const before = await stored(ana.userId);
 
       const changed = await patch(ana, ana.userId, { language: 'EN' });
-      expect([changed.statusCode, changed.json()]).toEqual([200, { userId: ana.userId, username: 'ana', language: 'en', messages: true, showFollowing: false, showFollowers: false, bio: null, links: [], avatarUrl: null }]);
+      expect([changed.statusCode, changed.json()]).toEqual([200, { userId: ana.userId, username: 'ana', language: 'en', messages: true, showFollowing: false, showFollowers: false, bio: null, links: [], avatarUrl: null, splashUrl: null }]);
       // The language is no part of her credit, so nothing tells the compactor to write that again.
       expect(await stored(ana.userId)).toEqual({ language: 'en', updated_at: before.updated_at });
       expect(await whoami(ana)).toMatchObject({ language: 'en' });
@@ -292,8 +292,8 @@ for (const target of TARGETS) {
       expect(await whoami(ana)).toMatchObject({ username: 'ana', language: 'en' });
 
       // With something else at once, and each alone leaves the other as it is.
-      expect((await patch(ana, ana.userId, { messages: false, language: 'es' })).json()).toEqual({ userId: ana.userId, username: 'ana', language: 'es', messages: false, showFollowing: false, showFollowers: false, bio: null, links: [], avatarUrl: null });
-      expect((await patch(ana, ana.userId, { messages: true })).json()).toEqual({ userId: ana.userId, username: 'ana', language: 'es', messages: true, showFollowing: false, showFollowers: false, bio: null, links: [], avatarUrl: null });
+      expect((await patch(ana, ana.userId, { messages: false, language: 'es' })).json()).toEqual({ userId: ana.userId, username: 'ana', language: 'es', messages: false, showFollowing: false, showFollowers: false, bio: null, links: [], avatarUrl: null, splashUrl: null });
+      expect((await patch(ana, ana.userId, { messages: true })).json()).toEqual({ userId: ana.userId, username: 'ana', language: 'es', messages: true, showFollowing: false, showFollowers: false, bio: null, links: [], avatarUrl: null, splashUrl: null });
       expect(await whoami(ana)).toMatchObject({ username: 'ana', language: 'es', messages: true });
 
       // Nobody else can, and the refusal is in the language of whoever tried.

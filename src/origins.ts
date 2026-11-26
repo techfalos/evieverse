@@ -10,7 +10,7 @@ import { badRequest, conflict, HttpError, notFound } from './http/errors.js';
 import { msg } from './language.js';
 import { moderatePost } from './moderation/policy.js';
 import type { OriginSummary, RefreshedGone, RefreshedNone, RefreshedUpdated } from './origins.types.js';
-import { LINK_MIME, mediaType, originMediaUrl, ownAddress, postAddress, previewCutter, previewOf, readPreview, TEXT_MIME } from './posts.js';
+import { LINK_MIME, mediaType, originMediaUrl, ownAddress, postAddress, previewCutter, previewOf, readPreview, shownTitle, TEXT_MIME } from './posts.js';
 import { removedRepostTags, repostedTags, repostsOf } from './reposts.js';
 import type { ContentMeta, Origin, Preview } from './storage/index.js';
 import { MINUTE } from './time.js';
@@ -89,9 +89,10 @@ export function originEntries({ db, config, content, writer, trust, originKeys, 
   /**
    * What the server keeps of a post on another server, from its attestation: its content type,
    * which an image, video or audio has to say and be (400), where it is and who published it
-   * there, and its preview, cut to the length of this server's. `texts` is what there is of it to
-   * read, as moderation reads a post: the preview's text or link, the original's address and its
-   * publisher's name. The type of post must be one the server takes (400).
+   * there, its title, if it has one, and its preview, cut to the length of this server's. `texts`
+   * is what there is of it to read, as moderation reads a post: its title, the preview's text or
+   * link, the original's address and its publisher's name. The title is kept whatever this
+   * server's POST_TITLES says, as a post's own is, and shown where titles are on. The type of post must be one the server takes (400).
    */
   function summarised(sent: AttestedPost): OriginSummary {
     const { kind } = sent.preview;
@@ -121,7 +122,14 @@ export function originEntries({ db, config, content, writer, trust, originKeys, 
             );
     // The alternative texts are the post's words as its caption is, and are read as it is.
     const alts = sent.preview.kind === 'image' ? (sent.preview.alt ?? []) : [];
-    return { mimeType, origin, preview, texts: [sent.preview.kind === 'link' ? sent.preview.url : caption && plainText(caption, true), ...alts, origin.url, origin.publisher.username] };
+    const title = sent.title || undefined;
+    return {
+      mimeType,
+      origin,
+      ...(title !== undefined && { title }),
+      preview,
+      texts: [title, sent.preview.kind === 'link' ? sent.preview.url : caption && plainText(caption, true), ...alts, origin.url, origin.publisher.username],
+    };
   }
 
   /**
@@ -170,11 +178,11 @@ export function originEntries({ db, config, content, writer, trust, originKeys, 
       return { change: 'gone', contentId: row.id, goneAt, already: row.origin_gone_at !== null };
     }
 
-    const { mimeType, origin, preview, texts } = summarised(said);
+    const { mimeType, origin, title, preview, texts } = summarised(said);
     if (mimeType !== meta.mimeType) throw badRequest(msg('repost.refresh_type_changed', { original: meta.mimeType, mimeType }));
     const { aiGenerated } = said;
     // A hidden entry is written whatever the post says: the write is what publishes it again.
-    if (row.origin_gone_at === null && aiGenerated === (row.ai_generated === 1) && isDeepStrictEqual(origin, meta.origin) && isDeepStrictEqual(preview, previewOf(meta, config.publicBaseUrl))) {
+    if (row.origin_gone_at === null && aiGenerated === (row.ai_generated === 1) && isDeepStrictEqual(origin, meta.origin) && title === meta.title && isDeepStrictEqual(preview, previewOf(meta, config.publicBaseUrl))) {
       return { change: 'none', contentId: row.id, queued: row.queued };
     }
 
@@ -197,13 +205,13 @@ export function originEntries({ db, config, content, writer, trust, originKeys, 
       seenSeq: Number(row.seq),
       recheck,
       given,
-      summary: { contentId: row.id, createdAt: row.created_at, updatedAt: ts, userId: row.user_id, mimeType, aiGenerated, comments: false, tags: moderated.tags, preview, origin },
-      meta: { contentId: row.id, mimeType, size: Buffer.byteLength(origin.url), aiGenerated, comments: false, preview, tags: moderated.tags, updatedAt: ts, origin, originAttestedAt: said.issuedAt },
+      summary: { contentId: row.id, createdAt: row.created_at, updatedAt: ts, userId: row.user_id, mimeType, aiGenerated, comments: false, tags: moderated.tags, ...(title !== undefined && { title }), preview, origin },
+      meta: { contentId: row.id, mimeType, size: Buffer.byteLength(origin.url), aiGenerated, comments: false, ...(title !== undefined && { title }), preview, tags: moderated.tags, updatedAt: ts, origin, originAttestedAt: said.issuedAt },
       queued: queued ? { trustScore: moderated.trustScore } : undefined,
       // The hashtags of reposts that what it now says is refused: they come off the entry for good (see ContentWrite.droppedReposts).
       droppedReposts: moderated.removedTags.filter((r) => given.includes(r.tag) && r.reason !== 'removed').map((r) => r.tag),
     });
-    return { change: 'updated', contentId: row.id, queued, tags, removedTags: moderated.removedTags, preview, aiGenerated, origin };
+    return { change: 'updated', contentId: row.id, queued, tags, removedTags: moderated.removedTags, ...shownTitle({ title }, config.postTitles), preview, aiGenerated, origin };
   }
 
   return { ownKeys, ownContentId, attested, summarised, refresh };

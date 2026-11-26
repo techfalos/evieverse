@@ -40,7 +40,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::json::js_number;
-use crate::posts::{MAX_TEXT_CHARS, OriginPublisher, Preview, PreviewKind, Video, link_url};
+use crate::posts::{MAX_TEXT_CHARS, MAX_TITLE_CHARS, OriginPublisher, Preview, PreviewKind, Video, link_url};
 use crate::text::{trim, units};
 use crate::time::MINUTE;
 
@@ -73,6 +73,9 @@ const MAX_ATTESTED_PIXELS: i64 = 16_384;
 
 /// The longest an attestation can say a video is, in seconds: a week.
 const MAX_ATTESTED_SECONDS: f64 = 7.0 * 24.0 * 3600.0;
+
+/// The longest title an attestation can give a post, in UTF-16 units: this server's own.
+const MAX_ATTESTED_TITLE_CHARS: usize = MAX_TITLE_CHARS;
 
 /// The longest name of a publisher, and the longest content type, in UTF-16 units.
 const MAX_USERNAME_CHARS: usize = 64;
@@ -336,6 +339,9 @@ pub struct AttestedPost {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
     pub ai_generated: bool,
+    /// Its title, where it has one: one line of plain text, MAX_ATTESTED_TITLE_CHARS at most.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// Its summary, as feeds show it there. An image's, video's or audio's has no `url`: the
     /// bytes are read at the post's address.
     pub preview: Preview,
@@ -523,6 +529,25 @@ fn signed(said: &Map<String, Value>, issues: &mut Issues) -> Option<Signed> {
     v.is_some().then_some(signed)
 }
 
+/// Whether a text is one line: it has no character that ends one, and no other control character.
+fn one_line(text: &str) -> bool {
+    !text
+        .chars()
+        .any(|c| matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}' | '\u{85}' | '\u{2028}' | '\u{2029}'))
+}
+
+/// A post's title, where the payload gives one: a line of at most MAX_ATTESTED_TITLE_CHARS.
+/// One that is empty is none.
+fn title(value: Option<&Value>, issues: &mut Issues) -> Option<String> {
+    let path = ["title"];
+    let title = issues.optional_text(value, &path, MAX_ATTESTED_TITLE_CHARS)?;
+    if !one_line(&title) {
+        issues.add(&path, "expected a title of one line");
+        return None;
+    }
+    Some(title).filter(|title| !title.is_empty())
+}
+
 fn publisher(value: Option<&Value>, issues: &mut Issues) -> Option<OriginPublisher> {
     let Some(Value::Object(said)) = value else {
         issues.add(&["publisher"], "expected an object");
@@ -532,10 +557,7 @@ fn publisher(value: Option<&Value>, issues: &mut Issues) -> Option<OriginPublish
     let path = ["publisher", "username"];
     let username = issues.text(said.get("username"), &path, 1, MAX_USERNAME_CHARS).and_then(|name| {
         // The name is kept on a line of the summary.
-        if name
-            .chars()
-            .any(|c| matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}' | '\u{85}' | '\u{2028}' | '\u{2029}'))
-        {
+        if !one_line(&name) {
             issues.add(&path, "expected a name of one line");
             return None;
         }
@@ -675,6 +697,7 @@ pub fn said(payload: &Value) -> Result<Attested, Vec<Issue>> {
     if ai_generated.is_none() {
         issues.add(&["aiGenerated"], "expected true or false");
     }
+    let title = title(said.get("title"), &mut issues);
     let preview = preview(said.get("preview"), &mut issues);
     match (signed, publisher, ai_generated, preview) {
         (Some(Signed { v, kid, issued_at, url }), Some(publisher), Some(ai_generated), Some(preview)) if issues.0.is_empty() => {
@@ -686,6 +709,7 @@ pub fn said(payload: &Value) -> Result<Attested, Vec<Issue>> {
                 publisher,
                 mime_type,
                 ai_generated,
+                title,
                 preview,
             })))
         }

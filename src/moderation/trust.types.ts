@@ -46,26 +46,29 @@ export interface TrustPost {
   /** For a comment: the post it is on. Absent for a post, and for a profile. */
   commentOn?: string;
   /**
-   * True for what a user puts on their profile (see moderateProfile): a bio, links, or an avatar,
-   * whichever the request sets. It is neither a post nor a comment, and has no moderation queue to
-   * wait in: a score that doesn't publish it refuses it. Absent for a post, and for a comment.
+   * True for what a user puts on their profile (see moderateProfile): a bio, links, an avatar, or
+   * a splash image, whichever the request sets. It is neither a post nor a comment, and has no
+   * moderation queue to wait in: a score that doesn't publish it refuses it. Absent for a post,
+   * and for a comment.
    */
   profile?: true;
+  /** True for a profile whose image (`images`) is its splash image. Absent for anything else: the image of any other profile is its avatar. */
+  splash?: true;
   /** The hashtags it was sent with, normalised, before moderation drops any. A comment has none, and neither has a profile. */
   tags: string[];
   /**
    * What there is of it to read: its text or caption or link, and its filename. A comment's text, and the name of its image or video.
-   * A profile's bio and links, and the name of its avatar. A text, a caption, a comment's text and a bio are as their readers read
+   * A profile's bio and links, and the name of its avatar or its splash image. A text, a caption, a comment's text and a bio are as their readers read
    * them: without their formatting, and with each link's address after its label, with a space after it where the text goes on
    * (plainText in format.ts).
    */
   texts: string[];
   /**
    * Its images: those of an image post, in their order, the one a comment comes with, and a
-   * profile's avatar. Absent for anything else: a post of another type, a comment with a video or
-   * with no file, the edit of a comment (which keeps its file), a profile whose avatar isn't
-   * what is set, a repost of a post on another server, whose image isn't here, and on a server
-   * none of whose plugins reads images.
+   * profile's avatar or its splash image (see `splash`). Absent for anything else: a post of
+   * another type, a comment with a video or with no file, the edit of a comment (which keeps its
+   * file), a profile neither of whose images is what is set, a repost of a post on another
+   * server, whose image isn't here, and on a server none of whose plugins reads images.
    */
   images?: ReadImage[];
 }

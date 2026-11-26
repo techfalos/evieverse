@@ -2,7 +2,7 @@
 //! or that one of the list's patterns matches, isn't trusted at all, and neither is a
 //! comment, nor what a user puts on their profile. Its text or caption or link, its filename
 //! and its hashtags are read (see `scan_texts`); of a profile, the bio, the links and the
-//! avatar's filename.
+//! filename of the avatar or of the splash image.
 //!
 //! Each hashtag's own list, which its moderators keep, isn't a matter of trust: a post with
 //! one of its words only loses that hashtag (see `moderate_post`), and a comment has no

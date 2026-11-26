@@ -251,6 +251,10 @@ fn owner(of: &Value) -> BytesOwner<'_> {
             user_id: field("userId"),
             avatar: field("avatar"),
         },
+        _ if of.get("splash").is_some() => BytesOwner::Splash {
+            user_id: field("userId"),
+            splash: field("splash"),
+        },
         _ if of.get("staged").is_some() => BytesOwner::Staged(field("staged")),
         _ => BytesOwner::Comment {
             post_id: field("postId"),

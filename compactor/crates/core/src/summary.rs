@@ -43,6 +43,9 @@ pub struct Summary {
     /// Whether the post takes comments.
     pub comments: bool,
     pub tags: Vec<String>,
+    /// The post's title. Absent on a post that has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     pub preview: Preview,
     /// On a repost of a post on another server: the original, which the preview is of.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -114,6 +117,7 @@ pub fn summary_of(post: Posted<'_>, meta: &ContentMeta, public_base_url: &str, r
         ai_generated: post.ai_generated,
         comments: meta.comments == Some(true),
         tags: meta.tags.clone(),
+        title: meta.title.clone().filter(|title| !title.is_empty()),
         preview: preview_of(post.content_id, &meta.preview, meta.origin.as_ref(), public_base_url),
         origin: meta.origin.clone(),
         mentions: preview_mentions(meta),
@@ -160,12 +164,16 @@ fn latest(r: &SummaryRef) -> i64 {
     r.reposted_at.iter().copied().fold(r.created_at, i64::max)
 }
 
-/// What a summary keeps of its preview beside the text, on a header line of its own, as JSON:
-/// the alternative texts of an image post's images, and what a processed video is. With them,
-/// the users the preview's text mentions. None of a summary whose post has none of the three.
+/// What a summary keeps beside the preview's text, on a header line of its own, as JSON: the
+/// post's title, the alternative texts of an image post's images, and what a processed video
+/// is. With them, the users the preview's text mentions. None of a summary whose post has
+/// none of the four.
 fn extras_of(s: &Summary) -> Option<Map<String, Value>> {
     let mentions = s.mentions.as_ref().filter(|m| !m.is_empty());
     let mut extras = Map::new();
+    if let Some(title) = s.title.as_ref().filter(|title| !title.is_empty()) {
+        extras.insert("title".into(), Value::from(title.clone()));
+    }
     match s.preview.kind {
         PreviewKind::Image => {
             if let Some(alt) = s.preview.alts() {
@@ -199,9 +207,10 @@ fn extras_of(s: &Summary) -> Option<Map<String, Value>> {
 /// The summary of a repost of a post on another server has a fifth number, 1, and with it a
 /// sixth header line, for the original: its address, then its publisher's id and username
 /// there. The summary of an image post of more than one image has a sixth number: how many
-/// images it has. The summary of an image post whose images are described, of a video the
-/// server has processed, and of a post whose preview mentions users, has a seventh number, 1,
-/// and with it one more header line: what it keeps of the preview beside the text, as JSON.
+/// images it has. The summary of a post that has a title, of an image post whose images are
+/// described, of a video the server has processed, and of a post whose preview mentions users,
+/// has a seventh number, 1, and with it one more header line: what it keeps beside the
+/// preview's text, as JSON.
 /// As few of the numbers are written as say it all.
 pub fn encode_summary(s: &Summary) -> String {
     let images = s.preview.album();
@@ -261,6 +270,11 @@ fn stored_origin(content_id: &str, line: &str) -> Result<Origin> {
             username: username.join(" "),
         },
     })
+}
+
+/// The title a summary's line of extras holds: none where it holds none, or one that is empty.
+fn stored_title(extras: &Map<String, Value>) -> Option<String> {
+    extras.get("title")?.as_str().filter(|title| !title.is_empty()).map(str::to_owned)
 }
 
 /// The mentions a summary's line of extras holds: each of them that names a user.
@@ -355,6 +369,7 @@ pub fn decode_summary(content_id: &str, text: &str, public_base_url: &str) -> Re
         } else {
             tags.split(' ').map(str::to_owned).collect()
         },
+        title: stored_title(&extras),
         preview: read_preview(&stored, &bytes_url),
         origin,
         mentions: stored_mentions(&extras),
@@ -612,6 +627,7 @@ mod tests {
             ai_generated: false,
             comments: true,
             tags: vec!["news".into(), "art".into()],
+            title: None,
             preview: Preview {
                 text: Some("first line\nsecond line".into()),
                 ..Preview::of(PreviewKind::Text)
@@ -628,6 +644,26 @@ mod tests {
         let text = encode_summary(&s);
         assert_eq!(text, "1700000000000 1700000000500 0 1\nu1\ntext/plain\nnews art\ntext\nfirst line\nsecond line");
         assert_eq!(decode_summary("c1", &text, "https://a.example").unwrap(), s);
+    }
+
+    #[test]
+    fn keeps_a_title_on_the_line_of_extras_and_reads_it_back() {
+        let s = Summary {
+            title: Some("Coast road \"closed\"".into()),
+            ..text_summary()
+        };
+        let text = encode_summary(&s);
+        assert_eq!(
+            text,
+            "1700000000000 1700000000500 0 1 0 0 1\nu1\ntext/plain\nnews art\ntext\n{\"title\":\"Coast road \\\"closed\\\"\"}\nfirst line\nsecond line"
+        );
+        assert_eq!(decode_summary("c1", &text, "https://a.example").unwrap(), s);
+        // One that is empty is none.
+        let empty = Summary {
+            title: Some(String::new()),
+            ..text_summary()
+        };
+        assert_eq!(encode_summary(&empty), encode_summary(&text_summary()));
     }
 
     #[test]

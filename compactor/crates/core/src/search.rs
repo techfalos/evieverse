@@ -306,14 +306,15 @@ fn without_hashtags(text: &str) -> String {
     out
 }
 
-/// The terms the post `meta` describes is found by: the `max` most frequent words of its text
-/// or caption, and of two as frequent the one the text has first, without the words that say
-/// nothing (STOPWORDS); and every one of its hashtags, whatever `max` is, each once.
+/// The terms the post `meta` describes is found by: the `max` most frequent words of its title
+/// and its text or caption, and of two as frequent the one that comes first, the title's before
+/// the text's, without the words that say nothing (STOPWORDS); and every one of its hashtags,
+/// whatever `max` is, each once.
 ///
 /// The text is read as its readers read it, without what formats it (`plain_text`). The
 /// server's entry for a post on another server holds no text but the start of the original's,
 /// in its preview, which is then what it is found by. A link post has no text: it is found by
-/// its hashtags.
+/// its title, if it has one, and its hashtags. A title is plain text, and is read as it is.
 ///
 /// A hashtag written in the text ("#news") is no word of it: the post is found by the
 /// hashtags it has, which are `meta.tags`, and not by one it only writes.
@@ -324,8 +325,10 @@ pub fn keywords_of(meta: &ContentMeta, max: usize) -> Vec<String> {
         None => meta.preview.text.as_ref(),
     };
     let mut counts: IndexMap<String, usize> = IndexMap::new();
-    if let Some(text) = text.filter(|text| !text.is_empty()) {
-        for word in words_of(&without_hashtags(&plain_text(text, false))) {
+    let title = meta.title.as_ref().filter(|title| !title.is_empty()).map(|title| without_hashtags(title));
+    let text = text.filter(|text| !text.is_empty()).map(|text| without_hashtags(&plain_text(text, false)));
+    for read in title.iter().chain(text.iter()) {
+        for word in words_of(read) {
             if !is_stopword(&word) {
                 *counts.entry(word).or_default() += 1;
             }
@@ -454,6 +457,28 @@ mod tests {
         let found = keywords_of(&meta("The **Café** in Mumbai's centre: café, #news and l'amour. A b", &["mumbai"]), 3);
         assert_eq!(found, ["cafe", "mumbai", "centre"]);
         assert_eq!(keywords_of(&meta("one two two three three", &["two"]), 2), ["two", "three"]);
+    }
+
+    #[test]
+    fn finds_a_post_by_the_words_of_its_title_too() {
+        let titled = |title: &str, text: &str| ContentMeta {
+            title: Some(title.to_owned()),
+            ..meta(text, &["news"])
+        };
+        assert_eq!(
+            keywords_of(&titled("Harbour **closed** #storm", "The harbour is shut"), 100),
+            ["harbour", "closed", "shut", "news"]
+        );
+        // The title's words come before the text's among those as frequent.
+        assert_eq!(keywords_of(&titled("Tide tables", "moon tables moon"), 2), ["tables", "moon", "news"]);
+        let mut link: ContentMeta = serde_json::from_value(serde_json::json!({
+            "contentId": "c", "mimeType": "text/uri-list", "size": 1, "aiGenerated": false, "title": "Tide tables",
+            "preview": { "kind": "link", "url": "https://tides.example/today" }, "tags": ["news"], "updatedAt": 1,
+        }))
+        .unwrap();
+        assert_eq!(keywords_of(&link, 100), ["tide", "tables", "news"]);
+        link.title = None;
+        assert_eq!(keywords_of(&link, 100), ["news"]);
     }
 
     #[test]

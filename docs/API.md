@@ -80,7 +80,7 @@ Every Evieverse instance serves the same HTTP API.
 | [`GET /monetization/ads/:adId`](#keeping-the-ads) | Admins | One ad. |
 | [`PATCH /monetization/ads/:adId`](#keeping-the-ads) | Admins | Changes an ad. |
 | [`DELETE /monetization/ads/:adId`](#keeping-the-ads) | Admins | Deletes an ad, and its image. |
-| [`GET /rules`](#get-rules) | Anyone | The server's rules, its minimum age, what it says of content made with generative AI, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version. |
+| [`GET /rules`](#get-rules) | Anyone | The server's rules, its minimum age, what it says of content made with generative AI, what it does with post titles, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version. |
 | [`POST /rules`](#keeping-the-rules) | Admins | Adds a rule. |
 | [`PATCH /rules/:ruleId`](#keeping-the-rules) | Admins | Changes a rule's text, or its place among the others. |
 | [`DELETE /rules/:ruleId`](#keeping-the-rules) | Admins | Removes a rule. |
@@ -454,7 +454,7 @@ Every record says what it is in `type`. They come in this order, each kind in an
 | --- | --- | --- |
 | `account` | The account, once. | `userId`, `username`, `createdAt`, `usernameSetAt` (when the user registered, which is when their name was set; later than `createdAt` only on an account that was renamed while a user could change their name, which none can now), their [profile](#a-users-profile) (`bio`, `links`, `avatarUrl`, and `pinnedContentIds`: every post they pinned, the one pinned last first, whether or not anyone else can read it now), `language` (`null` for the instance's default), `admin`, `moderator`, `messages`, `showFollowing`, `showFollowers`, `bannedAt` (`null` unless they're banned), and `claimsBarredAt` (`null` unless they're [barred from claiming hashtags](#barring-a-user-from-claiming)). Not why they were banned or barred, nor by whom. |
 | `apiKey` | Each API key the account has had. Never the key. | `keyId`, `createdAt`, `revokedAt` |
-| `post` | Each of the user's posts, oldest first, as [`GET /content/:contentId`](#get-contentcontentid) gives it to its publisher. Posts that wait in the moderation queue are there, with their `status`; posts set for deletion aren't. | `contentId`, `preview`, `text`, `mentions`, `tags`, `mimeType`, `comments`, `size`, `images`, `likes`, `views`, `dislikes` (`null` on an instance that has [dislikes](#post-dislike) off), `aiGenerated`, `contentUrl`, `createdAt`, `updatedAt`, and `origin` on a repost of a post on another server |
+| `post` | Each of the user's posts, oldest first, as [`GET /content/:contentId`](#get-contentcontentid) gives it to its publisher. Posts that wait in the moderation queue are there, with their `status`; posts set for deletion aren't. | `contentId`, `title` (on a post that has a [title](#titles)), `preview`, `text`, `mentions`, `tags`, `mimeType`, `comments`, `size`, `images`, `likes`, `views`, `dislikes` (`null` on an instance that has [dislikes](#post-dislike) off), `aiGenerated`, `contentUrl`, `createdAt`, `updatedAt`, and `origin` on a repost of a post on another server |
 | `comment` | Each [comment](#comments) the user wrote, oldest first, with the ones that wait in the moderation queue (`status: "pending_review"`). | `commentId`, `contentId`, `parentId`, `text`, `mentions`, `aiGenerated`, `media`, `createdAt`, `editedAt`. Not its likes or its replies, which are what others did. |
 | `like` | Each post the user liked. | `contentId`, `likedAt` |
 | `dislike` | Each post the user [disliked](#post-dislike). They're listed whether the instance has dislikes on now or not: one given while it had them is kept. | `contentId`, `dislikedAt` |
@@ -535,9 +535,12 @@ Every post has a `type`:
 
 A server takes all five types unless its operator turned some off (`POST_TYPE_TEXT`, `POST_TYPE_IMAGE`, `POST_TYPE_VIDEO`, `POST_TYPE_AUDIO`, `POST_TYPE_LINK`). A post of a type that's off is refused with `400`, as a new post and as an update, and the error names the types the server takes. The posts of that type the server already holds can still be read, liked and deleted. No endpoint lists the types: a server says which it takes in its [rules](#get-rules).
 
+A post can have a [title](#titles), and whether it can, and whether it has to, is the server's setting, which [`GET /rules`](#get-rules) gives as `postTitles`. Unless its operator says otherwise, every post needs one.
+
 | field | notes |
 | --- | --- |
 | `type` | Required: `image`, `video`, `audio`, `text` or `link`. One the server has turned off gets `400`. |
+| `title` | The post's [title](#titles): one line of plain text, at most 200 characters. Required where the server's `postTitles` is `on_required`, which is the default (`400` without one); optional where it's `on_optional`; and refused where it's `off` (`400` with one). An update sends the whole post again, so it says the title again too. |
 | `text` | A text post's text (required), or an image's, video's or audio's caption (optional). At most 40,000 characters, trimmed of leading and trailing whitespace. It can be formatted (bold, italic, links, lists and so on) as [TEXT_EDITORS.md](TEXT_EDITORS.md) describes: the formatting is part of the text, and is stored and returned as written. A link post has none (`400`). An update sends the whole post again, so one without `text` drops the caption. |
 | `url` | A link post's URL (required): `http` or `https`, at most 2,048 characters. Other types have none (`400`). |
 | `content` | An image's, video's or audio's file: a file part (multipart), or a string in JSON with `contentEncoding: "base64"` (a JSON request can be at most 32 MB). Required for those types unless `uploadId` or `images` is given; a text or link post has none (`400`). A file larger than `MAX_UPLOAD_BYTES` (5 GiB) gets `413`. An [album](#albums) sent as multipart has one file part named `content` for each image, in order. |
@@ -565,16 +568,35 @@ An update is in feeds the same way, after the compactor's next run. Until then f
 - A hashtag the update dropped then stops returning the content.
 - A hashtag the update added then returns it.
 
-The response is `201` for new content and `200` for an update, with `{ contentId, tags, preview, aiGenerated, comments }`, plus `removedTags` when moderation dropped some of the post's hashtags, `mentions` when its text or caption [mentions](#mentions) users, and `processing: true` when its video is yet to be [processed](#videos). An update that changes nothing (the same AI flag, comments flag and hashtags as the content has, and the same text or URL, or the same caption and file) stores nothing, and returns `{ contentId, unchanged: true }`, with `status: "pending_review"` for content that waits in the moderation queue. A file is the content's if its bytes as stored are the same, which the server tells by their SHA-256: for an image, that's the image without its metadata, so the same picture sent with other metadata is the same file. An album is unchanged when it has the same images in the same order: the same ones in another order, or with one more or one fewer, is an update. So is an image whose [alt text](#alt-text) is another, or gone. A video is the content's if it's the file the post was last sent, as it was sent. A video or audio file sent with an upload link (`uploadId`) isn't compared, and is stored again whenever it's sent; a video that turns out to be the one the post has isn't processed again.
+The response is `201` for new content and `200` for an update, with `{ contentId, tags, preview, aiGenerated, comments }`, plus `title` when the post has a [title](#titles), `removedTags` when moderation dropped some of the post's hashtags, `mentions` when its text or caption [mentions](#mentions) users, and `processing: true` when its video is yet to be [processed](#videos). An update that changes nothing (the same title, AI flag, comments flag and hashtags as the content has, and the same text or URL, or the same caption and file) stores nothing, and returns `{ contentId, unchanged: true }`, with `status: "pending_review"` for content that waits in the moderation queue. A file is the content's if its bytes as stored are the same, which the server tells by their SHA-256: for an image, that's the image without its metadata, so the same picture sent with other metadata is the same file. An album is unchanged when it has the same images in the same order: the same ones in another order, or with one more or one fewer, is an update. So is an image whose [alt text](#alt-text) is another, or gone. A video is the content's if it's the file the post was last sent, as it was sent. A video or audio file sent with an upload link (`uploadId`) isn't compared, and is stored again whenever it's sent; a video that turns out to be the one the post has isn't processed again.
 
 A post held in the [moderation queue](#the-moderation-queue) is answered `202` instead, with `status: "pending_review"` beside the same fields. It's stored (steps 3 and 4), but nothing is queued for the feed index, so it's in no feed until a server moderator or an admin accepts it. A held update of published content is `404` by its id at once, to everyone but those who can read it in the queue. Feeds stop returning it after the compactor's next run, which erases the content's summary, which they render from.
 
 ```bash
 curl -X POST localhost:3000/store -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID" \
-  -F type=video -F text="Sunrise over the harbour" -F tags=video,travel -F aiGenerated=true -F content=@clip.mp4
+  -F type=video -F title="The harbour at dawn" -F text="Sunrise over the harbour" -F tags=video,travel -F aiGenerated=true -F content=@clip.mp4
 curl -X POST localhost:3000/store -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID" \
-  -H "Content-Type: application/json" -d '{ "type": "link", "url": "https://example.com/report.pdf", "tags": ["news"] }'
+  -H "Content-Type: application/json" -d '{ "type": "link", "title": "The flood report", "url": "https://example.com/report.pdf", "tags": ["news"] }'
 ```
+
+#### Titles
+
+A post's title is one line of plain text, sent as `title`: a field of the JSON, or of the form. Whether a server's posts have titles is its operator's to say (`POST_TITLES`), and [`GET /rules`](#get-rules) gives it as `postTitles`, so a client reads it before it sends a post, to know whether to ask for a title and whether to insist on one.
+
+| `postTitles` | What `POST /store` does |
+| --- | --- |
+| `on_required` | Every post has a title. One sent without, or with a title of nothing but white space, is refused with `400`: `title is required: on this server, every post has a title`. This is what a server does unless its operator says otherwise. |
+| `on_optional` | A post is stored with a title or without. |
+| `off` | No post has a title. One sent with a title is refused with `400`, not stored without it: `this server doesn't take titles: leave title out`. |
+
+- A title is at most 200 characters, on every server. A longer one is refused with `400` (`title can be at most 200 characters`), not cut.
+- It's kept on one line: every run of white space or control characters in it is stored as one space, with none at either end, so a title sent on two lines comes back on one. The 200 characters are counted of the title as it's kept, in UTF-16 code units, as a text's length is: an emoji counts as two.
+- It's plain text. Nothing in it is formatting, and it mentions nobody: `**` and `@alice` are the title's own characters, and a client shows a title as it's written.
+- The title is checked first, with the post's `type`, before the request is authenticated: a post the server won't take for its title is refused whoever sent it.
+- An update says the title again, as it says all of the post. Where titles are required, an update without one is refused, even of a post from before they were. Where they're optional, an update that leaves `title` out takes the title off. The same post with another title is an update, and with the same title, as it's kept, it's `unchanged`.
+- The title is [moderated](#moderation) as the text is: the trust plugins and the hashtags' blocked words read it. And a [search](#searching-posts) finds the post by its words.
+- A post that has a title gives it as `title` wherever the post is read: in the response here, [`GET /content/:contentId`](#get-contentcontentid), [feeds](#get-feed) and [their RSS](#feeds-as-rss), a [profile's posts](#get-usersuseridposts), a [search](#searching-posts), the moderation queues, an [export](#get-usersuseridexport) and the post's [attestation](#attestations). A post without one has no `title` field.
+- A server whose operator turns titles off keeps the ones its posts have, and shows them to nobody: no response has `title`, and an update leaves the post's title as it is. They're back if titles are turned on again.
 
 #### Images
 
@@ -603,7 +625,7 @@ An image can have an alt text: a description of what it shows, for people who ca
 
 ```bash
 curl -X POST localhost:3000/store -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID" \
-  -F type=image -F tags=travel -F alt="A tram climbing a steep cobbled street" -F content=@tram.jpg
+  -F type=image -F title="The 28 tram" -F tags=travel -F alt="A tram climbing a steep cobbled street" -F content=@tram.jpg
 ```
 
 #### Videos
@@ -691,11 +713,11 @@ What holds for each image, and for all of them:
 
 ```bash
 curl -X POST localhost:3000/store -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID" \
-  -F type=image -F text="Three days in Lisbon" -F tags=travel,lisbon \
+  -F type=image -F title="Lisbon" -F text="Three days in Lisbon" -F tags=travel,lisbon \
   -F content=@day1.jpg -F content=@day2.jpg -F content=@day3.png \
   -F alt="A tram on a steep street" -F alt="" -F alt="The river at dusk, from a rooftop"
 curl -X POST localhost:3000/store -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID" -H "Content-Type: application/json" \
-  -d "{ \"type\": \"image\", \"tags\": [\"travel\"], \"contentEncoding\": \"base64\",
+  -d "{ \"type\": \"image\", \"title\": \"Lisbon\", \"tags\": [\"travel\"], \"contentEncoding\": \"base64\",
         \"images\": [ { \"content\": \"$(base64 < day1.jpg | tr -d '\n')\", \"filename\": \"day1.jpg\" },
                       { \"uploadId\": \"$UPLOAD_ID\", \"filename\": \"day2.jpg\" } ] }"
 ```
@@ -725,7 +747,7 @@ UPLOAD=$(curl -s -X POST localhost:3000/uploads -H "Authorization: Bearer $KEY" 
   -H "Content-Type: application/json" -d '{ "type": "video", "filename": "clip.mp4", "size": 48211032 }')
 curl -X PUT "$(echo "$UPLOAD" | jq -r .upload.url)" -H "Content-Type: video/mp4" --data-binary @clip.mp4
 curl -X POST localhost:3000/store -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID" -H "Content-Type: application/json" \
-  -d "{ \"type\": \"video\", \"uploadId\": $(echo "$UPLOAD" | jq .uploadId), \"tags\": [\"video\", \"travel\"] }"
+  -d "{ \"type\": \"video\", \"title\": \"The harbour at dawn\", \"uploadId\": $(echo "$UPLOAD" | jq .uploadId), \"tags\": [\"video\", \"travel\"] }"
 ```
 
 Azure Blob Storage's links carry one more header, `x-ms-blob-type`, so send every header in `upload.headers` rather than assuming there's only `Content-Type`.
@@ -804,7 +826,7 @@ The notice is `post_mention` or `comment_mention`, with who wrote the text as it
 
 ### `GET /content/:contentId`
 
-Returns the publisher credit first: `publisher: { userId, username, avatarUrl }`, with `avatarUrl` where the publisher has an [avatar](#the-avatar), and without it where they have none, or are [banned](#bans). Then come `contentId`, `preview`, `text` (a text post's whole text, or a caption), `mentions` (the users that text [mentions](#mentions), where it mentions any), `tags`, `likes`, `views` (how many times user accounts have read the post: [below](#views)), `dislikes` (how many users [dislike](#post-dislike) it, or `null` on an instance that has dislikes off), `mimeType`, `aiGenerated`, `comments` (whether the post takes [comments](#comments)), `size`, `contentUrl`, `images` (on an image post), `createdAt` and `updatedAt`. A post whose video is still being [processed](#videos) has `processing: true`. Where the instance shows [ads](#ads) on posts, `ad` comes last: one ad to show at the post's end, `{ adId, label, kind, imageUrl?, imageAlt?, text?, url? }`, as in [`GET /feed`](#get-feed). A post with no ad to show has none.
+Returns the publisher credit first: `publisher: { userId, username, avatarUrl }`, with `avatarUrl` where the publisher has an [avatar](#the-avatar), and without it where they have none, or are [banned](#bans). Then come `contentId`, `title` (the post's [title](#titles), on a post that has one, where the instance shows titles), `preview`, `text` (a text post's whole text, or a caption), `mentions` (the users that text [mentions](#mentions), where it mentions any), `tags`, `likes`, `views` (how many times user accounts have read the post: [below](#views)), `dislikes` (how many users [dislike](#post-dislike) it, or `null` on an instance that has dislikes off), `mimeType`, `aiGenerated`, `comments` (whether the post takes [comments](#comments)), `size`, `contentUrl`, `images` (on an image post), `createdAt` and `updatedAt`. A post whose video is still being [processed](#videos) has `processing: true`. Where the instance shows [ads](#ads) on posts, `ad` comes last: one ad to show at the post's end, `{ adId, label, kind, imageUrl?, imageAlt?, text?, url? }`, as in [`GET /feed`](#get-feed). A post with no ad to show has none.
 
 An image post has `images`, its images in the order they're shown: `[{ url, mimeType, size, alt? }]`, each with where its bytes are read, its content type, its size in bytes as stored, and its [alt text](#alt-text) if it has one. A post of one image has one item, whose `url` is `contentUrl`. An [album](#albums) has one for each image: the first at `contentUrl`, and the others at `contentUrl` with their number after it (`/content/<contentId>/raw/2`, and so on). The post's own `mimeType` and `size` are the first image's. No other post has `images`.
 
@@ -948,7 +970,7 @@ A post on another server is reposted with its **attestation**: what that server 
 
 | field | notes |
 | --- | --- |
-| `origin.attestation` | Required: the attestation, exactly as the post's own server gave it, at most 600,000 characters. It says the original's address there, who published it, its content type, its AI declaration and its [preview](#previews), and the instance takes all of that from it. |
+| `origin.attestation` | Required: the attestation, exactly as the post's own server gave it, at most 600,000 characters. It says the original's address there, who published it, its content type, its AI declaration, its [title](#titles) if it has one, and its [preview](#previews), and the instance takes all of that from it. |
 
 The original's address, publisher and summary aren't fields of the request: what a client says of the post itself isn't taken. An `origin` without an `attestation` gets `400`.
 
@@ -970,8 +992,9 @@ To check the signature, the instance asks the original's server for its public k
 An original that is itself a repost of a post elsewhere isn't its server's to attest: `GET /content/:contentId/attestation` answers `409` for it, with the address of the post it reposts in `origin.url`. Ask that post's server instead, so a post has one address wherever it's reposted from.
 
 The first repost of an original makes the instance's entry for it: a post of the reposter's that is a link to the original, with the original's summary.
-- It's a new post, and passes what a new post does. Its type must be one the instance [takes](#post-store) (`400`). It's [moderated](#moderation): it gets a trust score from what there is of it to read (the preview's text or link, the original's address, its publisher's name), which can refuse it (`422`) or hold it in the [moderation queue](#the-moderation-queue), and its hashtags follow their rules. It's a post as far as the [limit on posts a minute](#limits-on-posts-and-comments) goes.
-- The response is `201` with `{ contentId, tags, preview, aiGenerated, origin }`, plus `removedTags` when moderation dropped some of its hashtags, or `202` with `status: "pending_review"` beside them when it's held. `contentId` is the entry's id here, and `preview` is the original's, as its server attested it, cut to this instance's [preview](#previews) length.
+- It's a new post, and passes what a new post does. Its type must be one the instance [takes](#post-store) (`400`). It's [moderated](#moderation): it gets a trust score from what there is of it to read (its title, the preview's text or link, the original's address, its publisher's name), which can refuse it (`422`) or hold it in the [moderation queue](#the-moderation-queue), and its hashtags follow their rules. It's a post as far as the [limit on posts a minute](#limits-on-posts-and-comments) goes.
+- The response is `201` with `{ contentId, tags, preview, aiGenerated, origin }`, plus `title` when the original has one and this instance shows titles, and `removedTags` when moderation dropped some of its hashtags, or `202` with `status: "pending_review"` beside them when it's held. `contentId` is the entry's id here, and `preview` is the original's, as its server attested it, cut to this instance's [preview](#previews) length.
+- Its [title](#titles) is the original's, as its server attested it. Whether the post has one is that server's to say, so the entry isn't held to this instance's `postTitles`: where titles are required here, a repost of a post that has none is still made, without one. Where they're off here, the entry keeps the original's title and shows it to nobody, as with the instance's own posts. A title of more than 200 characters, or on more than one line, makes the attestation one the instance doesn't take (`400`).
 - It shows like any post, with `origin`. Feed records and `GET /content/:contentId` carry `origin: { url, publisher: { userId, username } }`: the original's address, and who published it there. Their `publisher` is the user who reposted it here, whose post the entry is. `GET /content/:contentId` adds `origin.attestedAt`: when the original's server signed what is shown.
 - Show the original's server beside its publisher's name. `origin.publisher.username` is a name on the server at `origin.url`, and nothing more. The attestation says that server said it, not who the person is: anyone can run a server and attest posts under any name, one that is somebody's on this instance among them. So show the host of `origin.url` with the name (`Dana of the North` on `other.example`), never the name alone. And `origin.publisher.userId` is an id on that server: don't link it to a user of this instance, or show it as one.
 - Its bytes stay where the original is. An image's, video's or audio's `preview.url` is the original's, `<origin.url>/raw`, and `GET /content/:contentId/raw` redirects there (`302`). An album's other images are there too, at `<origin.url>/raw/<n>`, where `GET /content/:contentId/raw/<n>` redirects, and its `preview.imageCount` says how many there are. Its images' [alt texts](#alt-text) come with the preview, in `alt`. A [processed video](#videos)'s poster and stream are the original's too: `preview.video.poster` and `preview.video.hls` are addresses on the original's server, and `GET /content/:contentId/video/:videoId/:file` redirects there. `GET /content/:contentId` has no `size` for it, no whole `text`, and no `images`.
@@ -1004,14 +1027,14 @@ Either way the instance does the same with it. The request:
 Authenticated. Any user can send it, not only those who reposted the original: it's the original's server that says what the post is, and the user only carries its word. A [banned](#bans) user is refused (`403`).
 
 What to send is whichever the original's server gave:
-- Its `attestation`, if the post is there (`200`). The entry takes the post's summary as it is now: its publisher's name there, its AI declaration and its preview.
+- Its `attestation`, if the post is there (`200`). The entry takes the post's summary as it is now: its publisher's name there, its AI declaration, its title and its preview. A title the post no longer has comes off the entry.
 - Its `gone`, if the post isn't (`404` there, with `gone` beside the `error`). It's sent in `origin.attestation` like the other, and has the entry hidden, not deleted.
 
 The attestation is [checked as a repost's is](#a-post-on-another-server), with the same refusals, except that one which says the post is gone is taken. Then:
 
 | Status | When |
 | --- | --- |
-| `200` | The entry was brought up to date: `{ contentId, tags, preview, aiGenerated, origin }`, plus `removedTags` when what it now says cost it hashtags. |
+| `200` | The entry was brought up to date: `{ contentId, tags, preview, aiGenerated, origin }`, plus `title` when the post has one and this instance shows titles, and `removedTags` when what it now says cost it hashtags. |
 | `200` | It says what the entry says already: `{ contentId, unchanged: true }`. Nothing was written. |
 | `200` | It says the post is gone: `{ contentId, status: "origin_gone", goneAt, deleteAfter }`. The entry is hidden (below). For an entry that was hidden already, `unchanged: true` comes with it, and `goneAt` is still when it was first hidden. |
 | `202` | What it now says is held in the [moderation queue](#the-moderation-queue): `status: "pending_review"` beside the fields of a `200`. The entry is out of the feeds until it's accepted. |
@@ -1062,6 +1085,7 @@ An attestation is two parts in base64url with a dot between them: a JSON payload
   "url": "https://other.example/content/0b7c0f5e-…",
   "publisher": { "userId": "…", "username": "Bob" },
   "mimeType": "image/jpeg", "aiGenerated": false,
+  "title": "The harbour at dawn",
   "preview": { "kind": "image", "text": "Sunrise over the harbour" } }
 ```
 
@@ -1073,6 +1097,7 @@ An attestation is two parts in base64url with a dot between them: a JSON payload
 | `url` | The post's address on the instance: its `PUBLIC_BASE_URL`, then `/content/<contentId>`. |
 | `publisher` | `{ userId, username }`: who published the post here. |
 | `mimeType`, `aiGenerated` | The post's content type and AI declaration. |
+| `title` | The post's [title](#titles), on a post that has one: one line of plain text, at most 200 characters. Left out for a post without one, and by an instance that has titles off (`postTitles`), whatever titles its posts were given before. An instance takes a title of up to 200 characters, on one line, from another server. |
 | `preview` | The post's [preview](#previews). An image's, video's or audio's has its caption, if it has one, and no `url`: the file is read at the post's address. An album's has `imageCount`, how many images it has (2 or more): the first is read at `<url>/raw`, the others at `<url>/raw/<n>`. An instance takes an `imageCount` of up to 100 from another server. An image post whose images are described has `alt`, as its preview does: an instance takes up to 5,000 characters for each from another server. A [processed video](#videos)'s has `video: { id, width, height, duration }`, without the addresses of its poster and stream: they're read at `<url>/video/<id>/poster.jpg` and `<url>/video/<id>/master.m3u8`. |
 
 The one that says there's no post has `gone` in place of everything about a post:
@@ -1654,6 +1679,7 @@ Each record is `{ contentId, publisher: { userId, username }, mimeType, aiGenera
 - `listedUnder` is the hashtag the record is listed under, of those the feed reads: the ones asked for and, with `addRelated`, the ones it added. A post under several of them is in the page once, under one of them.
 - `moderated` is whether a moderator of that hashtag has [approved](#a-hashtags-queue) the post there. It's per hashtag, so the same post can be `true` under one and `false` under another.
 - `preview` follows the post's type, as [previews](#previews) lists.
+- `title` is there on a record whose post has a [title](#titles): one line of plain text, to show as it's written. A post without one has no `title`, and on an instance that has titles off (`postTitles` of [`GET /rules`](#get-rules)) no record has.
 - `mentions` is there on a record whose `preview.text` [mentions](#mentions) users: `[{ userId, username }]`, the ones that part of the text names. The preview is cut so that a mention is in it whole or not at all.
 - `publisher` is the user's credit: their id, and the username they registered with, which can't be changed. A feed's credit doesn't have the user's [avatar](#the-avatar): `GET /users/<userId>/avatar` is where it's read.
 - `repost` and `origin` are there only on the records they apply to: `repost` on a record that is there because of a [repost](#post-repost), and `origin` on a repost of a [post on another server](#a-post-on-another-server). A record a repost put there has the likes since the repost, and all of the post's views and dislikes.
@@ -1785,7 +1811,7 @@ Each item is a record:
 
 | Element | What it holds |
 | --- | --- |
-| `title` | How the record's `preview.text` starts, without its [formatting](TEXT_EDITORS.md#the-format): at most 100 characters, and then it ends in `…`. A post with no text or caption, and a link post, has none. |
+| `title` | The post's [title](#titles), on a record that has one, as it's written. On a record without one, how its `preview.text` starts, without its [formatting](TEXT_EDITORS.md#the-format): at most 100 characters, and then it ends in `…`. A post with neither a title nor a text or caption has none, and nor has a link post without a title. |
 | `link` | The post's address: `/content/<contentId>`. |
 | `guid` | The post's `contentId`, with `isPermaLink="false"`. |
 | `pubDate` | When the post was placed in the feed: `repost.at` on a record a [repost](#post-repost) put there, `createdAt` otherwise. |
@@ -1880,10 +1906,11 @@ Whatever is compared is put in lowercase first, and its accents are taken off, i
 
 What a post is found by:
 
+- The words of its [title](#titles), if it has one. A title is plain text, so its words are read as they're written. On an instance that has titles off, a post that was given a title before is still found by its words, though the title isn't shown.
 - The words of its text, or of its caption if it's an image, a video or audio, read as its readers read it: without the characters that [format](TEXT_EDITORS.md#the-format) it.
 - Its hashtags, every one. These are the hashtags the post has (`tags`), as they are now: one a [repost](#post-repost) gave it finds it, and one a moderator took off it doesn't. A `#word` that's written in the text and isn't among the post's `tags` finds nothing.
-- Not the whole of a long text. A post keeps its 100 most frequent words (`SEARCH_MAX_KEYWORDS`), and of two as frequent the one that comes first. Common English words that say nothing of a post ("the", "and", "is") aren't kept, nor a single ASCII letter or digit, nor a word longer than 64 characters.
-- Nothing else. Not its comments, the alt text of its images, a link post's address, or its publisher's name. A link post has no text, so it's found by its hashtags. The instance's entry for a [post on another server](#a-post-on-another-server) is found by the start of the original's text, which is all of it the instance holds, and by its hashtags.
+- Not the whole of a long text. A post keeps its 100 most frequent words (`SEARCH_MAX_KEYWORDS`), of its title and its text together, and of two as frequent the one that comes first, the title's before the text's. Common English words that say nothing of a post ("the", "and", "is") aren't kept, nor a single ASCII letter or digit, nor a word longer than 64 characters.
+- Nothing else. Not its comments, the alt text of its images, a link post's address, or its publisher's name. A link post has no text, so it's found by its title, if it has one, and by its hashtags. The instance's entry for a [post on another server](#a-post-on-another-server) is found by the original's title, by the start of its text, which is all of it the instance holds, and by its hashtags.
 
 How `q` is read:
 
@@ -2004,7 +2031,7 @@ What else to know:
 
 ### `GET /rules`
 
-Gives the server's rules, its minimum age, what it says of content made with generative AI, the email address to write to for support, and its modification disclosure. It needs no key, so a client can show all five to someone before they register.
+Gives the server's rules, its minimum age, what it says of content made with generative AI, what it does with post titles, the email address to write to for support, and its modification disclosure. It needs no key, so a client can show all six to someone before they register.
 
 ```bash
 curl localhost:3000/rules
@@ -2016,6 +2043,7 @@ curl localhost:3000/rules
   "supportEmail": "support@example.com",
   "minimumAge": 13,
   "genAi": "disclosure_required",
+  "postTitles": "on_required",
   "rules": [
     { "ruleId": "0b7c0f5e-…", "position": 1, "text": "Be kind.", "createdAt": "2026-11-15T14:02:00.000Z", "updatedAt": "2026-11-15T14:02:00.000Z" },
     { "ruleId": "5e1a9d42-…", "position": 2, "text": "No spam.", "createdAt": "2026-11-15T14:03:00.000Z", "updatedAt": "2026-11-15T14:03:00.000Z" }
@@ -2031,6 +2059,7 @@ curl localhost:3000/rules
 | `supportEmail` | The email address to write to for support, which the server's operator sets (`SUPPORT_EMAIL`). It's always there: a server whose operator set none gives `noreply@yoururl.com`, a placeholder that nobody reads. The server sends it nothing, and no request changes it. |
 | `minimumAge` | The youngest a person may be to use the server, which the server's operator sets (`MINIMUM_AGE`): a number of years, such as `13`. A server whose operator set none gives the string `"All Legal Ages Allowed"` in its place, in the language the request's `Accept-Language` header asks for, so it's always there: a number is an age, and a string is what to show where there is none. The server asks nobody's age and holds nobody to it, and no request changes it. |
 | `genAi` | What the server says of content made with generative AI, which the server's operator sets (`GEN_AI`). It's always there, and one of three: `"disclosure_optional"` (it's allowed, and its author may declare that it was created with AI), which is what a server whose operator set none gives; `"disclosure_required"` (it's allowed, and its author has to declare it); `"not_allowed"` (it isn't allowed). It's the same word in every language, for a client to show in its own. The declaration is the `aiGenerated` a post is sent with ([`POST /store`](#post-store)), and a comment. The server doesn't hold anyone to it yet: whatever it says, a post or a comment is taken with the declaration or without it. No request changes it. |
+| `postTitles` | What the server does with post [titles](#titles), which the server's operator sets (`POST_TITLES`). It's always there, and one of three: `"on_required"` (every post has a title, and one sent without is refused), which is what a server whose operator set none gives; `"on_optional"` (a post has a title or not); `"off"` (no post has a title, and one sent with a title is refused). It's the same word in every language, for a client to show in its own, and to go by before it sends a post. Unlike `genAi`, the server holds every post to it ([`POST /store`](#post-store)). A title is at most 200 characters on every server. No request changes it. |
 | `rules` | Every rule, in the order the admins gave them. It's the whole list: there are no pages, and a server has at most 100. `[]` where there are none. |
 | `rules[].createdAt`, `rules[].updatedAt` | When the rule was added, and when its text or its place was last changed. A rule that moved only because another was added, moved or removed keeps its `updatedAt`. |
 

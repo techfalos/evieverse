@@ -82,6 +82,7 @@ export const toFeedRecord = (s: Summary, counts: Counts, publisher: Publisher, m
   mimeType: s.mimeType,
   aiGenerated: s.aiGenerated,
   comments: s.comments,
+  ...(s.title && { title: s.title }),
   preview: s.preview,
   ...(s.mentions?.length && { mentions: s.mentions }),
   tags: s.tags,

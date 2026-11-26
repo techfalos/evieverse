@@ -186,7 +186,7 @@ export function searchRoutes(app: FastifyInstance, { db, config, content, summar
       async (i) => {
         const row = rows[i]!;
         const meta = await content.getMeta(row.id);
-        if (meta) shown[i] = summaryOf(row, meta, config.publicBaseUrl);
+        if (meta) shown[i] = summaryOf(row, meta, config.publicBaseUrl, config.postTitles);
       },
     );
     const results: FeedRecord[] = rows.flatMap((row, i) => {

@@ -62,6 +62,8 @@ export interface AttestedPost extends Signed {
   /** Its content type, in lower case. Needed of an image, video or audio; a text's and a link's are their own. */
   mimeType?: string;
   aiGenerated: boolean;
+  /** Its title, where it has one: one line of plain text, MAX_TITLE_CHARS at most. */
+  title?: string;
   preview: AttestedPreview;
 }
 

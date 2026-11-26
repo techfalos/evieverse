@@ -11,10 +11,12 @@ import type { RssChannel } from './rss.types.js';
  * item. A post's text is formatted (src/format.ts), which a client reads to show it; a feed
  * reader reads HTML, so an item's description is the text as HTML, with the post's images.
  *
- * An item has no title unless its post has text: its title is then how the text starts.
+ * An item's title is its post's title, where the post has one (see FeedRecord.title). Of a
+ * post that has none, it is how the post's text starts, and an item of a post with no text
+ * either has no title.
  */
 
-/** The most characters of a post's text that an item's title has. */
+/** The most characters of a post's text that an item's title has, where the post has no title of its own. */
 const TITLE_CHARS = 100;
 /** What no XML 1.0 document may hold, escaped or not: the control characters but for tab and the two line ends, and half a surrogate pair. */
 const NOT_XML = /[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/gu;
@@ -100,7 +102,7 @@ function recordItem(record: FeedRecord, base: string): string {
   const text = preview.kind === 'link' ? undefined : preview.text;
   return [
     '<item>',
-    element('title', text && titleOf(text)),
+    element('title', record.title ?? (text && titleOf(text))),
     element('link', postAddress(base, record.contentId)),
     element('guid', record.contentId, ' isPermaLink="false"'),
     element('pubDate', new Date(record.repost?.at ?? record.createdAt).toUTCString()),

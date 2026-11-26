@@ -76,6 +76,9 @@ services:
       # What the server says of content made with generative AI, which GET /rules gives beside the rules:
       # disclosure_optional (allowed), disclosure_required (allowed if it says so) or not_allowed.
       GEN_AI: ${GEN_AI:-disclosure_optional}
+      # What the server does with post titles, which GET /rules gives beside the rules: on_required (every
+      # post has one), on_optional (a post has one or not) or off (posts have none).
+      POST_TITLES: ${POST_TITLES:-on_required}
       # Ads in hashtag feeds and at the end of posts, which admins keep at /monetization/ads. Off unless set to true.
       MONETIZATION_FEED_ADS: ${MONETIZATION_FEED_ADS:-false}
       MONETIZATION_POST_ADS: ${MONETIZATION_POST_ADS:-false}

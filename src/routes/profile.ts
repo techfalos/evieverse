@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { sql } from 'kysely';
 import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
@@ -14,23 +14,28 @@ import { Credentials } from '../http/schemas.js';
 import { msg } from '../language.js';
 import type { Message } from '../language.types.js';
 import { moderateProfile } from '../moderation/policy.js';
-import { AVATAR_TYPE, avatarUrl, MAX_AVATAR_BYTES, MAX_PINNED_POSTS, pinnedPosts, standardAvatar, UnreadableAvatar } from '../profile.js';
-import type { Summary } from '../storage/index.js';
+import { AVATAR_TYPE, avatarUrl, MAX_AVATAR_BYTES, MAX_PINNED_POSTS, pinnedPosts, splashUrl, standardAvatar, UnreadableAvatar } from '../profile.js';
+import type { BytesOwner, Summary } from '../storage/index.js';
 import { toFeedRecord } from '../tagfeed/layout.js';
 import type { FeedRecord } from '../tagfeed/layout.types.js';
 import { iso } from '../time.js';
 import { oneFile, readMultipart, readPost, trustImage } from '../upload.js';
-import type { PostFile, Upload } from '../upload.types.js';
+import type { PostFile, Upload, UploadLimits } from '../upload.types.js';
 import { mapLimit } from '../util.js';
 import { sendBytes } from './content.js';
 
-/** The user a path names (/users/:userId/...): whose avatar, whose posts, whose pinned posts. */
+/** The images of a profile that are files, each with routes of its own: its avatar and its splash image (src/profile.ts). */
+type ProfileImage = 'avatar' | 'splash';
+
+/** The user a path names (/users/:userId/...): whose avatar, whose splash image, whose posts, whose pinned posts. */
 const Params = z.object({ userId: z.string().uuid() });
 /** The path of a pin: the user whose profile it is, and the post. */
 const PinParams = z.object({ userId: z.string().uuid(), contentId: z.string().uuid() });
 
-/** A request with an image in it is the size of the image, in base64 where it is inline. */
+/** A request with an avatar in it is the size of the image, in base64 where it is inline. */
 const BODY_LIMIT = 16 * 1024 * 1024;
+/** A request with a splash image in it is as large as one with a post's file inline in it (POST /store): the image is kept as it is sent, and is held to no size but an upload's (`storage.maxUploadBytes`). */
+const SPLASH_BODY_LIMIT = 32 * 1024 * 1024;
 
 /** The most posts one page of a user's posts holds. */
 const MAX_PAGE = 50;
@@ -39,29 +44,52 @@ const MAX_PAGE = 50;
 const META_READS = 8;
 
 /**
- * How long a reader may keep an avatar read by the address its profile gave (`avatarUrl`, which
- * names the avatar by its id), as `cache-control` says it: a day. The image at that address
- * never changes, as another avatar has another, but its user may take it away, or delete their
- * account, and a day is how long a copy somebody kept outlasts that.
+ * How long a reader may keep an avatar or a splash image read by the address its profile gave
+ * (`avatarUrl`, `splashUrl`, which name the image by its id), as `cache-control` says it: a day.
+ * The image at that address never changes, as another image has another, but its user may take
+ * it away, or delete their account, and a day is how long a copy somebody kept outlasts that.
  */
-const AVATAR_CACHE = 'public, max-age=86400';
+const IMAGE_CACHE = 'public, max-age=86400';
 /**
- * How long a reader may keep an avatar read by any other address: the one with no `v`, which is
- * whatever avatar the user has, or with the id of one they had before. Five minutes, after which
- * it is asked for again, and is the one they have by then.
+ * How long a reader may keep an avatar or a splash image read by any other address: the one with
+ * no `v`, which is whatever image the user has, or with the id of one they had before. Five
+ * minutes, after which it is asked for again, and is the one they have by then.
  */
-const AVATAR_CACHE_LATEST = 'public, max-age=300';
+const IMAGE_CACHE_LATEST = 'public, max-age=300';
 
-/** What PUT /users/:userId/avatar says of the avatar, beside its file part: the image inline, for a JSON request, in base64. */
-const AvatarBody = Credentials.extend({
+/**
+ * What the routes of each of a profile's images say in its own words: to a caller whose image
+ * it isn't (`ownOnly`), to a request that sends no image (`required`) or a file that is none
+ * the server takes (`unsupported`), and to a reader, of a user who has none (`missing`) and of
+ * one who is banned (`hidden`).
+ */
+const WORDS = {
+  avatar: {
+    ownOnly: msg('user.avatar_own_only'),
+    required: msg('user.avatar_required'),
+    unsupported: msg('user.avatar_unsupported'),
+    missing: msg('user.avatar_not_found'),
+    hidden: msg('user.avatar_hidden'),
+  },
+  splash: {
+    ownOnly: msg('user.splash_own_only'),
+    required: msg('user.splash_required'),
+    unsupported: msg('user.splash_unsupported'),
+    missing: msg('user.splash_not_found'),
+    hidden: msg('user.splash_hidden'),
+  },
+} satisfies Record<ProfileImage, Record<string, Message>>;
+
+/** What PUT /users/:userId/avatar and PUT /users/:userId/splash say of the image, beside its file part: the image inline, for a JSON request, in base64. */
+const ImageBody = Credentials.extend({
   content: z.string().optional(),
   contentEncoding: z.literal('base64').optional(),
   /** The image's name, where it isn't a file part with one of its own. */
   filename: z.string().max(512).optional(),
 });
 
-/** The query of GET /users/:userId/avatar: the id of the avatar the address was given for (see avatarUrl), which says how long it may be kept. */
-const AvatarQuery = z.object({ v: z.string().max(64).optional() });
+/** The query of GET /users/:userId/avatar and of GET /users/:userId/splash: the id of the image the address was given for (see avatarUrl, splashUrl), which says how long it may be kept. */
+const ImageQuery = z.object({ v: z.string().max(64).optional() });
 
 /**
  * The query of GET /users/:userId/posts: the page asked for (`limit`, 20 unless the request says
@@ -80,15 +108,16 @@ function decodePostCursor(cursor: string): { createdAt: number; id: string } {
 }
 
 /**
- * What a profile has beside the user's row (src/profile.ts): their avatar, which they set and
- * take away and anyone reads; the list of their posts, for anyone; and the posts they pinned to
- * it. The bio and the links are fields of PATCH /users/:userId, and the profile itself is
- * GET /users/:userId (routes/register.ts). Nothing of it is shown of a user who is banned.
+ * What a profile has beside the user's row (src/profile.ts): their avatar and their splash
+ * image, each of which they set and take away and anyone reads; the list of their posts, for
+ * anyone; and the posts they pinned to it. The bio and the links are fields of
+ * PATCH /users/:userId, and the profile itself is GET /users/:userId (routes/register.ts).
+ * Nothing of it is shown of a user who is banned.
  */
 export function profileRoutes(app: FastifyInstance, { db, config, content, summaries, trust, now = Date.now }: RouteDeps) {
   const { dialect } = config.db;
   /** The image an avatar is made of is held to what an image post's image is (see readPost), and to a size of its own. */
-  const limits = { tmpPath: config.storage.tmpPath, maxUploadBytes: Math.min(config.storage.maxUploadBytes, MAX_AVATAR_BYTES) };
+  const avatarLimits = { tmpPath: config.storage.tmpPath, maxUploadBytes: Math.min(config.storage.maxUploadBytes, MAX_AVATAR_BYTES) };
 
   /** The caller, who must be the user named in the path: 403, with `refusal`, for anyone else. */
   async function caller(req: FastifyRequest, userId: string, credentials: Credentials, refusal: Message): Promise<AuthUser> {
@@ -104,30 +133,63 @@ export function profileRoutes(app: FastifyInstance, { db, config, content, summa
     return user;
   }
 
-  /** Deletes an avatar's file that no row names any more, or never did. One the store keeps is logged: it goes with the account, at the latest. */
-  const discard = (req: FastifyRequest, userId: string, avatarId: string) =>
-    content.removeAvatar(userId, avatarId).catch((err) => req.log.warn({ err, userId, avatarId }, 'could not delete an avatar that is no longer shown'));
+  /** Whose bytes an avatar or a splash image of a user's is, in the content store: the image of `kind` that `id` names. */
+  const owner = (kind: ProfileImage, userId: string, id: string): BytesOwner => (kind === 'avatar' ? { userId, avatar: id } : { userId, splash: id });
+
+  /** Deletes the file of an avatar or a splash image that no row names any more, or never did. One the store keeps is logged: it goes with the account, at the latest. */
+  const discard = (req: FastifyRequest, kind: ProfileImage, userId: string, id: string) =>
+    (kind === 'avatar' ? content.removeAvatar(userId, id) : content.removeSplash(userId, id)).catch((err) =>
+      req.log.warn({ err, userId, [`${kind}Id`]: id }, `could not delete ${kind === 'avatar' ? 'an avatar' : 'a splash image'} that is no longer shown`),
+    );
 
   /**
-   * Sets the caller's avatar: one made of the image the request sends, in place of the one they
-   * had. JSON with the image inline in `content`, in base64, or multipart with it as the file
-   * part, as /store takes a file. A JPEG, PNG, GIF or WebP image of up to MAX_AVATAR_BYTES,
+   * Puts the image `next` in the row of `userId` as their avatar or their splash image, or takes
+   * the one they have away (`next` null), and returns the id of the one it replaces: null where
+   * they had none, undefined where their account is gone. The row is locked first, so two
+   * requests at once take turns, and each knows which image it replaces, whose file is the
+   * caller's to delete (see discard).
+   */
+  function swap(kind: ProfileImage, userId: string, next: { id: string; type: string } | null): Promise<string | null | undefined> {
+    return db.transaction().execute(async (trx) => {
+      await lockUser(trx, dialect, userId);
+      const row = await trx.selectFrom('users').select(['avatar_id', 'splash_id']).where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
+      if (!row) return undefined;
+      const previous = kind === 'avatar' ? row.avatar_id : row.splash_id;
+      // Taking away an image that isn't there changes nothing.
+      if (next === null && previous === null) return null;
+      const [id, type] = next ? [next.id, next.type] : [null, null];
+      await trx
+        .updateTable('users')
+        .set(kind === 'avatar' ? { avatar_id: id, avatar_type: type } : { splash_id: id, splash_type: type })
+        .where('id', '=', userId)
+        .execute();
+      return previous;
+    });
+  }
+
+  /**
+   * Sets the caller's avatar or splash image, in place of the one they had, and returns its id.
+   * The request is JSON with the image inline in `content`, in base64, or multipart with it as
+   * the file part, as /store takes a file: a JPEG, PNG, GIF or WebP image within `limits`,
    * checked by its bytes and read without its metadata, as an image post's is.
    *
    * The image goes through the trust plugins first, as a post's images do (see moderateProfile),
    * as it was sent: one that isn't trusted is refused (422), and nothing of it is stored. A
    * banned user sets none (403).
    *
-   * What is stored is not the image but the avatar made of it (see standardAvatar): a square of
-   * AVATAR_SIZE pixels a side, in AVATAR_TYPE, whatever was sent. 400 for an image whose pixels
-   * can't be read.
-   *
-   * The file is written before the row names it, under an id of its own, so the avatar a profile
-   * names is always there to read, and two requests at once leave one whole image. The file of
-   * the avatar it replaces is deleted once the row no longer names it.
+   * `store` then writes what is kept of the image as the file `of`, and returns its content
+   * type. The file is written before the row names it, under an id of its own, so the image a
+   * profile names is always there to read, and two requests at once leave one whole image. The
+   * file of the image it replaces is deleted once the row no longer names it.
    */
-  app.put('/users/:userId/avatar', { bodyLimit: BODY_LIMIT }, async (req) => {
-    const { userId } = Params.parse(req.params);
+  async function setImage(
+    req: FastifyRequest,
+    kind: ProfileImage,
+    userId: string,
+    limits: UploadLimits,
+    store: (image: PostFile, of: BytesOwner) => Promise<string>,
+  ): Promise<string> {
+    const words = WORDS[kind];
     let upload: Upload | undefined;
     let image: PostFile | undefined;
     try {
@@ -137,23 +199,102 @@ export function profileRoutes(app: FastifyInstance, { db, config, content, summa
         raw = sent.fields;
         [upload] = sent.uploads;
       }
-      const fields = AvatarBody.parse(raw);
-      const user = await caller(req, userId, fields, msg('user.avatar_own_only'));
+      const fields = ImageBody.parse(raw);
+      const user = await caller(req, userId, fields, words.ownOnly);
       if (user.banned) throw forbidden(msg('user.banned_profile'));
-      if (!upload && fields.content === undefined) throw badRequest(msg('user.avatar_required'));
+      if (!upload && fields.content === undefined) throw badRequest(words.required);
       if (upload && fields.content !== undefined) throw badRequest(msg('post.file_or_field'));
       try {
         // Whatever type the file was sent as, its bytes say which image it is.
         image = await readPost({ type: 'image' }, oneFile({ content: fields.content, contentEncoding: 'base64', contentType: 'image/*', filename: fields.filename }, upload), limits);
       } catch (err) {
-        if (err instanceof HttpError && err.message === 'post.image_unsupported') throw badRequest(msg('user.avatar_unsupported'));
+        if (err instanceof HttpError && err.message === 'post.image_unsupported') throw badRequest(words.unsupported);
         throw err;
       }
       await moderateProfile(
         { trust, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } },
-        { userId, filename: image.filename, image: trustImage(image) },
+        { userId, filename: image.filename, image: trustImage(image), splash: kind === 'splash' },
       );
 
+      const id = randomUUID();
+      const type = await store(image, owner(kind, userId, id));
+      let previous: string | null | undefined;
+      try {
+        previous = await swap(kind, userId, { id, type });
+      } catch (err) {
+        await discard(req, kind, userId, id);
+        throw err;
+      }
+      if (previous === undefined) {
+        // The account was deleted while this request was under way: its images are gone, and this one goes too.
+        await discard(req, kind, userId, id);
+        throw notFound(msg('user.not_found'));
+      }
+      if (previous !== null) await discard(req, kind, userId, previous);
+      return id;
+    } finally {
+      // Before the response goes out: a function may be frozen straight after it.
+      await upload?.file.release();
+      await image?.file.release();
+    }
+  }
+
+  /**
+   * Takes the caller's avatar or splash image away, and deletes its file: `had` says whether
+   * there was one. Taking away an image that isn't there changes nothing. A banned user can.
+   */
+  async function takeImage(req: FastifyRequest, kind: ProfileImage): Promise<{ userId: string; had: boolean }> {
+    const { userId } = Params.parse(req.params);
+    await caller(req, userId, Credentials.parse(req.body ?? {}), WORDS[kind].ownOnly);
+    // An account that is gone has none to take away.
+    const previous = (await swap(kind, userId, null)) ?? null;
+    if (previous !== null) await discard(req, kind, userId, previous);
+    return { userId, had: previous !== null };
+  }
+
+  /**
+   * A user's avatar or splash image, for anyone: it is what `avatarUrl` or `splashUrl` names
+   * wherever a profile is given. A redirect to the store where it can sign links; else streamed
+   * from here, as a post's bytes are (see sendBytes). 404 for a user who has none, for one whose
+   * account is closed, and for one who is banned, whose images nobody is shown: the answer says
+   * which.
+   *
+   * The address a profile gives names the image by its id (`v`), and what it answers may be kept
+   * for a day (IMAGE_CACHE). Any other address answers with the image the user has now, and is
+   * kept a few minutes (IMAGE_CACHE_LATEST): with no `v`, a client that knows only the user
+   * shows their avatar, or their splash image.
+   */
+  async function sendImage(req: FastifyRequest, reply: FastifyReply, kind: ProfileImage) {
+    const words = WORDS[kind];
+    const { userId } = Params.parse(req.params);
+    const { v } = ImageQuery.parse(req.query);
+    const row = await db
+      .selectFrom('users')
+      .select(['avatar_id', 'avatar_type', 'splash_id', 'splash_type', 'banned_at'])
+      .where('id', '=', userId)
+      .where('deleted_at', 'is', null)
+      .executeTakeFirst();
+    if (!row) throw notFound(msg('user.not_found'));
+    if (row.banned_at !== null) throw notFound(words.hidden);
+    const [id, type] = kind === 'avatar' ? [row.avatar_id, row.avatar_type] : [row.splash_id, row.splash_type];
+    if (id === null) throw notFound(words.missing);
+    const headers = { 'cache-control': v === id ? IMAGE_CACHE : IMAGE_CACHE_LATEST };
+    // Looked for first: another image may have taken its place, and its file gone, since the row was read.
+    if (!(await sendBytes(reply, content, owner(kind, userId, id), () => type ?? 'application/octet-stream', { staged: true, headers }))) {
+      throw notFound(words.missing);
+    }
+    return reply;
+  }
+
+  /**
+   * Sets the caller's avatar: one made of the image the request sends (see setImage), which is
+   * of up to MAX_AVATAR_BYTES. What is stored is not the image but the avatar made of it (see
+   * standardAvatar): a square of AVATAR_SIZE pixels a side, in AVATAR_TYPE, whatever was sent.
+   * 400 for an image whose pixels can't be read.
+   */
+  app.put('/users/:userId/avatar', { bodyLimit: BODY_LIMIT }, async (req) => {
+    const { userId } = Params.parse(req.params);
+    const avatarId = await setImage(req, 'avatar', userId, avatarLimits, async (image, of) => {
       // Made of the image the plugins were shown, which waits in a file here.
       const path = await image.file.local();
       if (path === null) throw new Error("the image's bytes aren't in a file here, so no avatar can be made of them");
@@ -162,79 +303,52 @@ export function profileRoutes(app: FastifyInstance, { db, config, content, summa
         req.log.info({ err, userId }, 'no avatar could be made of an image');
         throw badRequest(msg('user.avatar_damaged'));
       });
-      const avatarId = randomUUID();
-      await content.putBytes({ userId, avatar: avatarId }, avatar, AVATAR_TYPE);
-      let previous: string | null | undefined;
-      try {
-        previous = await db.transaction().execute(async (trx) => {
-          // First: two avatars set at once take turns, and each knows which one it replaces.
-          await lockUser(trx, dialect, userId);
-          const row = await trx.selectFrom('users').select('avatar_id').where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
-          if (!row) return undefined;
-          await trx.updateTable('users').set({ avatar_id: avatarId, avatar_type: AVATAR_TYPE }).where('id', '=', userId).execute();
-          return row.avatar_id;
-        });
-      } catch (err) {
-        await discard(req, userId, avatarId);
-        throw err;
-      }
-      if (previous === undefined) {
-        // The account was deleted while this request was under way: its avatars are gone, and this one goes too.
-        await discard(req, userId, avatarId);
-        throw notFound(msg('user.not_found'));
-      }
-      if (previous !== null) await discard(req, userId, previous);
-      return { userId, avatarUrl: avatarUrl(config.publicBaseUrl, userId, avatarId) };
-    } finally {
-      // Before the response goes out: a function may be frozen straight after it.
-      await upload?.file.release();
-      await image?.file.release();
-    }
+      await content.putBytes(of, avatar, AVATAR_TYPE);
+      return AVATAR_TYPE;
+    });
+    return { userId, avatarUrl: avatarUrl(config.publicBaseUrl, userId, avatarId) };
   });
 
-  /** Takes the caller's avatar away, and deletes its file. Taking away an avatar that isn't there changes nothing. A banned user can. */
+  /** Takes the caller's avatar away, and deletes its file (see takeImage). */
   app.delete('/users/:userId/avatar', async (req) => {
-    const { userId } = Params.parse(req.params);
-    await caller(req, userId, Credentials.parse(req.body ?? {}), msg('user.avatar_own_only'));
-    const previous = await db.transaction().execute(async (trx) => {
-      await lockUser(trx, dialect, userId);
-      const row = await trx.selectFrom('users').select('avatar_id').where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
-      if (!row?.avatar_id) return null;
-      await trx.updateTable('users').set({ avatar_id: null, avatar_type: null }).where('id', '=', userId).execute();
-      return row.avatar_id;
-    });
-    if (previous !== null) await discard(req, userId, previous);
-    return { userId, avatarUrl: null, hadAvatar: previous !== null };
+    const { userId, had } = await takeImage(req, 'avatar');
+    return { userId, avatarUrl: null, hadAvatar: had };
   });
 
   /**
-   * A user's avatar, for anyone: it is what `avatarUrl` names wherever a profile is given. A
-   * redirect to the store where it can sign links; else streamed from here, as a post's bytes are
-   * (see sendBytes). 404 for a user who has none, for one whose account is closed, and for one
-   * who is banned, whose avatar nobody is shown: the answer says which.
-   *
-   * The address a profile gives names the avatar by its id (`v`), and what it answers may be kept
-   * for a day (AVATAR_CACHE). Any other address answers with the avatar the user has now, and is
-   * kept a few minutes (AVATAR_CACHE_LATEST): with no `v`, a client that knows only the user
-   * shows their avatar.
-   *
-   * One address gets `avatarRateLimitPerMinute` requests a minute, and is refused past that
-   * (429) before anything is read for it (see app.ts): it needs no key.
+   * A user's avatar, for anyone (see sendImage). One address gets `avatarRateLimitPerMinute`
+   * requests a minute, and is refused past that (429) before anything is read for it (see
+   * app.ts): it needs no key.
    */
-  app.get('/users/:userId/avatar', { compress: false, config: perMinute(config.avatarRateLimitPerMinute) }, async (req, reply) => {
+  app.get('/users/:userId/avatar', { compress: false, config: perMinute(config.avatarRateLimitPerMinute) }, (req, reply) => sendImage(req, reply, 'avatar'));
+
+  /**
+   * Sets the caller's splash image: the image the request sends (see setImage), which is stored
+   * as it was sent, without its metadata. Whatever its size and shape, and in the format it came
+   * in: unlike an avatar, it is not made again at a size of the server's, and it is held to no
+   * size but the one every upload is held to (`storage.maxUploadBytes`).
+   */
+  app.put('/users/:userId/splash', { bodyLimit: SPLASH_BODY_LIMIT }, async (req) => {
     const { userId } = Params.parse(req.params);
-    const { v } = AvatarQuery.parse(req.query);
-    const row = await db.selectFrom('users').select(['avatar_id', 'avatar_type', 'banned_at']).where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
-    if (!row) throw notFound(msg('user.not_found'));
-    if (row.banned_at !== null) throw notFound(msg('user.avatar_hidden'));
-    if (row.avatar_id === null) throw notFound(msg('user.avatar_not_found'));
-    const headers = { 'cache-control': v === row.avatar_id ? AVATAR_CACHE : AVATAR_CACHE_LATEST };
-    // Looked for first: another avatar may have taken its place, and its file gone, since the row was read.
-    if (!(await sendBytes(reply, content, { userId, avatar: row.avatar_id }, () => row.avatar_type ?? 'application/octet-stream', { staged: true, headers }))) {
-      throw notFound(msg('user.avatar_not_found'));
-    }
-    return reply;
+    const splashId = await setImage(req, 'splash', userId, config.storage, async (image, of) => {
+      await image.file.place(content, of, image.mimeType);
+      return image.mimeType;
+    });
+    return { userId, splashUrl: splashUrl(config.publicBaseUrl, userId, splashId) };
   });
+
+  /** Takes the caller's splash image away, and deletes its file (see takeImage). */
+  app.delete('/users/:userId/splash', async (req) => {
+    const { userId, had } = await takeImage(req, 'splash');
+    return { userId, splashUrl: null, hadSplash: had };
+  });
+
+  /**
+   * A user's splash image, for anyone (see sendImage). One address gets
+   * `splashRateLimitPerMinute` requests a minute, and is refused past that (429) before anything
+   * is read for it (see app.ts): it needs no key.
+   */
+  app.get('/users/:userId/splash', { compress: false, config: perMinute(config.splashRateLimitPerMinute) }, (req, reply) => sendImage(req, reply, 'splash'));
 
   /**
    * The feed records of `rows`, which are posts of `publisher`'s, in their order: each as a feed
@@ -256,7 +370,7 @@ export function profileRoutes(app: FastifyInstance, { db, config, content, summa
       async (i) => {
         const row = rows[i]!;
         const meta = await content.getMeta(row.id);
-        if (meta) shown[i] = summaryOf(row, meta, config.publicBaseUrl);
+        if (meta) shown[i] = summaryOf(row, meta, config.publicBaseUrl, config.postTitles);
       },
     );
     return rows.flatMap((row, i) => {

@@ -46,6 +46,7 @@ for (const target of TARGETS) {
         bio: null,
         links: [],
         avatarUrl: null,
+        splashUrl: null,
         pinnedContentIds: [],
         admin: false,
         moderator: false,
@@ -93,7 +94,7 @@ for (const target of TARGETS) {
       expect((await ctx.app.inject({ method: 'POST', url: '/register', payload: { username: 'bob' } })).statusCode).toBe(409);
 
       // What is theirs to change answers with the name they have.
-      expect((await patch({ messages: false })).json()).toEqual({ userId: bob.userId, username: 'bob', language: 'en', messages: false, showFollowing: true, showFollowers: true, bio: null, links: [], avatarUrl: null });
+      expect((await patch({ messages: false })).json()).toEqual({ userId: bob.userId, username: 'bob', language: 'en', messages: false, showFollowing: true, showFollowers: true, bio: null, links: [], avatarUrl: null, splashUrl: null });
     });
 
     it('lets a user post as soon as they register, and only them change their profile', async () => {
@@ -163,20 +164,31 @@ for (const target of TARGETS) {
       expect(tagList.tags.map((t: { tag: string }) => t.tag)).toEqual(['mumbai']);
     });
 
-    it('previews text as its first 100 words, at most 1,000 characters of them, and an image as a link to it', async () => {
+    it('previews text as its first 160 characters, and an image as a link to it', async () => {
       await ctx.close();
       ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com' });
       const alice = await ctx.register('alice');
       const words = Array.from({ length: 150 }, (_, i) => `w${i}`).join(' ');
       const text = (await storeText(alice, `${words} #long`)).json();
-      expect(text.preview.text.split(' ')).toHaveLength(101);
-      expect(text.preview.text).toMatch(/^w0 w1 .* w99 …$/);
+      // Where the 160th character is, which is in a word: 100 words are longer than that, whatever the words.
+      expect(text.preview.text).toBe(`${words.slice(0, 160)} …`);
+      expect(text.preview.text).toMatch(/^w0 w1 .* w41 w4 …$/);
       expect((await getContent(text.contentId)).text).toBe(`${words} #long`);
-      // Text without spaces reads as one word.
-      expect((await storeText(alice, `${'字'.repeat(5000)} #long`)).json().preview.text).toBe(`${'字'.repeat(1000)} …`);
-      expect((await storeText(alice, `a${'😀'.repeat(600)} #long`)).json().preview.text).toBe(`a${'😀'.repeat(499)} …`);
+      // Text without spaces is cut the same, and a character of two code units is kept whole.
+      expect((await storeText(alice, `${'字'.repeat(5000)} #long`)).json().preview.text).toBe(`${'字'.repeat(160)} …`);
+      expect((await storeText(alice, `a${'😀'.repeat(600)} #long`)).json().preview.text).toBe(`a${'😀'.repeat(79)} …`);
 
-      const img = await upload({ ...alice, type: 'image', tags: 'pixel' }, { name: 'pixel.png', type: 'image/png', data: PNG });
+      // A server that shows more of a text (FEED_PREVIEW_CHARS) cuts it after its first 100 words (FEED_PREVIEW_WORDS).
+      await ctx.close();
+      ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com', feed: { previewChars: 1000 } });
+      const bob = await ctx.register('bob');
+      const longer = (await storeText(bob, `${words} #long`)).json();
+      expect(longer.preview.text.split(' ')).toHaveLength(101);
+      expect(longer.preview.text).toMatch(/^w0 w1 .* w99 …$/);
+      expect((await storeText(bob, `${'字'.repeat(5000)} #long`)).json().preview.text).toBe(`${'字'.repeat(1000)} …`);
+      expect((await storeText(bob, `a${'😀'.repeat(600)} #long`)).json().preview.text).toBe(`a${'😀'.repeat(499)} …`);
+
+      const img = await upload({ ...bob, type: 'image', tags: 'pixel' }, { name: 'pixel.png', type: 'image/png', data: PNG });
       expect(img.statusCode).toBe(201);
       const { contentId } = img.json();
       expect(img.json().preview).toEqual({ kind: 'image', url: `https://api.example.com/content/${contentId}/raw` });
@@ -197,7 +209,9 @@ for (const target of TARGETS) {
       const img = await upload({ ...alice, type: 'image', text: `  ${caption}\n`, tags: 'pics' }, { name: 'sunset.png', type: 'image/png', data: PNG });
       expect(img.statusCode, img.body).toBe(201);
       const image = img.json().contentId;
-      expect(img.json().preview).toEqual({ kind: 'image', url: raw(image), text: expect.stringMatching(/^Sunset over the bay\. c0 .* c95 …$/) });
+      // A caption is cut as a text is: to its first 160 characters.
+      expect(img.json().preview).toEqual({ kind: 'image', url: raw(image), text: `${caption.slice(0, 160)} …` });
+      expect(img.json().preview.text).toMatch(/^Sunset over the bay\. c0 .* c36 c …$/);
       expect(await getContent(image)).toMatchObject({ mimeType: 'image/png', preview: img.json().preview, text: caption });
 
       // Inline in JSON, and typed by the file's extension.

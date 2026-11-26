@@ -244,6 +244,12 @@ export async function createTestContext(
     minimumAge?: number;
     /** What GET /rules says of content made with generative AI. The server's default, unless given. */
     genAi?: Config['genAi'];
+    /**
+     * What the server does with post titles (POST_TITLES). `on_optional`, unless given, which is
+     * not the server's default (`on_required`): the tests post without a title, but for the ones
+     * that are of titles.
+     */
+    postTitles?: Config['postTitles'];
     corsOrigins?: string | string[];
     compact?: Partial<Config['compact']>;
     /**
@@ -281,6 +287,8 @@ export async function createTestContext(
     profilePostsRateLimitPerMinute?: number;
     /** Requests to GET /users/:userId/avatar from one address in a minute. No limit, unless given. */
     avatarRateLimitPerMinute?: number;
+    /** Requests to GET /users/:userId/splash from one address in a minute. No limit, unless given. */
+    splashRateLimitPerMinute?: number;
     /** Searches from one address in a minute, which tests have no limit on unless they say, and the most words a post is found by. */
     search?: Partial<Config['search']>;
   } = {},
@@ -307,6 +315,7 @@ export async function createTestContext(
     contentRateLimitPerMinute: opts.contentRateLimitPerMinute ?? 0,
     profilePostsRateLimitPerMinute: opts.profilePostsRateLimitPerMinute ?? 0,
     avatarRateLimitPerMinute: opts.avatarRateLimitPerMinute ?? 0,
+    splashRateLimitPerMinute: opts.splashRateLimitPerMinute ?? 0,
     search: { rateLimitPerMinute: 0, ...opts.search },
     challenge: { powBits: 8, minSolveMs: 0, ...opts.challenge },
     tagging: { logRateLimitPerMinute: 0, ...opts.tagging },
@@ -330,6 +339,7 @@ export async function createTestContext(
     ...(opts.supportEmail !== undefined && { supportEmail: opts.supportEmail }),
     ...(opts.minimumAge !== undefined && { minimumAge: opts.minimumAge }),
     ...(opts.genAi !== undefined && { genAi: opts.genAi }),
+    postTitles: opts.postTitles ?? 'on_optional',
     ...(opts.corsOrigins && { corsOrigins: opts.corsOrigins }),
     ...(opts.compact && { compact: opts.compact }),
     video: { processing: false, ...opts.video },
@@ -544,6 +554,8 @@ export type FeedItem = {
   aiGenerated: boolean;
   /** Whether the post takes comments. */
   comments: boolean;
+  /** The post's title, on one that has one, where the server's titles are on. */
+  title?: string;
   preview: { kind: string; text?: string; url?: string; imageCount?: number; alt?: string[]; video?: { id: string; width: number; height: number; duration: number; poster: string; hls: string } };
   tags: string[];
   likes: number;

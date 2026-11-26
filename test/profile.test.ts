@@ -8,13 +8,13 @@ import { AVATAR_SIZE, MAX_AVATAR_BYTES, MAX_BIO_CHARS, MAX_PINNED_POSTS, MAX_PRO
 import { as, BASE_ENV, createTestContext, type FeedItem, type FilePart, JPEG, multipart, PNG, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 const NO_USER = '00000000-0000-4000-8000-000000000000';
-const BANNED = "your account is banned: you can take your bio, your links and your avatar away, and can't set them";
+const BANNED = "your account is banned: you can take your bio, your links, your avatar and your splash image away, and can't set them";
 const NOT_TRUSTED = "this server doesn't trust this enough to show it on a profile, so it wasn't saved";
 const BLOCKED_WORD = "it contains a word or phrase this server doesn't allow, so it wasn't saved";
 const RED = { r: 255, g: 0, b: 0 };
 const BLUE = { r: 0, g: 0, b: 255 };
 
-type Profile = { userId: string; username: string; createdAt: string; banned: boolean; bio: string | null; links: string[]; avatarUrl: string | null; pinnedContentIds: string[] };
+type Profile = { userId: string; username: string; createdAt: string; banned: boolean; bio: string | null; links: string[]; avatarUrl: string | null; splashUrl: string | null; pinnedContentIds: string[] };
 type Posts = { userId: string; banned: boolean; pinned?: FeedItem[]; posts: FeedItem[]; nextCursor: string | null };
 
 /** A picture twice as wide as it is high, 800 by 400: its left half red, its right half blue. */
@@ -60,6 +60,15 @@ for (const target of TARGETS) {
     const avatar = (url: string) => ctx.app.inject({ method: 'GET', url });
     const avatarId = (url: string | null) => new URL(url!, 'http://server.example').searchParams.get('v')!;
     const stored = async (userId: string, id: string) => (await ctx.content.statIfThere({ userId, avatar: id })) !== null;
+    /** PUT /users/:userId/splash as `u`, with the image as a file part. */
+    const cover = (u: User | null, file: Partial<FilePart> = {}, userId = u?.userId ?? NO_USER) => {
+      const body = multipart({}, { name: 'cover.png', type: 'image/png', data: PNG, ...file });
+      return ctx.app.inject({ method: 'PUT', url: `/users/${userId}/splash`, payload: body.payload, headers: { ...body.headers, ...(u && as(u)) } });
+    };
+    /** What a profile's `splashUrl` answers, read as anyone reads it. */
+    const splash = (url: string) => ctx.app.inject({ method: 'GET', url });
+    const splashId = (url: string | null) => new URL(url!, 'http://server.example').searchParams.get('v')!;
+    const storedSplash = async (userId: string, id: string) => (await ctx.content.statIfThere({ userId, splash: id })) !== null;
     const posts = async (userId: string, query = ''): Promise<Posts> => ok(await req(null, 'GET', `/users/${userId}/posts${query}`));
     const ids = (page: Posts) => page.posts.map((p) => p.contentId);
     const pin = (u: User | null, contentId: string, userId = u?.userId ?? NO_USER) => req(u, 'PUT', `/users/${userId}/pinned/${contentId}`);
@@ -80,7 +89,7 @@ for (const target of TARGETS) {
       ctx.clock.now += 60_000;
 
       // A new account says nothing of itself, but when it was created.
-      expect(await profile(alice.userId)).toMatchObject({ createdAt: registeredAt, banned: false, bio: null, links: [], avatarUrl: null, pinnedContentIds: [] });
+      expect(await profile(alice.userId)).toMatchObject({ createdAt: registeredAt, banned: false, bio: null, links: [], avatarUrl: null, splashUrl: null, pinnedContentIds: [] });
 
       // Both at once. The bio is stored as it was written, without the spaces around it; each link as a URL is written, in the order given, once.
       const set = ok(await update(alice, { bio: '  Reporter in **Mumbai**.\nOpinions my own.  ', links: ['https://Example.com/alice', 'http://social.example/@alice', 'https://example.com/alice'] }));
@@ -94,6 +103,7 @@ for (const target of TARGETS) {
         bio: 'Reporter in **Mumbai**.\nOpinions my own.',
         links: ['https://example.com/alice', 'http://social.example/@alice'],
         avatarUrl: null,
+        splashUrl: null,
       });
       // Anyone reads them, with the rest of the profile, and the creation date is as it was.
       expect(await profile(alice.userId)).toMatchObject({ createdAt: registeredAt, bio: 'Reporter in **Mumbai**.\nOpinions my own.', links: ['https://example.com/alice', 'http://social.example/@alice'] });
@@ -166,6 +176,16 @@ for (const target of TARGETS) {
       // The avatar she had is the one she has, and the only one the store holds of hers.
       expect((await profile(alice.userId)).avatarUrl).toBe(before);
       expect(await stored(alice.userId, avatarId(before))).toBe(true);
+
+      // A splash image is given to them the same way, and they are told that is what it is.
+      await seen();
+      ok(await cover(alice, { name: 'cover.png' }));
+      expect(await seen()).toEqual([{ userId: alice.userId, profile: true, splash: true, tags: [], texts: ['cover.png'], images: [expect.objectContaining({ mimeType: 'image/png', filename: 'cover.png' })] }]);
+      const shown = (await profile(alice.userId)).splashUrl;
+      expect(await refused(cover(alice, { name: 'spam.png' }))).toEqual([422, BLOCKED_WORD]);
+      expect(await refused(cover(alice, { name: 'FREE.png' }))).toEqual([422, NOT_TRUSTED]);
+      expect((await profile(alice.userId)).splashUrl).toBe(shown);
+      expect(await storedSplash(alice.userId, splashId(shown))).toBe(true);
     });
 
     it('shows nothing of the profile of a banned user, who sets nothing on it and can take theirs away', async () => {
@@ -174,12 +194,13 @@ for (const target of TARGETS) {
       const alice = await ctx.register('alice');
       ok(await update(alice, { bio: 'Hello', links: ['https://example.com/alice'] }));
       const { avatarUrl } = ok(await upload(alice));
+      const { splashUrl } = ok(await cover(alice));
       const first = await post(alice, 'First #news');
       ctx.clock.now += 1000;
       const second = await post(alice, 'Second #news');
       ok(await pin(alice, first), 201);
       await ctx.compact();
-      const shown = { banned: false, bio: 'Hello', links: ['https://example.com/alice'], avatarUrl, pinnedContentIds: [first] };
+      const shown = { banned: false, bio: 'Hello', links: ['https://example.com/alice'], avatarUrl, splashUrl, pinnedContentIds: [first] };
       expect(await profile(alice.userId)).toMatchObject(shown);
       expect(await creditOf(first)).toEqual({ userId: alice.userId, username: 'alice', avatarUrl });
       const { nextCursor } = await posts(alice.userId, '?limit=1');
@@ -187,7 +208,7 @@ for (const target of TARGETS) {
 
       ok(await req(root, 'PUT', `/banned/${alice.userId}`), 201);
       // The profile says she is banned, and nothing she put on it: not to anyone, with or without a key.
-      const hidden = { userId: alice.userId, username: 'alice', banned: true, bio: null, links: [], avatarUrl: null, pinnedContentIds: [] };
+      const hidden = { userId: alice.userId, username: 'alice', banned: true, bio: null, links: [], avatarUrl: null, splashUrl: null, pinnedContentIds: [] };
       expect(await profile(alice.userId)).toMatchObject(hidden);
       expect(ok(await req(alice, 'GET', `/users/${alice.userId}`))).toMatchObject(hidden);
       expect(ok(await req(root, 'GET', `/users/${alice.userId}`))).toMatchObject(hidden);
@@ -195,6 +216,9 @@ for (const target of TARGETS) {
       expect(await refused(avatar(avatarUrl))).toEqual([404, "this user is banned, so their avatar isn't shown"]);
       expect(await refused(avatar(`/users/${alice.userId}/avatar`))).toEqual([404, "this user is banned, so their avatar isn't shown"]);
       expect(await creditOf(first)).toEqual({ userId: alice.userId, username: 'alice' });
+      // Nor her splash image, by either of its addresses.
+      expect(await refused(splash(splashUrl))).toEqual([404, "this user is banned, so their splash image isn't shown"]);
+      expect(await refused(splash(`/users/${alice.userId}/splash`))).toEqual([404, "this user is banned, so their splash image isn't shown"]);
       // Her profile lists none of her posts, pinned or not, on any page. The post itself is where it was.
       expect(await posts(alice.userId)).toEqual({ userId: alice.userId, banned: true, pinned: [], posts: [], nextCursor: null });
       expect(await posts(alice.userId, `?limit=1&cursor=${nextCursor}`)).toEqual({ userId: alice.userId, banned: true, posts: [], nextCursor: null });
@@ -204,13 +228,15 @@ for (const target of TARGETS) {
       expect(await refused(update(alice, { bio: 'Still here' }))).toEqual([403, BANNED]);
       expect(await refused(update(alice, { links: ['https://example.com/other'] }))).toEqual([403, BANNED]);
       expect(await refused(upload(alice))).toEqual([403, BANNED]);
+      expect(await refused(cover(alice))).toEqual([403, BANNED]);
       // The rest of her account is hers to change, and she is given her own profile as it is.
-      expect(ok(await update(alice, { messages: false }))).toMatchObject({ messages: false, bio: 'Hello', links: ['https://example.com/alice'], avatarUrl });
+      expect(ok(await update(alice, { messages: false }))).toMatchObject({ messages: false, bio: 'Hello', links: ['https://example.com/alice'], avatarUrl, splashUrl });
 
       // It is all still hers, and is shown again once the ban ends.
       expect(ok(await req(root, 'DELETE', `/banned/${alice.userId}`))).toEqual({ userId: alice.userId, wasBanned: true });
       expect(await profile(alice.userId)).toMatchObject(shown);
       expect((await avatar(avatarUrl)).statusCode).toBe(200);
+      expect((await splash(splashUrl)).statusCode).toBe(200);
       expect(await creditOf(first)).toEqual({ userId: alice.userId, username: 'alice', avatarUrl });
       expect(await posts(alice.userId)).toMatchObject({ banned: false, pinned: [{ contentId: first }], posts: [{ contentId: second }, { contentId: first }] });
 
@@ -218,9 +244,10 @@ for (const target of TARGETS) {
       ok(await req(root, 'PUT', `/banned/${alice.userId}`), 201);
       expect(ok(await update(alice, { bio: null, links: null }))).toMatchObject({ bio: null, links: [] });
       expect(ok(await req(alice, 'DELETE', `/users/${alice.userId}/avatar`))).toEqual({ userId: alice.userId, avatarUrl: null, hadAvatar: true });
+      expect(ok(await req(alice, 'DELETE', `/users/${alice.userId}/splash`))).toEqual({ userId: alice.userId, splashUrl: null, hadSplash: true });
       expect(ok(await unpin(alice, first))).toEqual({ userId: alice.userId, contentId: first, wasPinned: true });
       ok(await req(root, 'DELETE', `/banned/${alice.userId}`));
-      expect(await profile(alice.userId)).toMatchObject({ banned: false, bio: null, links: [], avatarUrl: null, pinnedContentIds: [] });
+      expect(await profile(alice.userId)).toMatchObject({ banned: false, bio: null, links: [], avatarUrl: null, splashUrl: null, pinnedContentIds: [] });
     });
 
     it('takes an avatar as a file or inline, shows it to anyone, and deletes the one another replaces', async () => {
@@ -328,6 +355,98 @@ for (const target of TARGETS) {
       expect([await shape(still), (await sharp(still, { pages: -1 }).metadata()).pages ?? 1]).toEqual([standard, 1]);
     });
 
+    it('takes a splash image as a file or inline, of any size, and keeps it as it was sent but for its metadata', async () => {
+      ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com' });
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const path = (url: string) => url.replace('https://api.example.com', '');
+      /** What an image shows, whatever else its file says. */
+      const pixels = (bytes: Buffer) => sharp(bytes).raw().toBuffer();
+
+      expect(await refused(splash(`/users/${alice.userId}/splash`))).toEqual([404, 'this user has no splash image']);
+      expect(await refused(splash(`/users/${NO_USER}/splash`))).toEqual([404, 'user not found']);
+
+      // A photo as a phone writes one: it says who took it, with what, and where.
+      const photo = await wide()
+        .withExif({ IFD0: { Make: 'Phone', Copyright: 'Alice Example' }, IFD3: { GPSLatitudeRef: 'N', GPSLatitude: '51/1 30/1 0/1' } })
+        .jpeg()
+        .toBuffer();
+      expect([(await sharp(photo).metadata()).exif !== undefined, photo.includes('Alice Example'), photo.includes('Phone')]).toEqual([true, true, true]);
+      // As a file part, whatever type it says it is: its bytes say which image it is.
+      const set = ok(await cover(alice, { name: 'cover.bin', type: 'application/octet-stream', data: photo }));
+      expect(set).toEqual({ userId: alice.userId, splashUrl: expect.stringMatching(new RegExp(`^https://api\\.example\\.com/users/${alice.userId}/splash\\?v=[0-9a-f-]{36}$`)) });
+      expect((await profile(alice.userId)).splashUrl).toBe(set.splashUrl);
+      expect(ok(await update(alice, { bio: 'Hi' })).splashUrl).toBe(set.splashUrl);
+      const first = splashId(set.splashUrl);
+
+      // Anyone reads it, with no credentials; the address the profile gave may be kept.
+      const one = await splash(path(set.splashUrl));
+      expect([one.statusCode, one.headers['content-type'], one.headers['x-content-type-options'], one.headers['cache-control']]).toEqual([200, 'image/jpeg', 'nosniff', 'public, max-age=86400']);
+      // It is the image that was sent, in the format and at the size it was sent, and not one made of it.
+      expect(await shape(one.rawPayload)).toEqual(['jpeg', 800, 400]);
+      expect((await pixels(one.rawPayload)).equals(await pixels(photo))).toBe(true);
+      // And says nothing of who took it, with what, or where.
+      expect(await sharp(one.rawPayload).metadata()).not.toHaveProperty('exif');
+      expect([one.rawPayload.includes('Alice Example'), one.rawPayload.includes('Phone')]).toEqual([false, false]);
+      // With no `v`, it is whatever splash image she has, and is asked for again soon.
+      const latest = await splash(`/users/${alice.userId}/splash`);
+      expect([latest.statusCode, latest.headers['cache-control'], latest.rawPayload.equals(one.rawPayload)]).toEqual([200, 'public, max-age=300', true]);
+      // It is no avatar: she still has none.
+      expect((await profile(alice.userId)).avatarUrl).toBeNull();
+
+      // Inline, in base64: another image, under another address, and the file of the first is gone.
+      const replaced = ok(await req(alice, 'PUT', `/users/${alice.userId}/splash`, { content: PNG.toString('base64'), contentEncoding: 'base64' }));
+      expect(replaced.splashUrl).not.toBe(set.splashUrl);
+      const two = await splash(path(replaced.splashUrl));
+      expect([two.statusCode, two.headers['content-type'], two.headers['cache-control'], await shape(two.rawPayload)]).toEqual([200, 'image/png', 'public, max-age=86400', ['png', 1, 1]]);
+      expect(await storedSplash(alice.userId, first)).toBe(false);
+      expect(await storedSplash(alice.userId, splashId(replaced.splashUrl))).toBe(true);
+      // The address of the one before answers with the one she has now, and isn't kept as long.
+      const stale = await splash(path(set.splashUrl));
+      expect([stale.headers['cache-control'], stale.rawPayload.equals(two.rawPayload)]).toEqual(['public, max-age=300', true]);
+
+      // Of any size: one larger than an avatar can be made of is kept whole.
+      const large = await sharp({ create: { width: 1500, height: 1300, channels: 3, background: RED, noise: { type: 'gaussian', mean: 128, sigma: 50 } } })
+        .png({ compressionLevel: 0 })
+        .toBuffer();
+      expect(large.length).toBeGreaterThan(MAX_AVATAR_BYTES);
+      const whole = await splash(path(ok(await cover(alice, { data: large })).splashUrl));
+      expect([whole.statusCode, whole.headers['content-type'], await shape(whole.rawPayload)]).toEqual([200, 'image/png', ['png', 1500, 1300]]);
+      expect((await pixels(whole.rawPayload)).equals(await pixels(large))).toBe(true);
+      // And an animation keeps every frame.
+      const frames = await sharp(Buffer.concat([Buffer.alloc(64 * 64 * 3, 0), Buffer.alloc(64 * 64 * 3, 255)]), { raw: { width: 64, height: 128, channels: 3, pageHeight: 64 } }).gif().toBuffer();
+      const moving = await splash(path(ok(await cover(alice, { data: frames, name: 'moving.gif', type: 'image/gif' })).splashUrl));
+      expect([moving.headers['content-type'], (await sharp(moving.rawPayload, { pages: -1 }).metadata()).pages]).toEqual(['image/gif', 2]);
+      const kept = (await profile(alice.userId)).splashUrl!;
+
+      // One image, and an image at that.
+      expect(await refused(req(alice, 'PUT', `/users/${alice.userId}/splash`))).toEqual([400, 'content is required: the splash image']);
+      expect(await refused(cover(alice, { data: Buffer.from('<svg/>') }))).toEqual([400, 'splash images are JPEG, PNG, GIF and WebP images, and the file is none of them']);
+      expect(await refused(req(alice, 'PUT', `/users/${alice.userId}/splash`, { content: Buffer.from('just some text').toString('base64') }))).toEqual([
+        400,
+        'splash images are JPEG, PNG, GIF and WebP images, and the file is none of them',
+      ]);
+      expect((await cover(alice, { data: PNG.subarray(0, 40) })).statusCode).toBe(400);
+      // Only the user's own.
+      expect(await refused(cover(bob, {}, alice.userId))).toEqual([403, 'you can only change your own splash image']);
+      expect((await cover(null, {}, alice.userId)).statusCode).toBe(401);
+      expect(await refused(req(bob, 'DELETE', `/users/${alice.userId}/splash`))).toEqual([403, 'you can only change your own splash image']);
+      // None of which changed the one she has.
+      expect((await profile(alice.userId)).splashUrl).toBe(kept);
+
+      // An avatar is set beside it, and neither changes the other.
+      const { avatarUrl } = ok(await upload(alice));
+      expect(await profile(alice.userId)).toMatchObject({ avatarUrl, splashUrl: kept });
+
+      // Taken away, with its file; taking it away again changes nothing.
+      expect(ok(await req(alice, 'DELETE', `/users/${alice.userId}/splash`))).toEqual({ userId: alice.userId, splashUrl: null, hadSplash: true });
+      expect(await profile(alice.userId)).toMatchObject({ avatarUrl, splashUrl: null });
+      expect(await storedSplash(alice.userId, splashId(kept))).toBe(false);
+      expect(await refused(splash(path(kept)))).toEqual([404, 'this user has no splash image']);
+      expect(ok(await req(alice, 'DELETE', `/users/${alice.userId}/splash`))).toEqual({ userId: alice.userId, splashUrl: null, hadSplash: false });
+      expect((await avatar(path(avatarUrl))).statusCode).toBe(200);
+    });
+
     it("credits a user's posts with their avatar where a post is read from the database, and not in feeds", async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
@@ -417,21 +536,27 @@ for (const target of TARGETS) {
       expect(await posts(carol.userId)).toEqual({ userId: carol.userId, banned: false, pinned: [], posts: [], nextCursor: null });
     });
 
-    it('limits the lists of posts and the avatars one address reads in a minute, each on a count of its own', async () => {
-      ctx = await createTestContext(target, { profilePostsRateLimitPerMinute: 2, avatarRateLimitPerMinute: 3 });
+    it('limits the lists of posts, the avatars and the splash images one address reads in a minute, each on a count of its own', async () => {
+      ctx = await createTestContext(target, { profilePostsRateLimitPerMinute: 2, avatarRateLimitPerMinute: 3, splashRateLimitPerMinute: 2 });
       const alice = await ctx.register('alice');
       const { avatarUrl } = ok(await upload(alice));
+      const { splashUrl } = ok(await cover(alice));
       const read = () => req(null, 'GET', `/users/${alice.userId}/posts`);
       expect([(await read()).statusCode, (await read()).statusCode, (await read()).statusCode]).toEqual([200, 200, 429]);
       // An avatar is counted by whichever of its addresses it is read, and whether or not it is there.
       const shown = [await avatar(avatarUrl), await avatar(`/users/${alice.userId}/avatar`), await avatar(`/users/${NO_USER}/avatar`), await avatar(avatarUrl)];
       expect(shown.map((res) => res.statusCode)).toEqual([200, 200, 404, 429]);
+      // And so is a splash image, on a count that isn't the avatars'.
+      const covers = [await splash(splashUrl), await splash(`/users/${NO_USER}/splash`), await splash(`/users/${alice.userId}/splash`)];
+      expect(covers.map((res) => res.statusCode)).toEqual([200, 404, 429]);
       // The profile itself is counted apart.
       expect((await req(null, 'GET', `/users/${alice.userId}`)).statusCode).toBe(200);
 
-      // The setting is the server's own unless it is given another.
+      // Each setting is the server's own unless it is given another.
       expect(loadConfig({}, BASE_ENV).avatarRateLimitPerMinute).toBe(300);
       expect(loadConfig({}, { ...BASE_ENV, AVATAR_RATE_LIMIT_PER_MINUTE: '7' }).avatarRateLimitPerMinute).toBe(7);
+      expect(loadConfig({}, BASE_ENV).splashRateLimitPerMinute).toBe(120);
+      expect(loadConfig({}, { ...BASE_ENV, SPLASH_RATE_LIMIT_PER_MINUTE: '7' }).splashRateLimitPerMinute).toBe(7);
     });
 
     it('pins a few of the user’s own posts to their profile, which names them and lists them first', async () => {
@@ -511,7 +636,7 @@ for (const target of TARGETS) {
       expect((await ctx.db.selectFrom('pinned_posts').select('content_id').where('user_id', '=', alice.userId).execute()).map((row) => row.content_id).sort()).toEqual([spare, ...full.slice(0, -1)].sort());
     });
 
-    it("gives a user's profile in their export, and deletes it, avatar and all, with their account", async () => {
+    it("gives a user's profile in their export, and deletes it, avatar, splash image and all, with their account", async () => {
       ctx = await createTestContext(target);
       // An export is given once the index of users' comments holds everything, which the compactor's process sees to as it starts.
       await ctx.comments.indexAuthors();
@@ -519,6 +644,7 @@ for (const target of TARGETS) {
       const bob = await ctx.register('bob');
       ok(await update(alice, { bio: 'Hello', links: ['https://example.com/alice'] }));
       const { avatarUrl } = ok(await upload(alice));
+      const { splashUrl } = ok(await cover(alice));
       const pinned = await post(alice, 'Pinned #news');
       ctx.clock.now += 1000;
       const also = await post(alice, 'Pinned too #news');
@@ -527,26 +653,31 @@ for (const target of TARGETS) {
       ok(await pin(alice, also), 201);
       ok(await upload(bob));
       const bobsAvatar = avatarId((await profile(bob.userId)).avatarUrl);
+      const bobsSplash = splashId(ok(await cover(bob)).splashUrl);
 
       const exported = ok(await req(alice, 'GET', `/users/${alice.userId}/export`)).records as Record<string, unknown>[];
-      expect(exported.filter((r) => r.type === 'account')).toMatchObject([{ bio: 'Hello', links: ['https://example.com/alice'], avatarUrl, pinnedContentIds: [also, pinned] }]);
+      expect(exported.filter((r) => r.type === 'account')).toMatchObject([{ bio: 'Hello', links: ['https://example.com/alice'], avatarUrl, splashUrl, pinnedContentIds: [also, pinned] }]);
 
-      // The account is closed: nothing of the profile is read, and the avatar's file is gone at once.
+      // The account is closed: nothing of the profile is read, and the files of the avatar and of the splash image are gone at once.
       ok(await req(alice, 'DELETE', `/users/${alice.userId}`), 202);
       expect((await req(null, 'GET', `/users/${alice.userId}`)).statusCode).toBe(404);
       expect(await refused(avatar(avatarUrl))).toEqual([404, 'user not found']);
+      expect(await refused(splash(splashUrl))).toEqual([404, 'user not found']);
       expect(await refused(req(null, 'GET', `/users/${alice.userId}/posts`))).toEqual([404, 'user not found']);
       expect(await stored(alice.userId, avatarId(avatarUrl))).toBe(false);
+      expect(await storedSplash(alice.userId, splashId(splashUrl))).toBe(false);
       // The row waits for her posts, and goes with them, and her pins with both.
       await ctx.compact();
       expect(await ctx.db.selectFrom('users').select('id').where('id', '=', alice.userId).execute()).toEqual([]);
       expect(await ctx.db.selectFrom('pinned_posts').select('content_id').execute()).toEqual([]);
       // Nobody else's went with it.
       expect(await stored(bob.userId, bobsAvatar)).toBe(true);
+      expect(await storedSplash(bob.userId, bobsSplash)).toBe(true);
 
-      // An account with no posts is gone at once, with its avatar.
+      // An account with no posts is gone at once, with its avatar and its splash image.
       expect(ok(await req(bob, 'DELETE', `/users/${bob.userId}`))).toEqual({ userId: bob.userId, status: 'deleted' });
       expect(await stored(bob.userId, bobsAvatar)).toBe(false);
+      expect(await storedSplash(bob.userId, bobsSplash)).toBe(false);
     });
   });
 }

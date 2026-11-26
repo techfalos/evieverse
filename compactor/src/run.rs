@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::OnceCell;
 
-use crate::accounts::{drop_avatars, purge_accounts, sweep_content};
+use crate::accounts::{drop_profile_images, purge_accounts, sweep_content};
 use crate::activity::{idle_moderators, retire_moderator, start_counting};
 use crate::apply::{apply_pending, max_keywords};
 use crate::deps::Deps;
@@ -519,9 +519,9 @@ impl<'a> Run<'a> {
 
     /// Finishes deleting the accounts that were closed (see `accounts`): sets for deletion the
     /// content of theirs that a request left unmarked, deletes what the content store holds
-    /// of their avatars, and deletes the rows of those with no content left, which the
-    /// deletions above may just have been. The rest wait for a later run, and so does one
-    /// whose avatar the store kept.
+    /// of their avatars and splash images, and deletes the rows of those with no content
+    /// left, which the deletions above may just have been. The rest wait for a later run, and
+    /// so does one whose avatar or splash image the store kept.
     async fn settle_accounts(&self) -> Result<()> {
         let Deps { db, log, .. } = self.deps;
         let closed = strings(&db.fetch("SELECT id FROM users WHERE deleted_at IS NOT NULL", &[]).await?, "id")?;
@@ -538,7 +538,7 @@ impl<'a> Run<'a> {
             }
         }
         self.lease.check().await?;
-        let cleared = drop_avatars(self.deps, &closed).await;
+        let cleared = drop_profile_images(self.deps, &closed).await;
         self.lease.check().await?;
         let purged = purge_accounts(db, &cleared).await?;
         if !purged.is_empty() {

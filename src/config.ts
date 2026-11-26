@@ -21,6 +21,17 @@ export const GEN_AI_SETTINGS = ['disclosure_optional', 'disclosure_required', 'n
 /** What a server whose operator has set none says of generative AI (GEN_AI): what a server does of itself, which is take such content and leave declaring it to its author. */
 export const DEFAULT_GEN_AI: GenAi = 'disclosure_optional';
 
+/**
+ * What a server can do with a post's title (POST_TITLES), which GET /rules gives as `postTitles`:
+ * take posts with a title only (`on_required`), take them with one or without (`on_optional`),
+ * or take none with one and show none (`off`). A title is a line of plain text of at most
+ * MAX_TITLE_CHARS (src/posts.ts), which a post is sent with (`title` of POST /store).
+ */
+export const POST_TITLES_SETTINGS = ['on_required', 'on_optional', 'off'] as const;
+
+/** What a server whose operator has set none does with titles (POST_TITLES): every post has one. */
+export const DEFAULT_POST_TITLES: PostTitles = 'on_required';
+
 /** What a server that is given no Redis says, rather than start: every process keeps the feed index there, so none runs without it. */
 const REDIS_URL_NEEDED = 'REDIS_URL is not set: the server needs the redis:// or rediss:// URL of a Redis or Valkey server, which holds the feed index';
 
@@ -38,6 +49,7 @@ const ENV_MAP: Record<string, string> = {
   SUPPORT_EMAIL: 'supportEmail',
   MINIMUM_AGE: 'minimumAge',
   GEN_AI: 'genAi',
+  POST_TITLES: 'postTitles',
   DB_DIALECT: 'db.dialect',
   DATABASE_URL: 'db.url',
   DB_POOL_SIZE: 'db.poolSize',
@@ -86,6 +98,7 @@ const ENV_MAP: Record<string, string> = {
   CONTENT_RATE_LIMIT_PER_MINUTE: 'contentRateLimitPerMinute',
   PROFILE_POSTS_RATE_LIMIT_PER_MINUTE: 'profilePostsRateLimitPerMinute',
   AVATAR_RATE_LIMIT_PER_MINUTE: 'avatarRateLimitPerMinute',
+  SPLASH_RATE_LIMIT_PER_MINUTE: 'splashRateLimitPerMinute',
   FEED_PAGE_SIZE: 'feed.pageSize',
   FEED_MAX_PAGE_SIZE: 'feed.maxPageSize',
   FEED_RATE_LIMIT_PER_MINUTE: 'feed.rateLimitPerMinute',
@@ -285,6 +298,28 @@ const ConfigSchema = z.object({
       return z.NEVER;
     }),
 
+  /**
+   * What the server does with a post's title, which GET /rules gives to anyone who asks, beside
+   * the rules: one of POST_TITLES_SETTINGS, in any case, and with a hyphen or a space where the
+   * setting has an underscore, so `On-Required`, `On-Optional` and `Off` are read as they are
+   * written. Unlike GEN_AI, the server holds posts to it (POST /store): with `on_required` a post
+   * without a title is refused, and with `off` one with a title is. With `off` the titles of
+   * posts stored before are kept, and shown to nobody until titles are on again. Unset or empty:
+   * DEFAULT_POST_TITLES.
+   */
+  postTitles: z
+    .string()
+    .trim()
+    .default(DEFAULT_POST_TITLES)
+    .transform((v, ctx) => {
+      if (!v) return DEFAULT_POST_TITLES;
+      const written = v.toLowerCase().replace(/[-\s]+/g, '_');
+      const setting = POST_TITLES_SETTINGS.find((one) => one === written);
+      if (setting) return setting;
+      ctx.addIssue({ code: 'custom', message: `"${v}" is not one of ${POST_TITLES_SETTINGS.join(', ')}: POST_TITLES is whether a post has a title, and whether it has to` });
+      return z.NEVER;
+    }),
+
   db: z.object({
     dialect: z.enum(['postgres', 'sqlite', 'mysql']).default('sqlite'),
     /** Connection URL for postgres/mysql, or a file path (or ":memory:") for sqlite. */
@@ -333,7 +368,7 @@ const ConfigSchema = z.object({
    * The proxies in front of the server whose X-Forwarded-For is believed, which decides the client
    * address that registrations, feeds and the reads that need no key are limited by
    * (`registerRateLimitPerHour`, `feed.rateLimitPerMinute`, `feed.followingRateLimitPerMinute`,
-   * `contentRateLimitPerMinute`, `profilePostsRateLimitPerMinute`, `avatarRateLimitPerMinute`, `comments.listRateLimitPerMinute`,
+   * `contentRateLimitPerMinute`, `profilePostsRateLimitPerMinute`, `avatarRateLimitPerMinute`, `splashRateLimitPerMinute`, `comments.listRateLimitPerMinute`,
    * `reposts.attestationRateLimitPerMinute`, `tagging.logRateLimitPerMinute`) and that the audit log
    * and the request log record: how many of them there are, true for any, or their addresses and
    * CIDR ranges (separated by commas or spaces). Empty: none, so the address is the connection's
@@ -602,6 +637,15 @@ const ConfigSchema = z.object({
    */
   avatarRateLimitPerMinute: z.coerce.number().int().min(0).default(300),
 
+  /**
+   * Requests to GET /users/:userId/splash from one address in a minute, past which they are
+   * refused (0: no limit). It needs no key and reads the database and the content store for
+   * each. A profile names one splash image, and nothing else does, so this is what the profiles
+   * of a minute can ask for, as `profilePostsRateLimitPerMinute` is for their lists of posts.
+   * Counted as feeds are (`feed.rateLimitPerMinute`).
+   */
+  splashRateLimitPerMinute: z.coerce.number().int().min(0).default(120),
+
   feed: z.object({
     /** Posts per feed page when the request doesn't pass `limit`. */
     pageSize: int(50),
@@ -651,8 +695,8 @@ const ConfigSchema = z.object({
     relatedMinPercent: z.coerce.number().int().min(0).max(100).default(20),
     /** Words of a text post or caption copied into each record's preview... */
     previewWords: int(100),
-    /** ...and at most this many characters of them, which bounds text written without spaces. */
-    previewChars: int(1000),
+    /** ...and at most this many characters of them: what ends most previews, and all of a text written without spaces. */
+    previewChars: int(160),
     /**
      * How long a tag's head and related hashtags, and publisher credits, are cached by each node. A
      * node shows what the compactor published up to this long after it did.
@@ -980,6 +1024,9 @@ export type Config = z.infer<typeof ConfigSchema>;
 
 /** One of the things a server can say of content made with generative AI (GEN_AI_SETTINGS). */
 export type GenAi = (typeof GEN_AI_SETTINGS)[number];
+
+/** One of the things a server can do with a post's title (POST_TITLES_SETTINGS). */
+export type PostTitles = (typeof POST_TITLES_SETTINGS)[number];
 
 type Json = { [k: string]: unknown };
 

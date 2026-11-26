@@ -205,6 +205,22 @@ Which [types of post](API.md#post-store) the server takes: all five by default. 
 
 
 
+### Post titles
+
+
+Whether a post has a [title](API.md#titles), and whether it has to: by default, every post has one. A title is one line of plain text of at most 200 characters, on every server: the length isn't a setting. [`GET /rules`](API.md#get-rules) gives the setting to anyone who asks, as `postTitles`, so a client knows whether to ask for a title before it sends a post.
+
+| Variable      | File key     | Format | Default       | What it does |
+| ------------- | ------------ | ------ | ------------- | ------------ |
+| `POST_TITLES` | `postTitles` | choice | `on_required` | `on_required`: every post has a title, and `POST /store` refuses one sent without (`400`), an update too. `on_optional`: a post is stored with a title or without. `off`: no post has a title, `POST /store` refuses one sent with a title (`400`), and nothing the server answers shows one. It's read in any case, and with a hyphen or a space in place of the underscore, so `On-Required`, `On-Optional` and `Off` are the three as well. The server doesn't start if it's none of the three. Empty: the default. |
+
+- It's read when the server starts, so changing it takes a restart, and it's checked of what's written from then on. Posts the server already holds stay as they are: turning `on_required` on leaves the posts without a title untitled, until their publishers update them, which then takes a title.
+- `off` hides titles and deletes none. The titles posts were given before stay stored, are shown to nobody, are still among the words a [search](API.md#searching-posts) finds those posts by, and are back if titles are turned on again.
+- A repost of a [post on another server](API.md#a-post-on-another-server) has the title that server gives it, or none, whatever this says: it isn't refused for having no title where titles are required.
+
+
+
+
 ### Videos
 
 

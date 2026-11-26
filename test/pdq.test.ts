@@ -324,7 +324,7 @@ for (const target of TARGETS) {
       expect(notice!.text).toContain('It was not published: it is stored, and waits in the moderation queue, since this server deletes nothing on arrival. Accepting it there would publish it.');
     });
 
-    it("are refused as a user's avatar, on a server that deletes nothing on arrival too: a profile has no queue to wait in", async () => {
+    it("are refused as a user's avatar or splash image, on a server that deletes nothing on arrival too: a profile has no queue to wait in", async () => {
       ctx = await serverWithPlugin({ trust: { deleteBelow: 0 } });
       const root = await admin();
       const alice = await ctx.register('alice');
@@ -348,6 +348,16 @@ for (const target of TARGETS) {
       expect(fine.statusCode, fine.body).toBe(200);
       expect(await shown()).toBe(fine.json().avatarUrl);
       expect(await inbox(root)).toHaveLength(1);
+
+      // Nor is one their splash image, which is what the admins are then told it was sent as.
+      const splash = multipart({}, { name: 'cover.jpg', type: 'image/jpeg', data: await copy(ALSO_LISTED) });
+      const sent = await ctx.app.inject({ method: 'PUT', url: `/users/${alice.userId}/splash`, payload: splash.payload, headers: { ...splash.headers, ...as(alice) } });
+      expect(answer(sent)).toEqual([422, { error: "this server doesn't trust this enough to show it on a profile, so it wasn't saved" }]);
+      expect((await ctx.app.inject({ method: 'GET', url: `/users/${alice.userId}` })).json().splashUrl).toBeNull();
+      expect(await readdir(join(ctx.dir, 'content', 'splashes')).catch(() => [])).toEqual([]);
+      const told = await inbox(root);
+      expect(told).toHaveLength(2);
+      expect(told.find((notice) => notice.details?.sentAs !== 'avatar')).toMatchObject({ kind: 'csam_match_refused', details: { userId: alice.userId, sentAs: 'splash', outcome: 'refused', filename: 'cover.jpg', listed: ALSO_LISTED.hash } });
     });
 
     it('are checked only on a server that turns the plugin on, which then reads the list itself', async () => {

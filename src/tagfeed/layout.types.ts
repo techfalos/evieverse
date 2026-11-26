@@ -22,6 +22,11 @@ export interface FeedRecord {
   aiGenerated: boolean;
   /** Whether the post takes comments, which are read at /content/:contentId/comments. */
   comments: boolean;
+  /**
+   * The post's title: one line of plain text. Absent on a post that has none, and on every post
+   * of a server whose titles are off (`postTitles` of GET /rules).
+   */
+  title?: string;
   preview: Preview;
   /**
    * The users the preview's text mentions, each with the name it has them by: what the text is

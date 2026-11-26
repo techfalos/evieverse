@@ -14,6 +14,8 @@ export interface Summary {
   /** Whether the post takes comments, which its publisher says at /store. */
   comments: boolean;
   tags: string[];
+  /** The post's title (see ContentMeta.title). Absent on a post that has none, and on one that is read where titles are off. */
+  title?: string;
   preview: Preview;
   /** On a repost of a post on another server: the original, which the preview is of. */
   origin?: Origin;
@@ -31,10 +33,12 @@ export interface Summary {
 }
 
 /**
- * What a summary keeps of its preview beside the text, where its post has any of it (see
+ * What a summary keeps beside its preview's text, where its post has any of it (see
  * encodeSummary): written as JSON on a header line of its own.
  */
 export interface SummaryExtras {
+  /** The post's title (see Summary.title). */
+  title?: string;
   /** An image post's alternative texts, one for each image in their order (see Preview.alt). */
   alt?: string[];
   /** What a processed video is (see Preview.video). */
@@ -74,4 +78,9 @@ export interface SummaryStoreOptions {
   /** ...for this long: how long a node may go on showing a post as it was before an update. */
   cacheSeconds: number;
   publicBaseUrl: string;
+  /**
+   * Whether a summary that is read says its post's title: false where the server's titles are
+   * off (POST_TITLES), and a summary is then read without the title it keeps. Unset: it does.
+   */
+  titles?: boolean;
 }

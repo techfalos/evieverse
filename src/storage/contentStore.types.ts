@@ -35,6 +35,13 @@ export interface ContentMeta {
    * comments themselves are objects of their own (see CommentStore), and stay when this is turned off.
    */
   comments?: boolean;
+  /**
+   * The post's title: one line of plain text, MAX_TITLE_CHARS at most, which its publisher gave
+   * it at /store. Absent on a post that has none. On a repost of a post on another server it is
+   * the original's, as its server attested it. It is kept whatever POST_TITLES says, and shown
+   * only where titles are on (see shownTitle).
+   */
+  title?: string;
   /** As written; read it with previewOf, which links a file to where its bytes are read. */
   preview: Preview;
   /** The whole text of a text post, or an image's, video's or audio's caption. */

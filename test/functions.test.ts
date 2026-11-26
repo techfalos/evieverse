@@ -119,7 +119,8 @@ describe('functions', () => {
     const registered = await d.register('alice');
     expect(registered.status).toBe(201);
     const alice = registered.json() as { userId: string; apiKey: string };
-    const stored = await d.call('store', 'POST', '/store', { ...alice, type: 'text', text: 'hello from a function #news', tags: ['news'] });
+    // With a title: the deployment has the server's defaults, by which every post has one (POST_TITLES).
+    const stored = await d.call('store', 'POST', '/store', { ...alice, type: 'text', title: 'Hello', text: 'hello from a function #news', tags: ['news'] });
     expect(stored.status).toBe(201);
     const { contentId } = stored.json();
 

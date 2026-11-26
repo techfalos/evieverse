@@ -7,7 +7,7 @@ import { resetDatabase, TARGETS } from './helpers.js';
 
 describe('SQL migrations', () => {
   it('has the portable schema migrations, in order', () => {
-    expect(Object.keys(sqlMigrations())).toEqual(['0001_initial', '0002_pending_writes', '0003_staged_removals', '0004_unnumbered_writes', '0005_origin_gone', '0006_export_indexes', '0007_media', '0008_mention_notices', '0009_search', '0010_unlikes', '0011_tag_moderation', '0012_profiles', '0013_repost_removals', '0014_tag_log', '0015_moderator_activity', '0016_quarantine', '0017_claims_at_once', '0018_views_dislikes']);
+    expect(Object.keys(sqlMigrations())).toEqual(['0001_initial', '0002_pending_writes', '0003_staged_removals', '0004_unnumbered_writes', '0005_origin_gone', '0006_export_indexes', '0007_media', '0008_mention_notices', '0009_search', '0010_unlikes', '0011_tag_moderation', '0012_profiles', '0013_repost_removals', '0014_tag_log', '0015_moderator_activity', '0016_quarantine', '0017_claims_at_once', '0018_views_dislikes', '0019_splash']);
   });
 
   it('splits scripts into statements, ignoring comment lines', () => {
@@ -77,6 +77,8 @@ describe('SQL migrations', () => {
         'moderator',
         'show_followers',
         'show_following',
+        'splash_id',
+        'splash_type',
         'updated_at',
         'username',
         'username_folded',

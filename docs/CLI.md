@@ -102,7 +102,7 @@ A command exits with:
 | `moderators list <tag>`                                                  | A hashtag's moderators.                                                                                                                                                                                  |
 | `claims add <tag>`                                                       | [Claims a hashtag](API.md#claiming-a-hashtag) that has no moderator, on a server where publishers choose their posts' hashtags: you're its moderator from then on. The server's admins and server moderators are told, and can end it at any time. Refused if one of them [barred you from claiming](API.md#barring-a-user-from-claiming). |
 | `tag-rules list <tag>`                                                   | A hashtag's own [rules](API.md#a-hashtags-rules), in their order: what its moderators ask of the posts under it.                                                                                         |
-| `rules list`                                                             | The server's [rules](API.md#rules), in their order, its minimum age, whether it allows content made with generative AI, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is. |
+| `rules list`                                                             | The server's [rules](API.md#rules), in their order, its minimum age, whether it allows content made with generative AI, whether its posts have titles, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is. |
 | `inbox list [--unread] [--limit <n>] [--cursor <cursor>]`                | Your [inbox](API.md#inbox), newest first: the messages users sent you, and the notices of what moderators did to your posts and comments, of your mutes, of the hashtags you were made a moderator of or are one of no more, of being barred from claiming hashtags, and of the posts and comments that [mention](API.md#mentions) you. Each row says who sent it: the user who wrote a message or mentioned you, with their id, to answer or block them, and "the server" for any other notice. With `--unread`, only what you haven't read. |
 | `inbox read [--message <messageId>]`                                     | Marks everything in your inbox as read, or with `--message`, one message or notice.                                                                                                                      |
 | `inbox delete <messageId>`                                               | Deletes a message or a notice from your inbox.                                                                                                                                                           |
@@ -212,6 +212,8 @@ evieverse rules list
 Minimum age: 13
 
 Generative AI: allowed, and saying that content was made with it is optional
+
+Post titles: required: every post has one
 
 Support: support@example.com
 

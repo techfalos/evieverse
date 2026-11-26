@@ -17,7 +17,7 @@ import { tagActionItem, tagActions } from '../moderation/tagDecisions.js';
 import { adRecord, eligibleAds } from '../monetization.js';
 import type { PublishedAd } from '../monetization.types.js';
 import { payloadBytes, pendingImage, pendingPost } from '../pending.js';
-import { altsOf, imageCount, imageUrl, originMediaUrl, ownAddress, postAddress, previewOf, videoFileUrl } from '../posts.js';
+import { altsOf, imageCount, imageUrl, originMediaUrl, ownAddress, postAddress, previewOf, shownTitle, videoFileUrl } from '../posts.js';
 import { MEDIA_FILE, type BytesOwner, type ContentStore, type Publisher } from '../storage/index.js';
 import { indexAuthor } from '../tagfeed/layout.js';
 import { DAY, iso } from '../time.js';
@@ -139,7 +139,8 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
 
   /**
    * retrieve_content: the publisher's credit first (their userId and username, and where their
-   * avatar is read, `avatarUrl`, if they have one: see creditOf), then the preview, the
+   * avatar is read, `avatarUrl`, if they have one: see creditOf), then the title, on a post
+   * that has one where the server's titles are on (POST_TITLES, see shownTitle), the preview, the
    * whole text or caption, and hashtags. `status: "pending_review"` on content that waits in the
    * moderation queue. Who may read it is in loadReadable. `ad`, last, is the ad to show at the
    * end of the post (see postAd); content that waits in the moderation queue has none.
@@ -217,6 +218,7 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
       ...(row.queued && PENDING_REVIEW),
       ...(row.gone && ORIGIN_GONE),
       ...(processing && PROCESSING),
+      ...shownTitle(meta, config.postTitles),
       preview: previewOf(meta, config.publicBaseUrl),
       ...(meta.text !== undefined && { text: meta.text }),
       ...(meta.mentions?.length && { mentions: meta.mentions }),
@@ -270,7 +272,8 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
   /**
    * The attestation of a post: what this server says the post is, signed with its key, for
    * whoever reposts the post on another server to carry there (src/attestation.ts). It says the
-   * post's address here, its publisher, its content type, its AI declaration and its preview
+   * post's address here, its publisher, its content type, its AI declaration, its title, if it
+   * has one and the server's titles are on, and its preview
    * (with how many images it has, for an image post of several, the alternative texts of its
    * images, and what a processed video is: see StoredVideo), as of now. For anyone, with no key: a post anyone can repost is one anyone can read. It is good
    * for a few minutes, so it is asked for when it is used, and nothing in between keeps it.
@@ -326,6 +329,7 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
           publisher: publisherOf(row),
           mimeType: meta.mimeType,
           aiGenerated: row.ai_generated === 1,
+          ...shownTitle(meta, config.postTitles),
           preview:
             preview.kind === 'text'
               ? { kind: 'text', text: preview.text }

@@ -36,21 +36,27 @@ const latest = (r: SummaryRef) => Math.max(r.createdAt, ...(r.repostedAt ?? []))
 const imageCountOf = ({ preview }: Summary): number | undefined => (preview.kind === 'image' && preview.imageCount !== undefined && preview.imageCount > 1 ? preview.imageCount : undefined);
 
 /**
- * What a summary keeps of its preview beside the text, on a header line of its own, as JSON: the
- * alternative texts of an image post's images, and what a processed video is. With them, the
- * users the preview's text mentions (see Summary.mentions), which are of the text and not of the
- * preview's kind. None of a summary whose post has none of the three, which has no such line.
+ * What a summary keeps beside its preview's text, on a header line of its own, as JSON: the
+ * post's title, the alternative texts of an image post's images, and what a processed video is.
+ * With them, the users the preview's text mentions (see Summary.mentions), which are of the text
+ * and not of the preview's kind. None of a summary whose post has none of the four, which has
+ * no such line. The title is written first, and the mentions last.
  */
-function extrasOf({ preview, mentions }: Summary): SummaryExtras | undefined {
+function extrasOf({ title, preview, mentions }: Summary): SummaryExtras | undefined {
   const mentioned = mentions?.length ? { mentions } : undefined;
+  const titled = title ? { title } : undefined;
+  const none = titled || mentioned ? { ...titled, ...mentioned } : undefined;
   if (preview.kind === 'image') {
     const alt = altsOf(preview);
-    return alt ? { alt, ...mentioned } : mentioned;
+    return alt ? { ...titled, alt, ...mentioned } : none;
   }
-  if (preview.kind !== 'video' || !preview.video) return mentioned;
+  if (preview.kind !== 'video' || !preview.video) return none;
   const { id, width, height, duration } = preview.video;
-  return { video: { id, width, height, duration }, ...mentioned };
+  return { ...titled, video: { id, width, height, duration }, ...mentioned };
 }
+
+/** The title a summary's line of extras holds. Undefined where it holds none, or one that is empty. */
+const storedTitle = (extras: SummaryExtras | undefined): string | undefined => (typeof extras?.title === 'string' && extras.title !== '' ? extras.title : undefined);
 
 /** The mentions a summary's line of extras holds: each of them that names a user. Undefined where it holds none. */
 function storedMentions(extras: SummaryExtras | undefined): Mention[] | undefined {
@@ -96,10 +102,10 @@ function storedPreview(contentId: string, kind: string, text: string, imageCount
  * has. The fifth is then written whatever it is, 0 for a post that is no such repost. Each
  * image's URL is built when read, from the first's (see imageUrl).
  *
- * The summary of an image post whose images are described, of a video the server has
- * processed, and of a post whose preview mentions users, has a seventh number, 1, and with it
- * one more header line, after the original's if there is one: what it keeps of the preview
- * beside the text, as JSON on one line (see extrasOf). The fifth and sixth numbers are then written whatever they are, the sixth 0 for a
+ * The summary of a post that has a title, of an image post whose images are described, of a
+ * video the server has processed, and of a post whose preview mentions users, has a seventh
+ * number, 1, and with it one more header line, after the original's if there is one: what it
+ * keeps beside the preview's text, as JSON on one line (see extrasOf). The fifth and sixth numbers are then written whatever they are, the sixth 0 for a
  * post that is no album. The addresses of a video's poster and stream are built when read.
  */
 export function encodeSummary(s: Summary): string {
@@ -151,6 +157,7 @@ export function decodeSummary(contentId: string, text: string, publicBaseUrl: st
   if (more === 1) line();
   const extras = more === 1 ? storedExtras(contentId, lines.at(-1)!) : undefined;
   const mentions = storedMentions(extras);
+  const title = storedTitle(extras);
   return {
     contentId,
     createdAt: createdAt!,
@@ -160,6 +167,7 @@ export function decodeSummary(contentId: string, text: string, publicBaseUrl: st
     aiGenerated: ai === 1,
     comments: comments === 1,
     tags: lines[3] ? lines[3].split(' ') : [],
+    ...(title !== undefined && { title }),
     preview: readPreview(storedPreview(contentId, lines[4]!, text.slice(pos), images, extras), origin ? originMediaUrl(origin) : mediaUrl(publicBaseUrl, contentId)),
     ...(origin && { origin }),
     ...(mentions && { mentions }),
@@ -210,8 +218,11 @@ export class SummaryStore {
     });
   }
 
+  /** The summary a blob holds, as it is read here: without its post's title, where the server's titles are off (see SummaryStoreOptions.titles). */
   decode(contentId: string, blob: Buffer): Summary {
-    return decodeSummary(contentId, brotliDecompressSync(blob).toString('utf8'), this.opts.publicBaseUrl);
+    const summary = decodeSummary(contentId, brotliDecompressSync(blob).toString('utf8'), this.opts.publicBaseUrl);
+    if (this.opts.titles === false) delete summary.title;
+    return summary;
   }
 
   /** Writes the object store, under every day the summary is kept (see SummaryRef), then Redis while the post, or its latest repost, is younger than `hotDays`. */

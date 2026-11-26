@@ -75,6 +75,20 @@ const avatarKey = (userId: string, avatarId: string) => {
 };
 
 /**
+ * Where a user's splash images are kept (src/profile.ts): apart from posts and from avatars, and
+ * all under the user's id, so that whatever is left of them goes with the account in one deletion.
+ */
+const splashPrefix = (userId: string) => `splashes/${userId}/`;
+/**
+ * Where one splash image of a user's is kept, by its id (`users.splash_id`): each has a file of
+ * its own, as each avatar has (see avatarKey). Throws for an id that isn't written as a UUID is.
+ */
+const splashKey = (userId: string, splashId: string) => {
+  if (!MEDIA_ID.test(splashId)) throw new Error(`"${splashId}" is not the id of a splash image`);
+  return `${splashPrefix(userId)}${splashId}`;
+};
+
+/**
  * Where what the server made of a post's videos is kept, beside the MP4 that is the post's
  * bytes: a folder for each version of its video (see mediaKey), all of them under the post's id,
  * so that they go with the post in one deletion.
@@ -115,7 +129,8 @@ function stagedObject(key: string): string {
  * an image post, named by the post and the image's place among its images (see imageKey), those
  * of the image or video a comment came with, named by the comment and the post it is on, the
  * image of an ad, named by the ad, a user's avatar, named by the user and the avatar's id (see
- * avatarKey), a staged file's, named by its key (see stagedKey), or those of a file of a post's
+ * avatarKey), a user's splash image, named by the user and the splash image's id (see
+ * splashKey), a staged file's, named by its key (see stagedKey), or those of a file of a post's
  * processed video, named by the post, the version of the video and the file (see mediaKey).
  * They are written, read and linked to the same way; only where they are kept differs.
  */
@@ -126,21 +141,23 @@ export type BytesOwner =
   | { postId: string; commentId: string }
   | { adId: string }
   | { userId: string; avatar: string }
+  | { userId: string; splash: string }
   | { staged: string };
-/** Where the bytes of `of` are kept: with the posts', with what was made of a post's video, with the comments of the post it is on, with the ads' images, with its user's avatars, or where staged files wait. */
+/** Where the bytes of `of` are kept: with the posts', with what was made of a post's video, with the comments of the post it is on, with the ads' images, with its user's avatars or splash images, or where staged files wait. */
 function bytesKey(of: BytesOwner): string {
   if (typeof of === 'string') return contentKey(of);
   if ('image' in of) return imageKey(of.contentId, of.image);
   if ('video' in of) return mediaKey(of.contentId, of.video, of.file);
   if ('adId' in of) return adImageKey(of.adId);
   if ('avatar' in of) return avatarKey(of.userId, of.avatar);
+  if ('splash' in of) return splashKey(of.userId, of.splash);
   if ('staged' in of) return stagedObject(of.staged);
   return commentMediaKey(of.postId, of.commentId);
 }
 
 /**
  * Uploaded bytes and the meta file of each piece of content, the bytes of the images and videos
- * that comments come with, the images of ads and users' avatars, on any Apache OpenDAL backend (fs, s3, gcs,
+ * that comments come with, the images of ads and users' avatars and splash images, on any Apache OpenDAL backend (fs, s3, gcs,
  * azblob, sftp, webdav, gdrive, onedrive, dropbox, hdfs, ...). An image post of several images
  * has a file for each: the first is the post's bytes, and the others are beside it (see imageKey).
  *
@@ -346,7 +363,25 @@ export class ContentStore {
    * which died left behind. What goes with the account. Nothing there is no error.
    */
   async removeAvatars(userId: string): Promise<void> {
-    const prefix = avatarPrefix(userId);
+    await this.removeUnder(avatarPrefix(userId));
+  }
+
+  /** Deletes one splash image of a user's: the one another took the place of, or that the user took away. One that isn't there is no error. */
+  async removeSplash(userId: string, splashId: string): Promise<void> {
+    this.links.delete(splashKey(userId, splashId));
+    await this.op.delete(splashKey(userId, splashId));
+  }
+
+  /**
+   * Deletes every splash image the store holds of a user: the one they have, and any that a
+   * request which died left behind. What goes with the account. Nothing there is no error.
+   */
+  async removeSplashes(userId: string): Promise<void> {
+    await this.removeUnder(splashPrefix(userId));
+  }
+
+  /** Deletes every file kept under `prefix`, and forgets the links a signer gave to them. Nothing there is no error. */
+  private async removeUnder(prefix: string): Promise<void> {
     for (const key of this.links.keys()) if (key.startsWith(prefix)) this.links.delete(key);
     try {
       await this.op.removeAll(prefix);

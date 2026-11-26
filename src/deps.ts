@@ -22,6 +22,7 @@ export function createSummaryStore(config: Config, hot: HotStore, now: () => num
       cacheSize: config.feed.summaryCacheSize,
       cacheSeconds: config.feed.summaryCacheSeconds,
       publicBaseUrl: config.publicBaseUrl,
+      titles: config.postTitles !== 'off',
     },
     now,
   );

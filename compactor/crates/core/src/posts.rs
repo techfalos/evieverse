@@ -10,6 +10,8 @@ pub const TEXT_MIME: &str = "text/plain";
 pub const LINK_MIME: &str = "text/uri-list";
 /// The longest text of a text post, and the longest caption, in UTF-16 units.
 pub const MAX_TEXT_CHARS: usize = 40_000;
+/// The longest title of a post, in UTF-16 units.
+pub const MAX_TITLE_CHARS: usize = 200;
 /// The longest address `link_url` takes, in characters, counted as the URL parser writes it.
 const MAX_URL_CHARS: usize = 2048;
 

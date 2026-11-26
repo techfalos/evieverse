@@ -11,29 +11,37 @@ import type { UsersTable } from './db/schema.js';
  *            in the order they gave them;
  *   avatar   one image, which the server makes of the one the user sends: a square of
  *            AVATAR_SIZE pixels a side, whatever was sent (see standardAvatar), in the content
- *            store (`avatars/<userId>/<avatarId>`).
+ *            store (`avatars/<userId>/<avatarId>`);
+ *   splash   one image, for the top of the profile's page, which is the one the user sends:
+ *            of whatever size and shape it is, in the format it came in, and without its
+ *            metadata, as an image post's image is stored (see stripImage in src/image.ts).
+ *            The server makes nothing else of it. In the content store
+ *            (`splashes/<userId>/<splashId>`).
  *
  * The bio and the links are columns of the user's row, written by PATCH /users/:userId with the
- * rest of it (routes/register.ts). The avatar is a file, so it has routes of its own
- * (routes/profile.ts), and the row names it by an id: an avatar that takes another's place is
- * another file under another id, so two requests that set one at once leave the row naming one
- * whole image, and the file of the one that lost is deleted.
+ * rest of it (routes/register.ts). The avatar and the splash image are files, so each has routes
+ * of its own (routes/profile.ts), and the row names it by an id: an image that takes another's
+ * place is another file under another id, so two requests that set one at once leave the row
+ * naming one whole image, and the file of the one that lost is deleted.
  *
- * All three go through the trust plugins before they are stored, as a post does (see
- * moderateProfile): a bio with a blocked word, a link that spreads malware and an avatar that
- * matches the list of known abuse material are refused. A profile has no moderation queue, so
- * what isn't published is refused. A banned user sets none of them, and can still take them away.
+ * All four go through the trust plugins before they are stored, as a post does (see
+ * moderateProfile): a bio with a blocked word, a link that spreads malware and an avatar or a
+ * splash image that matches the list of known abuse material are refused. A profile has no
+ * moderation queue, so what isn't published is refused. A banned user sets none of them, and can
+ * still take them away.
  *
  * Nothing of a banned user's profile is shown to anyone while they are banned (see
  * shownProfile): the profile says that they are banned, and gives no bio, no links, no avatar,
- * no pinned post and none of their posts. That is what a moderator does about a profile that
- * shouldn't be read. It is all in the user's row still, and is shown again once the ban ends.
+ * no splash image, no pinned post and none of their posts. That is what a moderator does about a
+ * profile that shouldn't be read. It is all in the user's row still, and is shown again once the
+ * ban ends.
  *
  * A profile also names the posts its user pinned to it (`pinned_posts`, MAX_PINNED_POSTS at
  * most), and lists the user's posts (GET /users/:userId/posts): both are in routes/profile.ts.
  * The avatar goes out with the profile, and with the user's credit on their posts where a post
  * is read from the database: by its id (GET /content/:contentId) and in the profile's list.
- * Not in feeds, whose credits are read from Redis.
+ * Not in feeds, whose credits are read from Redis. The splash image goes out with the profile
+ * alone: it is no part of a credit.
  */
 
 /** The longest bio, in UTF-16 code units. */
@@ -112,24 +120,33 @@ export const storedLinks = (links: string[]): string | null => (links.length > 0
 export const avatarUrl = (publicBaseUrl: string, userId: string, avatarId: string) => `${publicBaseUrl}/users/${userId}/avatar?v=${avatarId}`;
 
 /**
+ * Where a user's splash image is read (GET /users/:userId/splash), as `avatarUrl` is where their
+ * avatar is: the address without its query is always the splash image the user has now, and `v`
+ * names the one it was when the address was given, which a reader may keep.
+ */
+export const splashUrl = (publicBaseUrl: string, userId: string, splashId: string) => `${publicBaseUrl}/users/${userId}/splash?v=${splashId}`;
+
+/**
  * What a user's row says of their profile beside their name, as the user themselves is given it
  * (the answer to PATCH /users/:userId, and their export): the bio, null for a user who has none,
- * their links, and where their avatar is read, null for one who has none. Whether or not they
- * are banned: what anyone else is shown is `shownProfile`.
+ * their links, and where their avatar and their splash image are read, each null for one who has
+ * none. Whether or not they are banned: what anyone else is shown is `shownProfile`.
  */
-export const profileOf = (row: Pick<UsersTable, 'id' | 'bio' | 'links' | 'avatar_id'>, publicBaseUrl: string) => ({
+export const profileOf = (row: Pick<UsersTable, 'id' | 'bio' | 'links' | 'avatar_id' | 'splash_id'>, publicBaseUrl: string) => ({
   bio: row.bio,
   links: profileLinks(row.links),
   avatarUrl: row.avatar_id === null ? null : avatarUrl(publicBaseUrl, row.id, row.avatar_id),
+  splashUrl: row.splash_id === null ? null : splashUrl(publicBaseUrl, row.id, row.splash_id),
 });
 
 /**
  * What anyone is shown of a user's profile (GET /users/:userId): whether they are banned
  * (`banned`), and what their row says of them (see profileOf). Of a banned user it is that they
- * are banned and nothing else: no bio, no links and no avatar, whatever the row holds.
+ * are banned and nothing else: no bio, no links, no avatar and no splash image, whatever the row
+ * holds.
  */
-export const shownProfile = (row: Pick<UsersTable, 'id' | 'bio' | 'links' | 'avatar_id' | 'banned_at'>, publicBaseUrl: string) =>
-  row.banned_at === null ? { banned: false, ...profileOf(row, publicBaseUrl) } : { banned: true, bio: null, links: [], avatarUrl: null };
+export const shownProfile = (row: Pick<UsersTable, 'id' | 'bio' | 'links' | 'avatar_id' | 'splash_id' | 'banned_at'>, publicBaseUrl: string) =>
+  row.banned_at === null ? { banned: false, ...profileOf(row, publicBaseUrl) } : { banned: true, bio: null, links: [], avatarUrl: null, splashUrl: null };
 
 /**
  * Where anyone reads the avatar of the user of `row`, for a response that credits them: null

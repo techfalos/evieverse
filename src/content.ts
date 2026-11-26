@@ -8,7 +8,8 @@ import { HttpError, notFound } from './http/errors.js';
 import { msg } from './language.js';
 import { moderatesServer } from './moderation/policy.js';
 import { effectiveMeta, pendingPost, type PendingReader } from './pending.js';
-import { altsOf, imageUrl, previewOf } from './posts.js';
+import type { PostTitles } from './config.js';
+import { altsOf, imageUrl, previewOf, shownTitle } from './posts.js';
 import { shownAvatarUrl } from './profile.js';
 import type { ContentMeta, ContentStore, Publisher, Summary } from './storage/index.js';
 import { countsOf } from './tagfeed/layout.js';
@@ -234,12 +235,15 @@ const previewMentions = (meta: Pick<ContentMeta, 'preview' | 'mentions'>): Pick<
 /**
  * The summary of the content `meta` describes, rebuilt from the database and the meta file, which
  * outlives the summary store's retention. `repostedAt` is when the content was reposted, once for
- * each repost: it says where the summary is kept, beside the content's own day.
+ * each repost: it says where the summary is kept, beside the content's own day. `postTitles` is
+ * what the server does with titles (POST_TITLES): the summary has the post's title unless they
+ * are off (see shownTitle), as one that is read from the summary store does.
  */
 export const summaryOf = (
   row: { id: string; user_id: string; created_at: number; ai_generated: number },
   meta: ContentMeta,
   publicBaseUrl: string,
+  postTitles: PostTitles,
   repostedAt: number[] = [],
 ): Summary => ({
   contentId: row.id,
@@ -250,6 +254,7 @@ export const summaryOf = (
   aiGenerated: row.ai_generated === 1,
   comments: takesComments(meta),
   tags: meta.tags,
+  ...shownTitle(meta, postTitles),
   preview: previewOf(meta, publicBaseUrl),
   ...(meta.origin && { origin: meta.origin }),
   ...previewMentions(meta),

@@ -208,6 +208,8 @@ struct Profile {
     texts: Vec<String>,
     #[serde(default)]
     image: Option<TrustImage>,
+    #[serde(default)]
+    splash: bool,
 }
 
 #[derive(Deserialize)]
@@ -336,6 +338,7 @@ async fn run(server: &Server, method: &str, now: f64, asked: Asked, log: &Logger
                         user_id: profile.user_id,
                         texts: profile.texts,
                         image: profile.image,
+                        splash: profile.splash,
                     },
                 )
                 .await,

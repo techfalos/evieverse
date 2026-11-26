@@ -43,6 +43,13 @@ const GEN_AI: Record<string, string> = {
   not_allowed: 'not allowed',
 };
 
+/** What a server does with post titles, in words, by the setting GET /rules names (`postTitles`). */
+const POST_TITLES: Record<string, string> = {
+  on_required: 'required: every post has one',
+  on_optional: 'optional: a post has one or not',
+  off: 'off: posts have none',
+};
+
 /**
  * The sections of `help`, in the order it shows them: the role whose commands each one lists, and
  * its title, which names the hashtags `me` moderates if the server said who the key's user is.
@@ -697,11 +704,11 @@ export const COMMANDS: Command[] = [
     request: ({ positionals: [tag] }) => ({ method: 'GET', path: path`/tags/${tag!}/rules` }),
     text: (d) => (d.rules.length ? table(d.rules.map((r) => [String(r.position), r.ruleId, r.text.replace(/\s+/g, ' ').trim()])) : `#${d.tag} has no rules.`),
   }),
-  endpoint<{ modificationDisclosure: ModificationDisclosure; supportEmail: string; minimumAge: number | string; genAi: string; rules: RuleRecord[] }>({
+  endpoint<{ modificationDisclosure: ModificationDisclosure; supportEmail: string; minimumAge: number | string; genAi: string; postTitles?: string; rules: RuleRecord[] }>({
     name: 'rules list',
     role: 'anyone',
     summary:
-      "Lists the server's rules, in their order, its minimum age, whether it allows content made with generative AI, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is.",
+      "Lists the server's rules, in their order, its minimum age, whether it allows content made with generative AI, whether its posts have titles, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is.",
     request: () => ({ method: 'GET', path: '/rules' }),
     text: (d) =>
       [
@@ -713,6 +720,8 @@ export const COMMANDS: Command[] = [
         // In words, or as the server names it where the setting is one this CLI has no words for.
         `Generative AI: ${GEN_AI[d.genAi] ?? d.genAi}`,
         '',
+        // Likewise. A server from before posts had titles says nothing of them, and the line is left out.
+        ...(d.postTitles === undefined ? [] : [`Post titles: ${POST_TITLES[d.postTitles] ?? d.postTitles}`, '']),
         `Support: ${d.supportEmail}`,
         '',
         [

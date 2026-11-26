@@ -15,6 +15,7 @@ import { msg } from '../language.js';
 import { moderatePost, moderateRepost, refuseBanned } from '../moderation/policy.js';
 import type { RemovedTag } from '../moderation/policy.types.js';
 import { originEntries, originHash } from '../origins.js';
+import { shownTitle } from '../posts.js';
 import { MAX_REPOSTED_TAGS, readableOf, repostedTags, repostsOf } from '../reposts.js';
 import { admitting } from '../sendLimit.js';
 import { authorIndex } from '../tagfeed/layout.js';
@@ -218,6 +219,7 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
       ...(done.queued && PENDING_REVIEW),
       tags: done.tags,
       ...(done.removedTags.length > 0 && { removedTags: done.removedTags }),
+      ...(done.title !== undefined && { title: done.title }),
       preview: done.preview,
       aiGenerated: done.aiGenerated,
       origin: done.origin,
@@ -320,7 +322,7 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
    * ContentMeta.originAttestedAt).
    */
   async function repostFrom(req: FastifyRequest, reply: FastifyReply, user: AuthUser, sent: AttestedPost, hash: string, tags: string[]) {
-    const { mimeType, origin, preview, texts } = summarised(sent);
+    const { mimeType, origin, title, preview, texts } = summarised(sent);
     const moderated = await moderatePost({ trust, now, log: req.log }, { userId: user.id, tags, texts });
     const queued = moderated.route === 'queue';
 
@@ -330,9 +332,9 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
     await admitting(deps, 'post', user.id, () =>
       writer.write({
         publisher: { userId: user.id, username: user.username },
-        summary: { contentId, createdAt: ts, updatedAt: ts, userId: user.id, mimeType, aiGenerated, comments: false, tags: moderated.tags, preview, origin },
+        summary: { contentId, createdAt: ts, updatedAt: ts, userId: user.id, mimeType, aiGenerated, comments: false, tags: moderated.tags, ...(title !== undefined && { title }), preview, origin },
         // The bytes are an address, whatever the original is: the compactor writes them from the meta file, as it does a link's (see payloadBytes).
-        meta: { contentId, mimeType, size: Buffer.byteLength(origin.url), aiGenerated, comments: false, preview, tags: moderated.tags, updatedAt: ts, origin, originAttestedAt: sent.issuedAt },
+        meta: { contentId, mimeType, size: Buffer.byteLength(origin.url), aiGenerated, comments: false, ...(title !== undefined && { title }), preview, tags: moderated.tags, updatedAt: ts, origin, originAttestedAt: sent.issuedAt },
         queued: queued ? { trustScore: moderated.trustScore } : undefined,
         originHash: hash,
       }),
@@ -343,6 +345,7 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
       ...(queued && PENDING_REVIEW),
       tags: moderated.tags,
       ...(moderated.removedTags.length > 0 && { removedTags: moderated.removedTags }),
+      ...shownTitle({ title }, config.postTitles),
       preview,
       aiGenerated,
       origin,

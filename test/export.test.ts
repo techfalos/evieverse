@@ -163,6 +163,7 @@ for (const target of TARGETS) {
           bio: null,
           links: [],
           avatarUrl: null,
+          splashUrl: null,
           pinnedContentIds: [],
           language: 'en',
           admin: false,

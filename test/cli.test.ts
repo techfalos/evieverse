@@ -530,7 +530,7 @@ describe('the CLI', () => {
   it("keeps the server's rules as an admin, and lists them, with its modification disclosure, as anyone", async () => {
     const SOURCE = 'https://git.example.com/our-evieverse';
     const SUPPORT = 'support@our-evieverse.example';
-    await setup({ modified: true, sourceUrl: SOURCE, supportEmail: SUPPORT, minimumAge: 13, genAi: 'disclosure_required' });
+    await setup({ modified: true, sourceUrl: SOURCE, supportEmail: SUPPORT, minimumAge: 13, genAi: 'disclosure_required', postTitles: 'on_required' });
     const root = await ctx.register('root');
     await setAdmin(ctx.db, 'root', true);
     const alice = await ctx.register('alice');
@@ -538,8 +538,8 @@ describe('the CLI', () => {
     await profile('alice', alice);
     const by = (name: string, ...args: string[]) => ran(...args, '--profile', name);
     const refused = (name: string, ...args: string[]) => cli([...args, '--profile', name]);
-    // What follows the rules: the minimum age, what the server says of generative AI, where to write for support, and the modification disclosure.
-    const MODIFIED = `Minimum age: 13\n\nGenerative AI: allowed, as long as content made with it says so\n\nSupport: ${SUPPORT}\n\nModification disclosure: this server runs a modified version of Evieverse, based on release ${RELEASE}.\nIts source code: ${SOURCE}`;
+    // What follows the rules: the minimum age, what the server says of generative AI, what it does with post titles, where to write for support, and the modification disclosure.
+    const MODIFIED = `Minimum age: 13\n\nGenerative AI: allowed, as long as content made with it says so\n\nPost titles: required: every post has one\n\nSupport: ${SUPPORT}\n\nModification disclosure: this server runs a modified version of Evieverse, based on release ${RELEASE}.\nIts source code: ${SOURCE}`;
     const ruleId = (out: string) => out.split(': ')[1]!;
 
     expect(await by('alice', 'rules', 'list')).toBe(`The server has no rules.\n\n${MODIFIED}`);
@@ -556,6 +556,7 @@ describe('the CLI', () => {
       supportEmail: SUPPORT,
       minimumAge: 13,
       genAi: 'disclosure_required',
+      postTitles: 'on_required',
       rules: [{ ruleId: first, position: 1 }, { ruleId: kind, position: 2, text: 'Be kind.' }, { ruleId: ruleId(spam), position: 3, text: 'No spam.\nNot even a little.' }],
     });
 
@@ -584,17 +585,23 @@ describe('the CLI', () => {
     expect(help).toMatch(/^  - rules remove <ruleId> /m);
 
     // A server whose operator says nothing of the kind runs a release, names no source, has no minimum age, allows generative AI with no word needed of it, and gives the placeholder for a support address.
+    // Its titles are optional, which is the tests' server's setting and not a server's default (see createTestContext).
     await ctx.close();
     ctx = await createTestContext(TARGETS[0]!);
     await profile('alice', await ctx.register('alice'));
     expect(await by('alice', 'rules', 'list')).toBe(
-      `The server has no rules.\n\nMinimum age: All Legal Ages Allowed\n\nGenerative AI: allowed, and saying that content was made with it is optional\n\nSupport: noreply@yoururl.com\n\nModification disclosure: this server runs Evieverse ${RELEASE}, unmodified.`,
+      `The server has no rules.\n\nMinimum age: All Legal Ages Allowed\n\nGenerative AI: allowed, and saying that content was made with it is optional\n\nPost titles: optional: a post has one or not\n\nSupport: noreply@yoururl.com\n\nModification disclosure: this server runs Evieverse ${RELEASE}, unmodified.`,
     );
     // And one that doesn't allow it says that.
     await ctx.close();
     ctx = await createTestContext(TARGETS[0]!, { genAi: 'not_allowed' });
     await profile('alice', await ctx.register('alice'));
     expect(await by('alice', 'rules', 'list')).toContain('\n\nGenerative AI: not allowed\n\n');
+    // And one whose titles are off says so.
+    await ctx.close();
+    ctx = await createTestContext(TARGETS[0]!, { postTitles: 'off' });
+    await profile('alice', await ctx.register('alice'));
+    expect(await by('alice', 'rules', 'list')).toContain('\n\nPost titles: off: posts have none\n\n');
   });
 
   it("claims a hashtag, ends a claimant's time and bars them from claiming as an admin, keeps a hashtag's rules as its moderator, and says why a hashtag is removed", async () => {

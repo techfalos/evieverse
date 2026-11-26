@@ -32,8 +32,10 @@ pub struct Sent {
     pub content_id: Option<String>,
     /// For a comment: the post it is on.
     pub comment_on: Option<String>,
-    /// True for an avatar.
+    /// True for an avatar, and for a splash image.
     pub profile: bool,
+    /// True for a splash image, which a profile's image is otherwise not.
+    pub splash: bool,
     /// For a new post whose file was found to match only once the post had an id, which is a
     /// video's: that post, which is deleted for it.
     pub created: Option<String>,
@@ -156,8 +158,9 @@ fn number(seconds: f64) -> Option<serde_json::Number> {
 pub async fn report(post: &Sent, ctx: &TrustContext<'_>, found: &Found) {
     let TrustContext { db, config, log, client, .. } = *ctx;
     let now = (ctx.now)();
-    // An avatar is refused whatever the thresholds are: a profile has no moderation queue to
-    // hold it in. So is a video, which is found after its request was answered.
+    // An avatar is refused whatever the thresholds are, and so is a splash image: a profile has
+    // no moderation queue to hold it in. So is a video, which is found after its request was
+    // answered.
     let refused = found.video.is_some() || post.profile || route_of(MIN_TRUST_SCORE, &config.trust) == TrustRoute::Delete;
     let kind = if found.video.is_some() {
         VIDEO_KIND
@@ -182,7 +185,9 @@ pub async fn report(post: &Sent, ctx: &TrustContext<'_>, found: &Found) {
         at: iso(found.video.map_or(now, |video| video.sent_at)),
         ip: client.map_or_else(|| "unknown".to_owned(), |client| client.ip.clone()),
         user_agent: brief(client.and_then(|client| client.user_agent.as_deref())),
-        sent_as: if post.profile {
+        sent_as: if post.profile && post.splash {
+            "splash"
+        } else if post.profile {
             "avatar"
         } else if post.comment_on.is_some() {
             "comment"

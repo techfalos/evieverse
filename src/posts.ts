@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { PostTitles } from './config.js';
 import { cutFormatted } from './format.js';
 import type { Mention } from './mentions.types.js';
 import type { Preview, StoredVideo } from './storage/contentStore.types.js';
@@ -18,6 +19,13 @@ export const LINK_MIME = 'text/uri-list';
 
 /** The longest text post or caption, in UTF-16 code units. */
 export const MAX_TEXT_CHARS = 40_000;
+/**
+ * The longest title of a post, in UTF-16 code units. A title is one line of plain text: it is
+ * read as it is written, with no formatting and no mentions (see titleLine).
+ */
+export const MAX_TITLE_CHARS = 200;
+/** What a title has between its words, as it is sent: white space of any kind and control characters, which a title is kept without (see titleLine). */
+const TITLE_GAPS = /[\s\u0000-\u001f\u007f\u0085]+/g;
 /** The most images an image post can have: one, or an album of up to this many, in the order they were sent. */
 export const MAX_POST_IMAGES = 10;
 /**
@@ -34,6 +42,22 @@ export const LinkUrl = z
   .url({ protocol: /^https?$/ })
   .transform((u) => new URL(u).href)
   .pipe(z.string().max(MAX_URL_CHARS, `a link must be at most ${MAX_URL_CHARS} characters`));
+
+/**
+ * A title as it is kept: on one line, with one space wherever it was sent with white space of
+ * any kind (a line end, a tab, several spaces) or a control character, and none around it.
+ * Undefined for none, and for one that is only white space. Its length is the caller's to hold
+ * to MAX_TITLE_CHARS, counted as it is kept.
+ */
+export const titleLine = (sent: string | undefined): string | undefined => sent?.replace(TITLE_GAPS, ' ').trim() || undefined;
+
+/**
+ * The title of the post a meta file or a summary describes, as a response gives it: `title`,
+ * on a post that has one, where the server's titles are on (POST_TITLES). Where they are off a
+ * title that is kept is shown to nobody, and a post without one says none either way.
+ */
+export const shownTitle = (of: { title?: string }, postTitles: PostTitles): { title: string } | undefined =>
+  postTitles !== 'off' && of.title ? { title: of.title } : undefined;
 
 /** The post type of files of `mimeType`, if they can be posted. */
 export function mediaType(mimeType: string): MediaType | null {

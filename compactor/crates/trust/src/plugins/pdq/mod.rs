@@ -2,7 +2,7 @@
 //! list of hashes of such material isn't trusted at all, and the server's admins are told of
 //! it, with what a report to the authorities is written from (see `report`). Every image of
 //! an image post is checked, new or an update, the image a comment comes with, and the avatar
-//! a user gives their profile.
+//! and the splash image a user gives their profile.
 //!
 //! PDQ is the perceptual hash Meta published for this (see hash.rs): the hash of a picture
 //! stays nearly the same when it is resized, compressed again or lightly edited, so a copy is
@@ -107,7 +107,7 @@ impl TrustPlugin for Pdq {
             .context("an image could not be read for its hash")?;
             match read {
                 Ok(Some(Matched { found, hash, frame })) => {
-                    let sent = Sent { user_id: post.user_id.clone(), content_id: post.content_id.clone(), comment_on: post.comment_on.clone(), profile: post.profile, created: None };
+                    let sent = Sent { user_id: post.user_id.clone(), content_id: post.content_id.clone(), comment_on: post.comment_on.clone(), profile: post.profile, splash: post.splash, created: None };
                     let found = Found { listed: found.listed, distance: found.distance, image: image.clone(), pdq: to_hex(&hash.words), quality: hash.quality, frame, video: None };
                     report(&sent, ctx, &found).await;
                     return Ok(Some(TrustChange::set(MIN_TRUST_SCORE)));
@@ -278,6 +278,15 @@ mod tests {
         let avatar = TrustPost { profile: true, ..post(vec![image(&known, "known.png")]) };
         assert_eq!(plugin.assess(&avatar, &world.ctx()).await.unwrap(), Some(TrustChange::set(0)));
         assert_eq!(world.db.fetch_optional("SELECT matches FROM quarantine", &[]).await.unwrap().unwrap().i64("matches").unwrap(), 2);
+
+        // So is a splash image, which the log tells from an avatar.
+        let said = world.said();
+        assert_eq!(said.iter().filter_map(|line| line.2["match"]["sentAs"].as_str()).collect::<Vec<_>>(), ["update", "avatar"]);
+        let splash = TrustPost { profile: true, splash: true, ..post(vec![image(&known, "known.png")]) };
+        assert_eq!(plugin.assess(&splash, &world.ctx()).await.unwrap(), Some(TrustChange::set(0)));
+        let said = world.said();
+        let matched = said.iter().find(|line| !line.2["match"].is_null()).map(|line| &line.2["match"]).unwrap();
+        assert_eq!((matched["sentAs"].as_str(), matched["outcome"].as_str()), (Some("splash"), Some("refused")));
     }
 
     #[tokio::test]

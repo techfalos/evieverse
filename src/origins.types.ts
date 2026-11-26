@@ -7,9 +7,11 @@ export interface OriginSummary {
   mimeType: string;
   /** Where it is, and who published it there. */
   origin: Origin;
+  /** Its title there, if it has one. */
+  title?: string;
   /** Its preview, cut to the length of this server's. */
   preview: Preview;
-  /** What there is of it to read, as moderation reads a post: the preview's text or link, the original's address and its publisher's name. */
+  /** What there is of it to read, as moderation reads a post: its title, the preview's text or link, the original's address and its publisher's name. */
   texts: (string | undefined)[];
 }
 
@@ -40,6 +42,8 @@ export interface RefreshedUpdated {
   /** The hashtags it has now, and the ones what it now says lost it. */
   tags: string[];
   removedTags: RemovedTag[];
+  /** The original's title, if it has one and the server's titles are on. */
+  title?: string;
   preview: Preview;
   aiGenerated: boolean;
   origin: Origin;

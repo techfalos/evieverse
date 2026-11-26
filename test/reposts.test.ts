@@ -614,7 +614,7 @@ for (const target of TARGETS) {
         publisher: { userId: alice!.userId, username: 'alice' },
         previous: meta,
         seenSeq: Number(row.seq),
-        summary: { ...summaryOf(row, meta, ctx.config.publicBaseUrl), updatedAt: ctx.clock.now },
+        summary: { ...summaryOf(row, meta, ctx.config.publicBaseUrl, ctx.config.postTitles), updatedAt: ctx.clock.now },
         meta: { ...meta, updatedAt: ctx.clock.now },
         given: ['weather'],
       });

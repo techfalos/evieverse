@@ -9,7 +9,7 @@ import { inboxItem, MESSAGE } from './inbox.js';
 import { msg } from './language.js';
 import type { Message } from './language.types.js';
 import { pendingComments, pendingMetas } from './pending.js';
-import { previewOf } from './posts.js';
+import { previewOf, shownTitle } from './posts.js';
 import { profileOf } from './profile.js';
 import type { ContentMeta } from './storage/index.js';
 import { indexAuthor } from './tagfeed/layout.js';
@@ -186,7 +186,7 @@ function sectionsOf({ db, content, comments, config }: ExportDeps): Section[] {
           db
             .selectFrom('users')
             .select(['id', 'username', 'created_at', 'updated_at', 'admin', 'moderator', 'language', 'messages', 'show_following', 'show_followers', 'banned_at', 'claims_barred_at'])
-            .select(['bio', 'links', 'avatar_id'])
+            .select(['bio', 'links', 'avatar_id', 'splash_id'])
             .where('id', '=', userId)
             .where('deleted_at', 'is', null),
           ['id'],
@@ -206,7 +206,7 @@ function sectionsOf({ db, content, comments, config }: ExportDeps): Section[] {
             createdAt: iso(r.created_at),
             // When they registered; or, on an account renamed while a user could change their name, when it last was.
             usernameSetAt: iso(r.updated_at),
-            // Their profile, whether or not they are banned and nobody else is shown it: their bio as they wrote it, their links, and where their avatar is read, which is a file, and so not in the export.
+            // Their profile, whether or not they are banned and nobody else is shown it: their bio as they wrote it, their links, and where their avatar and their splash image are read, which are files, and so not in the export.
             ...profileOf(r, config.publicBaseUrl),
             // The posts they pinned to it, the one pinned last first, whether or not anyone else can read them now.
             pinnedContentIds: pinned.map((pin) => pin.content_id),
@@ -266,6 +266,7 @@ function sectionsOf({ db, content, comments, config }: ExportDeps): Section[] {
               ...(r.origin_gone_at !== null && ORIGIN_GONE),
               // What the meta file says of the post. Without one, what the row says is all there is.
               ...(meta && {
+                ...shownTitle(meta, config.postTitles),
                 preview: previewOf(meta, config.publicBaseUrl),
                 ...(meta.text !== undefined && { text: meta.text }),
                 ...(meta.mentions?.length && { mentions: meta.mentions }),

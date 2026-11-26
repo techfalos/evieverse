@@ -114,9 +114,12 @@ async function call<T>(time: number, opts: InjectOptions): Promise<T> {
 
 // Everything random is drawn up front, so the data is the same on every run.
 const r = rng(20261109);
-// Streams of their own, so the AI flags and captions leave every other draw as it was.
+// Streams of their own, so the AI flags, captions and titles leave every other draw as it was.
 const rAi = rng(20261110);
 const rCaption = rng(20261111);
+const rTitle = rng(20261113);
+/** Whether the server's posts have titles (POST_TITLES): the seed's posts are sent with theirs unless it has them off, which refuses a post with one. */
+const TITLES = config.postTitles !== 'off';
 const start = Date.now();
 const registeredAt = start - (DAYS + 1) * DAY;
 
@@ -164,6 +167,8 @@ interface PostPlan {
   n: number;
   author: number;
   time: number;
+  /** Its title: an article's, or for a picture, its caption or a headline of its beat. Sent where the server's posts have titles. */
+  title: string;
   body: PostBody;
   tags: string[];
   aiGenerated: boolean;
@@ -185,17 +190,20 @@ for (let n = 1; n <= POSTS; n++) {
   const id = String(n).padStart(4, '0');
 
   let body: PostBody;
+  let title: string;
   if (r() < (spec.images ?? 0.04)) {
     if (!tags.includes('photography') && r() < 0.5) tags.push('photography');
     const png = picture(r, topicOf(beat));
     const caption = rCaption() < 0.6 ? article(rCaption, beat, tags).title : undefined;
+    title = article(rTitle, beat, tags).title;
     body = { type: 'image', content: png.toString('base64'), contentEncoding: 'base64', contentType: 'image/png', filename: `seed-${id}.png`, ...(caption && { text: caption }) };
   } else {
     const a = article(r, beat, tags);
+    title = a.title;
     // Some publishers' posts link to the article on their own site.
     body = r() < 0.08 ? { type: 'link', url: `https://${spec.host}.example.com/${beat}/${slug(a.title)}-${id}` } : { type: 'text', text: articleText(a) };
   }
-  const plan = { n, author, time, tags, body };
+  const plan = { n, author, time, title, tags, body };
 
   // Heavy-tailed likes; four in ten posts get none, and posts under 12 hours old have had less time.
   const age = start - time;
@@ -253,6 +261,7 @@ const remoteReposts = Array.from({ length: REMOTE_REPOSTS }, () => {
   const tags = [topicOf(beat), beat];
   const from = pick(rRepost, OTHER_SERVERS);
   const time = start - Math.round((0.05 + rRepost() * 5) * DAY);
+  const a = article(rRepost, beat, tags);
   return {
     user,
     tags,
@@ -264,7 +273,9 @@ const remoteReposts = Array.from({ length: REMOTE_REPOSTS }, () => {
         {
           url: `https://${from.host}/content/${randomUUID()}`,
           publisher: { userId: randomUUID(), username: from.username },
-          preview: { kind: 'text', text: articleText(article(rRepost, beat, tags)) },
+          // Its title on its own server, which this one keeps with the entry, and shows where its own titles are on.
+          title: a.title,
+          preview: { kind: 'text', text: articleText(a) },
           aiGenerated: false,
         },
         time,
@@ -318,14 +329,14 @@ await mapLimit(writes, 8, async ({ post: p, update: u }) => {
   if (u) {
     // mapLimit starts items in order, so the post's own store has already begun.
     const contentId = await p.stored!;
-    // No aiGenerated: an edit that doesn't say keeps the post's.
-    await call(u.time, { method: 'POST', url: '/store', payload: { ...creds(p.author), contentId, ...u.body, tags: u.tags } });
+    // No aiGenerated: an edit that doesn't say keeps the post's. Its title is said again, as an edit says all of the post.
+    await call(u.time, { method: 'POST', url: '/store', payload: { ...creds(p.author), contentId, ...u.body, ...(TITLES && { title: p.title }), tags: u.tags } });
     return;
   }
   p.stored = call<{ contentId: string }>(p.time, {
     method: 'POST',
     url: '/store',
-    payload: { ...creds(p.author), ...p.body, tags: p.tags, aiGenerated: p.aiGenerated },
+    payload: { ...creds(p.author), ...p.body, ...(TITLES && { title: p.title }), tags: p.tags, aiGenerated: p.aiGenerated },
   }).then((res) => res.contentId);
   p.contentId = await p.stored;
   if (++stored % 250 === 0) log(`stored ${stored}/${posts.length}`);

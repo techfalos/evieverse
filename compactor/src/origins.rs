@@ -45,6 +45,8 @@ pub enum Refreshed {
 struct Summarised {
     mime_type: String,
     origin: Origin,
+    /// Its title there, if it has one.
+    title: Option<String>,
     preview: Preview,
     /// What there is of it to read, as moderation reads a post.
     texts: Vec<String>,
@@ -145,8 +147,8 @@ impl Origins {
 
     /// What the server keeps of a post on another server, from its attestation: its content
     /// type, which an image, video or audio has to say and be, where it is and who published
-    /// it there, and its preview, cut to the length of this server's. The type of post must
-    /// be one the server takes.
+    /// it there, its title, and its preview, cut to the length of this server's. The type of
+    /// post must be one the server takes.
     fn summarised(&self, sent: &AttestedPost) -> Result<Summarised, Unwritten> {
         let config = &self.deps.config;
         let kind = sent.preview.kind;
@@ -205,14 +207,19 @@ impl Origins {
         } else {
             caption.map(|caption| plain_text(caption, true))
         };
-        let texts = words
+        // Its title, which is plain text, and the post's words as its caption is.
+        let title = sent.title.clone().filter(|title| !title.is_empty());
+        let texts = title
+            .clone()
             .into_iter()
+            .chain(words)
             .chain(alts)
             .chain([origin.url.clone(), origin.publisher.username.clone()])
             .collect();
         Ok(Summarised {
             mime_type,
             origin,
+            title,
             preview,
             texts,
         })
@@ -285,6 +292,7 @@ impl Origins {
         let Summarised {
             mime_type,
             origin,
+            title,
             preview,
             texts,
         } = self.summarised(post)?;
@@ -297,7 +305,7 @@ impl Origins {
         let ai_generated = post.ai_generated;
         let shown = preview_of(content_id, &meta.preview, meta.origin.as_ref(), &config.public_base_url);
         // A hidden entry is written whatever the post says: the write is what publishes it again.
-        if !hidden && ai_generated == row.flag("ai_generated")? && meta.origin.as_ref() == Some(&origin) && preview == shown {
+        if !hidden && ai_generated == row.flag("ai_generated")? && meta.origin.as_ref() == Some(&origin) && title == meta.title && preview == shown {
             return Ok(Refreshed::None);
         }
 
@@ -346,6 +354,7 @@ impl Origins {
             images: None,
             ai_generated,
             comments: Some(false),
+            title,
             preview,
             text: None,
             mentions: None,

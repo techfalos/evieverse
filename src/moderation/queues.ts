@@ -67,7 +67,7 @@ export async function queueItems(
     if (!post || !meta) return null;
     return {
       kind: 'post' as const,
-      ...toFeedRecord(summaryOf(post, meta, config.publicBaseUrl), rowCounts(post, config.dislikes), publisherOf(post)),
+      ...toFeedRecord(summaryOf(post, meta, config.publicBaseUrl, config.postTitles), rowCounts(post, config.dislikes), publisherOf(post)),
       ...(meta.text !== undefined && { text: meta.text }),
       // All of them, as the whole text is read with them: the record's own are those of its preview.
       ...(meta.mentions?.length && { mentions: meta.mentions }),

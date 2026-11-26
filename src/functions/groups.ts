@@ -51,7 +51,8 @@ interface WithoutDatabase {
  *            /content/:id/attestation (signed, for a repost on another server)
  *   store    POST /uploads, /store                            writes posts
  *   api      everything else: register and users, a user's profile (their avatar,
- *            /users/:id/avatar; the list of their posts, GET /users/:id/posts, which reads the
+ *            /users/:id/avatar; their splash image, /users/:id/splash; the list of their posts,
+ *            GET /users/:id/posts, which reads the
  *            database; the posts they pinned, /users/:id/pinned/:contentId), a user's export of
  *            their own data (GET /users/:id/export, a page at a time), its challenges read out
  *            (/challenges/:id/audio), languages, likes (of posts and of comments), dislikes

@@ -46,6 +46,8 @@ const state = {
   recentTags: [],
   /** The hashtags a post can have (GET /tagging): the server's in server tagging mode, null where any will do. */
   allowedTags: null,
+  /** What the server does with post titles (`postTitles` of GET /rules): on_required, on_optional or off. Required until the server says. */
+  postTitles: 'on_required',
   pages: [],
   cursor: null,
   query: null,
@@ -520,6 +522,8 @@ function card(rec, via) {
       h('span', { class: 'via' }, `via ${via}`),
     ),
     rec.origin ? originLine(rec.origin) : null,
+    // Plain text, as it is: a title has no formatting.
+    rec.title ? h('h3', { class: 'title' }, rec.title) : null,
     preview(rec),
     h('div', { class: 'chips' }, rec.tags.map((t) => h('button', { type: 'button', class: 'chip', onclick: () => toggleTag(t) }, `#${t}`))),
     h(
@@ -637,6 +641,8 @@ async function edit(rec) {
   $('#content-id').value = rec.contentId;
   $('#post-tags').value = rec.tags.join(', ');
   $('#ai-generated').checked = rec.aiGenerated;
+  // An update says the post's title again, as it says all of the post.
+  $('#title').value = rec.title ?? '';
   setKind(p.kind);
   if (p.kind === 'link') $('#url').value = p.url;
   else {
@@ -677,6 +683,19 @@ function setKind(k) {
 const SAMPLE_MARK = 'Testbed post from';
 const isSample = (s) => !s.trim() || s.startsWith(SAMPLE_MARK);
 let sampleTags = '';
+
+/** Whether the server's posts have titles: the title field is shown where they do. */
+const titlesOn = () => state.postTitles !== 'off';
+/** A sample title, where the server's posts have titles, unless one was typed in. */
+function fillSampleTitle() {
+  if (titlesOn() && isSample($('#title').value)) $('#title').value = `${SAMPLE_MARK} ${state.actor?.username ?? 'someone'}`;
+}
+/** Shows the title field as the server takes titles: required, optional, or not at all. */
+function renderTitleField() {
+  $('#title-fields').hidden = !titlesOn();
+  $('#title-hint').textContent = state.postTitles === 'on_required' ? '(required)' : '(optional)';
+  fillSampleTitle();
+}
 /** A sample post, tagged with the actor's interests (of the hashtags the server allows) unless other hashtags were typed in. */
 function fillSample() {
   const a = state.actor;
@@ -685,6 +704,7 @@ function fillSample() {
   // Where the server lists the hashtags a post can have, the ones wanted that are on it, or else its first.
   const usable = allowed ? wanted.filter((t) => allowed.includes(t)) : wanted;
   const tags = (usable.length ? usable : (allowed ?? [])).slice(0, 2).join(', ');
+  fillSampleTitle();
   $('#content').value =
     `${SAMPLE_MARK} ${a?.username ?? 'someone'} at ${new Date().toLocaleTimeString()}.\n\n` +
     'Its hashtags are below, so it shows up in those feeds after the next compactor run, a few seconds from now. ' +
@@ -703,6 +723,9 @@ async function post(e) {
   const type = kind();
   const text = $('#content').value;
   const url = $('#url').value.trim();
+  // Sent where the server's posts have titles (postTitles of GET /rules): one that has them off refuses a post with one.
+  const title = (titlesOn() && $('#title').value.trim()) || undefined;
+  if (state.postTitles === 'on_required' && !title) return toast('Give the post a title first: on this server, every post has one.');
   // An image post's images, in the order the browser lists them; any other post's one file.
   const files = [...$('#file').files].slice(0, type === 'image' ? undefined : 1);
   if (type === 'text' && !text.trim()) return toast('Write something first.');
@@ -710,10 +733,11 @@ async function post(e) {
   if (isMedia(type) && !files.length) return toast(type === 'image' ? 'Choose an image first, or several for an album.' : `Choose ${type === 'audio' ? 'an audio' : 'a video'} file first.`);
   /** The request body. */
   const body = () => {
-    if (type === 'text') return { type, text, tags, contentId, aiGenerated };
-    if (type === 'link') return { type, url, tags, contentId, aiGenerated };
+    if (type === 'text') return { type, title, text, tags, contentId, aiGenerated };
+    if (type === 'link') return { type, title, url, tags, contentId, aiGenerated };
     const form = new FormData();
     form.append('type', type);
+    if (title) form.append('title', title);
     if (text.trim()) form.append('text', text);
     if (tags) form.append('tags', tags);
     if (contentId) form.append('contentId', contentId);
@@ -826,11 +850,17 @@ async function init() {
       : `Any hashtags will do (TAGGING_MODE=user), up to ${data.maxTags} a post.`;
     if (data.allowedTags) $('#post-tags').placeholder = data.allowedTags.slice(0, 2).join(', ');
   } catch {}
+  // Whether a post has a title, and whether it has to (POST_TITLES): the server's rules say, beside the rules themselves.
+  try {
+    const { data } = await api('GET', '/rules', undefined, { auth: false });
+    if (data.postTitles) state.postTitles = data.postTitles;
+  } catch {}
 
   renderActorSelect();
   const fromHash = readHash();
   setActor(fromHash ?? store.get('actor'), { reload: false });
   if (!$('#content').value) fillSample();
+  renderTitleField();
 
   $('#actor').addEventListener('change', (e) => setActor(e.target.value));
   $('#feed-form').addEventListener('submit', (e) => {

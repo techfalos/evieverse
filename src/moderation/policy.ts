@@ -109,11 +109,12 @@ export async function moderateComment(
 }
 
 /**
- * Moderation of what `userId` puts on their profile: a bio, links, an avatar, or whichever of them
- * the request sets. It goes through the gate a post does: the same trust plugins give it a score,
- * each told it is a profile. What there is of it to read is the bio, as its readers
- * read it, the links, and the name the avatar was sent with (`filename`); `image` is the avatar,
- * as a post's images are given.
+ * Moderation of what `userId` puts on their profile: a bio, links, an avatar, a splash image, or
+ * whichever of them the request sets. It goes through the gate a post does: the same trust
+ * plugins give it a score, each told it is a profile. What there is of it to read is the bio, as
+ * its readers read it, the links, and the name the avatar or the splash image was sent with
+ * (`filename`); `image` is that image, as a post's images are given, and `splash` says that it
+ * is the splash image, and not the avatar.
  *
  * A profile has no moderation queue to wait in, so the score has one of two outcomes: it is
  * published, or it is refused. Throws 422 for one whose score doesn't publish it, which is
@@ -124,11 +125,16 @@ export async function moderateComment(
  */
 export async function moderateProfile(
   { trust, now = Date.now, log, client }: ModerationDeps,
-  profile: { userId: string; bio?: string | null; links?: string[] | null; filename?: string | null; image?: TrustImage },
+  profile: { userId: string; bio?: string | null; links?: string[] | null; filename?: string | null; image?: TrustImage; splash?: boolean },
 ): Promise<void> {
   const [image] = await read(trust, [profile.image]);
   // The bio as its readers read it: without its formatting, with where its links lead (format.ts).
-  const sent = { userId: profile.userId, texts: said([profile.bio ? plainText(profile.bio, true) : null, ...(profile.links ?? []), profile.filename]), ...(image && { image }) };
+  const sent = {
+    userId: profile.userId,
+    texts: said([profile.bio ? plainText(profile.bio, true) : null, ...(profile.links ?? []), profile.filename]),
+    ...(image && { image }),
+    ...(profile.splash && { splash: true }),
+  };
   settled(await trust.ask<null>('moderateProfile', now(), { client, sent }, log));
 }
 

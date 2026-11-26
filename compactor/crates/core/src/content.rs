@@ -1,5 +1,5 @@
 //! Uploaded bytes and the meta file of each piece of content, the bytes of the images and
-//! videos that comments come with, the images of ads and users' avatars. The same keys as
+//! videos that comments come with, the images of ads and users' avatars and splash images. The same keys as
 //! src/storage/contentStore.ts, and the compactor's side of that store: only the compactor
 //! writes or deletes a post's bytes and meta file, and a comment's image or video. What a
 //! request writes is a staged file, which the compactor makes the post's or the comment's.
@@ -52,6 +52,9 @@ pub struct ContentMeta {
     /// Whether the post takes comments. Absent: it doesn't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comments: Option<bool>,
+    /// The post's title: one line of plain text. Absent on a post that has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// As written; read it with `preview_of`, which links a file to where its bytes are read.
     pub preview: Preview,
     /// The whole text of a text post, or an image's, video's or audio's caption.
@@ -133,6 +136,12 @@ fn avatar_prefix(user_id: &str) -> String {
     format!("avatars/{user_id}/")
 }
 
+/// Where a user's splash images are kept: apart from posts and from avatars, and all under
+/// the user's id, so that whatever is left of them goes with the account in one deletion.
+fn splash_prefix(user_id: &str) -> String {
+    format!("splashes/{user_id}/")
+}
+
 /// Where what the server made of a post's videos is kept: a folder for each version of its
 /// video, all of them under the post's id, so that they go with the post in one deletion.
 fn media_prefix(content_id: &str) -> String {
@@ -172,6 +181,8 @@ pub enum BytesOwner<'a> {
     Ad(&'a str),
     /// A user's avatar, named by the user and the avatar's id.
     Avatar { user_id: &'a str, avatar: &'a str },
+    /// A user's splash image, named by the user and the splash image's id.
+    Splash { user_id: &'a str, splash: &'a str },
     /// A staged file's, named by its key.
     Staged(&'a str),
 }
@@ -196,6 +207,12 @@ impl BytesOwner<'_> {
                     bail!("\"{avatar}\" is not the id of an avatar");
                 }
                 format!("{}{avatar}", avatar_prefix(user_id))
+            }
+            Self::Splash { user_id, splash } => {
+                if !is_id(splash) {
+                    bail!("\"{splash}\" is not the id of a splash image");
+                }
+                format!("{}{splash}", splash_prefix(user_id))
             }
             Self::Staged(key) => staged_object(key)?.to_owned(),
         })
@@ -395,6 +412,17 @@ impl ContentStore {
     pub async fn remove_avatars(&self, user_id: &str) -> Result<()> {
         self.objects.remove_all(&avatar_prefix(user_id)).await
     }
+
+    /// Deletes one splash image of a user's. One that isn't there is no error.
+    pub async fn remove_splash(&self, user_id: &str, splash_id: &str) -> Result<()> {
+        self.objects.delete(&BytesOwner::Splash { user_id, splash: splash_id }.key()?).await
+    }
+
+    /// Deletes every splash image the store holds of a user: what goes with the account.
+    /// Nothing there is no error.
+    pub async fn remove_splashes(&self, user_id: &str) -> Result<()> {
+        self.objects.remove_all(&splash_prefix(user_id)).await
+    }
 }
 
 #[cfg(test)]
@@ -451,5 +479,7 @@ mod tests {
             .is_err()
         );
         assert!(BytesOwner::Avatar { user_id: "u", avatar: "../x" }.key().is_err());
+        assert_eq!(BytesOwner::Splash { user_id: "u", splash: ID }.key().unwrap(), format!("splashes/u/{ID}"));
+        assert!(BytesOwner::Splash { user_id: "u", splash: "../x" }.key().is_err());
     }
 }

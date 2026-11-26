@@ -145,12 +145,14 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   /**
    * A public profile: the user's name, when their account was created (`createdAt`), what they say
    * of themselves (`bio`, null for one who says nothing), where else they are found (`links`),
-   * where their avatar is read (`avatarUrl`, null for one who has none), and the posts they pinned
-   * to it, the one pinned last first (`pinnedContentIds`, without those nobody may read: see
-   * pinnedPosts). GET /users/:userId/posts lists their posts (routes/profile.ts).
+   * where their avatar and their splash image are read (`avatarUrl` and `splashUrl`, each null for
+   * one who has none), and the posts they pinned to it, the one pinned last first
+   * (`pinnedContentIds`, without those nobody may read: see pinnedPosts). GET /users/:userId/posts
+   * lists their posts (routes/profile.ts).
    *
    * `banned` says whether the user is banned. A banned user's profile says so and shows nothing
-   * else they put on it (see shownProfile): no bio, no links, no avatar and no pinned post.
+   * else they put on it (see shownProfile): no bio, no links, no avatar, no splash image and no
+   * pinned post.
    *
    * With the user's roles: whether they're an admin or a server moderator, and the
    * hashtags they moderate. Not whether they take messages from other users: with it, someone
@@ -161,7 +163,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const { userId } = Params.parse(req.params);
     const user = await db
       .selectFrom('users')
-      .select(['id', 'username', 'created_at', 'admin', 'moderator', 'bio', 'links', 'avatar_id', 'banned_at'])
+      .select(['id', 'username', 'created_at', 'admin', 'moderator', 'bio', 'links', 'avatar_id', 'splash_id', 'banned_at'])
       .where('id', '=', userId)
       .where('deleted_at', 'is', null)
       .executeTakeFirst();
@@ -218,7 +220,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
    * first, as a post does (see moderateProfile): the request is refused (422), all of it, if they
    * aren't trusted. A banned user sets neither (403), and can take them away. `links` is all of
    * the profile's links: the ones sent take the place of the ones there were. The same link sent
-   * twice is there once. The avatar is a file, and has routes of its own (routes/profile.ts).
+   * twice is there once. The avatar and the splash image are files, and have routes of their own
+   * (routes/profile.ts).
    *
    * The answer gives the profile as the user's row has it (see profileOf), to the user whose it
    * is: a banned user is given theirs here, which nobody is shown while they are banned.
@@ -255,7 +258,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     await db.updateTable('users').set(changes).where('id', '=', userId).execute();
     req.language = language;
     // The profile as the row now has it: what this request set of it, and what it left as it was.
-    const profile = await db.selectFrom('users').select(['id', 'bio', 'links', 'avatar_id']).where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
+    const profile = await db.selectFrom('users').select(['id', 'bio', 'links', 'avatar_id', 'splash_id']).where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
     // Deleted while this request was under way.
     if (!profile) throw notFound(msg('user.not_found'));
     return { userId, username: user.username, language, messages, showFollowing, showFollowers, ...profileOf(profile, config.publicBaseUrl) };

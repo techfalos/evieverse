@@ -140,15 +140,18 @@ pub async fn moderate_comment(deps: &Moderation<'_>, comment: CommentSent) -> Re
 #[derive(Debug, Clone, Default)]
 pub struct ProfileSent {
     pub user_id: String,
-    /// What there is of it to read: the bio, the links, and the name the avatar was sent with.
+    /// What there is of it to read: the bio, the links, and the name the avatar or the splash
+    /// image was sent with.
     pub texts: Vec<String>,
-    /// The avatar, if that is what is set.
+    /// The avatar or the splash image, if that is what is set.
     pub image: Option<TrustImage>,
+    /// Whether `image` is the splash image, and not the avatar.
+    pub splash: bool,
 }
 
-/// Moderation of what a user puts on their profile: a bio, links, an avatar, or whichever
-/// of them the request sets. It goes through the gate a post does, each plugin told it is a
-/// profile.
+/// Moderation of what a user puts on their profile: a bio, links, an avatar, a splash image,
+/// or whichever of them the request sets. It goes through the gate a post does, each plugin
+/// told it is a profile.
 ///
 /// A profile has no moderation queue to wait in, so the score has one of two outcomes: it is
 /// published, or it is refused, which is what a post's score would have it deleted for, and
@@ -157,6 +160,7 @@ pub async fn moderate_profile(deps: &Moderation<'_>, profile: ProfileSent) -> Re
     let post = TrustPost {
         user_id: profile.user_id,
         profile: true,
+        splash: profile.splash,
         texts: profile.texts.into_iter().filter(|text| !text.is_empty()).collect(),
         images: profile.image.into_iter().collect(),
         ..TrustPost::default()
@@ -599,6 +603,7 @@ mod tests {
             user_id: "u1".into(),
             texts: strings(&[text]),
             image: None,
+            splash: false,
         };
         moderate_profile(&deps, profile("a fine bio")).await.unwrap();
         // A profile has no queue to wait in.

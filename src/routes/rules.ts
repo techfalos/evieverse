@@ -183,7 +183,12 @@ function changeRule(db: Db, list: RuleList, ruleId: string, body: { text?: strin
  * as well, which a client shows in its own. The server holds nobody to it either, yet: a post
  * or a comment is taken with the declaration (`aiGenerated`) or without it, whatever this says.
  *
- * GET /rules gives all five to anyone, with a key or without, so a client can show them to
+ * What the server does with post titles is whether a post has a title, and whether it has to
+ * (`POST_TITLES`): one of three words too, the operator's to set. This one the server holds
+ * posts to (POST /store), so a client reads it to know whether to ask for a title, and whether
+ * to send a post without one.
+ *
+ * GET /rules gives all six to anyone, with a key or without, so a client can show them to
  * someone before they register. GET /tags/:tag/rules gives a hashtag's the same way.
  */
 export function rulesRoutes(app: FastifyInstance, deps: AppDeps) {
@@ -206,17 +211,19 @@ export function rulesRoutes(app: FastifyInstance, deps: AppDeps) {
   const acted = (req: FastifyRequest, user: AuthUser, tag: string) => recordAction(deps, user.id, tag, req.log);
 
   /**
-   * The rules, in their order, the minimum age, what the server says of generative AI, the
-   * support address and the modification disclosure. For anyone: it needs no key, and reads
+   * The rules, in their order, the minimum age, what the server says of generative AI, what it
+   * does with post titles, the support address and the modification disclosure. For anyone: it needs no key, and reads
    * none. The minimum age is the number of years the operator set, or where they set none, the
    * words that say so, in the language the request asks for. `genAi` is the setting as it is
-   * written (GEN_AI_SETTINGS in src/config.ts), the same in every language.
+   * written (GEN_AI_SETTINGS in src/config.ts), the same in every language, and so is
+   * `postTitles` (POST_TITLES_SETTINGS): `on_required`, `on_optional` or `off`.
    */
   app.get('/rules', async (req) => ({
     modificationDisclosure: { modified: config.modified, release: RELEASE, sourceUrl: config.sourceUrl },
     supportEmail: config.supportEmail,
     minimumAge: config.minimumAge ?? say(req, msg('rule.all_ages')),
     genAi: config.genAi,
+    postTitles: config.postTitles,
     rules: (await serverRules.inOrder(db)).map(record),
   }));
 

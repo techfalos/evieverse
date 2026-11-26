@@ -124,7 +124,7 @@ for (const target of TARGETS) {
 
       // Each list is shown on its own.
       const shown = await update(alice, { showFollowing: true });
-      expect([shown.statusCode, shown.json()]).toEqual([200, { userId: alice.userId, username: 'alice', language: 'en', messages: true, showFollowing: true, showFollowers: false, bio: null, links: [], avatarUrl: null }]);
+      expect([shown.statusCode, shown.json()]).toEqual([200, { userId: alice.userId, username: 'alice', language: 'en', messages: true, showFollowing: true, showFollowers: false, bio: null, links: [], avatarUrl: null, splashUrl: null }]);
       expect(await whoami(alice)).toMatchObject({ showFollowing: true, showFollowers: false });
       expect(await names('following')).toEqual(['bob']);
       expect(await names('following', carol)).toEqual(['bob']);

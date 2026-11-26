@@ -79,11 +79,19 @@ export interface UsersTable {
   /**
    * The id of the user's avatar (PUT /users/:userId/avatar), which names its file in the content
    * store: another image is another id. Null for a user who has none. The row of a closed
-   * account is purged only once this is null again (see dropAvatars).
+   * account is purged only once this is null again (see dropProfileImages).
    */
   avatar_id: string | null;
   /** The content type of the user's avatar, which is the one every avatar is made as (AVATAR_TYPE in src/profile.ts); null with `avatar_id`. */
   avatar_type: string | null;
+  /**
+   * The id of the user's splash image (PUT /users/:userId/splash), which names its file in the
+   * content store: another image is another id. Null for a user who has none. The row of a
+   * closed account is purged only once this is null again, as with `avatar_id`.
+   */
+  splash_id: string | null;
+  /** The content type of the user's splash image, which is the image's own (an ImageType of src/image.ts): it is kept as it was sent. Null with `splash_id`. */
+  splash_type: string | null;
 }
 
 /**

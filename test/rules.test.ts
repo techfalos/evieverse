@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_GEN_AI, DEFAULT_SUPPORT_EMAIL, GEN_AI_SETTINGS, loadConfig, MAX_MINIMUM_AGE } from '../src/config.js';
+import { DEFAULT_GEN_AI, DEFAULT_POST_TITLES, DEFAULT_SUPPORT_EMAIL, GEN_AI_SETTINGS, loadConfig, MAX_MINIMUM_AGE, POST_TITLES_SETTINGS } from '../src/config.js';
 import { loadLanguages } from '../src/language.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { RELEASE } from '../src/release.js';
@@ -20,9 +20,18 @@ const SUPPORT = 'support@our-evieverse.example';
 const AS_RELEASED = { modified: false, release: RELEASE, sourceUrl: null };
 /** What a server says its minimum age is where its operator set none, as every server does unless it is told otherwise. */
 const ALL_AGES = 'All Legal Ages Allowed';
+/** What the tests' server does with post titles unless a test says otherwise (see createTestContext): not the server's default. */
+const TEST_TITLES = 'on_optional';
 
 type Rule = { ruleId: string; position: number; text: string; createdAt: string; updatedAt: string };
-type Rules = { modificationDisclosure: { modified: boolean; release: string; sourceUrl: string | null }; supportEmail: string; minimumAge: number | string; genAi: string; rules: Rule[] };
+type Rules = {
+  modificationDisclosure: { modified: boolean; release: string; sourceUrl: string | null };
+  supportEmail: string;
+  minimumAge: number | string;
+  genAi: string;
+  postTitles: string;
+  rules: Rule[];
+};
 
 for (const target of TARGETS) {
   describe(`rules (${target.name})`, () => {
@@ -56,7 +65,7 @@ for (const target of TARGETS) {
 
     it('gives the rules and the modification disclosure to anyone, with a key or without', async () => {
       const { root, alice } = await setup();
-      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, rules: [] });
 
       const at = now();
       const first = await add(root, '  Be kind.  ');
@@ -64,7 +73,7 @@ for (const target of TARGETS) {
       const second = await add(root, 'No spam.\nNot even a little.');
       expect(second).toMatchObject({ position: 2, text: 'No spam.\nNot even a little.' });
 
-      const expected = { modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, rules: [first, second] };
+      const expected = { modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, rules: [first, second] };
       expect(await published()).toEqual(expected);
       expect(ok(await req(alice, 'GET', '/rules'))).toEqual(expected);
       // The body's credentials are as good as the headers', as on every route.
@@ -74,9 +83,9 @@ for (const target of TARGETS) {
     it('says it runs a modified version, the release that is based on and where its source is, on a server whose operator says so', async () => {
       const { root } = await setup({ modified: true, sourceUrl: SOURCE });
       const modificationDisclosure = { modified: true, release: RELEASE, sourceUrl: SOURCE };
-      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, rules: [] });
       const rule = await add(root, 'Be kind.');
-      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, rules: [rule] });
+      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, rules: [rule] });
       // No request changes it: not an admin's, and not one that names it.
       ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', modified: false, modificationDisclosure: AS_RELEASED }));
       expect((await published()).modificationDisclosure).toEqual(modificationDisclosure);
@@ -84,7 +93,7 @@ for (const target of TARGETS) {
 
     it('says where its source is on a server that runs a release, if its operator says', async () => {
       await setup({ sourceUrl: SOURCE });
-      expect(await published()).toEqual({ modificationDisclosure: { ...AS_RELEASED, sourceUrl: SOURCE }, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: { ...AS_RELEASED, sourceUrl: SOURCE }, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, rules: [] });
     });
 
     it('gives the address to write to for support: the one its operator set, and a placeholder until they do', async () => {
@@ -111,7 +120,7 @@ for (const target of TARGETS) {
       expect(ok(await req(alice, 'GET', '/rules')).minimumAge).toBe(13);
       // It comes with the rest, and beside the rules, not among them.
       const rule = await add(root, 'Be kind.');
-      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: 13, genAi: DEFAULT_GEN_AI, rules: [rule] });
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: 13, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, rules: [rule] });
       // No request changes it: not an admin's, and not one that names it.
       ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', minimumAge: 21 }));
       ok(await req(root, 'POST', '/rules', { text: 'Be older.', minimumAge: 21 }), 201);
@@ -152,12 +161,32 @@ for (const target of TARGETS) {
         expect(ok(await ctx.app.inject({ method: 'GET', url: '/rules', headers: { 'accept-language': 'es-MX' } })).genAi).toBe(genAi);
         // It comes with the rest, and beside the rules, not among them.
         const rule = await add(root, 'Be kind.');
-        expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi, rules: [rule] });
+        expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi, postTitles: TEST_TITLES, rules: [rule] });
         // No request changes it: not an admin's, and not one that names it.
         ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', genAi: 'not_allowed' }));
         ok(await req(root, 'POST', '/rules', { text: 'Be human.', genAi: 'disclosure_optional' }), 201);
         expect((await published()).genAi).toBe(genAi);
       }
+    });
+
+    it('says what its operator set of post titles: whether a post has one, and whether it has to', async () => {
+      for (const postTitles of POST_TITLES_SETTINGS) {
+        const { root, alice } = await setup({ postTitles });
+        expect((await published()).postTitles).toBe(postTitles);
+        expect(ok(await req(alice, 'GET', '/rules')).postTitles).toBe(postTitles);
+        // The setting as it is written, whatever language the request asks for.
+        expect(ok(await ctx.app.inject({ method: 'GET', url: '/rules', headers: { 'accept-language': 'es-MX' } })).postTitles).toBe(postTitles);
+        // It comes with the rest, and beside the rules, not among them.
+        const rule = await add(root, 'Be kind.');
+        expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles, rules: [rule] });
+        // No request changes it: not an admin's, and not one that names it.
+        ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', postTitles: 'off' }));
+        ok(await req(root, 'POST', '/rules', { text: 'Be brief.', postTitles: 'on_required' }), 201);
+        expect((await published()).postTitles).toBe(postTitles);
+        await ctx.close();
+      }
+      // The last one stays open for the test's end to close.
+      await setup();
     });
 
     it('has only an admin add, change and remove rules', async () => {
@@ -248,7 +277,7 @@ for (const target of TARGETS) {
       expect(await add(root, 'E', 2)).toMatchObject({ position: 2 });
       expect(await texts()).toEqual(['A', 'E', 'C', 'D']);
       for (const rule of (await published()).rules) ok(await req(root, 'DELETE', `/rules/${rule.ruleId}`));
-      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, rules: [] });
     });
 
     it(`has at most ${MAX_RULES} rules`, async () => {
@@ -371,6 +400,44 @@ describe('what the server says of generative AI', () => {
     }
     // What isn't text is refused too, whatever it holds.
     for (const setting of [true, 1, null, ['not_allowed'], { allowed: false }]) expect(() => genAi({}, { genAi: setting }), String(setting)).toThrow();
+  });
+});
+
+describe('what the server does with post titles', () => {
+  const postTitles = (env: Record<string, string>, overrides = {}) => loadConfig(overrides, { ...BASE_ENV, ...env }).postTitles;
+
+  it('is that every post has one, unless POST_TITLES says otherwise', () => {
+    expect(POST_TITLES_SETTINGS).toEqual(['on_required', 'on_optional', 'off']);
+    expect(DEFAULT_POST_TITLES).toBe('on_required');
+    expect(postTitles({})).toBe('on_required');
+    // An empty value counts as unset, as it does for every setting.
+    for (const unset of ['', '   ']) expect(postTitles({ POST_TITLES: unset }), `"${unset}"`).toBe(DEFAULT_POST_TITLES);
+    expect(postTitles({}, { postTitles: '' })).toBe(DEFAULT_POST_TITLES);
+    for (const setting of POST_TITLES_SETTINGS) {
+      expect(postTitles({ POST_TITLES: setting })).toBe(setting);
+      // In any case, and with space around it.
+      expect(postTitles({ POST_TITLES: ` ${setting.toUpperCase()} ` })).toBe(setting);
+      // As a config file has it.
+      expect(postTitles({}, { postTitles: setting })).toBe(setting);
+      // Settings that were read can be read again, as a function's are from the server's.
+      expect(postTitles({}, { postTitles: postTitles({ POST_TITLES: setting }) })).toBe(setting);
+    }
+    // With a hyphen or a space where the setting has an underscore: the three as they are said.
+    expect(postTitles({ POST_TITLES: 'On-Required' })).toBe('on_required');
+    expect(postTitles({ POST_TITLES: 'On-Optional' })).toBe('on_optional');
+    expect(postTitles({ POST_TITLES: 'Off' })).toBe('off');
+    expect(postTitles({ POST_TITLES: 'on required' })).toBe('on_required');
+    expect(postTitles({ POST_TITLES: 'ON_OPTIONAL' })).toBe('on_optional');
+    // The environment is over the config file, and what a caller passes is over both.
+    expect(postTitles({ POST_TITLES: 'off' }, { postTitles: 'on_optional' })).toBe('on_optional');
+  });
+
+  it('does not start a server whose POST_TITLES is none of the three', () => {
+    for (const setting of ['on', 'required', 'optional', 'onrequired', 'true', 'false', '0', 'yes', 'no', 'on_required,off', 'off!']) {
+      expect(() => postTitles({ POST_TITLES: setting }), setting).toThrow(/POST_TITLES is whether a post has a title, and whether it has to/);
+    }
+    // What isn't text is refused too, whatever it holds.
+    for (const setting of [true, false, 1, null, ['off'], { required: true }]) expect(() => postTitles({}, { postTitles: setting }), String(setting)).toThrow();
   });
 });
 

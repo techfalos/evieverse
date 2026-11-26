@@ -834,7 +834,7 @@ fn resolve(merged: &Value) -> Result<Config> {
             author_day_max_posts: r.positive("feed.authorDayMaxPosts", 1000),
             max_lookback_days: r.int("feed.maxLookbackDays", 90, 7, MAX_SAFE_INTEGER),
             preview_words: r.positive("feed.previewWords", 100),
-            preview_chars: r.positive("feed.previewChars", 1000),
+            preview_chars: r.positive("feed.previewChars", 160),
             related_tags: r.count("feed.relatedTags", 3),
             related_min_posts: r.positive("feed.relatedMinPosts", 5),
             related_min_percent: r.int("feed.relatedMinPercent", 20, 0, 100),

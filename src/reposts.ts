@@ -51,11 +51,11 @@ export const removedRepostTags = async (db: Pick<Db, 'selectFrom'>, contentId: s
 
 /**
  * What there is to read of content that is there, as moderation reads a post (see moderatePost):
- * its text or caption without its formatting, or the URL it links to; and, of a repost of a post
- * on another server, the original's address and its publisher's name.
+ * its title, its text or caption without its formatting, or the URL it links to; and, of a
+ * repost of a post on another server, the original's address and its publisher's name.
  */
-export function readableOf(meta: Pick<ContentMeta, 'preview' | 'text' | 'origin'>): string[] {
-  const { preview, origin } = meta;
+export function readableOf(meta: Pick<ContentMeta, 'title' | 'preview' | 'text' | 'origin'>): string[] {
+  const { title, preview, origin } = meta;
   const text = meta.text ?? (preview.kind === 'link' ? undefined : preview.text);
-  return [preview.kind === 'link' ? preview.url : text && plainText(text, true), origin?.url, origin?.publisher.username].filter((t): t is string => !!t);
+  return [title, preview.kind === 'link' ? preview.url : text && plainText(text, true), origin?.url, origin?.publisher.username].filter((t): t is string => !!t);
 }

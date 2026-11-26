@@ -38,7 +38,8 @@ export interface PostBytes {
   local(): Promise<string | null>;
   /**
    * Writes the bytes as `of`'s, over the ones it had, and returns their size as stored. For what
-   * no compactor writes, which is an ad's image: a post's file and a comment's are staged.
+   * no compactor writes, which is an ad's image and a profile's splash image: a post's file and
+   * a comment's are staged.
    */
   place(content: ContentStore, of: BytesOwner, mimeType: string): Promise<StoredBytes>;
   /**

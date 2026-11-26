@@ -9,8 +9,8 @@ export interface User {
   apiKey: string;
 }
 
-/** A post as /store takes it, but for whose it is. */
-export type PostBody = { tags: string[] } & (
+/** A post as /store takes it, but for whose it is. With a title: the benchmark's server has its settings' defaults, and by default every post has one (POST_TITLES). */
+export type PostBody = { tags: string[]; title: string } & (
   | { type: 'text'; text: string }
   | { type: 'link'; url: string }
   | { type: 'image'; content: string; contentEncoding: 'base64'; contentType: 'image/png'; filename: string }
@@ -41,7 +41,9 @@ export interface Dataset {
 
 /**
  * A post one of the publishers might write, of the testbed's corpus: a text of 90 to 200 words
- * mostly, sometimes a link or a picture, under its topic's hashtag and its subject's.
+ * mostly, sometimes a link or a picture, under its topic's hashtag and its subject's. A text's
+ * title is its article's; a link's and a picture's are made of what they are, with no draw of
+ * their own, so the data is what it was before posts had titles.
  */
 export function newPost(r: Rng, n: number, publisher = Math.floor(r() * PUBLISHERS.length)): PostBody & { publisher: number } {
   const spec = PUBLISHERS[publisher]!;
@@ -50,8 +52,9 @@ export function newPost(r: Rng, n: number, publisher = Math.floor(r() * PUBLISHE
   if (spec.beats.length > 1 && r() < 0.35) tags.push(pick(r, spec.beats.filter((b) => b !== beat)));
   const kind = r();
   if (kind < (spec.images ?? 0.04)) {
-    return { publisher, tags, type: 'image', content: picture(r, topicOf(beat)).toString('base64'), contentEncoding: 'base64', contentType: 'image/png', filename: `bench-${n}.png` };
+    return { publisher, tags, title: `${spec.username}: ${beat} in pictures, no. ${n}`, type: 'image', content: picture(r, topicOf(beat)).toString('base64'), contentEncoding: 'base64', contentType: 'image/png', filename: `bench-${n}.png` };
   }
-  if (kind > 0.92) return { publisher, tags, type: 'link', url: `https://${spec.host}.example.com/${beat}/${n}` };
-  return { publisher, tags, type: 'text', text: articleText(article(r, beat, tags)) };
+  if (kind > 0.92) return { publisher, tags, title: `${spec.username}: the latest on ${beat}, no. ${n}`, type: 'link', url: `https://${spec.host}.example.com/${beat}/${n}` };
+  const a = article(r, beat, tags);
+  return { publisher, tags, title: a.title, type: 'text', text: articleText(a) };
 }
