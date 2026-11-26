@@ -29,7 +29,7 @@ export const ORIGIN_GONE = { status: 'origin_gone' } as const;
 
 /**
  * What a response says of a post, or a comment, whose video the server is still processing
- * (src/video): `processing`, beside whatever else it says. It is stored, and is read by its id as
+ * (compactor/src/video): `processing`, beside whatever else it says. It is stored, and is read by its id as
  * it was written, but its video isn't there to play yet, and it is in no feed or list until it
  * is. It says so no more once the video is ready, a moment or some minutes later.
  */
@@ -206,7 +206,7 @@ const previewMentions = (meta: Pick<ContentMeta, 'preview' | 'mentions'>): Pick<
 /**
  * The summary of the content `meta` describes, rebuilt from the database and the meta file, which
  * outlives the summary store's retention. `repostedAt` is when the content was reposted, once for
- * each repost (see repostTimes): it says where the summary is kept, beside the content's own day.
+ * each repost: it says where the summary is kept, beside the content's own day.
  */
 export const summaryOf = (
   row: { id: string; user_id: string; created_at: number; ai_generated: number },

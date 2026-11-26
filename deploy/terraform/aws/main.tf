@@ -7,7 +7,7 @@
 
 locals {
   root        = abspath("${path.module}/../../..")
-  source_hash = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), sort(fileset(local.root, "languages/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json", "scripts/build-cli.mjs"]) : filesha1("${local.root}/${f}")]))
+  source_hash = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), sort(fileset(local.root, "languages/**")), sort(fileset(local.root, "compactor/src/**")), sort(fileset(local.root, "compactor/crates/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json", "scripts/build-cli.mjs", "compactor/Cargo.toml", "compactor/Cargo.lock", "compactor/rust-toolchain.toml"]) : filesha1("${local.root}/${f}")]))
   image       = var.image != "" ? var.image : "${aws_ecr_repository.app.repository_url}:${substr(local.source_hash, 0, 12)}"
   url         = "https://${aws_cloudfront_distribution.app.domain_name}"
   azs         = slice(data.aws_availability_zones.available.names, 0, 2)
@@ -375,7 +375,7 @@ resource "aws_elasticache_replication_group" "redis" {
   at_rest_encryption_enabled = true
   transit_encryption_enabled = true
   auth_token                 = random_password.redis.result
-  # A daily snapshot shortens recovery; `node dist/compact/main.js --once --rebuild` restores everything without one.
+  # A daily snapshot shortens recovery; `compactor --once --rebuild` restores everything without one.
   snapshot_retention_limit = 1
 }
 
@@ -559,13 +559,12 @@ resource "aws_db_proxy_target" "main" {
 
 locals {
   env = merge({
-    DB_DIALECT         = "postgres"
-    CONTENT_SCHEME     = "s3"
-    CONTENT_OPTIONS    = jsonencode({ bucket = aws_s3_bucket.content.id, region = var.region })
-    PUBLIC_BASE_URL    = local.url
-    SUPPORT_EMAIL      = var.support_email
-    COMPACT_IN_PROCESS = "false"
-    STORAGE_TMP_PATH   = "/tmp/evieverse"
+    DB_DIALECT       = "postgres"
+    CONTENT_SCHEME   = "s3"
+    CONTENT_OPTIONS  = jsonencode({ bucket = aws_s3_bucket.content.id, region = var.region })
+    PUBLIC_BASE_URL  = local.url
+    SUPPORT_EMAIL    = var.support_email
+    STORAGE_TMP_PATH = "/tmp/evieverse"
     # /store checks a file sent with an upload link by reading it back from the bucket, inside API
     # Gateway's 30 seconds. An estimate of what fits, not a measurement: raise it after timing your own.
     MAX_UPLOAD_BYTES = "268435456"
@@ -975,7 +974,7 @@ resource "aws_ecs_task_definition" "compactor" {
     cpu_architecture        = "X86_64"
   }
   container_definitions = jsonencode([merge(local.compactor_container, {
-    command = ["node", "dist/compact/main.js"]
+    command = ["compactor"]
     # SIGTERM lets the pass that is running finish; then ECS stops the task.
     stopTimeout = 120
   })])
@@ -1012,7 +1011,7 @@ resource "aws_ecs_service" "compactor" {
 }
 
 # `--rebuild` rebuilds the whole feed index from the database and the bucket, after Redis lost data.
-# It is a task of its own, started by hand (see docs/DEPLOY.md): no service runs it. It can run
+# It is a task of its own, started by hand (see docs/IAC.md): no service runs it. It can run
 # beside the compactor: the lease makes each wait for the other's pass.
 resource "aws_ecs_task_definition" "rebuild" {
   family                   = "${var.name}-rebuild"
@@ -1027,7 +1026,7 @@ resource "aws_ecs_task_definition" "rebuild" {
     cpu_architecture        = "X86_64"
   }
   container_definitions = jsonencode([merge(local.compactor_container, {
-    command = ["node", "dist/compact/main.js", "--once", "--rebuild"]
+    command = ["compactor", "--once", "--rebuild"]
   })])
   depends_on = [terraform_data.image, aws_lambda_invocation.migrate]
 }

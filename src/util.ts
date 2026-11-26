@@ -62,28 +62,6 @@ export async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Pr
 }
 
 /**
- * Gives what runs the functions it is handed with at most `limit` of them running at once: the
- * others wait their turn, in the order they were handed over. A function that waits for one it
- * handed over itself holds its place meanwhile, so it should hand over none.
- */
-export function limiter(limit: number): <T>(fn: () => Promise<T>) => Promise<T> {
-  let running = 0;
-  const waiting: (() => void)[] = [];
-  return async (fn) => {
-    // One that waited is given the place of the one that woke it, which is why that one doesn't count itself out.
-    if (running >= limit) await new Promise<void>((resolve) => waiting.push(resolve));
-    else running++;
-    try {
-      return await fn();
-    } finally {
-      const next = waiting.shift();
-      if (next) next();
-      else running--;
-    }
-  };
-}
-
-/**
  * Waits for every one of `tasks`, whatever becomes of each, and then throws the first failure
  * among them, in the order they are given, if there is one. So, as with mapLimit, none is still
  * running once it has returned or thrown.

@@ -70,7 +70,7 @@ function usernameTaken(err: unknown): never {
  * deletes any account.
  */
 export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
-  const { db, config, publishers, challenges, trustPlugins, now = Date.now } = deps;
+  const { db, config, publishers, challenges, trust, now = Date.now } = deps;
   const { languages } = app;
 
   /** Feeds read credits from Redis; the compactor re-syncs changed users if this write fails. */
@@ -170,7 +170,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   /**
    * Whose key the caller's is, with their roles, the language they are answered in, whether they
    * take part in messages between users, whether they show whom they follow and who follows
-   * them, and whether they are banned: what a client checks a key with, and learns what it may do.
+   * them, whether they are banned, and whether they are barred from claiming hashtags
+   * (`claimsBarred`): what a client checks a key with, and learns what it may do.
    */
   app.get('/whoami', async (req) => {
     const user = await authenticate(db, req, Credentials.parse(req.body ?? {}));
@@ -185,6 +186,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       showFollowing: user.showFollowing,
       showFollowers: user.showFollowers,
       banned: user.banned,
+      claimsBarred: user.claimsBarred,
     };
   });
 
@@ -217,7 +219,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const links = body.links === undefined ? undefined : [...new Set(body.links ?? [])];
     if (bio || links?.length) {
       if (user.banned) throw forbidden(msg('user.banned_profile'));
-      await moderateProfile({ db, config, trustPlugins, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } }, { userId, bio, links });
+      await moderateProfile({ trust, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } }, { userId, bio, links });
     }
     const username = body.username ?? user.username;
     const language = body.language === undefined ? user.language : chosen(body.language);

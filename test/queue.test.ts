@@ -5,28 +5,17 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { newCommentId } from '../src/comments.js';
 import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
-import { routeOf } from '../src/moderation/trust.js';
 import { commentIndexKey, commentKey } from '../src/storage/commentStore.js';
-import { as, createTestContext, multipart, PNG, queued, requests, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
+import { as, BASE_ENV, createTestContext, type Feed, multipart, PNG, queued, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 const NO_CONTENT = '00000000-0000-4000-8000-000000000000';
 const REFUSED = "the post contains a word or phrase this server doesn't allow, so it wasn't published";
 const NOT_QUEUED = 'the content is not in the moderation queue';
 
 describe('trust scores', () => {
-  it('send a post by the thresholds', () => {
-    const defaults = { deleteBelow: 25, allowFrom: 75 };
-    expect([0, 24, 25, 74, 75, 100].map((score) => routeOf(score, defaults))).toEqual(['delete', 'delete', 'queue', 'queue', 'allow', 'allow']);
-    // Nothing is deleted on arrival; everything waits; nothing waits.
-    expect(routeOf(0, { deleteBelow: 0, allowFrom: 75 })).toBe('queue');
-    expect(routeOf(100, { deleteBelow: 0, allowFrom: 101 })).toBe('queue');
-    expect(routeOf(0, { deleteBelow: 0, allowFrom: 0 })).toBe('allow');
-    expect([49, 50].map((score) => routeOf(score, { deleteBelow: 50, allowFrom: 50 }))).toEqual(['delete', 'allow']);
-  });
-
   it('take their thresholds from the environment, which must leave them in order', () => {
     const load = (env: Record<string, string> = {}) => {
-      const { deleteBelow, allowFrom } = loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).trust;
+      const { deleteBelow, allowFrom } = loadConfig({}, { ...BASE_ENV, ...env }).trust;
       return { deleteBelow, allowFrom };
     };
     expect(load()).toEqual({ deleteBelow: 25, allowFrom: 75 });
@@ -229,7 +218,7 @@ for (const target of TARGETS) {
       expect((await req(root, 'PUT', '/moderators/mod')).statusCode).toBe(400);
       expect(await moderators()).toEqual([{ userId: mod.userId, username: 'mod' }]);
       expect(await profile(mod)).toMatchObject({ admin: false, moderator: true, moderates: [] });
-      expect(await whoami(mod)).toEqual({ userId: mod.userId, username: 'mod', language: 'en', admin: false, moderator: true, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false });
+      expect(await whoami(mod)).toEqual({ userId: mod.userId, username: 'mod', language: 'en', admin: false, moderator: true, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false, claimsBarred: false });
       // An admin isn't one, and doesn't need to be.
       expect(await profile(root)).toMatchObject({ admin: true, moderator: false });
       expect((await req(mod, 'GET', '/moderators')).statusCode).toBe(403);
@@ -267,9 +256,10 @@ for (const target of TARGETS) {
         ['PUT', `/admins/${mod.userId}`],
         ['DELETE', `/admins/${root.userId}`],
         ['PUT', `/tags/news/moderators/${mod.userId}`],
-        ['DELETE', `/tags/news/moderators/${mod.userId}`],
       ];
       for (const [method, url, payload] of notTheirs) expect((await req(mod, method, url, payload)).statusCode, `${method} ${url}`).toBe(403);
+      // Ending the time of a hashtag's moderator is theirs, as it is an admin's, though appointing one is not.
+      expect(ok(await req(mod, 'DELETE', `/tags/news/moderators/${alice.userId}`), 200)).toEqual({ tag: 'news', userId: alice.userId, wasModerator: false });
       await ctx.compactor.runOnce();
       expect(ids(await feedOf('news')).sort()).toEqual([held, published].sort());
 
@@ -405,7 +395,16 @@ for (const target of TARGETS) {
       expect(await ctx.comments.getHeld(contentId, commentId)).toBeNull();
       for (const decision of ['accept', 'reject'] as const) expect(refusal(await decideOn(root, contentId, commentId, decision))).toEqual([404, COMMENT_NOT_QUEUED]);
       expect(waiting(await queue(mod))).toEqual(whole.filter(([, id]) => id !== commentId));
-      expect(await inbox(bob)).toEqual([['comment_accepted', contentId, text, 'Your comment was accepted from the moderation queue, and is published.']]);
+      // Newest first: before it, the notice of his own post, which waits. A comment that is held leaves none.
+      expect(await inbox(bob)).toEqual([
+        ['comment_accepted', contentId, text, 'Your comment was accepted from the moderation queue, and is published.'],
+        [
+          'post_held',
+          laterPost,
+          'Spam of my own #news',
+          "Your post is held in the moderation queue for review. It is not published, and only you and this server's moderators can read it, until one of them accepts it.",
+        ],
+      ]);
       // Published, it is the publisher's to delete, and anyone's to report.
       ok(await req(carol, 'POST', '/report', { contentId, commentId }));
 

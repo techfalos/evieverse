@@ -1,7 +1,7 @@
 import type { FastifyServerOptions } from 'fastify';
 import type { AuditLog } from './audit.types.js';
 import type { Languages } from './language.js';
-import type { TrustPlugin } from './moderation/trust.types.js';
+import type { TrustEngine } from './moderation/trust.js';
 import type { KeyFetcher } from './originKeys.js';
 import type { CliRelease } from './routes/cli.types.js';
 
@@ -15,8 +15,8 @@ export interface AppOptions extends FastifyServerOptions {
   edgeSecret?: string;
   /** The CLI the server ships, or null for none. By default, the one built with it, if it was (routes/cli.ts). */
   cli?: CliRelease | null;
-  /** The trust plugins, in the order they run. By default, the folders of src/plugins/trust (moderation/trust.ts). */
-  trustPlugins?: TrustPlugin[];
+  /** The trust plugins and the policy over them, which whoever gives them closes. By default, the ones the settings turn on, opened with the app and closed with it (moderation/trust.ts). */
+  trust?: TrustEngine;
   /** The languages the server answers in. By default, the files of the languages folder (language.ts). */
   languages?: Languages;
   /** Where changes are written down, or null for nowhere. By default, the store `config.audit` names, if it names one (audit.ts). */

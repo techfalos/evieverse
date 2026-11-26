@@ -6,13 +6,15 @@ import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
+import pino from 'pino';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { BUILD, CLI_HEADER } from '../src/cli/client.js';
 import type { Io } from '../src/cli/commands.types.js';
 import { run, UPDATED } from '../src/cli/main.js';
-import { writeProfile } from '../src/cli/profiles.js';
+import { readProfile, writeProfile } from '../src/cli/profiles.js';
 import { bootstrapAdmin, ensureAdmin, type BootstrapAdmin } from '../src/moderation/bootstrap.js';
+import { createFirstAdmin, setUpFirstAdmin } from '../src/moderation/firstAdmin.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { RELEASE } from '../src/release.js';
 import { loadCliRelease } from '../src/routes/cli.js';
@@ -140,8 +142,8 @@ for (const target of TARGETS) {
 
       expect((await req(null, 'GET', '/whoami')).statusCode).toBe(401);
       expect((await req({ userId: carol.userId, apiKey: root.apiKey }, 'GET', '/whoami')).statusCode).toBe(401);
-      expect(ok(await req(root, 'GET', '/whoami'))).toEqual({ userId: root.userId, username: 'root', language: 'en', admin: true, moderator: false, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false });
-      expect(ok(await req(carol, 'GET', '/whoami'))).toEqual({ userId: carol.userId, username: 'carol', language: 'en', admin: false, moderator: false, moderates: ['news', 'sports'], messages: true, showFollowing: false, showFollowers: false, banned: false });
+      expect(ok(await req(root, 'GET', '/whoami'))).toEqual({ userId: root.userId, username: 'root', language: 'en', admin: true, moderator: false, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false, claimsBarred: false });
+      expect(ok(await req(carol, 'GET', '/whoami'))).toEqual({ userId: carol.userId, username: 'carol', language: 'en', admin: false, moderator: false, moderates: ['news', 'sports'], messages: true, showFollowing: false, showFollowers: false, banned: false, claimsBarred: false });
       ok(await req(root, 'PUT', `/moderators/${carol.userId}`), 201);
       expect(ok(await req(carol, 'GET', '/whoami'))).toMatchObject({ admin: false, moderator: true, moderates: ['news', 'sports'] });
     });
@@ -163,7 +165,7 @@ for (const target of TARGETS) {
       const env = { BOOTSTRAP_ADMIN: JSON.stringify(first.admin) };
       expect(await bootstrapAdmin(ctx.db, env)).toEqual({ userId: first.admin.userId, username: 'operator', created: true, keyChanged: true, keyReplaced: false });
       // An account the operator set up registered in no language, so it is answered in the server's default.
-      expect(ok(await whoami(first.user))).toEqual({ userId: first.admin.userId, username: 'operator', language: 'en', admin: true, moderator: false, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false });
+      expect(ok(await whoami(first.user))).toEqual({ userId: first.admin.userId, username: 'operator', language: 'en', admin: true, moderator: false, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false, claimsBarred: false });
 
       // Every later deploy runs it again, and changes nothing: not a profile renamed since, either.
       ok(await ctx.app.inject({ method: 'PATCH', url: `/users/${first.admin.userId}`, headers: as(first.user), payload: { username: 'root' } }));
@@ -231,6 +233,67 @@ for (const target of TARGETS) {
       expect(ok(await whoami(issued.user.apiKey))).toMatchObject({ admin: true });
       expect(await bootstrapAdmin(ctx.db, reissued)).toEqual({ ...kept, keyReplaced: false });
       expect(await live()).toBe(1);
+    });
+
+    it('creates the admin of a server that has none as it starts, once, and keeps its key in a profile the CLI reads', async () => {
+      ctx = await createTestContext(target);
+      const log = pino({ level: 'silent' });
+      const home = join(ctx.dir, 'home');
+      const path = join(home, 'profiles', 'evieverse.json');
+      /** What the server does about its admin as it starts, with FIRST_ADMIN_PROFILE set to `firstAdminProfile`, or unset. */
+      const start = (firstAdminProfile?: string) => setUpFirstAdmin({ db: ctx.db, config: { firstAdminProfile, publicBaseUrl: SERVER, port: 3000 } }, log, ctx.clock.now);
+
+      // A server whose settings name no file creates nobody.
+      expect(await start()).toBeNull();
+      expect(await admins()).toEqual([]);
+
+      // A key that can't be kept is a key nobody has: nothing is created.
+      await expect(createFirstAdmin(ctx.db, () => Promise.reject(new Error('the disk is full')))).rejects.toThrow('the disk is full');
+      expect(await ctx.db.selectFrom('users').select('id').execute()).toEqual([]);
+
+      const made = (await start(path))!;
+      expect(made).toMatchObject({ username: 'admin' });
+      expect(ok(await req(made, 'GET', '/whoami'))).toMatchObject({ userId: made.userId, username: 'admin', admin: true });
+      // The file is a profile of the CLI's, for its owner alone.
+      expect(await readProfile(home, 'evieverse')).toEqual({ server: SERVER, userId: made.userId, username: 'admin', apiKey: made.apiKey });
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+
+      // Every later start finds an admin: it creates nobody, and leaves the file as it is.
+      await writeFile(path, 'what a first start wrote');
+      expect(await start(path)).toBeNull();
+      expect(await admins()).toEqual(['admin']);
+      expect(await readFile(path, 'utf8')).toBe('what a first start wrote');
+
+      // Whoever the admin is: one the account made, once it has stepped down, is admin enough.
+      const alice = await ctx.register('alice');
+      ok(await req(made, 'PUT', `/admins/${alice.userId}`), 201);
+      ok(await req(made, 'DELETE', `/admins/${made.userId}`));
+      expect(await start(path)).toBeNull();
+      expect(await admins()).toEqual(['alice']);
+
+      // A server with no admin, where the name is a user's: nobody is made an admin for the name they chose.
+      await setAdmin(ctx.db, 'alice', false);
+      expect(await createFirstAdmin(ctx.db, async () => {})).toEqual({ takenBy: made.userId });
+      expect(await start(path)).toBeNull();
+      expect(await admins()).toEqual([]);
+
+      // Without the profile's own port or address, the profile names the server on localhost.
+      ok(await ctx.app.inject({ method: 'PATCH', url: `/users/${made.userId}`, headers: as(made), payload: { username: 'retired' } }));
+      const local = (await setUpFirstAdmin({ db: ctx.db, config: { firstAdminProfile: path, publicBaseUrl: '', port: 8080 } }, log))!;
+      expect(await readProfile(home, 'evieverse')).toMatchObject({ server: 'http://localhost:8080', userId: local.userId });
+      expect(await admins()).toEqual(['admin']);
+    });
+
+    it('creates one admin where two servers start at once', async () => {
+      ctx = await createTestContext(target);
+      const kept: string[] = [];
+      const made = await Promise.all([0, 1, 2].map(() => createFirstAdmin(ctx.db, async (admin) => void kept.push(admin.userId))));
+      const created = made.filter((m) => m !== null);
+      expect(created).toHaveLength(1);
+      expect(created[0]).toMatchObject({ username: 'admin' });
+      expect(await admins()).toEqual(['admin']);
+      // One key was kept, and it is the key of the account there is.
+      expect(kept).toEqual([(created[0] as { userId: string }).userId]);
     });
   });
 }
@@ -382,7 +445,7 @@ describe('the CLI', () => {
     expect((await cli(['login', SERVER, bob.userId, '--profile', 'work'], { env: { EVIEVERSE_API_KEY: bob.apiKey } })).code).toBe(0);
     expect(await ran('profiles')).toBe(`default  ${SERVER}  alice\nwork     ${SERVER}  bob`);
     expect(await cli(['whoami'])).toMatchObject({ code: 1, err: 'evieverse: there are several profiles (default, work): choose one with --profile <name> or EVIEVERSE_PROFILE' });
-    expect(await json('--profile=work', 'whoami')).toEqual({ profile: 'work', server: SERVER, userId: bob.userId, username: 'bob', language: 'en', admin: false, moderator: false, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false });
+    expect(await json('--profile=work', 'whoami')).toEqual({ profile: 'work', server: SERVER, userId: bob.userId, username: 'bob', language: 'en', admin: false, moderator: false, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false, claimsBarred: false });
     expect((await cli(['whoami'], { env: { EVIEVERSE_PROFILE: 'default' } })).out).toContain('alice');
     expect(await cli(['whoami', '--profile', 'nobody'])).toMatchObject({ code: 1 });
     expect(await cli(['whoami', '--profile', '../default'])).toMatchObject({ code: 2 });
@@ -465,7 +528,7 @@ describe('the CLI', () => {
   it("keeps the server's rules as an admin, and lists them, with its modification disclosure, as anyone", async () => {
     const SOURCE = 'https://git.example.com/our-evieverse';
     const SUPPORT = 'support@our-evieverse.example';
-    await setup({ modified: true, sourceUrl: SOURCE, supportEmail: SUPPORT, minimumAge: 13 });
+    await setup({ modified: true, sourceUrl: SOURCE, supportEmail: SUPPORT, minimumAge: 13, genAi: 'disclosure_required' });
     const root = await ctx.register('root');
     await setAdmin(ctx.db, 'root', true);
     const alice = await ctx.register('alice');
@@ -473,8 +536,8 @@ describe('the CLI', () => {
     await profile('alice', alice);
     const by = (name: string, ...args: string[]) => ran(...args, '--profile', name);
     const refused = (name: string, ...args: string[]) => cli([...args, '--profile', name]);
-    // What follows the rules: the minimum age, where to write for support, and the modification disclosure.
-    const MODIFIED = `Minimum age: 13\n\nSupport: ${SUPPORT}\n\nModification disclosure: this server runs a modified version of Evieverse, based on release ${RELEASE}.\nIts source code: ${SOURCE}`;
+    // What follows the rules: the minimum age, what the server says of generative AI, where to write for support, and the modification disclosure.
+    const MODIFIED = `Minimum age: 13\n\nGenerative AI: allowed, as long as content made with it says so\n\nSupport: ${SUPPORT}\n\nModification disclosure: this server runs a modified version of Evieverse, based on release ${RELEASE}.\nIts source code: ${SOURCE}`;
     const ruleId = (out: string) => out.split(': ')[1]!;
 
     expect(await by('alice', 'rules', 'list')).toBe(`The server has no rules.\n\n${MODIFIED}`);
@@ -490,6 +553,7 @@ describe('the CLI', () => {
       modificationDisclosure: { modified: true, release: RELEASE, sourceUrl: SOURCE },
       supportEmail: SUPPORT,
       minimumAge: 13,
+      genAi: 'disclosure_required',
       rules: [{ ruleId: first, position: 1 }, { ruleId: kind, position: 2, text: 'Be kind.' }, { ruleId: ruleId(spam), position: 3, text: 'No spam.\nNot even a little.' }],
     });
 
@@ -517,16 +581,21 @@ describe('the CLI', () => {
     expect(help).toMatch(/^  - rules update <ruleId> \[--text <text>\] \[--position <n>\] /m);
     expect(help).toMatch(/^  - rules remove <ruleId> /m);
 
-    // A server whose operator says nothing of the kind runs a release, names no source, has no minimum age, and gives the placeholder for a support address.
+    // A server whose operator says nothing of the kind runs a release, names no source, has no minimum age, allows generative AI with no word needed of it, and gives the placeholder for a support address.
     await ctx.close();
     ctx = await createTestContext(TARGETS[0]!);
     await profile('alice', await ctx.register('alice'));
     expect(await by('alice', 'rules', 'list')).toBe(
-      `The server has no rules.\n\nMinimum age: All Legal Ages Allowed\n\nSupport: noreply@yoururl.com\n\nModification disclosure: this server runs Evieverse ${RELEASE}, unmodified.`,
+      `The server has no rules.\n\nMinimum age: All Legal Ages Allowed\n\nGenerative AI: allowed, and saying that content was made with it is optional\n\nSupport: noreply@yoururl.com\n\nModification disclosure: this server runs Evieverse ${RELEASE}, unmodified.`,
     );
+    // And one that doesn't allow it says that.
+    await ctx.close();
+    ctx = await createTestContext(TARGETS[0]!, { genAi: 'not_allowed' });
+    await profile('alice', await ctx.register('alice'));
+    expect(await by('alice', 'rules', 'list')).toContain('\n\nGenerative AI: not allowed\n\n');
   });
 
-  it("claims a hashtag, refuses a claim as an admin, keeps a hashtag's rules as its moderator, and says why a hashtag is removed", async () => {
+  it("claims a hashtag, ends a claimant's time and bars them from claiming as an admin, keeps a hashtag's rules as its moderator, and says why a hashtag is removed", async () => {
     await setup();
     const root = await ctx.register('root');
     await setAdmin(ctx.db, 'root', true);
@@ -537,27 +606,39 @@ describe('the CLI', () => {
     await profile('bob', bob);
     const by = (name: string, ...args: string[]) => ran(...args, '--profile', name);
     const refused = (name: string, ...args: string[]) => cli([...args, '--profile', name]);
-    const reviewUntil = new Date(ctx.clock.now + 24 * 60 * 60 * 1000).toISOString();
-    const waits = `you become its moderator at ${reviewUntil}, unless an admin or a server moderator refuses the claim before then.`;
+    const since = new Date(ctx.clock.now).toISOString();
+    const staffOnly = { code: 1, err: 'evieverse: only an admin or a server moderator can do this' };
 
-    expect(await by('root', 'claims', 'list')).toBe('No claim to a hashtag is waiting.');
-    expect(await by('alice', 'claims', 'add', 'Cars')).toBe(`You claimed #cars: ${waits}`);
-    expect(await by('alice', 'claims', 'add', 'cars')).toBe(`You had already claimed #cars: ${waits}`);
-    expect(await refused('bob', 'claims', 'add', 'cars')).toMatchObject({ code: 1, err: "evieverse: another user's claim to #cars is waiting" });
-    expect(await by('bob', 'moderators', 'list', 'cars')).toBe(
-      `#cars has no moderators.\nalice (${alice.userId}) claimed it, and becomes its moderator at ${reviewUntil} unless the claim is refused.`,
-    );
-    expect(await by('root', 'claims', 'list')).toBe(`#cars  ${alice.userId}  alice  claimed ${new Date(ctx.clock.now).toISOString()}  granted ${reviewUntil}`);
-    expect(await refused('bob', 'claims', 'list')).toMatchObject({ code: 1, err: 'evieverse: only an admin or a server moderator can do this' });
-    expect(await by('root', 'claims', 'refuse', 'cars')).toBe(`Refused the claim of ${alice.userId} to #cars.`);
-    expect(await by('root', 'claims', 'refuse', 'cars')).toBe("Nobody's claim to #cars is waiting.");
-    expect(await by('bob', 'claims', 'add', 'cars')).toBe(`You claimed #cars: ${waits}`);
-    expect(await by('bob', 'claims', 'withdraw', 'cars')).toBe('Withdrew your claim to #cars.');
+    // A claim makes its user the hashtag's moderator at once.
+    expect(await by('bob', 'moderators', 'list', 'cars')).toBe('#cars has no moderators.');
+    expect(await by('alice', 'claims', 'add', 'Cars')).toBe('You claimed #cars: you are now its moderator.');
+    expect(await by('alice', 'claims', 'add', 'cars')).toBe(`You already moderated #cars, since ${since}.`);
+    expect(await refused('bob', 'claims', 'add', 'cars')).toMatchObject({
+      code: 1,
+      err: "evieverse: #cars has a moderator already, so it can't be claimed: its moderators, or an admin, appoint the others",
+    });
+    expect(await by('bob', 'moderators', 'list', 'cars')).toBe(`${alice.userId}  alice  since ${since}`);
 
-    // A claim that nobody refused makes its user the hashtag's moderator, who keeps its rules.
-    await by('alice', 'claims', 'add', 'cars');
-    ctx.clock.now += 25 * 60 * 60 * 1000;
-    await ctx.compact();
+    // An admin ends it whenever they like, and keeps the user from claiming another.
+    expect(await refused('bob', 'moderators', 'remove', 'cars', alice.userId)).toMatchObject({ code: 1, err: 'evieverse: only an admin, a server moderator or a moderator of #cars can do this' });
+    expect(await by('root', 'moderators', 'remove', 'cars', alice.userId)).toBe(`${alice.userId} no longer moderates #cars.`);
+    expect(await by('root', 'claim-bars', 'list')).toBe('Nobody is barred from claiming hashtags.');
+    expect(await refused('bob', 'claim-bars', 'list')).toMatchObject(staffOnly);
+    expect(await refused('bob', 'claim-bars', 'add', alice.userId)).toMatchObject(staffOnly);
+    expect(await by('root', 'claim-bars', 'add', alice.userId, '--reason', 'Sits on\nhashtags')).toBe(`alice (${alice.userId}) is barred from claiming hashtags.`);
+    expect(await by('root', 'claim-bars', 'add', alice.userId)).toBe(`alice (${alice.userId}) was already barred from claiming hashtags.`);
+    expect(await by('root', 'claim-bars', 'list')).toMatch(new RegExp(`^${alice.userId}\\s+alice\\s+since 2026-\\S+\\s+by root\\s+Sits on hashtags$`));
+    expect(await json('claim-bars', 'list', '--profile', 'root')).toMatchObject({ barred: [{ userId: alice.userId, reason: 'Sits on\nhashtags', barredBy: { username: 'root' } }] });
+    expect(await refused('alice', 'claims', 'add', 'cars')).toMatchObject({ code: 1, err: 'evieverse: a moderator barred you from claiming hashtags on this server' });
+    expect(await by('alice', 'whoami')).toBe(`alice (${alice.userId}) on ${SERVER}: no moderation role; barred from claiming hashtags`);
+    expect(await json('whoami', '--profile', 'alice')).toMatchObject({ claimsBarred: true });
+    expect(await refused('bob', 'claim-bars', 'remove', alice.userId)).toMatchObject(staffOnly);
+    expect(await by('root', 'claim-bars', 'remove', alice.userId)).toBe(`${alice.userId} can claim hashtags again.`);
+    expect(await by('root', 'claim-bars', 'remove', alice.userId)).toBe(`${alice.userId} wasn't barred from claiming hashtags.`);
+    expect(await by('root', 'claim-bars', 'list')).toBe('Nobody is barred from claiming hashtags.');
+
+    // The hashtag is there to claim again, and whoever claims it keeps its rules.
+    expect(await by('alice', 'claims', 'add', 'cars')).toBe('You claimed #cars: you are now its moderator.');
     expect(await by('alice', 'whoami')).toBe(`alice (${alice.userId}) on ${SERVER}: moderator of #cars`);
     const ruleId = (out: string) => out.split(': ')[1]!;
     expect(await by('bob', 'tag-rules', 'list', 'cars')).toBe('#cars has no rules.');
@@ -581,12 +662,15 @@ describe('the CLI', () => {
 
     const help = (await refused('bob', 'help')).out;
     expect(help).toMatch(/^  \+ claims add <tag> /m);
-    expect(help).toMatch(/^  \+ claims withdraw <tag> /m);
     expect(help).toMatch(/^  \+ tag-rules list <tag> /m);
     expect(help).toMatch(/^  - tag-rules add <tag> <text> \[--position <n>\] /m);
     expect(help).toMatch(/^  - tag remove <contentId> <tag> \[--mute\] \[--reason <text>\] /m);
-    expect(help).toMatch(/^  - claims list \[--limit <n>\] \[--cursor <cursor>\] /m);
-    expect(help).toMatch(/^  - claims refuse <tag> /m);
+    expect(help).toMatch(/^  - moderators remove <tag> <userId> /m);
+    expect(help).toMatch(/^  - claim-bars list \[--limit <n>\] \[--cursor <cursor>\] /m);
+    expect(help).toMatch(/^  - claim-bars add <userId> \[--reason <text>\] /m);
+    expect(help).toMatch(/^  - claim-bars remove <userId> /m);
+    // What claims no longer need: nothing waits, so there is nothing to list, to refuse or to withdraw.
+    expect(help).not.toMatch(/claims (list|refuse|withdraw)/);
   });
 
   it('registers a user as an admin, without the challenge anyone else is asked to solve', async () => {
@@ -1356,7 +1440,7 @@ describe('the CLI', () => {
     await writeProfile(home, 'alice', { server, ...alice });
     const env = { ...process.env, EVIEVERSE_HOME: home, PATH: `${dirname(process.execPath)}${delimiter}${process.env.PATH}` };
     const evieverse = join(home, 'bin', 'evieverse');
-    const whoami = { profile: 'alice', server, userId: alice.userId, username: 'alice', language: 'en', admin: false, moderator: false, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false };
+    const whoami = { profile: 'alice', server, userId: alice.userId, username: 'alice', language: 'en', admin: false, moderator: false, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false, claimsBarred: false };
 
     const install = await exec('sh', ['-c', `curl -fsSL ${server}/cli/install.sh | sh`], { env });
     expect(install.stdout).toContain(`Installed evieverse ${shipped.version} in ${join(home, 'bin')}`);

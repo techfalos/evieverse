@@ -49,9 +49,6 @@ export const repostedTags = (rows: { tag: string }[]): string[] => rows.filter((
 export const removedRepostTags = async (db: Pick<Db, 'selectFrom'>, contentId: string): Promise<string[]> =>
   repostedTags(await db.selectFrom('repost_removals').select('tag').where('content_id', '=', contentId).execute());
 
-/** The reposters' own indexes the content is in. */
-export const reposterIndexes = (rows: { tag: string }[]): string[] => rows.filter((r) => indexAuthor(r.tag) !== null).map((r) => r.tag);
-
 /**
  * What there is to read of content that is there, as moderation reads a post (see moderatePost):
  * its text or caption without its formatting, or the URL it links to; and, of a repost of a post
@@ -62,6 +59,3 @@ export function readableOf(meta: Pick<ContentMeta, 'preview' | 'text' | 'origin'
   const text = meta.text ?? (preview.kind === 'link' ? undefined : preview.text);
   return [preview.kind === 'link' ? preview.url : text && plainText(text, true), origin?.url, origin?.publisher.username].filter((t): t is string => !!t);
 }
-
-/** When the content was reposted, once for each repost, oldest first: where its summary is kept beside its own day (see SummaryRef). */
-export const repostTimes = (rows: { created_at: number }[]): number[] => [...new Set(rows.map((r) => r.created_at))].sort((a, b) => a - b);

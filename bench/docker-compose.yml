@@ -22,10 +22,23 @@ services:
     cpus: ${BENCH_SERVER_CPUS:?is set by npm run bench}
     mem_limit: ${BENCH_SERVER_MEMORY:?is set by npm run bench}
     memswap_limit: ${BENCH_SERVER_MEMORY:?is set by npm run bench}
+    depends_on:
+      redis: { condition: service_healthy }
     environment:
       - BENCH_POSTS
+      - REDIS_URL=redis://redis:6379
     # Its database and its content store: on a volume, as a server's are, not in the container's own layer.
     volumes: [data:/data]
+
+  # The feed index, which every server keeps in a Redis-protocol server. It has CPUs and memory of
+  # its own, which the report doesn't count among the server's.
+  redis:
+    image: valkey/valkey:8
+    command: ['valkey-server', '--save', '', '--appendonly', 'no']
+    healthcheck:
+      test: ['CMD', 'valkey-cli', 'ping']
+      interval: 2s
+      retries: 30
 
   # What sends the requests (bench/benchmark.test.ts), with CPUs of its own, a thread to each, so
   # that sending them takes none of the server's. It waits for the server, and when it ends the run does.

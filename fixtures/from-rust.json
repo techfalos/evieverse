@@ -1,0 +1,75 @@
+{
+  "day": "0198c0de111140008000000000000001000000006aedc13e000198c0de111140008000000000000002000000076aedb330010198c0de111140008000000000000003000000076aedb330060198c0de0000400080000000000000a1ffffffff00000000070198c0de0000400080000000000000a2000000010000000000",
+  "head": "{\"v\":5,\"manifest\":\"1794052800000-0a1b2c3d\",\"compactedAt\":1793966400000}",
+  "manifest": "{\"v\":5,\"tag\":\"news\",\"id\":\"1794052800000-0a1b2c3d\",\"createdAt\":1793966400000,\"days\":[{\"day\":20763,\"gen\":\"20763-1794052800000-99887766\",\"quota\":400,\"count\":3},{\"day\":20762,\"gen\":\"20762-1794000000000-00112233\",\"quota\":200,\"count\":200}]}",
+  "summaries": [
+    {
+      "name": "text",
+      "brotli": "G6AAAOT/bvoX+u/iu8Y2HGOBbtA4yqLsUHKDA/a3s2ShLRtsGnlcb3gppzQSLbmpbNqqZUk6IHJLKIMk25Yn+QFFSTXHcpJKpjky9MHci7QHtAEs7hHAzhAFUXBKHx0cvjBPyuDKglCzO/Kl4cu/kj8ef31+43+dCw=="
+    },
+    {
+      "name": "mentions",
+      "brotli": "G7sAAMSyufwadRldYlVboQHh4YO7EjWcJITwlpJvRiS3sSs4aliF40RdNm3VsiQwU8A2FEuZxEsmSbatXCpKvia8FthnvJRGKtNRPodoIIv5nsgPyUFfPDErOxz/i4OHrVfAwWJXwM08p3Qs4SCbM/zDPzUtc7M5Aw=="
+    },
+    {
+      "name": "noTags",
+      "brotli": "G1UAAETn1l8SoTDPdAgtOiU0go5x4P5wbfhgKw4esioaF6XtnOm+qCHkUwhaxuUrpdDRGkG0Ooau3+N2ogM="
+    },
+    {
+      "name": "link",
+      "brotli": "G3gAAGTpmk9oIFf1SRxROjk/qH7nb2lgYRhgilHOQ0l0pzPbFC4oF5TlXrC5OQrgIviK1w1pg+gAb86/kHA3/82ecyDzcN2AXKdLBf197w+n0+FSvcjLtMIa"
+    },
+    {
+      "name": "image",
+      "brotli": "G2EAAES3+ftcHo80K1C/Uyr6IiLHOB9crn2ReaIN9xgb+iRT6Uu1aAab0gCYH6wEDR+YS1JJN3BCnJXejFW5Z1O+D1NyHw=="
+    },
+    {
+      "name": "album",
+      "brotli": "G10AAES3+ftcHo80M1C/MyqCroicch4wJm1ZkMj5RDe8x1i2wWDrm+ppDp/SAbACVnxG0IyBuaSxNCIEa6/0aGyXc9em/n5EAg=="
+    },
+    {
+      "name": "described",
+      "brotli": "G+kAAASiftv3V9LNZswTlZC/4tIY3jgfWMbraVgGfJ1o8EUG39eTXRYIzKRH+0Q7jN3QCqnUWJaEWmLb7oqtLDuOSquq9R7rnkNEVrLcUT+NVXPY6lblx1V6UDf5dJG8yKXMLzTQyOVNtbZv3gsfoMRZOkleN+cQ46wiYa2gzdyWfK5JKNaC5/OoqzvqWsRWZNbI5GmxFg=="
+    },
+    {
+      "name": "video",
+      "brotli": "G8gAAMSszXyMyqymbA66c738K4anRxoQV5KmQdwKqC2Krtr1hsmjdpBmufy6ZUWUOuaMR5lIlGp5U01oRd6w7fyh+jFQRxQXq0wWZridsdwzw+RFDyhfOEqsE+e7FQ0ePlcMlOZyeviW80GZOXpo//e5oOAKku+TSpt1OgE="
+    },
+    {
+      "name": "audio",
+      "brotli": "G2EAAMTy1r+kD+XnHuO/RcMk2LjBAXsFlCbWNuCKQ/Po2yeSE7Ot1VOJMOhg8oNBULeOMYVacsGCSJGm9P4I+81FB+Smxv+eBQ=="
+    },
+    {
+      "name": "origin",
+      "brotli": "G90AAETVzdeoCjO2/Sf8Ti5AQJGHz2YHDlHXWlthCyTA9vbye/A3+W8al4+EiNm72vRj1L22ZnSjBeRfgfnop123eCABLl0xExWOH40tOr8H8ael8WbO+0bt6LY/hz4ib5qaHffwas76WRhHBU5GOINY2EYs"
+    },
+    {
+      "name": "reposted",
+      "brotli": "G2cAAETd1l/SQznuIPe2KPomGhTUKQcOWdKWYVF6xXuMXVPiKH2ppZi5ZeBg5wcrQat3jBCXElpcCFRN6ca/aXZSjb1xQJK05+AV7wA="
+    }
+  ],
+  "metas": {
+    "text": "{\"contentId\":\"0198c0de-1111-4000-8000-000000000001\",\"mimeType\":\"text/plain\",\"size\":11,\"aiGenerated\":false,\"comments\":true,\"preview\":{\"kind\":\"text\",\"text\":\"hello #news\"},\"text\":\"hello #news\",\"mentions\":[{\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"username\":\"bob\"}],\"tags\":[\"news\"],\"updatedAt\":1793880000000}",
+    "album": "{\"contentId\":\"0198c0de-1111-4000-8000-000000000002\",\"mimeType\":\"image/png\",\"size\":8,\"sha256\":\"abababababababababababababababababababababababababababababababab\",\"images\":[{\"mimeType\":\"image/png\",\"size\":8,\"sha256\":\"abababababababababababababababababababababababababababababababab\"},{\"mimeType\":\"image/jpeg\",\"size\":8,\"sha256\":\"cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\"}],\"aiGenerated\":true,\"preview\":{\"kind\":\"image\",\"url\":\"https://api.example.com/content/0198c0de-1111-4000-8000-000000000002/raw\",\"text\":\"two of them\",\"imageCount\":2,\"alt\":[\"one\",\"two\"]},\"text\":\"two of them\",\"tags\":[\"art\",\"cats\"],\"updatedAt\":1793962800000}",
+    "video": "{\"contentId\":\"0198c0de-1111-4000-8000-000000000003\",\"mimeType\":\"video/mp4\",\"size\":1234567,\"sha256\":\"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\",\"aiGenerated\":false,\"comments\":false,\"preview\":{\"kind\":\"video\",\"url\":\"https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/raw\",\"text\":\"a clip\",\"video\":{\"id\":\"0198c0de-2222-4000-8000-000000000001\",\"width\":1280,\"height\":720,\"duration\":12.5}},\"text\":\"a clip\",\"tags\":[\"clips\"],\"updatedAt\":1793966400000}",
+    "origin": "{\"contentId\":\"0198c0de-1111-4000-8000-000000000003\",\"mimeType\":\"text/uri-list\",\"size\":58,\"aiGenerated\":false,\"preview\":{\"kind\":\"text\",\"text\":\"theirs\"},\"tags\":[\"news\"],\"updatedAt\":1793966400000,\"origin\":{\"url\":\"https://other.example/content/0198c0de-1111-4000-8000-000000000001\",\"publisher\":{\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"username\":\"them\"}},\"originAttestedAt\":1793966399995}",
+    "link": "{\"contentId\":\"0198c0de-1111-4000-8000-000000000002\",\"mimeType\":\"text/uri-list\",\"size\":19,\"aiGenerated\":false,\"preview\":{\"kind\":\"link\",\"url\":\"https://example.com\"},\"tags\":[\"links\"],\"updatedAt\":1793966400000}"
+  },
+  "comments": {
+    "first": "{\"commentId\":\"0198c0de-aaaa-7000-8000-000000000001\",\"contentId\":\"0198c0de-1111-4000-8000-000000000001\",\"userId\":\"0198c0de-0000-4000-8000-0000000000a1\",\"text\":\"the first, for @bob\",\"mentions\":[{\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"username\":\"bob\"}],\"createdAt\":1793966397000}",
+    "reply": "{\"commentId\":\"0198c0de-aaaa-7000-8000-000000000002\",\"contentId\":\"0198c0de-1111-4000-8000-000000000001\",\"parentId\":\"0198c0de-aaaa-7000-8000-000000000001\",\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"text\":\"\",\"aiGenerated\":true,\"media\":{\"kind\":\"image\",\"mimeType\":\"image/png\",\"size\":3,\"alt\":\"a cat\"},\"createdAt\":1793966398000}",
+    "held": "{\"commentId\":\"0198c0de-aaaa-7000-8000-000000000003\",\"contentId\":\"0198c0de-1111-4000-8000-000000000001\",\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"text\":\"this one waits\",\"createdAt\":1793966399000}",
+    "later": "{\"commentId\":\"0198c0df-bbbb-7000-8000-000000000004\",\"contentId\":\"0198c0de-1111-4000-8000-000000000001\",\"parentId\":\"0198c0de-aaaa-7000-8000-000000000001\",\"userId\":\"0198c0de-0000-4000-8000-0000000000a1\",\"text\":\"a later reply\",\"createdAt\":1793966399500,\"editedAt\":1793966399900}"
+  },
+  "payloads": {
+    "post": "{\"meta\":{\"contentId\":\"0198c0de-1111-4000-8000-000000000001\",\"mimeType\":\"text/plain\",\"size\":11,\"aiGenerated\":false,\"comments\":true,\"preview\":{\"kind\":\"text\",\"text\":\"hello #news\"},\"text\":\"hello #news\",\"mentions\":[{\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"username\":\"bob\"}],\"tags\":[\"news\"],\"updatedAt\":1793880000000}}",
+    "postToProcess": "{\"meta\":{\"contentId\":\"0198c0de-1111-4000-8000-000000000003\",\"mimeType\":\"video/mp4\",\"size\":1234567,\"sha256\":\"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\",\"aiGenerated\":false,\"comments\":false,\"preview\":{\"kind\":\"video\",\"url\":\"https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/raw\",\"text\":\"a clip\",\"video\":{\"id\":\"0198c0de-2222-4000-8000-000000000001\",\"width\":1280,\"height\":720,\"duration\":12.5}},\"text\":\"a clip\",\"tags\":[\"clips\"],\"updatedAt\":1793966400000},\"process\":true}",
+    "postKeepingBytes": "{\"meta\":{\"contentId\":\"0198c0de-1111-4000-8000-000000000003\",\"mimeType\":\"video/mp4\",\"size\":1234567,\"sha256\":\"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\",\"aiGenerated\":false,\"comments\":false,\"preview\":{\"kind\":\"video\",\"url\":\"https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/raw\",\"text\":\"a clip\",\"video\":{\"id\":\"0198c0de-2222-4000-8000-000000000001\",\"width\":1280,\"height\":720,\"duration\":12.5}},\"text\":\"a clip\",\"tags\":[\"clips\"],\"updatedAt\":1793966400000},\"keepBytes\":true}",
+    "commentPut": "{\"comment\":{\"commentId\":\"0198c0de-aaaa-7000-8000-000000000002\",\"contentId\":\"0198c0de-1111-4000-8000-000000000001\",\"parentId\":\"0198c0de-aaaa-7000-8000-000000000001\",\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"text\":\"\",\"aiGenerated\":true,\"media\":{\"kind\":\"image\",\"mimeType\":\"image/png\",\"size\":3,\"alt\":\"a cat\"},\"createdAt\":1793966398000},\"held\":false}",
+    "commentHeld": "{\"comment\":{\"commentId\":\"0198c0de-aaaa-7000-8000-000000000003\",\"contentId\":\"0198c0de-1111-4000-8000-000000000001\",\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"text\":\"this one waits\",\"createdAt\":1793966399000},\"held\":true,\"process\":true}",
+    "commentRemove": "{\"parentId\":\"0198c0de-aaaa-7000-8000-000000000001\"}",
+    "commentRemoveTopLevel": "{}",
+    "commentLike": "{\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\"}",
+    "commentUnlike": "{\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"unlike\":true}"
+  }
+}

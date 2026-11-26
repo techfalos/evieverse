@@ -5,7 +5,7 @@ import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { AD_POSITIONS, adStatus, eligibleAds, MAX_OPEN_ADS, orderAds, placeAds } from '../src/monetization.js';
 import type { PublishedAd } from '../src/monetization.types.js';
-import { as, createTestContext, JPEG, multipart, PNG, readAudit, requests, TARGETS, type FeedAdItem, type TestContext, type User } from './helpers.js';
+import { as, BASE_ENV, createTestContext, type FeedAdItem, JPEG, multipart, PNG, readAudit, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 const NO_AD = '00000000-0000-4000-8000-000000000000';
 const ADMIN_ONLY = 'only an admin can do this';
@@ -79,7 +79,7 @@ describe('ads', () => {
   });
 
   it('are shown nowhere unless the server turns them on', () => {
-    const load = (env: Record<string, string> = {}) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).monetization;
+    const load = (env: Record<string, string> = {}) => loadConfig({}, { ...BASE_ENV, ...env }).monetization;
     expect(load()).toEqual({ feedAds: false, postAds: false });
     expect(load({ MONETIZATION_FEED_ADS: 'true' })).toEqual({ feedAds: true, postAds: false });
     expect(load({ MONETIZATION_POST_ADS: 'true' })).toEqual({ feedAds: false, postAds: true });

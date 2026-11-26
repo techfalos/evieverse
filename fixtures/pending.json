@@ -1,0 +1,37 @@
+{
+  "unnumbered": 0,
+  "likeKey": {
+    "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+    "userId": "0198c0de-0000-4000-8000-0000000000a2",
+    "key": "0198c0de-aaaa-7000-8000-000000000001:0198c0de-0000-4000-8000-0000000000a2"
+  },
+  "stagedKey": {
+    "writeId": "0198c0de-3333-4000-8000-000000000001",
+    "key": "staged/0198c0de-3333-4000-8000-000000000001"
+  },
+  "payloads": {
+    "post": "{\"meta\":{\"contentId\":\"0198c0de-1111-4000-8000-000000000001\",\"mimeType\":\"text/plain\",\"size\":11,\"aiGenerated\":false,\"comments\":true,\"preview\":{\"kind\":\"text\",\"text\":\"hello #news\"},\"text\":\"hello #news\",\"mentions\":[{\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"username\":\"bob\"}],\"tags\":[\"news\"],\"updatedAt\":1793880000000}}",
+    "postToProcess": "{\"meta\":{\"contentId\":\"0198c0de-1111-4000-8000-000000000003\",\"mimeType\":\"video/mp4\",\"size\":1234567,\"sha256\":\"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\",\"aiGenerated\":false,\"comments\":false,\"preview\":{\"kind\":\"video\",\"url\":\"https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/raw\",\"text\":\"a clip\",\"video\":{\"id\":\"0198c0de-2222-4000-8000-000000000001\",\"width\":1280,\"height\":720,\"duration\":12.5}},\"text\":\"a clip\",\"tags\":[\"clips\"],\"updatedAt\":1793966400000},\"process\":true}",
+    "postKeepingBytes": "{\"meta\":{\"contentId\":\"0198c0de-1111-4000-8000-000000000003\",\"mimeType\":\"video/mp4\",\"size\":1234567,\"sha256\":\"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef\",\"aiGenerated\":false,\"comments\":false,\"preview\":{\"kind\":\"video\",\"url\":\"https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/raw\",\"text\":\"a clip\",\"video\":{\"id\":\"0198c0de-2222-4000-8000-000000000001\",\"width\":1280,\"height\":720,\"duration\":12.5}},\"text\":\"a clip\",\"tags\":[\"clips\"],\"updatedAt\":1793966400000},\"keepBytes\":true}",
+    "commentPut": "{\"comment\":{\"commentId\":\"0198c0de-aaaa-7000-8000-000000000002\",\"contentId\":\"0198c0de-1111-4000-8000-000000000001\",\"parentId\":\"0198c0de-aaaa-7000-8000-000000000001\",\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"text\":\"\",\"aiGenerated\":true,\"media\":{\"kind\":\"image\",\"mimeType\":\"image/png\",\"size\":3,\"alt\":\"a cat\"},\"createdAt\":1793966398000},\"held\":false}",
+    "commentHeld": "{\"comment\":{\"commentId\":\"0198c0de-aaaa-7000-8000-000000000003\",\"contentId\":\"0198c0de-1111-4000-8000-000000000001\",\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"text\":\"this one waits\",\"createdAt\":1793966399000},\"held\":true,\"process\":true}",
+    "commentRemove": "{\"parentId\":\"0198c0de-aaaa-7000-8000-000000000001\"}",
+    "commentRemoveTopLevel": "{}",
+    "commentLike": "{\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\"}",
+    "commentUnlike": "{\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"unlike\":true}"
+  },
+  "bytes": {
+    "text": {
+      "text": "hello #news",
+      "mimeType": "text/plain"
+    },
+    "link": {
+      "text": "https://example.com",
+      "mimeType": "text/uri-list"
+    },
+    "origin": {
+      "text": "https://other.example/content/0198c0de-1111-4000-8000-000000000001",
+      "mimeType": "text/uri-list"
+    }
+  }
+}

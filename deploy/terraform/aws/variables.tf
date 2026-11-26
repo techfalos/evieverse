@@ -71,7 +71,7 @@ variable "db_instance_class" {
 }
 
 variable "redis_node_type" {
-  description = "ElastiCache node type. Size it for the feed index (~30 bytes per indexed post) plus 8 days of compressed summaries; see docs/DEPLOY.md."
+  description = "ElastiCache node type. Size it for the feed index (~30 bytes per indexed post) plus 8 days of compressed summaries; see docs/IAC.md."
   type        = string
   default     = "cache.t4g.small"
 }

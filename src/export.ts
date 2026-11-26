@@ -41,7 +41,7 @@ import { mapLimit } from './util.js';
  * wrote or liked them (storage/commentStore.ts), which is read in the order of the comments'
  * ids, a page at a time, as the rows are. On a server that had comments before it kept that
  * index, the index lacks them until the compactor's process has been through them
- * (src/authorIndex.ts). An export would then lack them too, and nothing in it would say so: so
+ * (compactor/src/author_index.rs). An export would then lack them too, and nothing in it would say so: so
  * until the index holds everything, no page of an export is given (503).
  *
  * It is not a snapshot: it is read while the account is used. What is there throughout the walk
@@ -140,7 +140,7 @@ const commentAfter = (after: ExportPosition | null) => (after ? String(after[0])
  * (the account, its keys, the hashtags the user moderates, their reports) are a few rows, which
  * the database sorts: keys are made one at a time, and reports are limited by the hour.
  *
- *   account         the user's row: their name, profile, settings and roles, and since when they are banned, if they are
+ *   account         the user's row: their name, profile, settings and roles, and since when they are banned, or barred from claiming hashtags, if they are
  *   keys            their API keys, as far as the server has them: when each was made and revoked, and never the key
  *   posts           their posts, oldest first, as GET /content/:contentId gives each to its publisher
  *   comments        their comments, oldest first, with the ones that wait in the moderation queue
@@ -184,7 +184,7 @@ function sectionsOf({ db, content, comments, config }: ExportDeps): Section[] {
         const rows = await walk(
           db
             .selectFrom('users')
-            .select(['id', 'username', 'created_at', 'updated_at', 'admin', 'moderator', 'language', 'messages', 'show_following', 'show_followers', 'banned_at'])
+            .select(['id', 'username', 'created_at', 'updated_at', 'admin', 'moderator', 'language', 'messages', 'show_following', 'show_followers', 'banned_at', 'claims_barred_at'])
             .select(['bio', 'links', 'avatar_id'])
             .where('id', '=', userId)
             .where('deleted_at', 'is', null),
@@ -218,6 +218,8 @@ function sectionsOf({ db, content, comments, config }: ExportDeps): Section[] {
             showFollowers: r.show_followers === 1,
             // Not who banned them, nor why: only moderators read those.
             bannedAt: r.banned_at === null ? null : iso(r.banned_at),
+            // Since when they are barred from claiming hashtags, if they are: again, not by whom, nor why.
+            claimsBarredAt: r.claims_barred_at === null ? null : iso(r.claims_barred_at),
           },
         }));
       },

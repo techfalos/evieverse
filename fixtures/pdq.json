@@ -1,0 +1,220 @@
+{
+ "note": "Made by the TypeScript implementation (src/moderation/words.ts and src/plugins/trust) before the Rust one replaced it: the Rust tests are held to it.",
+ "hashes": [
+  {
+   "rows": 64,
+   "cols": 64,
+   "seed": 1,
+   "pdq": "e9d2e835c2cc3d59768ac3a9b8385c76299816146fe584eb6c49e17fca2c2e8b",
+   "quality": 100
+  },
+  {
+   "rows": 512,
+   "cols": 384,
+   "seed": 1,
+   "pdq": "e9d2c835c2cd3d59d48ac3a9b8385c76299816156fe584eb6c49e17fca2c2e8b",
+   "quality": 100
+  },
+  {
+   "rows": 200,
+   "cols": 150,
+   "seed": 1,
+   "pdq": "c9d2c835c2cd3d59d4aa81a9b8705d76291836356fe585eb6849e17fca2c2e8b",
+   "quality": 100
+  },
+  {
+   "rows": 512,
+   "cols": 512,
+   "seed": 2,
+   "pdq": "1f128c2d1017b6e14f79e0624ee35f51b529def84d0599ca7c46bf47b8738053",
+   "quality": 100
+  },
+  {
+   "rows": 100,
+   "cols": 333,
+   "seed": 3,
+   "pdq": "dc480ae9e88e1a4057df3a5998fa0395e0a491c17cdc7efde8ee1d0e0d446e75",
+   "quality": 100
+  },
+  {
+   "rows": 5,
+   "cols": 5,
+   "seed": 4,
+   "pdq": "c3f0ce333c0f318ccb72b1accb726e5b348dce73c3f08e233c0f318ccb7291a4",
+   "quality": 91
+  },
+  {
+   "rows": 37,
+   "cols": 91,
+   "seed": 5,
+   "pdq": "a656fc6bf85c5555a0f80c64e4b9e5f404634bf3f804542e4f02917f1d3b70ec",
+   "quality": 100
+  },
+  {
+   "rows": 480,
+   "cols": 640,
+   "seed": 6,
+   "pdq": "b993b0c8f372896994097eb3f09058031bd2f7c76703e8f655285903637edec3",
+   "quality": 100
+  },
+  {
+   "rows": 4,
+   "cols": 9,
+   "seed": 7,
+   "pdq": "0000000000000000000000000000000000000000000000000000000000000000",
+   "quality": 0
+  },
+  {
+   "rows": 129,
+   "cols": 127,
+   "seed": 8,
+   "pdq": "a41def7104ebb8e5e5b85af6c12820231b7388e4de77f2032b3a049e8d3ed785",
+   "quality": 100
+  },
+  {
+   "rows": 65,
+   "cols": 64,
+   "seed": 9,
+   "pdq": "f50df834d1d2a9c7b4a4f3f0ad240301ec6f6e437279f23c27c29a42ac7162bd",
+   "quality": 100
+  },
+  {
+   "rows": 300,
+   "cols": 200,
+   "seed": 1,
+   "pdq": "c9d2c835c2cc7d59f4aac3a9b8385c76291836146fe585eb6c49e17fca2c2c8b",
+   "quality": 100
+  },
+  {
+   "rows": 300,
+   "cols": 200,
+   "seed": 2,
+   "pdq": "1f128c651017b6e14f79e0624ee35f51bd29d7f84d0599ca7c46bf07b8738053",
+   "quality": 100
+  }
+ ],
+ "luma": [
+  {
+   "channels": 3,
+   "pixels": [
+    255,
+    255,
+    255,
+    0,
+    0,
+    0,
+    1,
+    2,
+    3,
+    200,
+    100,
+    50,
+    17,
+    99,
+    254
+   ],
+   "luma": [
+    255,
+    0,
+    1.815000057220459,
+    124.19999694824219,
+    92.1520004272461
+   ]
+  },
+  {
+   "channels": 4,
+   "pixels": [
+    255,
+    0,
+    0,
+    9,
+    0,
+    255,
+    0,
+    9,
+    0,
+    0,
+    255,
+    9,
+    13,
+    77,
+    211,
+    0
+   ],
+   "luma": [
+    76.2449951171875,
+    149.68499755859375,
+    29.06999969482422,
+    73.13999938964844
+   ]
+  },
+  {
+   "channels": 1,
+   "pixels": [
+    0,
+    7,
+    255
+   ],
+   "luma": [
+    0,
+    7,
+    255
+   ]
+  },
+  {
+   "channels": 2,
+   "pixels": [
+    7,
+    255,
+    9,
+    0
+   ],
+   "luma": [
+    7,
+    9
+   ]
+  }
+ ],
+ "lines": [
+  [
+   "abababababababababababababababababababababababababababababababab",
+   "abababababababababababababababababababababababababababababababab"
+  ],
+  [
+   "  ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB  \r",
+   "abababababababababababababababababababababababababababababababab"
+  ],
+  [
+   "17,0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f,2026-01-01",
+   "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
+  ],
+  [
+   "abc\t0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f\tx",
+   "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
+  ],
+  [
+   "# 0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+   null
+  ],
+  [
+   "id,hash,added",
+   null
+  ],
+  [
+   "",
+   null
+  ],
+  [
+   "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+   null
+  ],
+  [
+   "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+   null
+  ],
+  [
+   "00000000000000000000000000000000000000000000000000000000000000000 1111111111111111111111111111111111111111111111111111111111111111",
+   "1111111111111111111111111111111111111111111111111111111111111111"
+  ]
+ ]
+}

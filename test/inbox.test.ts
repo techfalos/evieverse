@@ -8,7 +8,7 @@ import { loadConfig } from '../src/config.js';
 import { excerptOf, MAX_MESSAGE_CHARS } from '../src/inbox.js';
 import { loadLanguages } from '../src/language.js';
 import { setAdmin } from '../src/moderation/policy.js';
-import { as, createTestContext, requests, TARGETS, type TestContext, type User } from './helpers.js';
+import { as, BASE_ENV, createTestContext, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 const NO_USER = '00000000-0000-4000-8000-000000000000';
 const NOT_TAKEN = "this user doesn't take messages from you";
@@ -29,7 +29,7 @@ type Inbox = { userId: string; unread: number; inbox: Item[]; nextCursor: string
 
 describe('inbox settings', () => {
   it('come from the environment', () => {
-    const load = (env: Record<string, string> = {}) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).inbox;
+    const load = (env: Record<string, string> = {}) => loadConfig({}, { ...BASE_ENV, ...env }).inbox;
     expect(load()).toEqual({ messagesPerMinute: 10, retentionDays: 90 });
     expect(load({ INBOX_MESSAGES_PER_MINUTE: '0', INBOX_RETENTION_DAYS: '7' })).toEqual({ messagesPerMinute: 0, retentionDays: 7 });
     expect(() => load({ INBOX_MESSAGES_PER_MINUTE: '-1' })).toThrow();
@@ -387,9 +387,10 @@ for (const target of TARGETS) {
       // Each user has their own count.
       ok(await say(bob, alice, 'reply'), 201);
 
-      ctx.clock.now += 59_000;
-      expect(await refused(say(alice, bob, 'three'))).toEqual([429, 'too many messages; try again in 1 second']);
-      ctx.clock.now += 1001;
+      // The minute is Redis's to count, from the first message, and what a refusal says is left of it: once it is over, the next is taken.
+      const [left] = Object.values(await ctx.lapse(`messages:${alice.userId}`));
+      expect(left).toBeGreaterThan(40_000);
+      expect(left).toBeLessThanOrEqual(60_000);
       ok(await say(alice, bob, 'three'), 201);
       expect((await texts(bob)).sort()).toEqual(['one', 'three', 'two']);
     });
@@ -494,33 +495,73 @@ for (const target of TARGETS) {
       expect(await notices(alice)).toContainEqual(expect.objectContaining({ kind: 'last_tag_removed', contentId, excerpt: 'Two hashtags here #news #sports' }));
     });
 
-    it('tells a publisher what became of their post in the moderation queue', async () => {
+    it('tells a publisher that their post is held in the moderation queue, and what became of it there', async () => {
       ctx = await createTestContext(target, { trust: { deleteBelow: 0 } });
       const root = await admin();
       const alice = await ctx.register('alice');
       ok(await req(root, 'POST', '/moderation/blocked-words', { words: ['spam'] }));
+      /** The notice of a post that is held, which quotes the post as the write that was held made it. */
+      const held = (contentId: string, excerpt: string) => ({
+        kind: 'post_held',
+        contentId,
+        excerpt,
+        text: "Your post is held in the moderation queue for review. It is not published, and only you and this server's moderators can read it, until one of them accepts it.",
+      });
 
       const accepted = ok(await store(alice, 'Good spam #news'), 202).contentId;
+      const heldAt = now();
+      // A post held for review is answered so, and its publisher finds it in their inbox too: unread, like any notice.
+      expect(await inbox(alice)).toEqual({
+        userId: alice.userId,
+        unread: 1,
+        inbox: [{ messageId: expect.any(String), ...held(accepted, 'Good spam #news'), sentAt: heldAt, readAt: null }],
+        nextCursor: null,
+      });
+      ctx.clock.now += 1000;
       const rejected = ok(await store(alice, 'Bad spam #news'), 202).contentId;
-      // A post held for review is answered so, not reported.
-      expect(await notices(alice)).toEqual([]);
+      expect(await notices(alice)).toEqual([held(accepted, 'Good spam #news'), held(rejected, 'Bad spam #news')]);
+      // Once: an update of a post that waits keeps its place in the queue, and tells them nothing they weren't told.
+      ctx.clock.now += 1000;
+      ok(await store(alice, 'Good spam, really #news', { contentId: accepted }), 202);
+      ok(await store(alice, 'Good spam, really #news', { contentId: accepted }), 200);
+      expect(await notices(alice)).toHaveLength(2);
 
+      ctx.clock.now += 1000;
       ok(await req(root, 'POST', `/moderation/queue/${accepted}/accept`));
       ctx.clock.now += 1000;
       ok(await req(root, 'POST', `/moderation/queue/${rejected}/reject`), 202);
-      expect(await notices(alice)).toEqual([
-        { kind: 'post_accepted', contentId: accepted, excerpt: 'Good spam #news', text: 'Your post was accepted from the moderation queue, and is published.' },
+      expect((await notices(alice)).slice(2)).toEqual([
+        { kind: 'post_accepted', contentId: accepted, excerpt: 'Good spam, really #news', text: 'Your post was accepted from the moderation queue, and is published.' },
         { kind: 'post_rejected', contentId: rejected, excerpt: 'Bad spam #news', text: 'Your post was rejected from the moderation queue, and deleted.' },
       ]);
       // A decision that can't be made twice isn't reported twice.
       expect((await req(root, 'POST', `/moderation/queue/${accepted}/accept`)).statusCode).not.toBe(200);
       expect((await req(root, 'POST', `/moderation/queue/${rejected}/reject`)).statusCode).not.toBe(202);
-      expect(await notices(alice)).toHaveLength(2);
+      expect(await notices(alice)).toHaveLength(4);
 
-      // An admin's own held post, accepted by themselves, is no news to them.
+      // A post that is published tells nobody, and nor does an update of it that is. One that is held does: the
+      // post was in feeds until then. So does the next held update of a post that was accepted.
+      ctx.clock.now += 1000;
+      const fine = ok(await store(alice, 'An honest post #news'), 201).contentId;
+      ok(await store(alice, 'An honest post, fixed #news', { contentId: fine }), 200);
+      expect(await notices(alice)).toHaveLength(4);
+      ctx.clock.now += 1000;
+      ok(await store(alice, 'Now with spam #news', { contentId: fine }), 202);
+      ctx.clock.now += 1000;
+      ok(await store(alice, 'Good spam, again #news', { contentId: accepted }), 202);
+      expect((await notices(alice)).slice(4)).toEqual([held(fine, 'Now with spam #news'), held(accepted, 'Good spam, again #news')]);
+      // An update that is published takes the post out of the queue with nobody's decision, and one held after it is held anew.
+      ctx.clock.now += 1000;
+      ok(await store(alice, 'An honest post again #news', { contentId: fine }), 200);
+      expect(await notices(alice)).toHaveLength(6);
+      ctx.clock.now += 1000;
+      ok(await store(alice, 'And spam again #news', { contentId: fine }), 202);
+      expect((await notices(alice)).slice(6)).toEqual([held(fine, 'And spam again #news')]);
+
+      // An admin's post is held like anyone's, and they are told of that. Accepting it themselves is no news to them.
       const own = ok(await store(root, 'My spam #news'), 202).contentId;
       ok(await req(root, 'POST', `/moderation/queue/${own}/accept`));
-      expect(await notices(root)).toEqual([]);
+      expect(await notices(root)).toEqual([held(own, 'My spam #news')]);
     });
 
     it('tells a publisher when an admin deletes their post, not when they delete it themselves', async () => {

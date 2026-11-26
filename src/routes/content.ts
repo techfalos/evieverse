@@ -155,7 +155,7 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    * described has that as its `alt`, the text to give it for those who can't see it, and the
    * preview has them all, in the images' order (`alt`).
    *
-   * `preview.video`, on a video post whose video the server processed (src/video): its size
+   * `preview.video`, on a video post whose video the server processed (compactor/src/video): its size
    * and length, a poster to show before it plays (`poster`), and its adaptive stream (`hls`,
    * see GET /content/:contentId/video/:videoId/:file). `contentUrl` is then an MP4 that plays
    * anywhere. `processing: true` on a post whose video is still being processed: it is read as
@@ -254,7 +254,7 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    * A 404 here is signed too: beside its `error` it carries `gone`, an attestation that says no
    * post is published at the address (see AttestedGone). It is what tells a server that holds a
    * repost of the post to hide it (POST /repost/refresh there, or that server's own asking, see
-   * src/originSweep.ts), and to delete it if the post stays gone. It is given
+   * compactor/src/sweep.rs), and to delete it if the post stays gone. It is given
    * for whatever isn't published, which is all a 404 says of it: a post that was deleted, one that
    * waits in the moderation queue, and an id that was never a post's. A new post whose video is
    * still being processed isn't published yet either; an update that is, is attested as the
@@ -330,7 +330,7 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    * requireMeta): a file from where it is staged, and a text or a link's URL from the write's
    * row, which holds it.
    *
-   * Not a video the server is still processing (src/video): the file as it was sent is never
+   * Not a video the server is still processing (compactor/src/video): the file as it was sent is never
    * served, since it says what the processed one doesn't (where it was filmed, and when). Until
    * it is ready, an update's bytes are the ones the post had, and a new post has none: 404,
    * which says so. Once it is, these are an MP4 that plays anywhere.
@@ -359,7 +359,7 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
   });
 
   /**
-   * A file of a post's processed video (src/video), by the id of that version of the video
+   * A file of a post's processed video (compactor/src/video), by the id of that version of the video
    * (`preview.video.id`) and the file's name: its poster (`poster.jpg`), the master playlist
    * of its adaptive stream (`master.m3u8`), and what that leads to, a playlist for each size
    * (`720p.m3u8`) and the segments each of those lists (`720p_00000.ts`). A post's preview

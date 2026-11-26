@@ -1,0 +1,4381 @@
+{
+ "note": "Made by the TypeScript implementation (src/moderation/words.ts and src/plugins/trust) before the Rust one replaced it: the Rust tests are held to it.",
+ "normalize": [
+  [
+   "  Buy NOW! ",
+   "buy now",
+   false
+  ],
+  [
+   "Café",
+   "cafe",
+   false
+  ],
+  [
+   "ＳＰＡＭ",
+   "spam",
+   false
+  ],
+  [
+   "crème-brûlée",
+   "creme brulee",
+   false
+  ],
+  [
+   "垃圾",
+   "垃圾",
+   false
+  ],
+  [
+   "ΣΟΦΟΣ",
+   "σοφος",
+   false
+  ],
+  [
+   "ὈΔΥΣΣΕΎΣ",
+   "οδυσσευς",
+   false
+  ],
+  [
+   "!!! ...",
+   null,
+   false
+  ],
+  [
+   "",
+   null,
+   false
+  ],
+  [
+   "a b c d e f g h",
+   "a b c d e f g h",
+   false
+  ],
+  [
+   "a b c d e f g h i",
+   null,
+   false
+  ],
+  [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   false
+  ],
+  [
+   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   null,
+   false
+  ],
+  [
+   "𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷",
+   "𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷",
+   false
+  ],
+  [
+   "𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷𐐷",
+   null,
+   false
+  ],
+  [
+   "𝒳𝒴",
+   "xy",
+   false
+  ],
+  [
+   "İstanbul",
+   "istanbul",
+   false
+  ],
+  [
+   "STRASSE straße ẞ",
+   "strasse straße ß",
+   false
+  ],
+  [
+   "ǅ ǆ Ǆ",
+   "dz dz dz",
+   false
+  ],
+  [
+   "ﬁne ﬃ",
+   "fine ffi",
+   false
+  ],
+  [
+   "①②③ ½",
+   "123 1 2",
+   false
+  ],
+  [
+   "x̣́y",
+   "xy",
+   false
+  ],
+  [
+   "नमस्ते दुनिया",
+   "नमस्ते दुनिया",
+   false
+  ],
+  [
+   "ไทย ภาษา",
+   "ไทย ภาษา",
+   false
+  ],
+  [
+   "מִלָּה",
+   "מִלָּה",
+   false
+  ],
+  [
+   "العربية ـ",
+   "العربية ـ",
+   false
+  ],
+  [
+   "a_b-c.d",
+   "a b c d",
+   false
+  ],
+  [
+   "don't",
+   "don t",
+   false
+  ],
+  [
+   "e‍moji 👍🏽",
+   "e moji",
+   false
+  ],
+  [
+   "  nbsp 　",
+   "nbsp",
+   false
+  ],
+  [
+   "ſ K Ω",
+   "s k ω",
+   false
+  ],
+  [
+   "ǰ ŉ",
+   "j ʼn",
+   false
+  ],
+  [
+   "㎏ ㍿",
+   "kg 株式会社",
+   false
+  ],
+  [
+   "ｶﾞｰﾄﾞ",
+   "ガード",
+   false
+  ],
+  [
+   " /buy\\s+now/ ",
+   "/buy\\s+now/",
+   true
+  ],
+  [
+   "/垃圾|广告/",
+   "/垃圾|广告/",
+   true
+  ],
+  [
+   "/café/",
+   "/café/",
+   true
+  ],
+  [
+   "/spam/i",
+   null,
+   true
+  ],
+  [
+   "/spam",
+   null,
+   true
+  ],
+  [
+   "//",
+   null,
+   true
+  ],
+  [
+   "/(/",
+   null,
+   true
+  ],
+  [
+   "/[a-/",
+   null,
+   true
+  ],
+  [
+   "/a*/",
+   null,
+   true
+  ],
+  [
+   "/(spam)?/",
+   null,
+   true
+  ],
+  [
+   "/|x/",
+   null,
+   true
+  ],
+  [
+   "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+   "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+   true
+  ],
+  [
+   "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+   null,
+   true
+  ],
+  [
+   "/a？/",
+   "/a？/",
+   true
+  ],
+  [
+   "/ｓｐａｍ/",
+   "/ｓｐａｍ/",
+   true
+  ],
+  [
+   "﻿/x/",
+   "/x/",
+   true
+  ],
+  [
+   "/x/",
+   "x",
+   false
+  ],
+  [
+   " / x /",
+   "/ x /",
+   true
+  ],
+  [
+   "/\\//",
+   "/\\//",
+   true
+  ],
+  [
+   "/a\\/b/",
+   "/a\\/b/",
+   true
+  ],
+  [
+   "/./",
+   "/./",
+   true
+  ],
+  [
+   "/^/",
+   null,
+   true
+  ],
+  [
+   "/$/",
+   null,
+   true
+  ],
+  [
+   "/\\b/",
+   "/\\b/",
+   true
+  ],
+  [
+   "/(?=a)/",
+   "/(?=a)/",
+   true
+  ],
+  [
+   "/a|/",
+   null,
+   true
+  ],
+  [
+   "/[^]/",
+   "/[^]/",
+   true
+  ],
+  [
+   "/\\p{L}/",
+   "/\\p{L}/",
+   true
+  ],
+  [
+   "/\\p{Nope}/",
+   null,
+   true
+  ],
+  [
+   "/(?<n>a)\\k<n>/",
+   "/(?<n>a)\\k<n>/",
+   true
+  ],
+  [
+   "/\\u{1F600}/",
+   "/\\u{1F600}/",
+   true
+  ],
+  [
+   "/x{2,1}/",
+   null,
+   true
+  ],
+  [
+   "/Buy\\s+NOW!/",
+   "/Buy\\s+NOW!/",
+   true
+  ],
+  [
+   "/café/",
+   "/café/",
+   true
+  ],
+  [
+   "/scam\\w*/",
+   "/scam\\w*/",
+   true
+  ],
+  [
+   "/^promo/",
+   "/^promo/",
+   true
+  ],
+  [
+   "/すごい？/",
+   "/すごい？/",
+   true
+  ],
+  [
+   "/[がぎ]り/",
+   "/[がぎ]り/",
+   true
+  ],
+  [
+   "/ｶﾞｰﾄﾞ/",
+   "/ｶﾞｰﾄﾞ/",
+   true
+  ],
+  [
+   "/buy.*now/",
+   "/buy.*now/",
+   true
+  ],
+  [
+   "/\\d{3}-\\d{4}/",
+   "/\\d{3}-\\d{4}/",
+   true
+  ],
+  [
+   "/rumou?r/",
+   "/rumou?r/",
+   true
+  ],
+  [
+   "/Café/",
+   "/Café/",
+   true
+  ],
+  [
+   "/何？/",
+   "/何？/",
+   true
+  ],
+  [
+   "/cat$/",
+   "/cat$/",
+   true
+  ],
+  [
+   "/^Buy/",
+   "/^Buy/",
+   true
+  ],
+  [
+   "/\\bfree\\b/",
+   "/\\bfree\\b/",
+   true
+  ],
+  [
+   "/\\Bfree/",
+   "/\\Bfree/",
+   true
+  ],
+  [
+   "/s[^a-z]?p[^a-z]?a[^a-z]?m/",
+   "/s[^a-z]?p[^a-z]?a[^a-z]?m/",
+   true
+  ],
+  [
+   "/[5s]pam/",
+   "/[5s]pam/",
+   true
+  ],
+  [
+   "/a{2}b/",
+   "/a{2}b/",
+   true
+  ],
+  [
+   "/a{2,}b/",
+   "/a{2,}b/",
+   true
+  ],
+  [
+   "/a{1,2}b/",
+   "/a{1,2}b/",
+   true
+  ],
+  [
+   "/e{3,}?l/",
+   "/e{3,}?l/",
+   true
+  ],
+  [
+   "/x|y|z/",
+   "/x|y|z/",
+   true
+  ],
+  [
+   "/(?:ab){5,}/",
+   "/(?:ab){5,}/",
+   true
+  ],
+  [
+   "/[a-c-e]/",
+   "/[a-c-e]/",
+   true
+  ],
+  [
+   "/[\\d-x]/",
+   null,
+   true
+  ],
+  [
+   "/[\\w.+-]+@[\\w-]+\\.[a-z]{2,}/",
+   "/[\\w.+-]+@[\\w-]+\\.[a-z]{2,}/",
+   true
+  ],
+  [
+   "/https?:\\/\\/[^\\s/]+/",
+   "/https?:\\/\\/[^\\s/]+/",
+   true
+  ],
+  [
+   "/\\(\\d{3}\\)/",
+   "/\\(\\d{3}\\)/",
+   true
+  ],
+  [
+   "/\\$\\d+/",
+   "/\\$\\d+/",
+   true
+  ],
+  [
+   "/\\+1/",
+   "/\\+1/",
+   true
+  ],
+  [
+   "/\\.example/",
+   "/\\.example/",
+   true
+  ],
+  [
+   "/[.]example/",
+   "/[.]example/",
+   true
+  ],
+  [
+   "/\\^|\\||\\?|\\*/",
+   "/\\^|\\||\\?|\\*/",
+   true
+  ],
+  [
+   "/[\\]\\[]/",
+   "/[\\]\\[]/",
+   true
+  ],
+  [
+   "/\\{|\\}/",
+   "/\\{|\\}/",
+   true
+  ],
+  [
+   "/-{2,}|9999/",
+   "/-{2,}|9999/",
+   true
+  ],
+  [
+   "/\\x41b/",
+   "/\\x41b/",
+   true
+  ],
+  [
+   "/\\u0041b/",
+   "/\\u0041b/",
+   true
+  ],
+  [
+   "/[\\u{1F600}-\\u{1F64F}]{2}/",
+   "/[\\u{1F600}-\\u{1F64F}]{2}/",
+   true
+  ],
+  [
+   "/\\t/",
+   "/\\t/",
+   true
+  ],
+  [
+   "/line one\\nline/",
+   "/line one\\nline/",
+   true
+  ],
+  [
+   "/\\r\\n/",
+   "/\\r\\n/",
+   true
+  ],
+  [
+   "/\\cJ/",
+   "/\\cJ/",
+   true
+  ],
+  [
+   "/[\\b]/",
+   "/[\\b]/",
+   true
+  ],
+  [
+   "/\\0/",
+   "/\\0/",
+   true
+  ],
+  [
+   "/\\u2028/",
+   "/\\u2028/",
+   true
+  ],
+  [
+   "/\\u00a0/",
+   "/\\u00a0/",
+   true
+  ],
+  [
+   "/\\S\\s\\S/",
+   "/\\S\\s\\S/",
+   true
+  ],
+  [
+   "/\\ufeff/",
+   "/\\ufeff/",
+   true
+  ],
+  [
+   "/(?<!\\w)free(?!\\w)/",
+   "/(?<!\\w)free(?!\\w)/",
+   true
+  ],
+  [
+   "/(?<=\\$)\\d+/",
+   "/(?<=\\$)\\d+/",
+   true
+  ],
+  [
+   "/(?<=a+)b/",
+   "/(?<=a+)b/",
+   true
+  ],
+  [
+   "/(?<!a{2,})b/",
+   "/(?<!a{2,})b/",
+   true
+  ],
+  [
+   "/(?=.*scam)(?=.*promo)/",
+   "/(?=.*scam)(?=.*promo)/",
+   true
+  ],
+  [
+   "/free(?= money)/",
+   "/free(?= money)/",
+   true
+  ],
+  [
+   "/(?<=x)free/",
+   "/(?<=x)free/",
+   true
+  ],
+  [
+   "/(?!)/",
+   "/(?!)/",
+   true
+  ],
+  [
+   "/(?<!^)promo/",
+   "/(?<!^)promo/",
+   true
+  ],
+  [
+   "/(?<=^|\\s)the\\b/",
+   "/(?<=^|\\s)the\\b/",
+   true
+  ],
+  [
+   "/(.)\\1{3,}/",
+   "/(.)\\1{3,}/",
+   true
+  ],
+  [
+   "/(?<c>[a-z])\\k<c>\\k<c>/",
+   "/(?<c>[a-z])\\k<c>\\k<c>/",
+   true
+  ],
+  [
+   "/\\b(\\w+)\\s+\\1\\b/",
+   "/\\b(\\w+)\\s+\\1\\b/",
+   true
+  ],
+  [
+   "/(a)|\\1b/",
+   "/(a)|\\1b/",
+   true
+  ],
+  [
+   "/(?<first>a+)(?<second>b+)\\k<first>/",
+   "/(?<first>a+)(?<second>b+)\\k<first>/",
+   true
+  ],
+  [
+   "/(a)(b)?\\2a/",
+   "/(a)(b)?\\2a/",
+   true
+  ],
+  [
+   "/\\k<later>x(?<later>a)/",
+   "/\\k<later>x(?<later>a)/",
+   true
+  ],
+  [
+   "/\\p{Script=Han}{2,}/",
+   "/\\p{Script=Han}{2,}/",
+   true
+  ],
+  [
+   "/\\p{sc=Cyrillic}+/",
+   "/\\p{sc=Cyrillic}+/",
+   true
+  ],
+  [
+   "/\\p{Script_Extensions=Greek}{3}/",
+   "/\\p{Script_Extensions=Greek}{3}/",
+   true
+  ],
+  [
+   "/\\p{scx=Hiragana}\\p{sc=Katakana}/",
+   "/\\p{scx=Hiragana}\\p{sc=Katakana}/",
+   true
+  ],
+  [
+   "/\\p{L}+\\d/",
+   "/\\p{L}+\\d/",
+   true
+  ],
+  [
+   "/\\p{Lu}{5,}/",
+   "/\\p{Lu}{5,}/",
+   true
+  ],
+  [
+   "/\\p{Uppercase_Letter}\\p{Ll}/",
+   "/\\p{Uppercase_Letter}\\p{Ll}/",
+   true
+  ],
+  [
+   "/\\p{Emoji_Presentation}{3}/",
+   "/\\p{Emoji_Presentation}{3}/",
+   true
+  ],
+  [
+   "/\\p{Extended_Pictographic}/",
+   "/\\p{Extended_Pictographic}/",
+   true
+  ],
+  [
+   "/\\P{ASCII}{6,}/",
+   "/\\P{ASCII}{6,}/",
+   true
+  ],
+  [
+   "/\\p{Nd}{3}/",
+   "/\\p{Nd}{3}/",
+   true
+  ],
+  [
+   "/[\\p{N}--]/",
+   null,
+   true
+  ],
+  [
+   "/\\p{Any}{3000}/",
+   "/\\p{Any}{3000}/",
+   true
+  ],
+  [
+   "/\\p{Alphabetic}{20,}/",
+   "/\\p{Alphabetic}{20,}/",
+   true
+  ],
+  [
+   "/\\p{White_Space}{2}/",
+   "/\\p{White_Space}{2}/",
+   true
+  ],
+  [
+   "/\\p{Emoji_Modifier}/",
+   "/\\p{Emoji_Modifier}/",
+   true
+  ],
+  [
+   "/\\p{Regional_Indicator}{2}/",
+   "/\\p{Regional_Indicator}{2}/",
+   true
+  ],
+  [
+   "/\\p{General_Category=Decimal_Number}+-/",
+   "/\\p{General_Category=Decimal_Number}+-/",
+   true
+  ],
+  [
+   "/[^\\p{L}\\p{N}\\s]{3,}/",
+   "/[^\\p{L}\\p{N}\\s]{3,}/",
+   true
+  ],
+  [
+   "/\\p{Lt}/",
+   "/\\p{Lt}/",
+   true
+  ],
+  [
+   "/\\p{RGI_Emoji}/",
+   null,
+   true
+  ],
+  [
+   "/ſ/",
+   "/ſ/",
+   true
+  ],
+  [
+   "/ς/",
+   "/ς/",
+   true
+  ],
+  [
+   "/ß/",
+   "/ß/",
+   true
+  ],
+  [
+   "/ẞ/",
+   "/ẞ/",
+   true
+  ],
+  [
+   "/İ/",
+   "/İ/",
+   true
+  ],
+  [
+   "/k/",
+   "/k/",
+   true
+  ],
+  [
+   "/\\u212a/",
+   "/\\u212a/",
+   true
+  ],
+  [
+   "/ǆ/",
+   "/ǆ/",
+   true
+  ],
+  [
+   "/привет/",
+   "/привет/",
+   true
+  ],
+  [
+   "/[a-z]{12,}/",
+   "/[a-z]{12,}/",
+   true
+  ],
+  [
+   "/\\w\\u212a/",
+   "/\\w\\u212a/",
+   true
+  ],
+  [
+   "/[\\W]ſ/",
+   "/[\\W]ſ/",
+   true
+  ],
+  [
+   "/allcapsshouting/",
+   "/allcapsshouting/",
+   true
+  ],
+  [
+   "/[A-Z][a-z]+[A-Z]/",
+   "/[A-Z][a-z]+[A-Z]/",
+   true
+  ],
+  [
+   "/😀.😄/",
+   "/😀.😄/",
+   true
+  ],
+  [
+   "/^.$/",
+   "/^.$/",
+   true
+  ],
+  [
+   "/[😀-😄]{3}/",
+   "/[😀-😄]{3}/",
+   true
+  ],
+  [
+   "/[^\\x00-\\x7f]{5,}/",
+   "/[^\\x00-\\x7f]{5,}/",
+   true
+  ],
+  [
+   "/text .{1,3}$/",
+   "/text .{1,3}$/",
+   true
+  ],
+  [
+   "/two.line/",
+   "/two.line/",
+   true
+  ],
+  [
+   "/one.line/",
+   "/one.line/",
+   true
+  ],
+  [
+   "/[^]bom/",
+   "/[^]bom/",
+   true
+  ],
+  [
+   "/[^a]\\u2028/",
+   "/[^a]\\u2028/",
+   true
+  ],
+  [
+   "/a{2,1}/",
+   null,
+   true
+  ],
+  [
+   "/\\ｄ/",
+   null,
+   true
+  ],
+  [
+   "/spam\\/",
+   null,
+   true
+  ],
+  [
+   "/\\a/",
+   null,
+   true
+  ],
+  [
+   "/a{/",
+   null,
+   true
+  ],
+  [
+   "/}/",
+   null,
+   true
+  ],
+  [
+   "/]/",
+   null,
+   true
+  ],
+  [
+   "/\\-/",
+   null,
+   true
+  ],
+  [
+   "/(?<n>a)(?<n>b)/",
+   null,
+   true
+  ],
+  [
+   "/\\k<n>/",
+   null,
+   true
+  ],
+  [
+   "/\\p{Script=Nope}/",
+   null,
+   true
+  ],
+  [
+   "/[z-a]/",
+   null,
+   true
+  ],
+  [
+   "/(?<=a)+b/",
+   null,
+   true
+  ],
+  [
+   "/\\1(/",
+   null,
+   true
+  ],
+  [
+   "/*a/",
+   null,
+   true
+  ],
+  [
+   "/a**/",
+   null,
+   true
+  ],
+  [
+   "/\\u{110000}/",
+   null,
+   true
+  ],
+  [
+   "/\\c/",
+   null,
+   true
+  ],
+  [
+   "/(?i:a)b/",
+   null,
+   true
+  ],
+  [
+   "/(?-i:A)b/",
+   null,
+   true
+  ],
+  [
+   "/\\8/",
+   null,
+   true
+  ],
+  [
+   "/\\_/",
+   null,
+   true
+  ],
+  [
+   "/(?<n>a)|(?<n>b)x/",
+   null,
+   true
+  ],
+  [
+   "/spam|/",
+   null,
+   true
+  ],
+  [
+   "/何?/",
+   null,
+   true
+  ],
+  [
+   "/(?=)/",
+   null,
+   true
+  ],
+  [
+   "/(?<!a)/",
+   null,
+   true
+  ],
+  [
+   "/(a+)+$/",
+   "/(a+)+$/",
+   true
+  ],
+  [
+   "/(a|aa)+$/",
+   "/(a|aa)+$/",
+   true
+  ],
+  [
+   "/(.*a){12}/",
+   "/(.*a){12}/",
+   true
+  ],
+  [
+   "/(x+x+)+y/",
+   "/(x+x+)+y/",
+   true
+  ],
+  [
+   "/([a-z]+)*\\d$/",
+   "/([a-z]+)*\\d$/",
+   true
+  ]
+ ],
+ "fold": [
+  [
+   "Buy   NOW! limited offer, call 555-1234 today",
+   "buy   now! limited offer, call 555-1234 today"
+  ],
+  [
+   "这是垃圾广告内容,请勿相信",
+   "这是垃圾广告内容,请勿相信"
+  ],
+  [
+   "CAFE au lait and a cafe, plus SPAM spam",
+   "cafe au lait and a cafe, plus spam spam"
+  ],
+  [
+   "すごい? がり ぎり ガード ガード",
+   "すごい? がり ぎり ガード ガード"
+  ],
+  [
+   "promo at start? no. scammers scam",
+   "promo at start? no. scammers scam"
+  ],
+  [
+   "free money $100 FREEDOM xfree",
+   "free money $100 freedom xfree"
+  ],
+  [
+   "aaaa bbbb heeeeello the the cat",
+   "aaaa bbbb heeeeello the the cat"
+  ],
+  [
+   "Привет мир ΑΒΓ σς Σ s K ẞ ß I i",
+   "привет мир αβγ σς σ s k ß ß i i"
+  ],
+  [
+   "😀😃😄 emoji 👍🏽 text 🇺🇸",
+   "😀😃😄 emoji 👍🏽 text 🇺🇸"
+  ],
+  [
+   "line one\nline two\r\nline three sep nbsp﻿bom",
+   "line one\nline two\r\nline three sep nbsp﻿bom"
+  ],
+  [
+   "x",
+   "x"
+  ],
+  [
+   "Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. ",
+   "lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. "
+  ],
+  [
+   "ab aab aaab ba",
+   "ab aab aaab ba"
+  ],
+  [
+   "AEIOU aeiou Dz dz DZ",
+   "aeiou aeiou dz dz dz"
+  ],
+  [
+   "tel: +1 (555) 010-9999, email a.b@example.com, http://bad.example/path?q=1",
+   "tel: +1 (555) 010-9999, email a.b@example.com, http://bad.example/path?q=1"
+  ],
+  [
+   "spam SPAM SpAm s.p.a.m s p a m 5pam",
+   "spam spam spam s.p.a.m s p a m 5pam"
+  ],
+  [
+   "a\tb  c d",
+   "a\tb  c d"
+  ],
+  [
+   "१२३ ٣٤٥ 678",
+   "१२३ ٣٤٥ 678"
+  ],
+  [
+   "CamelCaseWORDS and ALLCAPSSHOUTING",
+   "camelcasewords and allcapsshouting"
+  ],
+  [
+   "abababababababababababababababababababababababababababababab",
+   "abababababababababababababababababababababababababababababab"
+  ],
+  [
+   "ÀÉÎÕÜ àéîõü",
+   "aeiou aeiou"
+  ],
+  [
+   "ΣΑΣ ΟΔΟΣ Σ",
+   "σας οδος σ"
+  ],
+  [
+   "İI ıi",
+   "ii ıi"
+  ],
+  [
+   "ǅungla",
+   "dzungla"
+  ],
+  [
+   "ﬁﬂ ½ ①",
+   "fifl 1⁄2 1"
+  ],
+  [
+   "Ω Ω K",
+   "ω ω k"
+  ],
+  [
+   "é é ẹ́",
+   "e e e"
+  ],
+  [
+   "ｶﾞｰﾄﾞ ガード",
+   "ガード ガード"
+  ],
+  [
+   "한글 ᄒᆞᆫ",
+   "한글 ᄒᆞᆫ"
+  ],
+  [
+   "ͅ ᾳ ᾼ",
+   " α α"
+  ]
+ ],
+ "patterns": {
+  "texts": [
+   "Buy   NOW! limited offer, call 555-1234 today",
+   "这是垃圾广告内容,请勿相信",
+   "CAFE au lait and a cafe, plus SPAM spam",
+   "すごい? がり ぎり ガード ガード",
+   "promo at start? no. scammers scam",
+   "free money $100 FREEDOM xfree",
+   "aaaa bbbb heeeeello the the cat",
+   "Привет мир ΑΒΓ σς Σ s K ẞ ß I i",
+   "😀😃😄 emoji 👍🏽 text 🇺🇸",
+   "line one\nline two\r\nline three sep nbsp﻿bom",
+   "x",
+   "Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. ",
+   "ab aab aaab ba",
+   "AEIOU aeiou Dz dz DZ",
+   "tel: +1 (555) 010-9999, email a.b@example.com, http://bad.example/path?q=1",
+   "spam SPAM SpAm s.p.a.m s p a m 5pam",
+   "a\tb  c d",
+   "१२३ ٣٤٥ 678",
+   "CamelCaseWORDS and ALLCAPSSHOUTING",
+   "abababababababababababababababababababababababababababababab"
+  ],
+  "entries": [
+   {
+    "entry": "/垃圾|广告/",
+    "hits": [
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/Buy\\s+NOW!/",
+    "hits": [
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/a\\/b/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/café/",
+    "hits": [
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/café/",
+    "hits": [
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/scam\\w*/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/^promo/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/ｓｐａｍ/",
+    "hits": [
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/すごい？/",
+    "hits": [
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/[がぎ]り/",
+    "hits": [
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/ｶﾞｰﾄﾞ/",
+    "hits": [
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/buy.*now/",
+    "hits": [
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\d{3}-\\d{4}/",
+    "hits": [
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/rumou?r/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/Café/",
+    "hits": [
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/何？/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/cat$/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/^Buy/",
+    "hits": [
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\bfree\\b/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\Bfree/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/s[^a-z]?p[^a-z]?a[^a-z]?m/",
+    "hits": [
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/[5s]pam/",
+    "hits": [
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/a{2}b/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/a{2,}b/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/a{1,2}b/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true
+    ]
+   },
+   {
+    "entry": "/e{3,}?l/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/x|y|z/",
+    "hits": [
+     true,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     true,
+     false,
+     true,
+     false,
+     false,
+     true,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/(?:ab){5,}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true
+    ]
+   },
+   {
+    "entry": "/[a-c-e]/",
+    "hits": [
+     true,
+     false,
+     true,
+     false,
+     true,
+     true,
+     true,
+     false,
+     true,
+     true,
+     false,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     false,
+     true,
+     true
+    ]
+   },
+   {
+    "entry": "/[\\w.+-]+@[\\w-]+\\.[a-z]{2,}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/https?:\\/\\/[^\\s/]+/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\(\\d{3}\\)/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\$\\d+/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\+1/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\.example/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/[.]example/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\^|\\||\\?|\\*/",
+    "hits": [
+     false,
+     false,
+     false,
+     true,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/[\\]\\[]/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\{|\\}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/-{2,}|9999/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\x41b/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true
+    ]
+   },
+   {
+    "entry": "/\\u0041b/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true
+    ]
+   },
+   {
+    "entry": "/\\u{1F600}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/[\\u{1F600}-\\u{1F64F}]{2}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\t/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/line one\\nline/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\r\\n/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\cJ/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/[\\b]/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\0/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\u2028/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\u00a0/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\S\\s\\S/",
+    "hits": [
+     true,
+     false,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     false,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     false
+    ]
+   },
+   {
+    "entry": "/\\ufeff/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/(?<!\\w)free(?!\\w)/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/(?<=\\$)\\d+/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/(?<=a+)b/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true
+    ]
+   },
+   {
+    "entry": "/(?<!a{2,})b/",
+    "hits": [
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     true,
+     false,
+     true,
+     true,
+     false,
+     true,
+     false,
+     true,
+     false,
+     false,
+     true
+    ]
+   },
+   {
+    "entry": "/(?=.*scam)(?=.*promo)/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/free(?= money)/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/(?<=x)free/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/(?!)/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/(?<!^)promo/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/(?<=^|\\s)the\\b/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/(.)\\1{3,}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/(?<c>[a-z])\\k<c>\\k<c>/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\b(\\w+)\\s+\\1\\b/",
+    "hits": [
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     true,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/(a)|\\1b/",
+    "hits": [
+     true,
+     false,
+     true,
+     false,
+     true,
+     false,
+     true,
+     false,
+     false,
+     true,
+     false,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     false,
+     true,
+     true
+    ]
+   },
+   {
+    "entry": "/(?<first>a+)(?<second>b+)\\k<first>/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true
+    ]
+   },
+   {
+    "entry": "/(a)(b)?\\2a/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\k<later>x(?<later>a)/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\p{Script=Han}{2,}/",
+    "hits": [
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\p{sc=Cyrillic}+/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\p{Script_Extensions=Greek}{3}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\p{scx=Hiragana}\\p{sc=Katakana}/",
+    "hits": [
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\p{L}+\\d/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\p{Lu}{5,}/",
+    "hits": [
+     true,
+     false,
+     false,
+     false,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     false,
+     true,
+     false,
+     true,
+     true,
+     false,
+     false,
+     false,
+     true,
+     true
+    ]
+   },
+   {
+    "entry": "/\\p{Uppercase_Letter}\\p{Ll}/",
+    "hits": [
+     true,
+     false,
+     true,
+     false,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     false,
+     true,
+     true,
+     true,
+     true,
+     true,
+     false,
+     false,
+     true,
+     true
+    ]
+   },
+   {
+    "entry": "/\\p{Emoji_Presentation}{3}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\p{Extended_Pictographic}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\P{ASCII}{6,}/",
+    "hits": [
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\p{Nd}{3}/",
+    "hits": [
+     true,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     true,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\p{Any}{3000}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\p{Alphabetic}{20,}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true
+    ]
+   },
+   {
+    "entry": "/\\p{White_Space}{2}/",
+    "hits": [
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\p{Emoji_Modifier}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\p{Regional_Indicator}{2}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\p{General_Category=Decimal_Number}+-/",
+    "hits": [
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/[^\\p{L}\\p{N}\\s]{3,}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\p{Lt}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/ſ/",
+    "hits": [
+     false,
+     false,
+     true,
+     false,
+     true,
+     false,
+     false,
+     true,
+     false,
+     true,
+     false,
+     true,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     true,
+     false
+    ]
+   },
+   {
+    "entry": "/ς/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/ß/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/ẞ/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/İ/",
+    "hits": [
+     true,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     true,
+     true,
+     true,
+     false,
+     true,
+     false,
+     true,
+     true,
+     false,
+     false,
+     false,
+     true,
+     false
+    ]
+   },
+   {
+    "entry": "/k/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\u212a/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/ǆ/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/привет/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/[a-z]{12,}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     true
+    ]
+   },
+   {
+    "entry": "/\\w\\u212a/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/[\\W]ſ/",
+    "hits": [
+     false,
+     false,
+     true,
+     false,
+     true,
+     false,
+     false,
+     true,
+     false,
+     true,
+     false,
+     true,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/allcapsshouting/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false
+    ]
+   },
+   {
+    "entry": "/[A-Z][a-z]+[A-Z]/",
+    "hits": [
+     true,
+     false,
+     true,
+     false,
+     true,
+     true,
+     true,
+     false,
+     true,
+     true,
+     false,
+     true,
+     true,
+     true,
+     true,
+     true,
+     false,
+     false,
+     true,
+     true
+    ]
+   },
+   {
+    "entry": "/😀.😄/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/^.$/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/[😀-😄]{3}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/[^\\x00-\\x7f]{5,}/",
+    "hits": [
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/text .{1,3}$/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/two.line/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/one.line/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/[^]bom/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/[^a]\\u2028/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/\\b/",
+    "hits": [
+     true,
+     false,
+     true,
+     false,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true,
+     true
+    ]
+   },
+   {
+    "entry": "/(a+)+$/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/(a|aa)+$/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/(.*a){12}/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true
+    ]
+   },
+   {
+    "entry": "/(x+x+)+y/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false
+    ]
+   },
+   {
+    "entry": "/([a-z]+)*\\d$/",
+    "hits": [
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     false,
+     true,
+     false,
+     false,
+     true,
+     false,
+     null
+    ]
+   }
+  ]
+ },
+ "scans": [
+  {
+   "lists": {
+    "*": [
+     "spam",
+     "buy now",
+     "cafe"
+    ]
+   },
+   "texts": [
+    "This is Spam!"
+   ],
+   "matched": [
+    "*"
+   ]
+  },
+  {
+   "lists": {
+    "*": [
+     "spam",
+     "buy now",
+     "cafe"
+    ]
+   },
+   "texts": [
+    "spammers and antispam",
+    "buy it now",
+    "buy",
+    "now"
+   ],
+   "matched": []
+  },
+  {
+   "lists": {
+    "*": [
+     "spam",
+     "buy now",
+     "cafe"
+    ]
+   },
+   "texts": [
+    "Buy... NOW",
+    "x"
+   ],
+   "matched": [
+    "*"
+   ]
+  },
+  {
+   "lists": {
+    "a": [
+     "one"
+    ],
+    "b": [
+     "two",
+     "one"
+    ],
+    "c": [
+     "three"
+    ]
+   },
+   "texts": [
+    "One, two"
+   ],
+   "matched": [
+    "a",
+    "b"
+   ]
+  },
+  {
+   "lists": {
+    "cats": [
+     "/c.t/"
+    ],
+    "dogs": [
+     "/d.g/",
+     "puppy"
+    ]
+   },
+   "texts": [
+    "a cut above",
+    "do",
+    "g"
+   ],
+   "matched": [
+    "cats"
+   ]
+  },
+  {
+   "lists": {
+    "cats": [
+     "/c.t/"
+    ],
+    "dogs": [
+     "/d.g/",
+     "puppy"
+    ]
+   },
+   "texts": [
+    "a Puppy",
+    "dig"
+   ],
+   "matched": [
+    "dogs"
+   ]
+  },
+  {
+   "lists": {
+    "han": [
+     "/垃圾|广告/",
+     "垃圾"
+    ],
+    "jp": [
+     "/すごい？/",
+     "/ｶﾞｰﾄﾞ/"
+    ],
+    "w": [
+     "ガード"
+    ]
+   },
+   "texts": [
+    "Buy   NOW! limited offer, call 555-1234 today",
+    "这是垃圾广告内容,请勿相信",
+    "CAFE au lait and a cafe, plus SPAM spam",
+    "すごい? がり ぎり ガード ガード",
+    "promo at start? no. scammers scam",
+    "free money $100 FREEDOM xfree",
+    "aaaa bbbb heeeeello the the cat",
+    "Привет мир ΑΒΓ σς Σ s K ẞ ß I i",
+    "😀😃😄 emoji 👍🏽 text 🇺🇸",
+    "line one\nline two\r\nline three sep nbsp﻿bom",
+    "x",
+    "Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. ",
+    "ab aab aaab ba",
+    "AEIOU aeiou Dz dz DZ",
+    "tel: +1 (555) 010-9999, email a.b@example.com, http://bad.example/path?q=1",
+    "spam SPAM SpAm s.p.a.m s p a m 5pam",
+    "a\tb  c d",
+    "१२३ ٣٤٥ 678",
+    "CamelCaseWORDS and ALLCAPSSHOUTING",
+    "abababababababababababababababababababababababababababababab"
+   ],
+   "matched": [
+    "han",
+    "jp"
+   ]
+  },
+  {
+   "lists": {
+    "accents": [
+     "creme brulee",
+     "σοφος",
+     "strasse"
+    ],
+    "long": [
+     "a b c d e f g h"
+    ]
+   },
+   "texts": [
+    "CRÈME   brûlée!",
+    "ΣΟΦΌΣ",
+    "a,b;c.d e-f_g h",
+    "Straße"
+   ],
+   "matched": [
+    "accents",
+    "long"
+   ]
+  },
+  {
+   "lists": {
+    "marks": [
+     "नमस्ते",
+     "ไทย"
+    ],
+    "digits": [
+     "123",
+     "१२३"
+    ]
+   },
+   "texts": [
+    "नमस्ते दुनिया",
+    "१२३ ٣٤٥ 678",
+    "ไทยภาษา",
+    "abc123"
+   ],
+   "matched": [
+    "digits",
+    "marks"
+   ]
+  },
+  {
+   "lists": {},
+   "texts": [
+    "anything"
+   ],
+   "matched": []
+  },
+  {
+   "lists": {
+    "empty": []
+   },
+   "texts": [
+    "anything"
+   ],
+   "matched": []
+  }
+ ]
+}

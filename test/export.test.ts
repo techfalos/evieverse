@@ -1,14 +1,12 @@
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LightMyRequestResponse } from 'fastify';
-import pino from 'pino';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { startAuthorIndexing } from '../src/authorIndex.js';
+import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
-import type { TrustPlugin } from '../src/moderation/trust.types.js';
+import type { TestPlugin } from '../src/moderation/trust.types.js';
 import { DAY } from '../src/time.js';
-import { as, createTestContext, requests, TARGETS, type TestContext, type User } from './helpers.js';
+import { as, BASE_ENV, createTestContext, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 /** A record of an export, as far as tests read it. */
 type ExportRecord = { type: string; [field: string]: unknown };
@@ -16,11 +14,11 @@ type ExportRecord = { type: string; [field: string]: unknown };
 type ExportPage = { userId: string; records: ExportRecord[]; nextCursor: string | null };
 
 /** A trust plugin that holds whatever says "held" for the moderation queue, and lets the rest through. */
-const holdsHeld: TrustPlugin = { name: 'holds-held', assess: (post) => (post.texts.some((text) => /held/i.test(text)) ? { set: 50 } : null) };
+const holdsHeld: TestPlugin = { name: 'holds-held', rules: [{ includes: 'held', ignoreCase: true, set: 50 }] };
 
 describe('the export setting', () => {
   it('comes from the environment: the pages a user can read in a minute, or no limit', () => {
-    const load = (env: Record<string, string> = {}) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).export;
+    const load = (env: Record<string, string> = {}) => loadConfig({}, { ...BASE_ENV, ...env }).export;
     expect(load()).toEqual({ pagesPerMinute: 120 });
     expect(load({ EXPORT_PAGES_PER_MINUTE: '0' })).toEqual({ pagesPerMinute: 0 });
     expect(load({ EXPORT_PAGES_PER_MINUTE: '5' })).toEqual({ pagesPerMinute: 5 });
@@ -36,7 +34,7 @@ for (const target of TARGETS) {
     const { post, storeText, like } = requests(() => ctx);
     /**
      * A server whose index of users' comments holds everything, which is what the process that
-     * runs the compactor makes of a new one as it starts (src/authorIndex.ts): an export is
+     * runs the compactor makes of a new one as it starts (compactor/src/author_index.rs): an export is
      * given from then on.
      */
     const setup = async (opts: Parameters<typeof createTestContext>[1] = {}) => {
@@ -173,6 +171,7 @@ for (const target of TARGETS) {
           showFollowing: false,
           showFollowers: false,
           bannedAt: null,
+          claimsBarredAt: null,
         },
       ]);
       // The key's row, and nothing a key could be made from.
@@ -523,9 +522,8 @@ for (const target of TARGETS) {
       await refused();
 
       // The process that runs the compactor indexes them, as it starts.
-      const stop = startAuthorIndexing(ctx, pino({ level: 'silent' }));
-      await vi.waitFor(async () => expect(await ctx.comments.indexed()).toBe(true), { timeout: 10_000 });
-      await stop();
+      await ctx.compactor.authorIndex();
+      expect(await ctx.comments.indexed()).toBe(true);
       expect(await indexOf(alice)).toEqual({ wrote, liked });
       expect(await indexOf(bob)).toEqual({ wrote: liked, liked: [] });
       const records = await everything(alice);
@@ -537,7 +535,7 @@ for (const target of TARGETS) {
       expect(ofType(records, 'commentLike').map((r) => r.commentId)).toEqual(liked);
       // Once: there is nothing left for it to do, on this start or the next.
       expect(await ctx.comments.indexAuthors(() => true)).toBe(true);
-      await startAuthorIndexing(ctx, pino({ level: 'silent' }))();
+      await ctx.compactor.authorIndex();
     });
 
     it('lets a user read so many pages in a minute', async () => {

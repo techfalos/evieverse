@@ -7,7 +7,7 @@
 
 locals {
   root          = abspath("${path.module}/../../..")
-  source_hash   = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), sort(fileset(local.root, "languages/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json", "scripts/build-cli.mjs"]) : filesha1("${local.root}/${f}")]))
+  source_hash   = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), sort(fileset(local.root, "languages/**")), sort(fileset(local.root, "compactor/src/**")), sort(fileset(local.root, "compactor/crates/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json", "scripts/build-cli.mjs", "compactor/Cargo.toml", "compactor/Cargo.lock", "compactor/rust-toolchain.toml"]) : filesha1("${local.root}/${f}")]))
   compact       = replace(var.name, "-", "")
   image         = var.image != "" ? var.image : "${azurerm_container_registry.main.login_server}/app:${substr(local.source_hash, 0, 12)}"
   url           = "https://${azurerm_cdn_frontdoor_endpoint.main.host_name}"
@@ -27,10 +27,9 @@ locals {
     CONTENT_SCHEME  = "azblob"
     CONTENT_OPTIONS = jsonencode(merge(local.blob_options, { container = azurerm_storage_container.content.name }))
     # Which identity the server is to act as: the one of the deployment (src/storage/azureIdentity.ts).
-    AZURE_CLIENT_ID    = azurerm_user_assigned_identity.app.client_id
-    PUBLIC_BASE_URL    = local.url
-    SUPPORT_EMAIL      = var.support_email
-    COMPACT_IN_PROCESS = "false"
+    AZURE_CLIENT_ID = azurerm_user_assigned_identity.app.client_id
+    PUBLIC_BASE_URL = local.url
+    SUPPORT_EMAIL   = var.support_email
     # /store makes an upload a post's bytes by copying it within the storage account, inside the
     # `request_timeout` Front Door gives a request (240 seconds at most): 512 MiB. The server's own
     # default (5 GiB) doesn't fit. An estimate of what does, not a measurement: raise it through
@@ -785,7 +784,7 @@ resource "azurerm_container_app" "compactor" {
     container {
       name    = "compactor"
       image   = local.image
-      command = ["node", "dist/compact/main.js"]
+      command = ["compactor"]
       cpu     = var.compactor_cpu
       memory  = var.compactor_memory
       dynamic "env" {
@@ -809,7 +808,7 @@ resource "azurerm_container_app" "compactor" {
 }
 
 # `--rebuild` rebuilds the whole feed index from the database and blob storage, after Redis lost
-# data. It is a job, started by hand (see docs/DEPLOY.md). It can run beside the compactor: the
+# data. It is a job, started by hand (see docs/IAC.md). It can run beside the compactor: the
 # lease makes each wait for the other's pass.
 resource "azurerm_container_app_job" "rebuild" {
   name                         = "${var.name}-rebuild"
@@ -850,7 +849,7 @@ resource "azurerm_container_app_job" "rebuild" {
     container {
       name    = "rebuild"
       image   = local.image
-      command = ["node", "dist/compact/main.js", "--once", "--rebuild"]
+      command = ["compactor", "--once", "--rebuild"]
       cpu     = 0.5
       memory  = "1Gi"
       dynamic "env" {

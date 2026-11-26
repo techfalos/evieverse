@@ -10,7 +10,7 @@ import { busy } from '../src/http/errors.js';
 import { msg } from '../src/language.js';
 import type { TagFeedReader } from '../src/tagfeed/reader.js';
 import { HOUR, MINUTE } from '../src/time.js';
-import { as, createTestContext, TARGETS, type TestContext } from './helpers.js';
+import { as, BASE_ENV, createTestContext, TARGETS, type TestContext } from './helpers.js';
 
 type App = TestContext['app'];
 
@@ -63,7 +63,7 @@ const nextConnectionClosed = (app: App) => new Promise<void>((resolve) => app.se
 
 describe('TRUST_PROXY', () => {
   it('reads none, any, a number of proxies, or their addresses', () => {
-    const read = (value?: string) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', TRUST_PROXY: value }).trustProxy;
+    const read = (value?: string) => loadConfig({}, { ...BASE_ENV, TRUST_PROXY: value }).trustProxy;
     expect(read()).toBe(false);
     expect(read('')).toBe(false);
     expect(read('false')).toBe(false);
@@ -139,15 +139,13 @@ for (const target of TARGETS) {
       expect((await ctx.hot.incr('other', 60_000)).count).toBe(1);
 
       // The window isn't pushed back by later counts.
-      expect((await ctx.hot.incr('brief', 200)).count).toBe(1);
-      if (target.hot === 'memory') ctx.clock.now += 150;
-      else await sleep(150);
-      const later = await ctx.hot.incr('brief', 200);
+      expect((await ctx.hot.incr('brief', 1000)).count).toBe(1);
+      await sleep(400);
+      const later = await ctx.hot.incr('brief', 1000);
       expect(later.count).toBe(2);
-      expect(later.ttlMs).toBeLessThanOrEqual(60);
-      if (target.hot === 'memory') ctx.clock.now += 100;
-      else await sleep(100);
-      expect((await ctx.hot.incr('brief', 200)).count).toBe(1);
+      expect(later.ttlMs).toBeLessThanOrEqual(600);
+      await sleep(later.ttlMs + 50);
+      expect((await ctx.hot.incr('brief', 1000)).count).toBe(1);
     });
 
     it('swaps a value in the hot store only for a caller that knows what it holds, so of concurrent swaps one wins', async () => {
@@ -167,8 +165,7 @@ for (const target of TARGETS) {
       expect(await ctx.hot.swap('cell', await held(), null)).toBe(true);
       expect(await held()).toBeNull();
       expect(await ctx.hot.swap('cell', null, 'brief', 100)).toBe(true);
-      if (target.hot === 'memory') ctx.clock.now += 150;
-      else await sleep(150);
+      await sleep(150);
       expect(await held()).toBeNull();
     });
 
@@ -178,7 +175,7 @@ for (const target of TARGETS) {
       expect(await ctx.hot.bump('tally')).toBeNull();
       expect(await held()).toBeNull();
 
-      await ctx.hot.set('tally', '5', 200);
+      await ctx.hot.set('tally', '5', 2000);
       const bumps = await Promise.all(Array.from({ length: 20 }, () => ctx.hot.bump('tally')));
       expect([...bumps].sort((a, b) => a! - b!)).toEqual(Array.from({ length: 20 }, (_, i) => i + 6));
       expect(await held()).toBe('25');
@@ -190,8 +187,10 @@ for (const target of TARGETS) {
       expect(await held()).toBe('25');
 
       // It keeps the time the count had left: it expires when it would have.
-      if (target.hot === 'memory') ctx.clock.now += 250;
-      else await sleep(250);
+      const [left] = await ctx.ttl(['tally']);
+      expect(left).toBeGreaterThan(0);
+      expect(left).toBeLessThanOrEqual(2000);
+      await sleep(left! + 50);
       expect(await ctx.hot.bump('tally')).toBeNull();
       expect(await held()).toBeNull();
     });
@@ -218,10 +217,14 @@ for (const target of TARGETS) {
         // Other routes aren't counted with it.
         expect((await ctx.app.inject({ method: 'GET', url: `/users/${first.json().userId}` })).statusCode).toBe(200);
 
-        if (target.hot === 'memory') {
-          ctx.clock.now += HOUR;
-          expect((await register(other, 'carol')).statusCode).toBe(201);
+        // The count lasts an hour from its first request, by Redis's clock, and then begins again.
+        const counts = await ctx.lapse('limit:*');
+        expect(Object.keys(counts)).toHaveLength(1);
+        for (const left of Object.values(counts)) {
+          expect(left).toBeGreaterThan(HOUR - MINUTE);
+          expect(left).toBeLessThanOrEqual(HOUR);
         }
+        expect((await register(other, 'carol')).statusCode).toBe(201);
       } finally {
         await other.close();
       }
@@ -272,12 +275,16 @@ for (const target of TARGETS) {
           expect(res.headers['x-ratelimit-limit']).toBeUndefined();
         }
 
-        if (target.hot === 'memory') {
-          ctx.clock.now += MINUTE;
-          const again = await read(other);
-          expect(again.statusCode, again.body).toBe(200);
-          expect(again.headers['x-ratelimit-remaining']).toBe('2');
+        // The count lasts a minute from its first request, by Redis's clock, and then begins again.
+        const counts = await ctx.lapse('limit:* /feed:*');
+        expect(Object.keys(counts)).toHaveLength(1);
+        for (const left of Object.values(counts)) {
+          expect(left).toBeGreaterThan(MINUTE - 20_000);
+          expect(left).toBeLessThanOrEqual(MINUTE);
         }
+        const again = await read(other);
+        expect(again.statusCode, again.body).toBe(200);
+        expect(again.headers['x-ratelimit-remaining']).toBe('2');
       } finally {
         await other.close();
       }
@@ -313,9 +320,9 @@ for (const target of TARGETS) {
         expect(res.headers['x-ratelimit-limit']).toBeUndefined();
       }
       // The setting is the server's own unless it is given another: 120 a minute.
-      const { feed } = loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json' });
+      const { feed } = loadConfig({}, BASE_ENV);
       expect([feed.rateLimitPerMinute, feed.maxConcurrent]).toEqual([120, 100]);
-      const set = loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', FEED_RATE_LIMIT_PER_MINUTE: '30', FEED_MAX_CONCURRENT: '0' }).feed;
+      const set = loadConfig({}, { ...BASE_ENV, FEED_RATE_LIMIT_PER_MINUTE: '30', FEED_MAX_CONCURRENT: '0' }).feed;
       expect([set.rateLimitPerMinute, set.maxConcurrent]).toEqual([30, 0]);
     });
 
@@ -336,15 +343,47 @@ for (const target of TARGETS) {
         return { app, gate };
       };
 
-      /** That the app answers `max` feeds at a time, no fewer and no more: that many are let in, and the next is refused. */
+      /**
+       * That the app answers `max` feeds at a time, no fewer and no more: that many are let in, and the next is refused.
+       *
+       * A place is given back when its feed's handler is done, which reads Redis, so a moment after
+       * its response or its connection closed: the feeds are sent again until all are let in. A
+       * place that is never given back fails this, where waiting at the gate for it would not end.
+       */
       const answersAtATime = async (to: App, gate: ReturnType<typeof gated>, max: number) => {
-        gate.shut();
-        const sent = Array.from({ length: max }, () => read(to));
-        await gate.holds(max);
-        expect((await read(to)).statusCode).toBe(503);
-        gate.open();
-        for (const res of await Promise.all(sent)) expect(res.statusCode, res.body).toBe(200);
-        await tick();
+        await vi.waitFor(async () => {
+          gate.shut();
+          const sent = Array.from({ length: max }, () => read(to));
+          // With the gate shut, only a feed that was refused is answered.
+          const refused = await Promise.race([gate.holds(max).then(() => false), Promise.race(sent).then(() => true)]);
+          if (refused) {
+            gate.open();
+            await Promise.all(sent);
+            throw new Error(`fewer than ${max} places are free`);
+          }
+          expect((await read(to)).statusCode).toBe(503);
+          gate.open();
+          for (const res of await Promise.all(sent)) expect(res.statusCode, res.body).toBe(200);
+          await tick();
+        });
+      };
+
+      /**
+       * Sends a feed until one is let in, and returns it as it waits at the shut gate with the
+       * `held` that waited there already: for a place that is free a moment later than the
+       * connection of its feed closed (see answersAtATime). Fails if none is let in. What it
+       * returns holds the feed's answer, which comes once the gate opens.
+       */
+      const letIn = async (to: App, gate: ReturnType<typeof gated>, held: number) => {
+        let sent = read(to);
+        await vi.waitFor(async () => {
+          const refused = await Promise.race([gate.holds(held + 1).then(() => false), sent.then(() => true)]);
+          if (refused) {
+            sent = read(to);
+            throw new Error('no place is free');
+          }
+        });
+        return { answer: sent };
       };
 
       it('answers so many, and refuses the rest until one of them is answered', async () => {
@@ -456,11 +495,10 @@ for (const target of TARGETS) {
         socket.destroy();
         await closedEarly;
         await tick();
-        const next = read(app);
-        await gate.holds(2);
+        const next = await letIn(app, gate, 1);
         expect((await read(app)).statusCode).toBe(503);
         gate.open();
-        expect((await next).statusCode).toBe(200);
+        expect((await next.answer).statusCode).toBe(200);
         await vi.waitFor(async () => expect((await read(app)).statusCode).toBe(200));
         await answersAtATime(app, gate, 2);
       });
@@ -503,17 +541,21 @@ for (const target of TARGETS) {
         expect(res.statusCode, `${url} ${res.body}`).toBe(200);
         expect(res.headers['x-ratelimit-limit']).toBeUndefined();
       }
-      if (target.hot === 'memory') {
-        ctx.clock.now += MINUTE;
-        expect((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}` })).statusCode).toBe(200);
+      // Each count lasts a minute from its first request, by Redis's clock, and then begins again.
+      const counts = await ctx.lapse('limit:GET *');
+      expect(Object.keys(counts)).toHaveLength(6);
+      for (const left of Object.values(counts)) {
+        expect(left).toBeGreaterThan(MINUTE - 20_000);
+        expect(left).toBeLessThanOrEqual(MINUTE);
       }
+      expect((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}` })).statusCode).toBe(200);
 
       // The settings are the server's own unless it is given others.
-      const config = loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json' });
+      const config = loadConfig({}, BASE_ENV);
       expect([config.feed.followingRateLimitPerMinute, config.contentRateLimitPerMinute, config.comments.listRateLimitPerMinute, config.reposts.attestationRateLimitPerMinute, config.tagging.logRateLimitPerMinute]).toEqual([60, 300, 120, 60, 120]);
       const set = loadConfig(
         {},
-        { EVIEVERSE_CONFIG: '/nonexistent.json', FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE: '5', CONTENT_RATE_LIMIT_PER_MINUTE: '0', COMMENTS_LIST_RATE_LIMIT_PER_MINUTE: '7', REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE: '9', TAG_LOG_RATE_LIMIT_PER_MINUTE: '11' },
+        { ...BASE_ENV, FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE: '5', CONTENT_RATE_LIMIT_PER_MINUTE: '0', COMMENTS_LIST_RATE_LIMIT_PER_MINUTE: '7', REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE: '9', TAG_LOG_RATE_LIMIT_PER_MINUTE: '11' },
       );
       expect([set.feed.followingRateLimitPerMinute, set.contentRateLimitPerMinute, set.comments.listRateLimitPerMinute, set.reposts.attestationRateLimitPerMinute, set.tagging.logRateLimitPerMinute]).toEqual([5, 0, 7, 9, 11]);
     });

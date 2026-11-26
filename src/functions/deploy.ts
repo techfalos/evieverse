@@ -6,7 +6,7 @@ import { loadLanguages } from '../language.js';
 import { bootstrapAdmin } from '../moderation/bootstrap.js';
 import type { Deployed } from './deploy.types.js';
 import { GROUP_NAMES } from './groups.js';
-import { createFunction, functionConfig, requireRedis } from './handler.js';
+import { createFunction, functionConfig } from './handler.js';
 import type { FunctionOptions } from './handler.types.js';
 
 /**
@@ -40,13 +40,10 @@ function reasonOf(err: unknown): string {
  * It doesn't tell whether the settings are right, only that the server starts with them: an
  * Auth-Key that URLhaus refuses, say, passes. The compactor reads the same settings, less the few
  * that only functions are given.
- *
- * `opts.hot` is the hot store to use instead of Redis, which functions otherwise need.
  */
 export async function checkSettings(env: NodeJS.ProcessEnv = process.env, opts: FunctionOptions = {}): Promise<Config> {
   try {
     const config = functionConfig(env);
-    if (!opts.hot) requireRedis(config);
     const languages = loadLanguages(config.defaultLanguage);
     for (const group of GROUP_NAMES) {
       const fn = createFunction(group, config, { ...opts, server: { languages } });

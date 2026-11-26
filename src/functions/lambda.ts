@@ -1,7 +1,7 @@
 import { loadLanguages } from '../language.js';
 import { migrateDeployment } from './deploy.js';
 import { isGroup } from './groups.js';
-import { createFunction, functionConfig, requireRedis } from './handler.js';
+import { createFunction, functionConfig } from './handler.js';
 import { httpApiHandler, runLambda } from './lambdaRuntime.js';
 import { loadSecrets } from './secrets.js';
 
@@ -15,7 +15,7 @@ import { loadSecrets } from './secrets.js';
  *                                  with them, then brings the schema up to date and sets up the
  *                                  admin account in BOOTSTRAP_ADMIN, if there is one
  *
- * The compactor isn't a function: it is a process that stays up (`node dist/compact/main.js`), which
+ * The compactor isn't a function: it is a process that stays up (the program in `compactor`, `npm run compact`), which
  * a deployment runs from the same image as a container of its own.
  *
  * FUNCTION_SECRETS, if set, names the secrets of AWS Secrets Manager that hold the settings a
@@ -40,7 +40,6 @@ if (group === 'migrate') {
 } else if (isGroup(group)) {
   await loadSecrets();
   const config = functionConfig();
-  requireRedis(config);
   // Read once, for the app and for what the handler answers without it.
   const languages = loadLanguages(config.defaultLanguage);
   const fn = createFunction(group, config, { server: { languages } });

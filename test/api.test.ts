@@ -5,7 +5,7 @@ import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { authorIndex } from '../src/tagfeed/layout.js';
 import { DAY, HOUR } from '../src/time.js';
-import { as, createTestContext, JPEG, multipart, PNG, queued, requests, sha256, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
+import { as, BASE_ENV, createTestContext, type Feed, JPEG, multipart, PNG, queued, requests, sha256, TARGETS, type TestContext, type User } from './helpers.js';
 
 for (const target of TARGETS) {
   describe(`API (${target.name})`, () => {
@@ -363,7 +363,7 @@ for (const target of TARGETS) {
     });
 
     it("doesn't start in server mode without a usable list of hashtags", () => {
-      const load = (env: Record<string, string>) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).tagging;
+      const load = (env: Record<string, string>) => loadConfig({}, { ...BASE_ENV, ...env }).tagging;
       expect(load({})).toMatchObject({ mode: 'user', serverTags: [] });
       expect(load({ TAGGING_MODE: 'server', TAGGING_SERVER_TAGS: 'News, #local sports' })).toMatchObject({ mode: 'server', serverTags: ['news', 'local', 'sports'] });
       expect(load({ TAGGING_MODE: 'server', TAGGING_SERVER_TAGS: Array.from({ length: 40 }, (_, i) => `t${i}`).join(',') }).serverTags).toHaveLength(40);
@@ -410,7 +410,7 @@ for (const target of TARGETS) {
     });
 
     it('takes every type of post unless one is turned off, and does not start with all of them off', () => {
-      const load = (env: Record<string, string> = {}) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).postTypes;
+      const load = (env: Record<string, string> = {}) => loadConfig({}, { ...BASE_ENV, ...env }).postTypes;
       const all = { text: true, image: true, video: true, audio: true, link: true };
       expect(load()).toEqual(all);
       expect(load({ POST_TYPE_TEXT: '', POST_TYPE_LINK: 'true' })).toEqual(all);

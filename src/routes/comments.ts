@@ -201,7 +201,7 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
    * its author and those who decide on it there can read (see `readable`); anyone else gets the
    * placeholder of one that was published before, which has that status too, and nothing of the
    * comment. `status: "deleted"` on the placeholder of a deleted comment that has replies.
-   * `processing: true` on one whose video the server is still processing (src/video): it is in
+   * `processing: true` on one whose video the server is still processing (compactor/src/video): it is in
    * no list yet, and its video isn't there to play.
    */
   app.get('/content/:contentId/comments/:commentId', async (req) => {
@@ -222,7 +222,7 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
    *
    * The file of a comment the compactor has yet to write is where its request staged it, and is
    * served from there; once the compactor has it where comments' files are kept, from there.
-   * 404 for a video the server is still processing (src/video), which says so.
+   * 404 for a video the server is still processing (compactor/src/video), which says so.
    */
   app.get('/content/:contentId/comments/:commentId/raw', { compress: false }, async (req, reply) => {
     const { contentId, commentId } = CommentParams.parse(req.params);
@@ -273,7 +273,7 @@ export function commentReadRoutes(app: FastifyInstance, deps: AppDeps) {
  * refuses counts for nothing, and neither does one whose write fails.
  */
 export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
-  const { db, config, content, comments, trustPlugins, now = Date.now } = deps;
+  const { db, config, content, comments, trust, now = Date.now } = deps;
 
   /**
    * The published post, if it takes comments: what is set for deletion, or waits in the moderation
@@ -347,7 +347,7 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
    * edit.
    *
    * A video is not published as it was sent, where the server processes videos
-   * (`video.processing`, src/video): the answer says `processing: true`, and the comment is
+   * (`video.processing`, compactor/src/video): the answer says `processing: true`, and the comment is
    * listed, with a video that plays anywhere and says nothing of where it was filmed, once the
    * video worker has made it one. Until then it is read by its id, and its video isn't served.
    * One that can't be processed is told to its author by a notice, and the comment is
@@ -404,7 +404,7 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
 
       // Before the limit, so a refused one doesn't count.
       const { route, trustScore } = await moderateComment(
-        { db, config, trustPlugins, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } },
+        { trust, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } },
         // Its image is given to the trust plugins that look at pictures, as a post's are (see trustImage). A video isn't.
         { userId: user.id, contentId, text, filename: file?.filename, alt: file?.alt, ...(file?.kind === 'image' && { image: trustImage(file) }) },
       );
@@ -520,7 +520,7 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (!body.text && !comment.media) throw badRequest(msg('comment.text_required'));
 
     const { route, trustScore } = await moderateComment(
-      { db, config, trustPlugins, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } },
+      { trust, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } },
       { userId: user.id, contentId, text: body.text },
     );
     const held = route === 'queue';

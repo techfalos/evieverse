@@ -33,16 +33,22 @@ export interface ServerInfo {
   kernel: string;
 }
 
-/** What the server's process has used: two of these, either side of a load, say what the load took. */
+/**
+ * What the server has used, which is what its two processes have: its own, and the compactor's
+ * beside it. Two of these, either side of a load, say what the load took.
+ */
 export interface Usage {
   /** Milliseconds, on the server's clock. */
   at: number;
-  /** CPU time of all its threads, since it started. */
+  /** CPU time of all their threads, since they started. */
   cpuSeconds: number;
-  /** The memory it holds now (its resident set), and the most it has held at any time. */
+  /** The memory they hold now (their resident sets), and the most each has held at any time, added up: they may not have held it at once. */
   memoryBytes: number;
   peakMemoryBytes: number;
 }
+
+/** The ticks the kernel counts a process's CPU time in (/proc/<pid>/stat), in a second: 100 on every Linux there is. */
+const TICKS_PER_SECOND = 100;
 
 /** The limits Docker put on this container, from where the kernel keeps them (cgroup v2). */
 function limits(): { cpus: number; memoryBytes: number } {
@@ -60,12 +66,25 @@ function limits(): { cpus: number; memoryBytes: number } {
   return { cpus: Number(quota) / Number(period), memoryBytes: Number(memory) };
 }
 
-function usage(): Usage {
-  const { user, system } = process.cpuUsage();
+/** What a process of this container has used, as the kernel counts it: its CPU time, the memory it holds, and the most it has held. */
+function usageOf(pid: number | 'self'): Omit<Usage, 'at'> {
+  const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+  // After the process's name, which is in brackets and may hold anything: its state, and then numbers, of which the 12th and 13th are its time in user and in kernel mode.
+  const numbers = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+  const status = readFileSync(`/proc/${pid}/status`, 'utf8');
   // The kernel's own count of the most the process has held (VmHWM, in kB): between two loads' ends it may have held more than at either.
-  const peak = /^VmHWM:\s+(\d+) kB$/m.exec(readFileSync('/proc/self/status', 'utf8'));
-  if (!peak) throw new Error("/proc/self/status doesn't say the most memory the process has held (VmHWM)");
-  return { at: performance.now(), cpuSeconds: (user + system) / 1e6, memoryBytes: process.memoryUsage.rss(), peakMemoryBytes: Number(peak[1]) * 1024 };
+  const held = (name: string) => {
+    const kb = new RegExp(`^${name}:\\s+(\\d+) kB$`, 'm').exec(status);
+    if (!kb) throw new Error(`/proc/${pid}/status doesn't say the memory the process holds (${name})`);
+    return Number(kb[1]) * 1024;
+  };
+  return { cpuSeconds: (Number(numbers[11]) + Number(numbers[12])) / TICKS_PER_SECOND, memoryBytes: held('VmRSS'), peakMemoryBytes: held('VmHWM') };
+}
+
+function usage(): Usage {
+  const used = [usageOf('self'), usageOf(compactorPid)];
+  const sum = (of: (one: Omit<Usage, 'at'>) => number) => used.reduce((total, one) => total + of(one), 0);
+  return { at: performance.now(), cpuSeconds: sum((one) => one.cpuSeconds), memoryBytes: sum((one) => one.memoryBytes), peakMemoryBytes: sum((one) => one.peakMemoryBytes) };
 }
 
 const startedAt = Date.now();
@@ -73,7 +92,7 @@ const log = (message: string) => console.log(`bench ${String(Math.round((Date.no
 
 const { cpus, memoryBytes } = limits();
 // Fewer posts, and there may be no picture among them, or too few to comment on.
-const { dataset, flushMs } = await startServer({ posts: setting('BENCH_POSTS', 500), dir: DIR, host: '0.0.0.0', port: PORT, log });
+const { dataset, flushMs, compactorPid } = await startServer({ posts: setting('BENCH_POSTS', 500), dir: DIR, host: '0.0.0.0', port: PORT, log });
 const info: ServerInfo = { port: PORT, dataset, flushMs, cpus, memoryBytes, node: process.version, kernel: release() };
 
 // Listens only now: the load generator waits for it, and so for the posts.

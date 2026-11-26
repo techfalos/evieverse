@@ -15,7 +15,7 @@ import { registerLanguages } from './http/language.js';
 import { warnOfUncountedProxies } from './http/proxyCheck.js';
 import { rateLimitStore } from './http/rateLimitStore.js';
 import { loadLanguages, msg } from './language.js';
-import { loadTrustPlugins } from './moderation/trust.js';
+import { openTrust } from './moderation/trust.js';
 import { OriginKeys } from './originKeys.js';
 import { MAX_POST_IMAGES } from './posts.js';
 import { loadCliRelease, requireCliBuild } from './routes/cli.js';
@@ -28,7 +28,7 @@ import { contentWriter } from './write.js';
  */
 export async function buildApp(
   deps: StoreDeps & { db?: Db },
-  { edgeSecret, cli = loadCliRelease(), trustPlugins, languages, audit = createAuditLog(deps.config.audit), keyFetcher, ...opts }: AppOptions = {},
+  { edgeSecret, cli = loadCliRelease(), trust, languages, audit = createAuditLog(deps.config.audit), keyFetcher, ...opts }: AppOptions = {},
   groups: readonly GroupName[] = GROUP_NAMES,
 ) {
   const { trustProxy } = deps.config;
@@ -105,12 +105,14 @@ export async function buildApp(
     challenges: new Challenges(deps),
     writer: contentWriter({ ...deps, db }, app.log),
     // Loaded once, as the app starts: a plugin that can't be loaded stops it there, not at the first post.
-    trustPlugins: trustPlugins ?? (await loadTrustPlugins(deps.config.trust.optionalPlugins)),
+    trust: trust ?? openTrust(deps.config, app.log),
     originKeys: new OriginKeys(deps.hot, keyFetcher, deps.now, app.log),
   };
-  if (writing) app.log.info({ trustPlugins: writing.trustPlugins.map((plugin) => plugin.name) }, 'trust plugins loaded');
+  if (writing) app.log.info({ trustPlugins: writing.trust.plugins }, 'trust plugins loaded');
+  // The ones opened here are closed with the app; the ones it was given are their giver's to close.
+  if (writing && !trust) app.addHook('onClose', () => writing.trust.close());
   // Said once, as the app starts: what a server that matches files against the pdq plugin's list doesn't do with them, as it is set up.
-  if (writing?.trustPlugins.some((plugin) => plugin.name === 'pdq')) {
+  if (writing?.trust.plugins.includes('pdq')) {
     const { quarantine, video, postTypes } = deps.config;
     if (quarantine.scheme === undefined) {
       app.log.warn(

@@ -1,12 +1,14 @@
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import { MemoryHotStore, SummaryStore, type Summary } from '../src/storage/index.js';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { SummaryStore, type HotStore, type Summary } from '../src/storage/index.js';
 import { decodeSummary, encodeSummary, summaryKey } from '../src/storage/summaryStore.js';
 import { DAY_ENTRY_BYTES, packDay, unpackDay } from '../src/tagfeed/layout.js';
 import type { IndexEntry } from '../src/tagfeed/layout.types.js';
 import { DAY } from '../src/time.js';
+import { testHotStore } from './helpers.js';
 
 const NOW = Date.UTC(2026, 10, 6, 12);
 const ID = '0f8fad5b-d9cb-469f-a165-70867728950e';
@@ -165,38 +167,48 @@ describe('day index entries', () => {
   });
 });
 
-describe('MemoryHotStore', () => {
-  it('expires keys by the injected clock', async () => {
-    let now = NOW;
-    const hot = new MemoryHotStore(() => now);
+describe('the hot store', () => {
+  let redis: ReturnType<typeof testHotStore>;
+  let hot: HotStore;
+  beforeEach(() => {
+    redis = testHotStore();
+    ({ hot } = redis);
+  });
+  afterEach(() => redis.close());
+
+  it('expires keys when their time is up, by the clock of Redis', async () => {
     await hot.set('a', 'x', 1000);
     await hot.set('b', Buffer.from('y'));
     expect(await hot.mget(['a', 'b', 'c'])).toEqual([Buffer.from('x'), Buffer.from('y'), null]);
-    now += 1000;
+    const [a, b, c] = await redis.ttl(['a', 'b', 'c']);
+    expect(a).toBeGreaterThan(0);
+    expect(a).toBeLessThanOrEqual(1000);
+    // One set with no time to live never expires, and one that isn't there has none.
+    expect([b, c]).toEqual([-1, -2]);
+    await sleep(1100);
     expect(await hot.exists(['a', 'b'])).toEqual([false, true]);
 
-    await hot.expire(['b'], 10);
-    now += 10;
+    await hot.expire(['b'], 50);
+    await sleep(150);
     expect(await hot.mget(['a', 'b'])).toEqual([null, null]);
 
     await hot.setMany([{ key: 'c', value: 'x', ttlMs: 1000 }, { key: 'd', value: Buffer.from('y') }]);
     expect(await hot.mget(['c', 'd'])).toEqual([Buffer.from('x'), Buffer.from('y')]);
-    now += 1000;
+    await sleep(1100);
     expect(await hot.exists(['c', 'd'])).toEqual([false, true]);
   });
 
   it('keeps a set in the order of its members, read a range at a time from either end, which lasts from when it was begun', async () => {
-    let now = NOW;
-    const hot = new MemoryHotStore(() => now);
     expect(await hot.lexRange('ids', { limit: 10 })).toEqual([]);
     expect([await hot.lexCount('ids'), await hot.lexHas('ids', 'b')]).toEqual([0, false]);
-    await hot.lexAdd('ids', [], 1000);
+    await hot.lexAdd('ids', [], 2000);
     expect(await hot.exists(['ids'])).toEqual([false]);
 
-    await hot.lexAdd('ids', ['d', 'b', '~'], 1000);
-    now += 600;
+    await hot.lexAdd('ids', ['d', 'b', '~'], 2000);
+    await sleep(600);
     // Adding to it doesn't make it last longer; adding a member again changes nothing.
-    await hot.lexAdd('ids', ['a', 'c', 'b'], 1000);
+    await hot.lexAdd('ids', ['a', 'c', 'b'], 2000);
+    expect((await redis.ttl(['ids']))[0]).toBeLessThanOrEqual(1400);
     expect(await hot.lexRange('ids', { limit: 10 })).toEqual(['a', 'b', 'c', 'd', '~']);
     expect(await hot.lexRange('ids', { before: '~', limit: 2 })).toEqual(['a', 'b']);
     expect(await hot.lexRange('ids', { after: 'b', before: '~', limit: 10 })).toEqual(['c', 'd']);
@@ -207,11 +219,11 @@ describe('MemoryHotStore', () => {
 
     await hot.lexRem('ids', ['b', 'e']);
     expect(await hot.lexRange('ids', { before: '~', limit: 10 })).toEqual(['a', 'c', 'd']);
-    now += 400;
+    await sleep((await redis.ttl(['ids']))[0]! + 100);
     expect(await hot.lexRange('ids', { limit: 10 })).toEqual([]);
 
     // A set left with no member is gone, and begins again with the next.
-    await hot.lexAdd('ids', ['a'], 1000);
+    await hot.lexAdd('ids', ['a'], 2000);
     await hot.lexRem('ids', ['a']);
     expect(await hot.exists(['ids'])).toEqual([false]);
   });
@@ -219,13 +231,17 @@ describe('MemoryHotStore', () => {
 
 describe('SummaryStore', () => {
   let dir: string;
+  let redis: ReturnType<typeof testHotStore>;
   afterEach(async () => {
+    await redis.close();
     await rm(dir, { recursive: true, force: true });
   });
 
+  /** A summary store on the clock `now`, which is what it reckons a post's age by: how long Redis then keeps a summary is Redis's own to count. */
   const create = async (now: () => number) => {
     dir = await mkdtemp(join(tmpdir(), 'evieverse-summaries-'));
-    const hot = new MemoryHotStore(now);
+    redis = testHotStore();
+    const { hot } = redis;
     const store = new SummaryStore(hot, { scheme: 'fs', options: { root: dir } }, { hotDays: 8, quality: 11, cacheSize: 16, cacheSeconds: 60, publicBaseUrl: '' }, now);
     return { hot, store };
   };
@@ -303,8 +319,10 @@ describe('SummaryStore', () => {
     await store.put({ ...updated, repostedAt });
     clock.now += 61_000;
     for (const at of [createdAt, ...repostedAt]) expect(await store.getMany([{ contentId: ID, createdAt: at }])).toEqual([updated]);
-    clock.now = NOW + 7 * DAY + 10;
-    expect(await hot.exists([summaryKey(read)])).toEqual([false]);
+    // Which is 8 days after it: 7 days and 5 ms from when the update was written.
+    const [left] = await redis.ttl([summaryKey(read)]);
+    expect(left).toBeGreaterThan(7 * DAY - 60_000);
+    expect(left).toBeLessThanOrEqual(7 * DAY + 5);
 
     // Erasing it erases every copy.
     await store.erase({ contentId: ID, createdAt, repostedAt });

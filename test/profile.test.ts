@@ -3,10 +3,9 @@ import sharp from 'sharp';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
-import { loadTrustPlugins } from '../src/moderation/trust.js';
-import type { TrustPlugin, TrustPost } from '../src/moderation/trust.types.js';
+import type { TestPlugin } from '../src/moderation/trust.types.js';
 import { AVATAR_SIZE, MAX_AVATAR_BYTES, MAX_BIO_CHARS, MAX_PINNED_POSTS, MAX_PROFILE_LINKS } from '../src/profile.js';
-import { as, createTestContext, JPEG, multipart, PNG, requests, TARGETS, type FeedItem, type FilePart, type TestContext, type User } from './helpers.js';
+import { as, BASE_ENV, createTestContext, type FeedItem, type FilePart, JPEG, multipart, PNG, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 const NO_USER = '00000000-0000-4000-8000-000000000000';
 const BANNED = "your account is banned: you can take your bio, your links and your avatar away, and can't set them";
@@ -128,23 +127,24 @@ for (const target of TARGETS) {
     });
 
     it('sends a bio, links and an avatar through the trust plugins, and saves only what they trust', async () => {
-      const seen: TrustPost[] = [];
-      const watching: TrustPlugin = { name: 'watching', assess: (sent) => void seen.push(sent) };
+      /** Reads images, as a plugin that looks at pictures does, so that the avatar is read for it. */
+      const watching: TestPlugin = { name: 'watching', record: true, readsImages: true };
       /** Takes off 30, which leaves a post waiting in the moderation queue. */
-      const wary: TrustPlugin = { name: 'wary', assess: ({ texts }) => (texts.some((text) => text.includes('FREE')) ? { reduce: 30 } : null) };
-      ctx = await createTestContext(target, { trustPlugins: [...(await loadTrustPlugins()), wary, watching] });
+      const wary: TestPlugin = { name: 'wary', rules: [{ includes: 'FREE', reduce: 30 }] };
+      ctx = await createTestContext(target, { moreTrustPlugins: [wary, watching] });
+      /** What the plugin was shown since this was last asked. */
+      const seen = async () => (await ctx.trust.seen()).map((shown) => shown.post);
       const root = await admin();
       const alice = await ctx.register('alice');
       ok(await req(root, 'POST', '/moderation/blocked-words', { words: ['spam'] }));
 
       // What a plugin is told: that it is a profile, and what there is of it to read, the bio as its readers read it.
       ok(await update(alice, { bio: 'Read [my blog](https://blog.example/me) daily', links: ['https://social.example/alice'] }));
-      expect(seen).toEqual([{ userId: alice.userId, profile: true, tags: [], texts: ['Read my blog https://blog.example/me daily', 'https://social.example/alice'] }]);
+      expect(await seen()).toEqual([{ userId: alice.userId, profile: true, tags: [], texts: ['Read my blog https://blog.example/me daily', 'https://social.example/alice'] }]);
       // Only what is set is sent to them: nothing, for what is taken away or isn't a profile's.
-      seen.length = 0;
       ok(await update(alice, { bio: null, links: [] }));
       ok(await update(alice, { messages: false }));
-      expect(seen).toEqual([]);
+      expect(await seen()).toEqual([]);
 
       // A blocked word of the server's, in the bio or in a link, is refused, and nothing of the request is saved.
       expect(await refused(update(alice, { bio: 'Buy my spam', username: 'alicia' }))).toEqual([422, BLOCKED_WORD]);
@@ -154,9 +154,9 @@ for (const target of TARGETS) {
       expect(await profile(alice.userId)).toMatchObject({ username: 'alice', bio: null, links: [] });
 
       // An avatar is given to them as a post's image is, with its name: the image as it was sent, not the avatar made of it.
-      seen.length = 0;
+      await seen();
       ok(await upload(alice, { name: 'me.png' }));
-      expect(seen).toEqual([{ userId: alice.userId, profile: true, tags: [], texts: ['me.png'], images: [expect.objectContaining({ mimeType: 'image/png', filename: 'me.png' })] }]);
+      expect(await seen()).toEqual([{ userId: alice.userId, profile: true, tags: [], texts: ['me.png'], images: [expect.objectContaining({ mimeType: 'image/png', filename: 'me.png' })] }]);
       const before = (await profile(alice.userId)).avatarUrl;
       expect(await refused(upload(alice, { name: 'spam.png' }))).toEqual([422, BLOCKED_WORD]);
       expect(await refused(upload(alice, { name: 'FREE.png' }))).toEqual([422, NOT_TRUSTED]);
@@ -360,7 +360,7 @@ for (const target of TARGETS) {
 
     it("lists all of a user's posts, newest first, a page at a time, and only what anyone can read", async () => {
       /** Takes off 30, which leaves a post waiting in the moderation queue. */
-      const wary: TrustPlugin = { name: 'wary', assess: ({ texts }) => (texts.some((text) => text.includes('FREE')) ? { reduce: 30 } : null) };
+      const wary: TestPlugin = { name: 'wary', rules: [{ includes: 'FREE', reduce: 30 }] };
       ctx = await createTestContext(target, { trustPlugins: [wary] });
       const alice = await ctx.register('alice');
       const bob = await ctx.register('bob');
@@ -427,8 +427,8 @@ for (const target of TARGETS) {
       expect((await req(null, 'GET', `/users/${alice.userId}`)).statusCode).toBe(200);
 
       // The setting is the server's own unless it is given another.
-      expect(loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json' }).avatarRateLimitPerMinute).toBe(300);
-      expect(loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', AVATAR_RATE_LIMIT_PER_MINUTE: '7' }).avatarRateLimitPerMinute).toBe(7);
+      expect(loadConfig({}, BASE_ENV).avatarRateLimitPerMinute).toBe(300);
+      expect(loadConfig({}, { ...BASE_ENV, AVATAR_RATE_LIMIT_PER_MINUTE: '7' }).avatarRateLimitPerMinute).toBe(7);
     });
 
     it('pins a few of the user’s own posts to their profile, which names them and lists them first', async () => {

@@ -7,7 +7,7 @@ import { resetDatabase, TARGETS } from './helpers.js';
 
 describe('SQL migrations', () => {
   it('has the portable schema migrations, in order', () => {
-    expect(Object.keys(sqlMigrations())).toEqual(['0001_initial', '0002_pending_writes', '0003_staged_removals', '0004_unnumbered_writes', '0005_origin_gone', '0006_export_indexes', '0007_media', '0008_mention_notices', '0009_search', '0010_unlikes', '0011_tag_moderation', '0012_profiles', '0013_repost_removals', '0014_tag_log', '0015_moderator_activity', '0016_quarantine']);
+    expect(Object.keys(sqlMigrations())).toEqual(['0001_initial', '0002_pending_writes', '0003_staged_removals', '0004_unnumbered_writes', '0005_origin_gone', '0006_export_indexes', '0007_media', '0008_mention_notices', '0009_search', '0010_unlikes', '0011_tag_moderation', '0012_profiles', '0013_repost_removals', '0014_tag_log', '0015_moderator_activity', '0016_quarantine', '0017_claims_at_once']);
   });
 
   it('splits scripts into statements, ignoring comment lines', () => {
@@ -44,7 +44,6 @@ describe('SQL migrations', () => {
         'search_terms',
         'server_rules',
         'staged_removals',
-        'tag_claims',
         'tag_moderation',
         'tag_moderation_log',
         'tag_moderators',
@@ -65,6 +64,9 @@ describe('SQL migrations', () => {
         'banned_at',
         'banned_by',
         'bio',
+        'claims_bar_reason',
+        'claims_barred_at',
+        'claims_barred_by',
         'created_at',
         'deleted_at',
         'id',
@@ -95,8 +97,7 @@ describe('SQL migrations', () => {
       expect(await columns('moderation_queue')).toEqual(['content_id', 'created_at', 'trust_score']);
       expect(await columns('tag_moderation')).toEqual(['applied_at', 'content_id', 'decided_at', 'decision', 'moderator_id', 'tag']);
       expect(await columns('tag_moderation_log')).toEqual(['content_id', 'created_at', 'decision', 'id', 'moderator_id', 'moderator_role', 'reason', 'tag']);
-      expect(await columns('tag_claims')).toEqual(['created_at', 'review_until', 'tag', 'user_id']);
-      expect(await columns('tag_moderators')).toEqual(['acted_at', 'created_at', 'tag', 'user_id']);
+      expect(await columns('tag_moderators')).toEqual(['acted_at', 'claimed', 'created_at', 'tag', 'user_id']);
       expect(await columns('tag_rules')).toEqual(['body', 'created_at', 'id', 'sort_order', 'tag', 'updated_at']);
       expect(await columns('reports')).toEqual(['accepted_at', 'content_id', 'created_at', 'reason', 'user_id']);
       expect(await columns('comment_queue')).toEqual(['comment_id', 'content_id', 'created_at', 'trust_score']);
@@ -226,7 +227,7 @@ describe('SQL migrations', () => {
 
         await migrateToLatest(db);
         const rows = async () =>
-          (await db.selectFrom('tag_moderators').selectAll().orderBy('created_at').execute()).map((r) => ({ ...r, created_at: Number(r.created_at), acted_at: r.acted_at === null ? null : Number(r.acted_at) }));
+          (await db.selectFrom('tag_moderators').select(['tag', 'user_id', 'created_at', 'acted_at']).orderBy('created_at').execute()).map((r) => ({ ...r, created_at: Number(r.created_at), acted_at: r.acted_at === null ? null : Number(r.acted_at) }));
         // Null, and not the time they became one: the compactor counts them from its next run (src/moderation/activity.ts).
         expect(await rows()).toEqual([
           { tag: 'cars', user_id: 'u1', created_at: 5, acted_at: null },
@@ -236,6 +237,51 @@ describe('SQL migrations', () => {
         // A moderator made from then on has the time with them.
         await db.insertInto('tag_moderators').values({ tag: 'news', user_id: 'u2', created_at: 8, acted_at: 8 }).execute();
         expect((await rows()).at(-1)).toEqual({ tag: 'news', user_id: 'u2', created_at: 8, acted_at: 8 });
+      } finally {
+        await db.destroy();
+      }
+    });
+
+    it(`makes the users whose claims to hashtags waited moderators of them when claims stop waiting, and keeps a hashtag to one claimant (${target.name})`, async () => {
+      const db = await createDb({ dialect: target.dialect, url: target.url, poolSize: 1 });
+      try {
+        await resetDatabase(db, target.dialect);
+        const { error } = await new Migrator({ db, provider: { getMigrations: async () => sqlMigrations() } }).migrateTo('0016_quarantine');
+        expect(error).toBeUndefined();
+        await sql`INSERT INTO users (id, username, created_at, updated_at) VALUES ('u1', 'alice', 0, 0), ('u2', 'bob', 0, 0), ('u3', 'carol', 0, 0), ('u4', 'dave', 0, 0), ('u5', 'erin', 0, 0)`.execute(db);
+        await sql`UPDATE users SET banned_at = 3, banned_by = 'u1' WHERE id = 'u3'`.execute(db);
+        await sql`UPDATE users SET deleted_at = 3 WHERE id = 'u4'`.execute(db);
+        await sql`INSERT INTO tag_moderators (tag, user_id, created_at, acted_at) VALUES ('news', 'u1', 1, 2)`.execute(db);
+        // Claims that wait: two to grant, one of a banned user, one of an account that was closed, and one to a
+        // hashtag that was given a moderator meanwhile.
+        await sql`INSERT INTO tag_claims (tag, user_id, created_at, review_until) VALUES ('cars', 'u2', 5, 105), ('bikes', 'u5', 6, 106), ('boats', 'u3', 7, 107), ('trains', 'u4', 8, 108), ('news', 'u2', 9, 109)`.execute(db);
+
+        await migrateToLatest(db);
+        expect((await db.introspection.getTables()).map((t) => t.name)).not.toContain('tag_claims');
+        const rows = async () =>
+          (await db.selectFrom('tag_moderators').selectAll().orderBy('created_at').execute()).map((r) => ({
+            ...r,
+            created_at: Number(r.created_at),
+            acted_at: r.acted_at === null ? null : Number(r.acted_at),
+            claimed: r.claimed === null ? null : Number(r.claimed),
+          }));
+        // Since they claimed it, and as claimants. The moderator there was is one who was appointed, for all it says.
+        // Nothing is known of when the new ones last did anything: the compactor counts them from its next run.
+        expect(await rows()).toEqual([
+          { tag: 'news', user_id: 'u1', created_at: 1, acted_at: 2, claimed: null },
+          { tag: 'cars', user_id: 'u2', created_at: 5, acted_at: null, claimed: 1 },
+          { tag: 'bikes', user_id: 'u5', created_at: 6, acted_at: null, claimed: 1 },
+        ]);
+        // Nobody is barred from claiming to begin with.
+        expect(await db.selectFrom('users').select('id').where('claims_barred_at', 'is not', null).execute()).toEqual([]);
+
+        // A hashtag has one claimant, and as many appointed moderators as there are.
+        const insert = (tag: string, userId: string, claimed: number | null) => db.insertInto('tag_moderators').values({ tag, user_id: userId, created_at: 10, acted_at: 10, claimed }).execute();
+        expect(await insert('cars', 'u5', 1).then(() => false, isUniqueViolation)).toBe(true);
+        await insert('cars', 'u5', null);
+        await insert('cars', 'u1', null);
+        await insert('boats', 'u2', 1);
+        expect((await rows()).map((r) => `${r.tag} ${r.user_id} ${r.claimed}`).sort()).toEqual(['bikes u5 1', 'boats u2 1', 'cars u1 null', 'cars u2 1', 'cars u5 null', 'news u1 null']);
       } finally {
         await db.destroy();
       }

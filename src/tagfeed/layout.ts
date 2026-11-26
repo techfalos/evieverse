@@ -1,4 +1,3 @@
-import { randomBytes } from 'node:crypto';
 import type { Publisher, Summary } from '../storage/index.js';
 import { iso, wholeSeconds } from '../time.js';
 import type { FeedRecord, Head, IndexEntry, RepostMark } from './layout.types.js';
@@ -42,13 +41,6 @@ const REPOST = 4;
 
 /** What a tag that was never compacted has for a head: no manifest, so no day index, and the tag reads as empty. */
 export const EMPTY_HEAD: Head = { v: 5, manifest: null, compactedAt: 0 };
-
-/**
- * The key the compactor keeps its progress under from one run to the next, as JSON: the instants
- * up to which it has applied likes, profile changes and hashtag counts, and the day it has purged
- * summaries up to (see `State` in src/compact/compactor.ts).
- */
-export const COMPACTOR_STATE_KEY = 'compactor:state';
 
 /** A publisher's own index, named so no hashtag (letters, digits and _) can be the same. */
 export const authorIndex = (userId: string) => `@${userId}`;
@@ -121,20 +113,6 @@ export const headKey = (tag: string) => `head:${tag}`;
 export const manifestKey = (tag: string, id: string) => `man:${tag}:${id}`;
 /** The key of one of a tag's day indexes: `gen` is the one its `DayRef` in the manifest names. */
 export const dayKey = (tag: string, gen: string) => `day:${tag}:${gen}`;
-
-/** `n` in decimal, with zeros in front up to `width` digits: 13 by default, which is as long as a time in epoch ms. */
-const pad = (n: number, width = 13) => String(n).padStart(width, '0');
-/** Eight random hex digits, which end a new id so that two made for the same instant differ. */
-const rand = () => randomBytes(4).toString('hex');
-
-/** The id of a new manifest: when it was made (`createdAt`, epoch ms, which is the compactor run's start), then random digits. */
-export const newManifestId = (createdAt: number) => `${pad(createdAt)}-${rand()}`;
-/**
- * The `gen` of a new day index, which its key carries: the UTC day number, when it was built
- * (`createdAt`, epoch ms, which is the compactor run's start), then random digits. A day that is
- * rebuilt gets a new one, as a day index is never overwritten.
- */
-export const newGenId = (day: number, createdAt: number) => `${pad(day, 5)}-${pad(createdAt)}-${rand()}`;
 
 /** Post quota of a UTC day at `ageDays` old: halves each day from `max`, never below `min`. */
 export const dayQuota = (ageDays: number, max: number, min: number) => Math.max(min, Math.floor(max / 2 ** Math.max(0, ageDays)));

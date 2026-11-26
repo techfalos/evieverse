@@ -133,8 +133,8 @@ describe('response compression', () => {
 
   it('answers through the Lambda adapter in base64, which is how a function returns bytes', async () => {
     await setup();
-    // The feed's function over the server's own stores, as a deployment's functions share them.
-    const fn = createFunction('feed', ctx.config, { now: () => ctx.clock.now, hot: ctx.hot, server: { logger: false } });
+    // The feed's function over the server's own Redis and content store, as a deployment's functions share them.
+    const fn = createFunction('feed', ctx.config, { now: () => ctx.clock.now, server: { logger: false } });
     try {
       const handler = httpApiHandler(fn);
       const ask = (headers: Record<string, string>) =>

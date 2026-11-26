@@ -10,7 +10,7 @@ import type { Challenge } from '../src/challenge/challenges.types.js';
 import { ALPHABET, ANSWER_LENGTH, challengeText, HEIGHT, renderChallenge, WIDTH } from '../src/challenge/image.js';
 import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
-import { as, createTestContext, TARGETS, type TestContext, type User } from './helpers.js';
+import { as, BASE_ENV, createTestContext, TARGETS, type TestContext, type User } from './helpers.js';
 
 /** The pixels of an 8-bit grayscale PNG. */
 function decodePng(png: Buffer) {
@@ -333,7 +333,7 @@ for (const target of TARGETS) {
 
     it('has no setting that spares a registration its challenge', async () => {
       // What once turned it off, in the environment or in a config file, is no setting now, and changes nothing.
-      const off = loadConfig({ challenge: { register: false } }, { EVIEVERSE_CONFIG: '/nonexistent.json' });
+      const off = loadConfig({ challenge: { register: false } }, BASE_ENV);
       expect(off.challenge).toEqual({ ttlSeconds: 120, powBits: 18, minSolveMs: 2000 });
 
       await ctx.close();

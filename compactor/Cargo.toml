@@ -1,0 +1,72 @@
+# The Rust side of Evieverse, all of it in this folder: the compactor's binary (src/) and the
+# crates it is built from (crates/). The API stays TypeScript (../src), and meets this code in
+# three places: the database, Redis and the object store, whose formats both sides keep (see
+# ../fixtures).
+#
+# Cargo is run from this folder, which is also where the toolchain is pinned (rust-toolchain.toml).
+[workspace]
+resolver = "2"
+members = [".", "crates/core", "crates/trust", "crates/node"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+license-file = "../LICENSE.md"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# What the workspace is built on is built as it is released, in a build for tests too: SQLite,
+# the engine that runs admins' blocked patterns, which has 100 ms to read a post with, and what
+# compresses every summary and hashes every file. So a pattern is as quick in a test as on a
+# server, and the tests, which run the compactor as it is built for them, are held up by none
+# of it. The workspace's own code is built as a test build is: quickly, and with its checks.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = "debuginfo"
+
+[package]
+name = "compactor"
+description = "The compactor: the one process that applies the writes requests committed, and builds the feed index from them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The `harness` command, which the API's tests drive the compactor with (src/harness.rs, and
+# ../test/harness.ts). Never part of a build that serves.
+harness = ["tokio/io-std", "evieverse-trust/test-plugin"]
+
+[dependencies]
+anyhow = "1.0.105"
+clap = { version = "4.6.10", features = ["derive"] }
+evieverse-core = { path = "crates/core" }
+evieverse-trust = { path = "crates/trust" }
+futures = "0.3.34"
+hex = "0.4.3"
+indexmap = "2.14.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+sha2 = "0.11.2"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "process", "fs", "io-util"] }
+uuid = { version = "1.29.3", features = ["v4"] }
+
+[dev-dependencies]
+evieverse-core = { path = "crates/core", features = ["testing"] }
+tempfile = "3"
+tokio = { version = "1.54.1", features = ["test-util"] }

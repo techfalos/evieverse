@@ -7,7 +7,7 @@ import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { commentIndexKey, commentKey, commentLikesKey } from '../src/storage/commentStore.js';
 import { HOUR } from '../src/time.js';
-import { as, createTestContext, JPEG, multipart, PNG, requests, TARGETS, type TestContext, type User } from './helpers.js';
+import { as, BASE_ENV, createTestContext, JPEG, multipart, PNG, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 const NO_ID = '00000000-0000-4000-8000-000000000000';
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -16,7 +16,7 @@ const NO_COMMENT = 'comment not found';
 
 describe('COMMENTS_PER_MINUTE and COMMENTS_HOT_HOURS', () => {
   it('are 10 and 24 unless set, and 0 comments a minute is no limit', () => {
-    const load = (env: Record<string, string> = {}) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).comments;
+    const load = (env: Record<string, string> = {}) => loadConfig({}, { ...BASE_ENV, ...env }).comments;
     // The limit on reading the lists of comments by address is its own setting (see ratelimit.test.ts).
     expect(load()).toEqual({ perMinute: 10, hotHours: 24, listRateLimitPerMinute: 120 });
     expect(load({ COMMENTS_PER_MINUTE: '0', COMMENTS_HOT_HOURS: '2' })).toEqual({ perMinute: 0, hotHours: 2, listRateLimitPerMinute: 120 });
@@ -313,10 +313,9 @@ for (const target of TARGETS) {
       // Each user has their own minute.
       ok(await comment(carol, contentId, 'Mine'));
       expect(texts(await list(contentId))).toEqual(['One', 'Two', 'Mine']);
-      if (target.hot === 'memory') {
-        ctx.clock.now += 60_000;
-        ok(await comment(bob, contentId, 'Three'));
-      }
+      // The minute is the one before the comment, by the server's clock: once the first is that old, the next is taken.
+      ctx.clock.now += 60_000;
+      ok(await comment(bob, contentId, 'Three'));
     });
 
     it('keeps comments in the content store alone: what Redis loses of them is read from there again', async () => {
@@ -368,15 +367,17 @@ for (const target of TARGETS) {
       await ctx.hot.del([index]);
       expect(await list(contentId)).toMatchObject({ count: 3, comments: sent.slice(1) });
 
-      // Redis keeps none of it for longer than COMMENTS_HOT_HOURS, however often it is read.
-      if (target.hot === 'memory') {
-        ctx.clock.now += 23 * HOUR;
-        expect((await list(contentId)).count).toBe(3);
-        ctx.clock.now += HOUR;
-        expect(await ctx.hot.exists([index])).toEqual([false]);
-        expect(await list(contentId)).toMatchObject({ count: 3, comments: sent.slice(1) });
-        expect(await ctx.hot.exists([index])).toEqual([true]);
-      }
+      // Redis keeps none of it for longer than COMMENTS_HOT_HOURS, however often it is read: the
+      // index lasts that long from when it was begun, by Redis's clock, and is then built again.
+      const [begun] = await ctx.ttl([index]);
+      expect(begun).toBeGreaterThan(24 * HOUR - 60_000);
+      expect(begun).toBeLessThanOrEqual(24 * HOUR);
+      expect((await list(contentId)).count).toBe(3);
+      expect((await ctx.ttl([index]))[0]).toBeLessThanOrEqual(begun!);
+      await ctx.lapse([index]);
+      expect(await ctx.hot.exists([index])).toEqual([false]);
+      expect(await list(contentId)).toMatchObject({ count: 3, comments: sent.slice(1) });
+      expect(await ctx.hot.exists([index])).toEqual([true]);
     });
 
     it('removes the comments of a post with the post, their replies and their likes too', async () => {

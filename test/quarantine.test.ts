@@ -8,12 +8,8 @@ import sharp from 'sharp';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
-import { loadTrustPlugins } from '../src/moderation/trust.js';
-import { pdqHash, toHex } from '../src/plugins/trust/pdq/hash.js';
-import { framesOf } from '../src/plugins/trust/pdq/image.js';
-import { pdq } from '../src/plugins/trust/pdq/index.js';
 import { DAY } from '../src/time.js';
-import { as, createTestContext, multipart, sha256, TARGETS, type FilePart, type TestContext, type User } from './helpers.js';
+import { as, BASE_ENV, createTestContext, type FilePart, multipart, sha256, TARGETS, type TestContext, type User } from './helpers.js';
 
 /** Whether this machine has the ffmpeg the server processes videos with: the tests that process one are skipped where it hasn't. */
 const FFMPEG = spawnSync('ffmpeg', ['-version']).status === 0 && spawnSync('ffprobe', ['-version']).status === 0;
@@ -50,11 +46,13 @@ const png = (seed: number) => drawn(seed).png().toBuffer();
 const copy = (seed: number, width = 200, quality = 60) => drawn(seed).resize({ width }).jpeg({ quality }).toBuffer();
 /** The picture on the list, and one that isn't. */
 const [LISTED, OTHER] = [1, 2];
+/** The listed picture's PDQ hash, as Meta's reference implementation gives it (see pdq.test.ts). */
+const LISTED_HASH = '286c319d7379a2467424a3467379799de8ec4bbb981bc672d1e25af2d3121e29';
 /** Two hashes that are on the list beside the picture's, of nothing the tests send: half their bits are set, as a PDQ hash's are. */
 const FILLERS = ['0f'.repeat(32), '33'.repeat(32)];
 
 describe('QUARANTINE_SCHEME and the other settings of the quarantine', () => {
-  const load = (env: Record<string, string>) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent', ...env }).quarantine;
+  const load = (env: Record<string, string>) => loadConfig({}, { ...BASE_ENV, ...env }).quarantine;
 
   it('are no store, and a year, unless set', () => {
     expect(load({})).toEqual({ retentionDays: 365 });
@@ -78,13 +76,9 @@ describe('QUARANTINE_SCHEME and the other settings of the quarantine', () => {
 for (const target of TARGETS) {
   /** What the tests of this file share: a list with the picture's hash on it, and a server that runs the plugin with it. */
   const shared = () => {
-    const state = { dir: '', list: '', hash: '' };
+    const state = { dir: '', list: '', hash: LISTED_HASH };
     beforeAll(async () => {
       state.dir = mkdtempSync(join(tmpdir(), 'evieverse-quarantine-'));
-      // The picture's hash, as the plugin itself reads and hashes it.
-      const picture = join(state.dir, 'listed.png');
-      await writeFile(picture, await png(LISTED));
-      for await (const { luma, rows, cols } of framesOf(picture)) state.hash = toHex(pdqHash(luma, rows, cols).words);
       state.list = join(state.dir, 'pdq.txt');
       await writeFile(state.list, [state.hash, ...FILLERS, ''].join('\n'));
     });
@@ -105,7 +99,7 @@ for (const target of TARGETS) {
 
     /** A server that runs the plugin with the test's list, and keeps what matches unless `quarantine` is false. */
     const server = async (opts: Parameters<typeof createTestContext>[1] = {}) => {
-      ctx = await createTestContext(target, { quarantine: true, ...opts, pdq: { hashList: state.list }, trustPlugins: [...(await loadTrustPlugins()), { name: 'pdq', ...pdq() }] });
+      ctx = await createTestContext(target, { quarantine: true, ...opts, trust: { ...opts.trust, optionalPlugins: ['pdq'] }, pdq: { hashList: state.list } });
     };
     const admin = async (name = 'root') => {
       const user = await ctx.register(name);
@@ -348,7 +342,6 @@ for (const target of TARGETS) {
         video: { processing: true, heights: [240, 144], commentHeight: 144 },
         trust: { optionalPlugins: ['pdq'] },
         pdq: { hashList: state.list },
-        trustPlugins: [...(await loadTrustPlugins()), { name: 'pdq', ...pdq() }],
         ...opts,
       });
     };
@@ -508,7 +501,7 @@ for (const target of TARGETS) {
     });
 
     it('are not checked on a server that does not run the plugin, which keeps nothing of who sent a video', async () => {
-      await server({ trust: {}, trustPlugins: undefined });
+      await server({ trust: {} });
       const alice = await ctx.register('alice');
       const { contentId } = ok(await send(alice, clip(LISTED_CLIP)), 201);
       expect(await jobs()).toEqual([{ attempts: 0, client_ip: null, client_user_agent: null }]);

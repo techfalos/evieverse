@@ -14,7 +14,6 @@ name: evieverse-testbed
 
 x-app-env: &app-env
   PUBLIC_BASE_URL: http://localhost:${TESTBED_PORT:-8080}/api
-  COMPACT_IN_PROCESS: 'false'
   COMPACT_INTERVAL_SECONDS: ${COMPACT_INTERVAL_SECONDS:-5}
   # Every request reaches the app from nginx, so the per-IP limits on /register and on /feed are effectively global.
   REGISTER_RATE_LIMIT_PER_HOUR: '1000'
@@ -36,6 +35,9 @@ x-app-env: &app-env
   # The youngest a person may be to use the server, in years, which GET /rules gives beside the rules.
   # None unless set: GET /rules then says "All Legal Ages Allowed".
   MINIMUM_AGE: ${MINIMUM_AGE:-}
+  # What the server says of content made with generative AI, which GET /rules gives beside the rules:
+  # disclosure_optional (allowed), disclosure_required (allowed if it says so) or not_allowed.
+  GEN_AI: ${GEN_AI:-disclosure_optional}
   # Ads in hashtag feeds and at the end of posts, which admins keep at /monetization/ads. Off unless set to
   # true. The app and the compactor share them: the compactor publishes the ads the app shows.
   MONETIZATION_FEED_ADS: ${MONETIZATION_FEED_ADS:-false}

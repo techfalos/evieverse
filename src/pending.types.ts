@@ -11,7 +11,7 @@ import type { Comment, ContentMeta } from './storage/index.js';
 export interface PostPayload {
   meta: ContentMeta;
   /**
-   * The write's file is a video that is yet to be processed (src/video): the staged file is the
+   * The write's file is a video that is yet to be processed (compactor/src/video): the staged file is the
    * one that was sent, and `meta` describes that. The compactor leaves the write, and readers
    * are given nothing of the file, until the video worker has put the processed file in the
    * row and taken this off, in one commit. It is in the row, not beside it, so that whoever
@@ -44,7 +44,7 @@ export interface CommentPutPayload {
 /**
  * What a `comment_remove` row holds: the comment that the removed one replied to, if it was a
  * reply. The compactor goes by it once the comment is gone, to take away the placeholder of a
- * deleted comment that this was the last reply to (see prune).
+ * deleted comment that this was the last reply to (`prune` in compactor/src/replies.rs).
  */
 export interface CommentRemovePayload {
   parentId?: string;

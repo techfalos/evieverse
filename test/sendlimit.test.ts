@@ -3,11 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { payloadOf } from '../src/pending.js';
 import type { CommentPutPayload, PostPayload } from '../src/pending.types.js';
-import { createTestContext, requests, TARGETS, type TestContext, type User } from './helpers.js';
+import { BASE_ENV, createTestContext, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 describe('POST_RATE_LIMIT_PER_MINUTE and COMMENTS_PER_MINUTE', () => {
   it('are 3 and 10 unless set, 0 for no limit, and all that posts and comments are held to', () => {
-    const load = (env: Record<string, string> = {}) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env });
+    const load = (env: Record<string, string> = {}) => loadConfig({}, { ...BASE_ENV, ...env });
     expect([load().postRateLimitPerMinute, load().comments.perMinute]).toEqual([3, 10]);
     expect(load({ POST_RATE_LIMIT_PER_MINUTE: '5', COMMENTS_PER_MINUTE: '20' })).toMatchObject({ postRateLimitPerMinute: 5, comments: { perMinute: 20 } });
     expect(load({ POST_RATE_LIMIT_PER_MINUTE: '0', COMMENTS_PER_MINUTE: '0' })).toMatchObject({ postRateLimitPerMinute: 0, comments: { perMinute: 0 } });
@@ -17,7 +17,7 @@ describe('POST_RATE_LIMIT_PER_MINUTE and COMMENTS_PER_MINUTE', () => {
     // What once set the challenges for posts and comments, in the environment or in a config file, is no setting now, and changes nothing.
     const old = loadConfig(
       { challenge: { postWindowSeconds: 60, commentsPerMinute: 3 } },
-      { EVIEVERSE_CONFIG: '/nonexistent.json', CHALLENGE_POST_WINDOW_SECONDS: '60', CHALLENGE_COMMENTS_PER_MINUTE: '3' },
+      { ...BASE_ENV, CHALLENGE_POST_WINDOW_SECONDS: '60', CHALLENGE_COMMENTS_PER_MINUTE: '3' },
     );
     expect(old.challenge).toEqual({ ttlSeconds: 120, powBits: 18, minSolveMs: 2000 });
   });

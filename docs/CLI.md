@@ -84,7 +84,7 @@ A command exits with:
 | `login <server> <userId>`                                                | Checks your key with the server and saves the profile.                                                                                                                                                   |
 | `logout`                                                                 | Removes the profile from this machine. The key still works on the server.                                                                                                                                |
 | `profiles`                                                               | Lists the profiles on this machine.                                                                                                                                                                      |
-| `whoami`                                                                 | The account the key belongs to, and its roles.                                                                                                                                                           |
+| `whoami`                                                                 | The account the key belongs to, its roles, and whether it's banned or barred from claiming hashtags.                                                                                                                                                        |
 | `key rotate`                                                             | Replaces your API key with a new one (`[POST /users/:userId/key](API.md#post-usersuseridkey)`) and saves it in the profile. The old key stops working, wherever else it's in use.                        |
 | `account delete --yes`                                                   | Deletes your account, for good ([`DELETE /users/:userId`](API.md#delete-usersuserid)): your key stops working, your posts are deleted, and the profile is removed from this machine. Your comments stay, without your name. It does nothing without `--yes`. |
 | `help`                                                                   | Every command, with the ones your key may use marked.                                                                                                                                                    |
@@ -99,12 +99,11 @@ A command exits with:
 | `comments like <contentId> <commentId>`                                  | Likes a comment, and says how many likes it has. You like a comment once, until you take the like back: liking it again changes nothing.                                                                 |
 | `comments unlike <contentId> <commentId>`                                | Takes back your like of a comment, and says how many likes it has. You can like the comment again afterwards. Taking back a like you hadn't made changes nothing.                                        |
 | `comments delete <contentId> <commentId>`                                | Deletes a comment: your own, one on your post, or any comment if you're an admin.                                                                                                                        |
-| `moderators list <tag>`                                                  | A hashtag's moderators, and the [claim](API.md#claiming-a-hashtag) to it that waits, if there is one.                                                                                                    |
-| `claims add <tag>`                                                       | [Claims a hashtag](API.md#claiming-a-hashtag) that has no moderator, to moderate it, on a server where publishers choose their posts' hashtags. The server's admins and server moderators are told, and can refuse the claim until the time the command prints; after that you're the hashtag's moderator, and a notice in your inbox says so. |
-| `claims withdraw <tag>`                                                  | Withdraws your claim to a hashtag, while it waits.                                                                                                                                                       |
+| `moderators list <tag>`                                                  | A hashtag's moderators.                                                                                                                                                                                  |
+| `claims add <tag>`                                                       | [Claims a hashtag](API.md#claiming-a-hashtag) that has no moderator, on a server where publishers choose their posts' hashtags: you're its moderator from then on. The server's admins and server moderators are told, and can end it at any time. Refused if one of them [barred you from claiming](API.md#barring-a-user-from-claiming). |
 | `tag-rules list <tag>`                                                   | A hashtag's own [rules](API.md#a-hashtags-rules), in their order: what its moderators ask of the posts under it.                                                                                         |
-| `rules list`                                                             | The server's [rules](API.md#rules), in their order, its minimum age, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is. |
-| `inbox list [--unread] [--limit <n>] [--cursor <cursor>]`                | Your [inbox](API.md#inbox), newest first: the messages users sent you, and the notices of what moderators did to your posts and comments, of your mutes, of your claims to hashtags and of the hashtags you were made a moderator of or are one of no more, and of the posts and comments that [mention](API.md#mentions) you. Each row says who sent it: the user who wrote a message or mentioned you, with their id, to answer or block them, and "the server" for any other notice. With `--unread`, only what you haven't read. |
+| `rules list`                                                             | The server's [rules](API.md#rules), in their order, its minimum age, whether it allows content made with generative AI, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is. |
+| `inbox list [--unread] [--limit <n>] [--cursor <cursor>]`                | Your [inbox](API.md#inbox), newest first: the messages users sent you, and the notices of what moderators did to your posts and comments, of your mutes, of the hashtags you were made a moderator of or are one of no more, of being barred from claiming hashtags, and of the posts and comments that [mention](API.md#mentions) you. Each row says who sent it: the user who wrote a message or mentioned you, with their id, to answer or block them, and "the server" for any other notice. With `--unread`, only what you haven't read. |
 | `inbox read [--message <messageId>]`                                     | Marks everything in your inbox as read, or with `--message`, one message or notice.                                                                                                                      |
 | `inbox delete <messageId>`                                               | Deletes a message or a notice from your inbox.                                                                                                                                                           |
 | `messages send <userId> <text>`                                          | Sends a user a message (quote the text). Refused if either of you turned messages off or blocked the other.                                                                                              |
@@ -158,8 +157,10 @@ Both queue and reports contain posts and comments. Each line starts with `post` 
 | `bans list [--limit <n>] [--cursor <cursor>]`                                        | The [banned](API.md#bans) users, most recently banned first: who banned each, when, and why.                                                     |
 | `bans add <userId> [--reason <text>]`                                                | Bans a user: they can't post, comment, like or send messages, and can still read. They're told. Not an admin or a server moderator.              |
 | `bans remove <userId>`                                                               | Ends a ban. The user is told.                                                                                                                    |
-| `claims list [--limit <n>] [--cursor <cursor>]`                                      | The [claims to hashtags](API.md#claiming-a-hashtag) that wait, longest waiting first: who claims which hashtag, and until when the claim can be refused. |
-| `claims refuse <tag>`                                                                | Refuses the claim to a hashtag that waits: its user doesn't become the hashtag's moderator, and is told.                                         |
+| `moderators remove <tag> <userId>`                                                   | Ends a user's moderation of a hashtag, at any time, whether they were appointed to it or [claimed it](API.md#claiming-a-hashtag). The user is told. From one of the hashtag's own moderators, the server takes it for those who became a moderator after them, and for themselves ([API.md](API.md#a-hashtags-moderators)), though `help` lists the command for server moderators. |
+| `claim-bars list [--limit <n>] [--cursor <cursor>]`                                  | The users who are [barred from claiming hashtags](API.md#barring-a-user-from-claiming), most recently barred first: who barred each, when, and why. |
+| `claim-bars add <userId> [--reason <text>]`                                          | Bars a user from claiming hashtags: their claims are refused, and nothing else is. They're told. The hashtags they moderate stay theirs: end those with `moderators remove`. |
+| `claim-bars remove <userId>`                                                         | Lets a user claim hashtags again. The user is told.                                                                                              |
 
 
 
@@ -177,7 +178,6 @@ Both queue and reports contain posts and comments. Each line starts with `post` 
 | `server-moderators add <userId>`          | Makes a user a server moderator: they can work through the moderation queue and the report queue, and moderate every hashtag.                                                                                                                                                   |
 | `server-moderators remove <userId>`       | Ends a user's time as a server moderator.                                                                                                                                                                                                                                       |
 | `moderators add <tag> <userId>`           | Appoints a moderator of a hashtag. The user is told. The server takes it from one of the hashtag's own moderators too ([API.md](API.md#a-hashtags-moderators)), though `help` lists the command for admins.                                                                      |
-| `moderators remove <tag> <userId>`        | Ends a user's moderation of a hashtag. The user is told. From one of the hashtag's own moderators, the server takes it for those who became a moderator after them, and for themselves.                                                                                         |
 | `rules add <text> [--position <n>]`       | Adds a rule (quote the text). It goes at the end of the list, or with `--position`, at that place, counted from 1.                                                                                                                                                              |
 | `rules update <ruleId> [--text <text>] [--position <n>]` | Changes a rule: with `--text`, what it says, and with `--position`, its place in the list.                                                                                                                                                                       |
 | `rules remove <ruleId>`                   | Removes a rule.                                                                                                                                                                                                                                                                 |
@@ -211,6 +211,8 @@ evieverse rules list
 
 Minimum age: 13
 
+Generative AI: allowed, and saying that content was made with it is optional
+
 Support: support@example.com
 
 Modification disclosure: this server runs Evieverse 0.1.0, unmodified.
@@ -235,14 +237,21 @@ evieverse tag remove 5c06badf-… news --mute              # and mute its publis
 evieverse tag remove 5c06badf-… news --reason "Not news" # and say why, on the post
 ```
 
-Claim a hashtag nobody moderates, and set its rules once the claim went through:
+Claim a hashtag nobody moderates, and set its rules:
 
 ```bash
-evieverse claims add cars                                # prints until when the claim can be refused
-evieverse claims list                                    # as a server moderator or an admin: the claims that wait
-evieverse claims refuse cars                             # ...to stop one
+evieverse claims add cars                                # you moderate #cars from now on
 evieverse tag-rules add cars "Cars only: no trucks."     # as the hashtag's moderator, a server moderator or an admin
 evieverse tag-rules list cars
+```
+
+End a user's moderation of a hashtag, and keep them from claiming another:
+
+```bash
+evieverse moderators remove cars 56243052-…              # as a server moderator, or an admin: at any time
+evieverse claim-bars add 56243052-… --reason "Spam"      # their claims are refused from now on
+evieverse claim-bars list                                # who is barred, by whom, and why
+evieverse claim-bars remove 56243052-…
 ```
 
 Work through the moderation queue:

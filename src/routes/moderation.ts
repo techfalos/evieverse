@@ -5,7 +5,7 @@ import { authenticate, authenticateIfNamed } from '../auth/apiKey.js';
 import type { AuthUser } from '../auth/apiKey.types.js';
 import { removeComment, removeCommentRows } from '../comments.js';
 import { loadContent } from '../content.js';
-import { addOnce, ignoreConflicts } from '../db/index.js';
+import { addOnce, ignoreConflicts, lockUser } from '../db/index.js';
 import type { Database } from '../db/schema.js';
 import { setForDeletion } from '../deletion.js';
 import type { RouteDeps } from '../deps.types.js';
@@ -18,7 +18,7 @@ import { excerpt, excerptOf, notify } from '../inbox.js';
 import { msg } from '../language.js';
 import { notifyMentions } from '../mentions.js';
 import { recordAction } from '../moderation/activity.js';
-import { claimItem, claimTag, closeClaim, endClaim, pendingClaim } from '../moderation/claims.js';
+import { claimTag } from '../moderation/claims.js';
 import { moderates, moderatesServer, moderatorRole } from '../moderation/policy.js';
 import { kindColumn, queueItems } from '../moderation/queues.js';
 import { approveTag, MAX_REASON_CHARS, removeTag, tagLog, tagLogItem } from '../moderation/tagDecisions.js';
@@ -26,11 +26,11 @@ import { isPattern, MAX_LIST_PATTERNS, MAX_LIST_WORDS, MAX_PHRASE_WORDS, MAX_WOR
 import { effectiveComment, insertPending, pendingComment, writePending, type PendingReader } from '../pending.js';
 import { iso } from '../time.js';
 
-/** The hashtag a path names, for the routes under /tags/:tag: its blocked words, its moderators, the claim to it, and the users muted on it. */
+/** The hashtag a path names, for the routes under /tags/:tag: its blocked words, its moderators, a claim to it, and the users muted on it. */
 const TagParams = z.object({ tag: Hashtag });
 /** A hashtag and a user in a path: the user who is made or unmade a moderator of the hashtag, or muted or unmuted on it. */
 const TagUserParams = z.object({ tag: Hashtag, userId: z.string().uuid() });
-/** The user a path names: the one who is made or unmade an admin or a server moderator, or banned or unbanned. */
+/** The user a path names: the one who is made or unmade an admin or a server moderator, banned or unbanned, or barred from claiming hashtags or let claim them again. */
 const UserParams = z.object({ userId: z.string().uuid() });
 /** The post a path names in the moderation queue, for the request that accepts or rejects it. */
 const ContentParams = z.object({ contentId: z.string().uuid() });
@@ -40,7 +40,7 @@ const ContentTagParams = z.object({ contentId: z.string().uuid(), tag: Hashtag }
 const RepostParams = z.object({ contentId: z.string().uuid(), userId: z.string().uuid() });
 /** The comment a path names in the moderation queue, by its post's id and its own, for the request that accepts or rejects it. */
 const CommentParams = z.object({ contentId: z.string().uuid(), commentId: z.string().uuid() });
-/** Why a user is banned, which only moderators read. */
+/** Why a user is banned, or barred from claiming hashtags, which only moderators read. */
 const BanBody = Credentials.extend({ reason: z.string().trim().min(1).max(500).optional() });
 /**
  * The entries a request adds to a list of blocked words, or removes from it: 1 to 1000 of them,
@@ -67,12 +67,13 @@ const adminOnly = () => forbidden(msg('moderation.admin_only'));
 
 /**
  * Moderation: admins make and revoke admins, appoint server moderators and tag moderators, and keep
- * the server's blocked words; server moderators and admins ban users; server moderators (and admins) accept or reject the posts and the
+ * the server's blocked words; server moderators and admins ban users, bar users from claiming hashtags,
+ * and end any tag moderator's time on a hashtag; server moderators (and admins) accept or reject the posts and the
  * comments their trust score sent to the moderation queue, and remove a user's repost of a post; a tag's moderators (and server moderators
  * and admins, on every tag) keep its blocked words, mute users on it, and approve the content under
  * it or remove it from content. Where publishers choose their posts' hashtags, a user claims a
- * hashtag that has no moderator, and moderates it unless an admin or a server moderator refuses
- * the claim (src/moderation/claims.ts). A hashtag's own moderators appoint its other moderators,
+ * hashtag that has no moderator, and moderates it from then on, until they leave it or an admin or
+ * a server moderator ends that (src/moderation/claims.ts). A hashtag's own moderators appoint its other moderators,
  * as an admin does, and remove the ones who became one after them. A hashtag's rules are its
  * moderators' to set too (routes/rules.ts).
  * Mutes and blocked words apply to what is written from then on; what a tag's moderator decides
@@ -80,7 +81,7 @@ const adminOnly = () => forbidden(msg('moderation.admin_only'));
  * have no say over comments.
  *
  * Whoever it is done to is told: a notice goes to the inbox (src/inbox.ts) of a user who is muted
- * or unmuted, of one who is made a hashtag's moderator or is one no more, of one whose repost is removed, of the publisher of a post that loses a hashtag, or is accepted or rejected in the
+ * or unmuted, of one who is made a hashtag's moderator or is one no more, of one who is barred from claiming hashtags or let claim them again, of one whose repost is removed, of the publisher of a post that loses a hashtag, or is accepted or rejected in the
  * moderation queue, and of the author of a comment that is accepted or rejected there. And what a
  * tag's moderator decides about a post is written down on the post, for its readers, and in the
  * hashtag's log (GET /tags/:tag/log), which says who decided to those who moderate the hashtag
@@ -109,17 +110,31 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     return user;
   }
 
+  /** Since when a user is one of a hashtag's own moderators, by their row for it; undefined for one who has none. */
+  const moderatorSince = async (tag: string, userId: string): Promise<number | undefined> =>
+    (await db.selectFrom('tag_moderators').select('created_at').where('tag', '=', tag).where('user_id', '=', userId).executeTakeFirst())?.created_at;
+
   /**
-   * For who says who moderates a hashtag: an admin, or one of the hashtag's own moderators, with
-   * since when they are one (`since`; null for an admin, who needs no row for it). Not a server
-   * moderator as such: they moderate every hashtag, and appoint to none.
+   * For who appoints a hashtag's moderators: an admin, or one of the hashtag's own moderators.
+   * Not a server moderator as such: they moderate every hashtag, and appoint to none.
    */
-  async function asAppointer(req: FastifyRequest, tag: string, body: Credentials): Promise<{ user: AuthUser; since: number | null }> {
+  async function asAppointer(req: FastifyRequest, tag: string, body: Credentials): Promise<AuthUser> {
     const user = await authenticate(db, req, body);
-    if (user.admin) return { user, since: null };
-    const own = await db.selectFrom('tag_moderators').select('created_at').where('tag', '=', tag).where('user_id', '=', user.id).executeTakeFirst();
-    if (!own) throw forbidden(msg('moderation.own_moderator_only', { tag }));
-    return { user, since: own.created_at };
+    if (!user.admin && (await moderatorSince(tag, user.id)) === undefined) throw forbidden(msg('moderation.own_moderator_only', { tag }));
+    return user;
+  }
+
+  /**
+   * For who ends a moderator's time on a hashtag: an admin or a server moderator, who end
+   * anyone's, at any time, or one of the hashtag's own moderators, with since when they are one
+   * (`since`; null for an admin or a server moderator, who needs no row for it).
+   */
+  async function asRemover(req: FastifyRequest, tag: string, body: Credentials): Promise<{ user: AuthUser; since: number | null }> {
+    const user = await authenticate(db, req, body);
+    if (moderatesServer(user)) return { user, since: null };
+    const since = await moderatorSince(tag, user.id);
+    if (since === undefined) throw forbidden(msg('moderation.tag_moderator_only', { tag }));
+    return { user, since };
   }
 
   /**
@@ -326,6 +341,96 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
     return { userId, wasBanned };
   });
 
+  // Claim bars: who can't claim a hashtag, whatever else they can do (src/moderation/claims.ts).
+
+  /**
+   * Users who are barred from claiming hashtags, most recently barred first, a page at a time, with
+   * who barred each and why. Server moderators and admins.
+   */
+  app.get('/claim-barred', async (req) => {
+    const page = listQuery(req.query);
+    await asServerModerator(req, Credentials.parse(req.body ?? {}));
+    const { rows, nextCursor } = await listPage(
+      db
+        .selectFrom('users')
+        .leftJoin('users as bars', 'bars.id', 'users.claims_barred_by')
+        .select((eb) => [
+          'users.id',
+          'users.username',
+          eb.ref('users.claims_barred_at').$castTo<number>().as('created_at'),
+          'users.claims_bar_reason',
+          'bars.id as by_id',
+          'bars.username as by_username',
+        ])
+        .where('users.claims_barred_at', 'is not', null)
+        .where('users.deleted_at', 'is', null),
+      { createdAt: 'users.claims_barred_at', userId: 'users.id' },
+      page,
+    );
+    return {
+      barred: rows.map((r) => ({
+        userId: r.id,
+        username: r.username,
+        barredAt: iso(r.created_at),
+        reason: r.claims_bar_reason,
+        barredBy: r.by_id !== null && r.by_username !== null ? { userId: r.by_id, username: r.by_username } : null,
+      })),
+      nextCursor,
+    };
+  });
+
+  /**
+   * Bars a user from claiming hashtags: their claims are refused from then on (see claimTag), and
+   * nothing else is. The hashtags they moderate stay theirs, which DELETE
+   * /tags/:tag/moderators/:userId ends one at a time, and they can still be appointed to one.
+   * `reason` is kept for moderators. Server moderators and admins. The user is told, once: `201`,
+   * or `200` with `alreadyBarred` and the first bar's time and reason for one who already was.
+   */
+  app.put('/claim-barred/:userId', async (req, reply) => {
+    const { userId } = UserParams.parse(req.params);
+    const body = BanBody.parse(req.body ?? {});
+    const moderator = await asServerModerator(req, body);
+    const at = now();
+    // Under the lock of the user's row, so a bar never overwrites the first.
+    const bar = await db.transaction().execute(async (trx) => {
+      await lockUser(trx, config.db.dialect, userId);
+      const user = await trx.selectFrom('users').select(['username', 'claims_barred_at', 'claims_bar_reason']).where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
+      if (!user) throw notFound(msg('user.not_found'));
+      if (user.claims_barred_at !== null) return { username: user.username, at: user.claims_barred_at, reason: user.claims_bar_reason, already: true };
+      const reason = body.reason ?? null;
+      await trx.updateTable('users').set({ claims_barred_at: at, claims_barred_by: moderator.id, claims_bar_reason: reason }).where('id', '=', userId).execute();
+      return { username: user.username, at, reason, already: false };
+    });
+    if (!bar.already) {
+      req.log.info({ userId, moderator: moderator.id }, 'barred a user from claiming hashtags');
+      await notify(deps, { userId, kind: 'claims_barred', by: moderator.id }, req.log);
+    }
+    return reply.status(bar.already ? 200 : 201).send({ userId, username: bar.username, barredAt: iso(bar.at), reason: bar.reason, alreadyBarred: bar.already });
+  });
+
+  /** Lets a user claim hashtags again, which the user is told of. Server moderators and admins. */
+  app.delete('/claim-barred/:userId', async (req) => {
+    const { userId } = UserParams.parse(req.params);
+    const moderator = await asServerModerator(req, Credentials.parse(req.body ?? {}));
+    const wasBarred =
+      Number(
+        (
+          await db
+            .updateTable('users')
+            .set({ claims_barred_at: null, claims_barred_by: null, claims_bar_reason: null })
+            .where('id', '=', userId)
+            .where('claims_barred_at', 'is not', null)
+            .where('deleted_at', 'is', null)
+            .executeTakeFirst()
+        ).numUpdatedRows,
+      ) > 0;
+    if (wasBarred) {
+      req.log.info({ userId, moderator: moderator.id }, 'let a user claim hashtags again');
+      await notify(deps, { userId, kind: 'claims_unbarred', by: moderator.id }, req.log);
+    }
+    return { userId, wasBarred };
+  });
+
   // Blocked words: the server's list, and each hashtag's.
 
   function normalizeWords(inputs: string[]): string[] {
@@ -417,36 +522,27 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
 
   // Tag moderators.
 
-  /** Who moderates a hashtag, and the claim to it that waits (`claim`), if there is one. Public, like posts. */
+  /** Who moderates a hashtag, in the order they became one. Public, like posts. */
   app.get('/tags/:tag/moderators', async (req) => {
     const { tag } = TagParams.parse(req.params);
-    const [moderators, claim] = await Promise.all([
-      db
-        .selectFrom('tag_moderators')
-        .innerJoin('users', 'users.id', 'tag_moderators.user_id')
-        .select(['users.id', 'users.username', 'tag_moderators.created_at'])
-        .where('tag_moderators.tag', '=', tag)
-        .orderBy('tag_moderators.created_at')
-        .orderBy('tag_moderators.user_id')
-        .execute(),
-      pendingClaim(db, tag),
-    ]);
-    return {
-      tag,
-      moderators: moderators.map((r) => ({ userId: r.id, username: r.username, since: iso(r.created_at) })),
-      ...(claim && { claim: claimItem(claim) }),
-    };
+    const moderators = await db
+      .selectFrom('tag_moderators')
+      .innerJoin('users', 'users.id', 'tag_moderators.user_id')
+      .select(['users.id', 'users.username', 'tag_moderators.created_at'])
+      .where('tag_moderators.tag', '=', tag)
+      .orderBy('tag_moderators.created_at')
+      .orderBy('tag_moderators.user_id')
+      .execute();
+    return { tag, moderators: moderators.map((r) => ({ userId: r.id, username: r.username, since: iso(r.created_at) })) };
   });
 
   /**
    * Makes a user a moderator of a hashtag. An admin's to do, and the hashtag's own moderators'.
-   * A claim to the hashtag that waits is over with it (see closeClaim): the hashtag has a
-   * moderator, who appoints its others. The user is told (`tag_moderator_added`), unless they
-   * were one already.
+   * The user is told (`tag_moderator_added`), unless they were one already.
    */
   app.put('/tags/:tag/moderators/:userId', async (req, reply) => {
     const { tag, userId } = TagUserParams.parse(req.params);
-    const { user } = await asAppointer(req, tag, Credentials.parse(req.body ?? {}));
+    const user = await asAppointer(req, tag, Credentials.parse(req.body ?? {}));
     await findUser(userId);
     const { at, already } = await addOnce(
       now,
@@ -454,26 +550,26 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
       // The time they have to do something as its moderator starts with it (src/moderation/activity.ts).
       (createdAt) => db.insertInto('tag_moderators').values({ tag, user_id: userId, created_at: createdAt, acted_at: createdAt }).execute(),
     );
-    await closeClaim(deps, tag, userId, user, req.log);
     await acted(req, user, tag);
     if (!already) await notify(deps, { userId, kind: 'tag_moderator_added', tag, by: user.id }, req.log);
     return reply.status(already ? 200 : 201).send({ tag, userId, since: iso(at), alreadyModerator: already });
   });
 
   /**
-   * Ends a user's time as a moderator of a hashtag. An admin ends anyone's. One of the hashtag's
+   * Ends a user's time as a moderator of a hashtag. An admin or a server moderator ends anyone's,
+   * at any time, however they came to moderate it: appointed, or by a claim. One of the hashtag's
    * own moderators ends that of those who became one after them, and their own: so whoever a
    * moderator brought in can't turn them out, and the one who was there first stays until they
-   * leave or an admin says so. `403` for one who was there before the caller, or since the same
-   * moment. Whoever is a moderator no more is told (`tag_moderator_removed`), unless they left
-   * themselves.
+   * leave or an admin or a server moderator says so. `403` for one who was there before the
+   * caller, or since the same moment. Whoever is a moderator no more is told
+   * (`tag_moderator_removed`), unless they left themselves.
    */
   app.delete('/tags/:tag/moderators/:userId', async (req) => {
     const { tag, userId } = TagUserParams.parse(req.params);
-    const { user, since } = await asAppointer(req, tag, Credentials.parse(req.body ?? {}));
+    const { user, since } = await asRemover(req, tag, Credentials.parse(req.body ?? {}));
     if (since !== null && userId !== user.id) {
-      const other = await db.selectFrom('tag_moderators').select('created_at').where('tag', '=', tag).where('user_id', '=', userId).executeTakeFirst();
-      if (other && other.created_at <= since) throw forbidden(msg('moderation.joined_before', { tag }));
+      const other = await moderatorSince(tag, userId);
+      if (other !== undefined && other <= since) throw forbidden(msg('moderation.joined_before', { tag }));
     }
     const wasModerator = Number((await db.deleteFrom('tag_moderators').where('tag', '=', tag).where('user_id', '=', userId).executeTakeFirst()).numDeletedRows) > 0;
     // One who left has no row left to note it on.
@@ -485,43 +581,16 @@ export function moderationRoutes(app: FastifyInstance, deps: RouteDeps) {
   // Claims: where publishers choose their posts' hashtags, how a hashtag that has no moderator gets its first (src/moderation/claims.ts).
 
   /**
-   * Claims a hashtag for the caller, to moderate it (see claimTag). The claim waits
-   * (`reviewUntil`) for an admin or a server moderator to refuse it, each of whom is told of it,
-   * and is granted if none does: the caller is a moderator of the hashtag from then on. `201`, or
-   * `200` with `alreadyClaimed` for a hashtag the caller's claim already waits on.
+   * Claims a hashtag for the caller, who moderates it from then on (see claimTag): nothing waits,
+   * and the admins and server moderators are told of it, any of whom can end it (DELETE
+   * /tags/:tag/moderators/:userId, above). `201`, or `200` with `alreadyModerator` for a hashtag
+   * the caller moderates already.
    */
   app.post('/tags/:tag/claim', async (req, reply) => {
     const { tag } = TagParams.parse(req.params);
     const user = await authenticate(db, req, Credentials.parse(req.body ?? {}));
-    const { claim, already } = await claimTag(deps, user, tag, req.log);
-    return reply.status(already ? 200 : 201).send({ ...claimItem(claim), alreadyClaimed: already });
-  });
-
-  /**
-   * Ends the claim to a hashtag that waits (see endClaim): an admin or a server moderator refuses
-   * it, which its user is told of, or its own user withdraws it. `refused` says which.
-   */
-  app.delete('/tags/:tag/claim', async (req) => {
-    const { tag } = TagParams.parse(req.params);
-    const user = await authenticate(db, req, Credentials.parse(req.body ?? {}));
-    return { tag, ...(await endClaim(deps, user, tag, req.log)) };
-  });
-
-  /** The claims to hashtags that wait, longest waiting first, a page at a time: what an admin or a server moderator has to look at. Server moderators and admins. */
-  app.get('/moderation/tag-claims', async (req) => {
-    const page = listQuery(req.query);
-    await asServerModerator(req, Credentials.parse(req.body ?? {}));
-    const { rows, nextCursor } = await listPage(
-      db
-        .selectFrom('tag_claims')
-        .innerJoin('users', 'users.id', 'tag_claims.user_id')
-        // A hashtag has one claim, so its name tells two claims of one instant apart.
-        .select(['tag_claims.tag as id', 'tag_claims.tag', 'tag_claims.user_id', 'users.username', 'tag_claims.created_at', 'tag_claims.review_until']),
-      { createdAt: 'tag_claims.created_at', userId: 'tag_claims.tag' },
-      page,
-      'oldest',
-    );
-    return { claims: rows.map(claimItem), nextCursor };
+    const { since, already } = await claimTag(deps, user, tag, req.log);
+    return reply.status(already ? 200 : 201).send({ tag, userId: user.id, username: user.username, since: iso(since), alreadyModerator: already });
   });
 
   // Mutes.

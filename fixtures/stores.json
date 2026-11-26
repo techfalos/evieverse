@@ -1,0 +1,1022 @@
+{
+  "now": 1793966400000,
+  "hotDays": 8,
+  "quality": 5,
+  "commentHotMs": 86400000,
+  "publicBaseUrl": "https://api.example.com",
+  "ops": [
+    {
+      "op": "content.putBytes",
+      "of": "0198c0de-1111-4000-8000-000000000001",
+      "text": "hello #news",
+      "mimeType": "text/plain"
+    },
+    {
+      "op": "content.putMeta",
+      "meta": {
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "mimeType": "text/plain",
+        "size": 11,
+        "aiGenerated": false,
+        "comments": true,
+        "preview": {
+          "kind": "text",
+          "text": "hello #news"
+        },
+        "text": "hello #news",
+        "mentions": [
+          {
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "username": "bob"
+          }
+        ],
+        "tags": [
+          "news"
+        ],
+        "updatedAt": 1793880000000
+      }
+    },
+    {
+      "op": "content.putBytes",
+      "of": {
+        "staged": "staged/0198c0de-3333-4000-8000-000000000001"
+      },
+      "text": "PNGBYTES",
+      "mimeType": "image/png"
+    },
+    {
+      "op": "content.adopt",
+      "staged": "staged/0198c0de-3333-4000-8000-000000000001",
+      "of": "0198c0de-1111-4000-8000-000000000002",
+      "mimeType": "image/png"
+    },
+    {
+      "op": "content.adopt",
+      "staged": "staged/0198c0de-3333-4000-8000-000000000001",
+      "of": {
+        "contentId": "0198c0de-1111-4000-8000-000000000002",
+        "image": 2
+      },
+      "mimeType": "image/jpeg"
+    },
+    {
+      "op": "content.putMeta",
+      "meta": {
+        "contentId": "0198c0de-1111-4000-8000-000000000002",
+        "mimeType": "image/png",
+        "size": 8,
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "images": [
+          {
+            "mimeType": "image/png",
+            "size": 8,
+            "sha256": "abababababababababababababababababababababababababababababababab"
+          },
+          {
+            "mimeType": "image/jpeg",
+            "size": 8,
+            "sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+          }
+        ],
+        "aiGenerated": true,
+        "preview": {
+          "kind": "image",
+          "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000002/raw",
+          "text": "two of them",
+          "imageCount": 2,
+          "alt": [
+            "one",
+            "two"
+          ]
+        },
+        "text": "two of them",
+        "tags": [
+          "art",
+          "cats"
+        ],
+        "updatedAt": 1793962800000
+      }
+    },
+    {
+      "op": "content.putBytes",
+      "of": {
+        "contentId": "0198c0de-1111-4000-8000-000000000003",
+        "video": "0198c0de-2222-4000-8000-000000000001",
+        "file": "poster.jpg"
+      },
+      "text": "JPG",
+      "mimeType": "image/jpeg"
+    },
+    {
+      "op": "content.putBytes",
+      "of": {
+        "contentId": "0198c0de-1111-4000-8000-000000000003",
+        "video": "0198c0de-2222-4000-8000-000000000001",
+        "file": "720p_00001.ts"
+      },
+      "text": "TS",
+      "mimeType": "video/mp2t"
+    },
+    {
+      "op": "content.putBytes",
+      "of": {
+        "postId": "0198c0de-1111-4000-8000-000000000001",
+        "commentId": "0198c0de-aaaa-7000-8000-000000000002"
+      },
+      "text": "IMG",
+      "mimeType": "image/png"
+    },
+    {
+      "op": "comments.put",
+      "comment": {
+        "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "text": "the first, for @bob",
+        "mentions": [
+          {
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "username": "bob"
+          }
+        ],
+        "createdAt": 1793966397000
+      },
+      "held": false
+    },
+    {
+      "op": "comments.put",
+      "comment": {
+        "commentId": "0198c0de-aaaa-7000-8000-000000000002",
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "parentId": "0198c0de-aaaa-7000-8000-000000000001",
+        "userId": "0198c0de-0000-4000-8000-0000000000a2",
+        "text": "",
+        "aiGenerated": true,
+        "media": {
+          "kind": "image",
+          "mimeType": "image/png",
+          "size": 3,
+          "alt": "a cat"
+        },
+        "createdAt": 1793966398000
+      },
+      "held": false
+    },
+    {
+      "op": "comments.put",
+      "comment": {
+        "commentId": "0198c0de-aaaa-7000-8000-000000000003",
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "userId": "0198c0de-0000-4000-8000-0000000000a2",
+        "text": "this one waits",
+        "createdAt": 1793966399000
+      },
+      "held": true
+    },
+    {
+      "op": "comments.makingLikes",
+      "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+      "done": false
+    },
+    {
+      "op": "comments.addLike",
+      "postId": "0198c0de-1111-4000-8000-000000000001",
+      "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+      "userId": "0198c0de-0000-4000-8000-0000000000a2"
+    },
+    {
+      "op": "comments.addLike",
+      "postId": "0198c0de-1111-4000-8000-000000000001",
+      "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+      "userId": "0198c0de-0000-4000-8000-0000000000a1"
+    },
+    {
+      "op": "comments.addLike",
+      "postId": "0198c0de-1111-4000-8000-000000000001",
+      "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+      "userId": "0198c0de-0000-4000-8000-0000000000a1"
+    },
+    {
+      "op": "comments.removeLike",
+      "postId": "0198c0de-1111-4000-8000-000000000001",
+      "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+      "userId": "0198c0de-0000-4000-8000-0000000000a1"
+    },
+    {
+      "op": "comments.addLike",
+      "postId": "0198c0de-1111-4000-8000-000000000001",
+      "commentId": "0198c0de-aaaa-7000-8000-000000000002",
+      "userId": "0198c0de-0000-4000-8000-0000000000a1"
+    },
+    {
+      "op": "comments.makingLikes",
+      "commentId": "0198c0de-aaaa-7000-8000-000000000002",
+      "done": true
+    },
+    {
+      "op": "summaries.put",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "createdAt": 1793880000000,
+        "updatedAt": 1793880000000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "text/plain",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "news",
+          "world"
+        ],
+        "preview": {
+          "kind": "text",
+          "text": "hello #news\nand a second line, with \"quotes\" and ünïcödé 🎉"
+        }
+      }
+    },
+    {
+      "op": "summaries.put",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000003",
+        "createdAt": 1793620800000,
+        "updatedAt": 1793620800005,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "video/mp4",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "clips"
+        ],
+        "preview": {
+          "kind": "video",
+          "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/raw",
+          "text": "a clip",
+          "video": {
+            "id": "0198c0de-2222-4000-8000-000000000001",
+            "width": 1280,
+            "height": 720,
+            "duration": 12.5,
+            "poster": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/media/0198c0de-2222-4000-8000-000000000001/poster.jpg",
+            "hls": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/media/0198c0de-2222-4000-8000-000000000001/master.m3u8"
+          }
+        }
+      }
+    },
+    {
+      "op": "summaries.put",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000003",
+        "createdAt": 1791374400000,
+        "updatedAt": 1791374400000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "image/png",
+        "aiGenerated": true,
+        "comments": false,
+        "tags": [
+          "art"
+        ],
+        "preview": {
+          "kind": "image",
+          "url": "https://other.example/content/0198c0de-1111-4000-8000-000000000001/raw",
+          "text": "theirs",
+          "imageCount": 2
+        },
+        "origin": {
+          "url": "https://other.example/content/0198c0de-1111-4000-8000-000000000001",
+          "publisher": {
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "username": "a name with spaces"
+          }
+        }
+      }
+    },
+    {
+      "op": "summaries.put",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000002",
+        "createdAt": 1776686400000,
+        "updatedAt": 1776686400000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "text/plain",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "news",
+          "again"
+        ],
+        "preview": {
+          "kind": "text",
+          "text": "old news"
+        },
+        "repostedAt": [
+          1793793600000,
+          1793797200000,
+          1793962800000
+        ]
+      }
+    },
+    {
+      "op": "snapshot",
+      "name": "written"
+    },
+    {
+      "op": "comments.publish",
+      "comment": {
+        "commentId": "0198c0de-aaaa-7000-8000-000000000003",
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "userId": "0198c0de-0000-4000-8000-0000000000a2",
+        "text": "this one waited",
+        "createdAt": 1793966399000,
+        "editedAt": 1793966400000
+      }
+    },
+    {
+      "op": "comments.put",
+      "comment": {
+        "commentId": "0198c0df-bbbb-7000-8000-000000000004",
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "parentId": "0198c0de-aaaa-7000-8000-000000000001",
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "text": "a later reply",
+        "createdAt": 1793966399500,
+        "editedAt": 1793966399900
+      },
+      "held": false
+    },
+    {
+      "op": "comments.hold",
+      "comment": {
+        "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "text": "the first, edited",
+        "mentions": [
+          {
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "username": "bob"
+          }
+        ],
+        "createdAt": 1793966397000,
+        "editedAt": 1793966400000
+      }
+    },
+    {
+      "op": "comments.remove",
+      "postId": "0198c0de-1111-4000-8000-000000000001",
+      "commentId": "0198c0de-aaaa-7000-8000-000000000002",
+      "keepPlace": false
+    },
+    {
+      "op": "comments.remove",
+      "postId": "0198c0de-1111-4000-8000-000000000001",
+      "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+      "keepPlace": true
+    },
+    {
+      "op": "comments.remove",
+      "postId": "0198c0de-1111-4000-8000-000000000001",
+      "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+      "keepPlace": true
+    },
+    {
+      "op": "content.removeStaged",
+      "staged": "staged/0198c0de-3333-4000-8000-000000000001"
+    },
+    {
+      "op": "content.removeImage",
+      "contentId": "0198c0de-1111-4000-8000-000000000002",
+      "image": 2
+    },
+    {
+      "op": "content.removeMedia",
+      "contentId": "0198c0de-1111-4000-8000-000000000003",
+      "videoId": "0198c0de-2222-4000-8000-000000000001"
+    },
+    {
+      "op": "summaries.eraseCopies",
+      "ref": {
+        "contentId": "0198c0de-1111-4000-8000-000000000002",
+        "createdAt": 1776686400000,
+        "repostedAt": [
+          1793962800000
+        ]
+      },
+      "gone": [
+        1793793600000,
+        1793797200000
+      ]
+    },
+    {
+      "op": "summaries.erase",
+      "ref": {
+        "contentId": "0198c0de-1111-4000-8000-000000000003",
+        "createdAt": 1793620800000
+      }
+    },
+    {
+      "op": "summaries.ensureMany",
+      "summaries": [
+        {
+          "contentId": "0198c0de-1111-4000-8000-000000000001",
+          "createdAt": 1793880000000,
+          "updatedAt": 1793880000000,
+          "userId": "0198c0de-0000-4000-8000-0000000000a1",
+          "mimeType": "text/plain",
+          "aiGenerated": false,
+          "comments": true,
+          "tags": [
+            "news",
+            "world"
+          ],
+          "preview": {
+            "kind": "text",
+            "text": "hello #news\nand a second line, with \"quotes\" and ünïcödé 🎉"
+          }
+        },
+        {
+          "contentId": "0198c0de-1111-4000-8000-000000000003",
+          "createdAt": 1793620800000,
+          "updatedAt": 1793620800000,
+          "userId": "0198c0de-0000-4000-8000-0000000000a1",
+          "mimeType": "audio/mpeg",
+          "aiGenerated": false,
+          "comments": false,
+          "tags": [
+            "music"
+          ],
+          "preview": {
+            "kind": "audio",
+            "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/raw",
+            "text": "a song"
+          }
+        },
+        {
+          "contentId": "0198c0de-1111-4000-8000-000000000002",
+          "createdAt": 1790510400000,
+          "updatedAt": 1793793600000,
+          "userId": "0198c0de-0000-4000-8000-0000000000a2",
+          "mimeType": "text/uri-list",
+          "aiGenerated": false,
+          "comments": true,
+          "tags": [
+            "links"
+          ],
+          "preview": {
+            "kind": "link",
+            "url": "https://example.com/a?b=c d"
+          }
+        }
+      ]
+    },
+    {
+      "op": "snapshot",
+      "name": "changed"
+    },
+    {
+      "op": "comments.removeAll",
+      "postId": "0198c0de-1111-4000-8000-000000000001"
+    },
+    {
+      "op": "content.remove",
+      "contentId": "0198c0de-1111-4000-8000-000000000001",
+      "images": 1
+    },
+    {
+      "op": "content.remove",
+      "contentId": "0198c0de-1111-4000-8000-000000000002",
+      "images": 2
+    },
+    {
+      "op": "content.removeMedia",
+      "contentId": "0198c0de-1111-4000-8000-000000000003"
+    },
+    {
+      "op": "summaries.remove",
+      "refs": [
+        {
+          "contentId": "0198c0de-1111-4000-8000-000000000001",
+          "createdAt": 1793880000000
+        },
+        {
+          "contentId": "0198c0de-1111-4000-8000-000000000002",
+          "createdAt": 1776686400000,
+          "repostedAt": [
+            1793962800000
+          ]
+        }
+      ]
+    },
+    {
+      "op": "summaries.purgeBefore",
+      "day": 20728
+    },
+    {
+      "op": "snapshot",
+      "name": "removed"
+    }
+  ],
+  "snapshots": {
+    "written": {
+      "objects": {
+        "authors/0198c0de-0000-4000-8000-0000000000a1/comments/0198c/0198c0de-aaaa-7000-8000-000000000001.0198c0de-1111-4000-8000-000000000001": {
+          "text": "1"
+        },
+        "authors/0198c0de-0000-4000-8000-0000000000a1/likes/0198c/0198c0de-aaaa-7000-8000-000000000002.0198c0de-1111-4000-8000-000000000001": {
+          "text": "1"
+        },
+        "authors/0198c0de-0000-4000-8000-0000000000a2/comments/0198c/0198c0de-aaaa-7000-8000-000000000002.0198c0de-1111-4000-8000-000000000001": {
+          "text": "1"
+        },
+        "authors/0198c0de-0000-4000-8000-0000000000a2/comments/0198c/0198c0de-aaaa-7000-8000-000000000003.0198c0de-1111-4000-8000-000000000001": {
+          "text": "1"
+        },
+        "authors/0198c0de-0000-4000-8000-0000000000a2/likes/0198c/0198c0de-aaaa-7000-8000-000000000001.0198c0de-1111-4000-8000-000000000001": {
+          "text": "1"
+        },
+        "comments/0198c0de-1111-4000-8000-000000000001/0198c0de-aaaa-7000-8000-000000000001.0198c0de-aaaa-7000-8000-000000000002.reply": {
+          "text": "1"
+        },
+        "comments/0198c0de-1111-4000-8000-000000000001/0198c0de-aaaa-7000-8000-000000000001.json": {
+          "json": {
+            "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "userId": "0198c0de-0000-4000-8000-0000000000a1",
+            "text": "the first, for @bob",
+            "mentions": [
+              {
+                "userId": "0198c0de-0000-4000-8000-0000000000a2",
+                "username": "bob"
+              }
+            ],
+            "createdAt": 1793966397000
+          }
+        },
+        "comments/0198c0de-1111-4000-8000-000000000001/0198c0de-aaaa-7000-8000-000000000002.json": {
+          "json": {
+            "commentId": "0198c0de-aaaa-7000-8000-000000000002",
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "parentId": "0198c0de-aaaa-7000-8000-000000000001",
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "text": "",
+            "aiGenerated": true,
+            "media": {
+              "kind": "image",
+              "mimeType": "image/png",
+              "size": 3,
+              "alt": "a cat"
+            },
+            "createdAt": 1793966398000
+          }
+        },
+        "comments/0198c0de-1111-4000-8000-000000000001/held/0198c0de-aaaa-7000-8000-000000000003.json": {
+          "json": {
+            "commentId": "0198c0de-aaaa-7000-8000-000000000003",
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "text": "this one waits",
+            "createdAt": 1793966399000
+          }
+        },
+        "comments/0198c0de-1111-4000-8000-000000000001/likes/0198c0de-aaaa-7000-8000-000000000001/0198c0de-0000-4000-8000-0000000000a2": {
+          "text": "1"
+        },
+        "comments/0198c0de-1111-4000-8000-000000000001/likes/0198c0de-aaaa-7000-8000-000000000002/0198c0de-0000-4000-8000-0000000000a1": {
+          "text": "1"
+        },
+        "comments/0198c0de-1111-4000-8000-000000000001/media/0198c0de-aaaa-7000-8000-000000000002": {
+          "text": "IMG"
+        },
+        "content/0198c0de-1111-4000-8000-000000000001": {
+          "text": "hello #news"
+        },
+        "content/0198c0de-1111-4000-8000-000000000001.meta.json": {
+          "json": {
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "mimeType": "text/plain",
+            "size": 11,
+            "aiGenerated": false,
+            "comments": true,
+            "preview": {
+              "kind": "text",
+              "text": "hello #news"
+            },
+            "text": "hello #news",
+            "mentions": [
+              {
+                "userId": "0198c0de-0000-4000-8000-0000000000a2",
+                "username": "bob"
+              }
+            ],
+            "tags": [
+              "news"
+            ],
+            "updatedAt": 1793880000000
+          }
+        },
+        "content/0198c0de-1111-4000-8000-000000000002": {
+          "text": "PNGBYTES"
+        },
+        "content/0198c0de-1111-4000-8000-000000000002.2": {
+          "text": "PNGBYTES"
+        },
+        "content/0198c0de-1111-4000-8000-000000000002.meta.json": {
+          "json": {
+            "contentId": "0198c0de-1111-4000-8000-000000000002",
+            "mimeType": "image/png",
+            "size": 8,
+            "sha256": "abababababababababababababababababababababababababababababababab",
+            "images": [
+              {
+                "mimeType": "image/png",
+                "size": 8,
+                "sha256": "abababababababababababababababababababababababababababababababab"
+              },
+              {
+                "mimeType": "image/jpeg",
+                "size": 8,
+                "sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+              }
+            ],
+            "aiGenerated": true,
+            "preview": {
+              "kind": "image",
+              "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000002/raw",
+              "text": "two of them",
+              "imageCount": 2,
+              "alt": [
+                "one",
+                "two"
+              ]
+            },
+            "text": "two of them",
+            "tags": [
+              "art",
+              "cats"
+            ],
+            "updatedAt": 1793962800000
+          }
+        },
+        "media/0198c0de-1111-4000-8000-000000000003/0198c0de-2222-4000-8000-000000000001/720p_00001.ts": {
+          "text": "TS"
+        },
+        "media/0198c0de-1111-4000-8000-000000000003/0198c0de-2222-4000-8000-000000000001/poster.jpg": {
+          "text": "JPG"
+        },
+        "staged/0198c0de-3333-4000-8000-000000000001": {
+          "text": "PNGBYTES"
+        },
+        "summaries/20563/0198c0de-1111-4000-8000-000000000002.br": {
+          "brotli": "1776686400000 1776686400000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews again\ntext\nold news"
+        },
+        "summaries/20733/0198c0de-1111-4000-8000-000000000003.br": {
+          "brotli": "1791374400000 1791374400000 1 0 1 2\n0198c0de-0000-4000-8000-0000000000a1\nimage/png\nart\nimage\nhttps://other.example/content/0198c0de-1111-4000-8000-000000000001 0198c0de-0000-4000-8000-0000000000a2 a name with spaces\ntheirs"
+        },
+        "summaries/20759/0198c0de-1111-4000-8000-000000000003.br": {
+          "brotli": "1793620800000 1793620800005 0 1 0 0 1\n0198c0de-0000-4000-8000-0000000000a1\nvideo/mp4\nclips\nvideo\n{\"video\":{\"id\":\"0198c0de-2222-4000-8000-000000000001\",\"width\":1280,\"height\":720,\"duration\":12.5}}\na clip"
+        },
+        "summaries/20761/0198c0de-1111-4000-8000-000000000002.br": {
+          "brotli": "1776686400000 1776686400000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews again\ntext\nold news"
+        },
+        "summaries/20762/0198c0de-1111-4000-8000-000000000001.br": {
+          "brotli": "1793880000000 1793880000000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews world\ntext\nhello #news\nand a second line, with \"quotes\" and ünïcödé 🎉"
+        },
+        "summaries/20763/0198c0de-1111-4000-8000-000000000002.br": {
+          "brotli": "1776686400000 1776686400000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews again\ntext\nold news"
+        }
+      },
+      "redis": {
+        "cmt:0198c0de-aaaa-7000-8000-000000000001": {
+          "json": {
+            "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "userId": "0198c0de-0000-4000-8000-0000000000a1",
+            "text": "the first, for @bob",
+            "mentions": [
+              {
+                "userId": "0198c0de-0000-4000-8000-0000000000a2",
+                "username": "bob"
+              }
+            ],
+            "createdAt": 1793966397000
+          },
+          "expires": true
+        },
+        "cmt:0198c0de-aaaa-7000-8000-000000000002": {
+          "json": {
+            "commentId": "0198c0de-aaaa-7000-8000-000000000002",
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "parentId": "0198c0de-aaaa-7000-8000-000000000001",
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "text": "",
+            "aiGenerated": true,
+            "media": {
+              "kind": "image",
+              "mimeType": "image/png",
+              "size": 3,
+              "alt": "a cat"
+            },
+            "createdAt": 1793966398000
+          },
+          "expires": true
+        },
+        "cmtidx:0198c0de-1111-4000-8000-000000000001": {
+          "members": [
+            "0198c0de-aaaa-7000-8000-000000000001:0198c0de-aaaa-7000-8000-000000000002",
+            ":0198c0de-aaaa-7000-8000-000000000001"
+          ],
+          "expires": true
+        },
+        "cmtl:0198c0de-aaaa-7000-8000-000000000002": {
+          "text": "1",
+          "expires": true
+        },
+        "cmtlm:0198c0de-aaaa-7000-8000-000000000001": {
+          "making": true,
+          "expires": true
+        },
+        "cmtlm:0198c0de-aaaa-7000-8000-000000000002": {
+          "making": false,
+          "expires": true
+        },
+        "sum:0198c0de-1111-4000-8000-000000000001": {
+          "brotli": "1793880000000 1793880000000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews world\ntext\nhello #news\nand a second line, with \"quotes\" and ünïcödé 🎉",
+          "expires": true
+        },
+        "sum:0198c0de-1111-4000-8000-000000000002": {
+          "brotli": "1776686400000 1776686400000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews again\ntext\nold news",
+          "expires": true
+        },
+        "sum:0198c0de-1111-4000-8000-000000000003": {
+          "brotli": "1793620800000 1793620800005 0 1 0 0 1\n0198c0de-0000-4000-8000-0000000000a1\nvideo/mp4\nclips\nvideo\n{\"video\":{\"id\":\"0198c0de-2222-4000-8000-000000000001\",\"width\":1280,\"height\":720,\"duration\":12.5}}\na clip",
+          "expires": true
+        }
+      }
+    },
+    "changed": {
+      "objects": {
+        "authors/0198c0de-0000-4000-8000-0000000000a1/comments/0198c/0198c0df-bbbb-7000-8000-000000000004.0198c0de-1111-4000-8000-000000000001": {
+          "text": "1"
+        },
+        "authors/0198c0de-0000-4000-8000-0000000000a2/comments/0198c/0198c0de-aaaa-7000-8000-000000000003.0198c0de-1111-4000-8000-000000000001": {
+          "text": "1"
+        },
+        "comments/0198c0de-1111-4000-8000-000000000001/0198c0de-aaaa-7000-8000-000000000001.0198c0df-bbbb-7000-8000-000000000004.reply": {
+          "text": "1"
+        },
+        "comments/0198c0de-1111-4000-8000-000000000001/0198c0de-aaaa-7000-8000-000000000001.json": {
+          "json": {
+            "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "userId": "",
+            "text": "",
+            "createdAt": 1793966397000,
+            "gone": "deleted"
+          }
+        },
+        "comments/0198c0de-1111-4000-8000-000000000001/0198c0de-aaaa-7000-8000-000000000003.json": {
+          "json": {
+            "commentId": "0198c0de-aaaa-7000-8000-000000000003",
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "text": "this one waited",
+            "createdAt": 1793966399000,
+            "editedAt": 1793966400000
+          }
+        },
+        "comments/0198c0de-1111-4000-8000-000000000001/0198c0df-bbbb-7000-8000-000000000004.json": {
+          "json": {
+            "commentId": "0198c0df-bbbb-7000-8000-000000000004",
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "parentId": "0198c0de-aaaa-7000-8000-000000000001",
+            "userId": "0198c0de-0000-4000-8000-0000000000a1",
+            "text": "a later reply",
+            "createdAt": 1793966399500,
+            "editedAt": 1793966399900
+          }
+        },
+        "content/0198c0de-1111-4000-8000-000000000001": {
+          "text": "hello #news"
+        },
+        "content/0198c0de-1111-4000-8000-000000000001.meta.json": {
+          "json": {
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "mimeType": "text/plain",
+            "size": 11,
+            "aiGenerated": false,
+            "comments": true,
+            "preview": {
+              "kind": "text",
+              "text": "hello #news"
+            },
+            "text": "hello #news",
+            "mentions": [
+              {
+                "userId": "0198c0de-0000-4000-8000-0000000000a2",
+                "username": "bob"
+              }
+            ],
+            "tags": [
+              "news"
+            ],
+            "updatedAt": 1793880000000
+          }
+        },
+        "content/0198c0de-1111-4000-8000-000000000002": {
+          "text": "PNGBYTES"
+        },
+        "content/0198c0de-1111-4000-8000-000000000002.meta.json": {
+          "json": {
+            "contentId": "0198c0de-1111-4000-8000-000000000002",
+            "mimeType": "image/png",
+            "size": 8,
+            "sha256": "abababababababababababababababababababababababababababababababab",
+            "images": [
+              {
+                "mimeType": "image/png",
+                "size": 8,
+                "sha256": "abababababababababababababababababababababababababababababababab"
+              },
+              {
+                "mimeType": "image/jpeg",
+                "size": 8,
+                "sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+              }
+            ],
+            "aiGenerated": true,
+            "preview": {
+              "kind": "image",
+              "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000002/raw",
+              "text": "two of them",
+              "imageCount": 2,
+              "alt": [
+                "one",
+                "two"
+              ]
+            },
+            "text": "two of them",
+            "tags": [
+              "art",
+              "cats"
+            ],
+            "updatedAt": 1793962800000
+          }
+        },
+        "summaries/20563/0198c0de-1111-4000-8000-000000000002.br": {
+          "brotli": "1776686400000 1776686400000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews again\ntext\nold news"
+        },
+        "summaries/20723/0198c0de-1111-4000-8000-000000000002.br": {
+          "brotli": "1790510400000 1793793600000 0 1\n0198c0de-0000-4000-8000-0000000000a2\ntext/uri-list\nlinks\nlink\nhttps://example.com/a?b=c d"
+        },
+        "summaries/20733/0198c0de-1111-4000-8000-000000000003.br": {
+          "brotli": "1791374400000 1791374400000 1 0 1 2\n0198c0de-0000-4000-8000-0000000000a1\nimage/png\nart\nimage\nhttps://other.example/content/0198c0de-1111-4000-8000-000000000001 0198c0de-0000-4000-8000-0000000000a2 a name with spaces\ntheirs"
+        },
+        "summaries/20759/0198c0de-1111-4000-8000-000000000003.br": {
+          "brotli": "1793620800000 1793620800000 0 0\n0198c0de-0000-4000-8000-0000000000a1\naudio/mpeg\nmusic\naudio\na song"
+        },
+        "summaries/20762/0198c0de-1111-4000-8000-000000000001.br": {
+          "brotli": "1793880000000 1793880000000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews world\ntext\nhello #news\nand a second line, with \"quotes\" and ünïcödé 🎉"
+        },
+        "summaries/20763/0198c0de-1111-4000-8000-000000000002.br": {
+          "brotli": "1776686400000 1776686400000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews again\ntext\nold news"
+        }
+      },
+      "redis": {
+        "cmt:0198c0de-aaaa-7000-8000-000000000001": {
+          "json": {
+            "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "userId": "",
+            "text": "",
+            "createdAt": 1793966397000,
+            "gone": "deleted"
+          },
+          "expires": true
+        },
+        "cmt:0198c0de-aaaa-7000-8000-000000000002": {
+          "text": "",
+          "expires": true
+        },
+        "cmt:0198c0de-aaaa-7000-8000-000000000003": {
+          "json": {
+            "commentId": "0198c0de-aaaa-7000-8000-000000000003",
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "text": "this one waited",
+            "createdAt": 1793966399000,
+            "editedAt": 1793966400000
+          },
+          "expires": true
+        },
+        "cmt:0198c0df-bbbb-7000-8000-000000000004": {
+          "json": {
+            "commentId": "0198c0df-bbbb-7000-8000-000000000004",
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "parentId": "0198c0de-aaaa-7000-8000-000000000001",
+            "userId": "0198c0de-0000-4000-8000-0000000000a1",
+            "text": "a later reply",
+            "createdAt": 1793966399500,
+            "editedAt": 1793966399900
+          },
+          "expires": true
+        },
+        "cmtidx:0198c0de-1111-4000-8000-000000000001": {
+          "members": [
+            "0198c0de-aaaa-7000-8000-000000000001:0198c0df-bbbb-7000-8000-000000000004",
+            ":0198c0de-aaaa-7000-8000-000000000001",
+            ":0198c0de-aaaa-7000-8000-000000000003"
+          ],
+          "expires": true
+        },
+        "cmtl:0198c0df-bbbb-7000-8000-000000000004": {
+          "text": "0",
+          "expires": true
+        },
+        "cmtlm:0198c0de-aaaa-7000-8000-000000000001": {
+          "making": true,
+          "expires": true
+        },
+        "cmtlm:0198c0de-aaaa-7000-8000-000000000002": {
+          "making": false,
+          "expires": true
+        },
+        "sum:0198c0de-1111-4000-8000-000000000001": {
+          "brotli": "1793880000000 1793880000000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews world\ntext\nhello #news\nand a second line, with \"quotes\" and ünïcödé 🎉",
+          "expires": true
+        },
+        "sum:0198c0de-1111-4000-8000-000000000002": {
+          "brotli": "1776686400000 1776686400000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews again\ntext\nold news",
+          "expires": true
+        },
+        "sum:0198c0de-1111-4000-8000-000000000003": {
+          "brotli": "1793620800000 1793620800000 0 0\n0198c0de-0000-4000-8000-0000000000a1\naudio/mpeg\nmusic\naudio\na song",
+          "expires": true
+        }
+      }
+    },
+    "removed": {
+      "objects": {
+        "summaries/20733/0198c0de-1111-4000-8000-000000000003.br": {
+          "brotli": "1791374400000 1791374400000 1 0 1 2\n0198c0de-0000-4000-8000-0000000000a1\nimage/png\nart\nimage\nhttps://other.example/content/0198c0de-1111-4000-8000-000000000001 0198c0de-0000-4000-8000-0000000000a2 a name with spaces\ntheirs"
+        },
+        "summaries/20759/0198c0de-1111-4000-8000-000000000003.br": {
+          "brotli": "1793620800000 1793620800000 0 0\n0198c0de-0000-4000-8000-0000000000a1\naudio/mpeg\nmusic\naudio\na song"
+        }
+      },
+      "redis": {
+        "cmt:0198c0de-aaaa-7000-8000-000000000001": {
+          "json": {
+            "commentId": "0198c0de-aaaa-7000-8000-000000000001",
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "userId": "",
+            "text": "",
+            "createdAt": 1793966397000,
+            "gone": "deleted"
+          },
+          "expires": true
+        },
+        "cmt:0198c0de-aaaa-7000-8000-000000000002": {
+          "text": "",
+          "expires": true
+        },
+        "cmt:0198c0de-aaaa-7000-8000-000000000003": {
+          "json": {
+            "commentId": "0198c0de-aaaa-7000-8000-000000000003",
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "text": "this one waited",
+            "createdAt": 1793966399000,
+            "editedAt": 1793966400000
+          },
+          "expires": true
+        },
+        "cmt:0198c0df-bbbb-7000-8000-000000000004": {
+          "json": {
+            "commentId": "0198c0df-bbbb-7000-8000-000000000004",
+            "contentId": "0198c0de-1111-4000-8000-000000000001",
+            "parentId": "0198c0de-aaaa-7000-8000-000000000001",
+            "userId": "0198c0de-0000-4000-8000-0000000000a1",
+            "text": "a later reply",
+            "createdAt": 1793966399500,
+            "editedAt": 1793966399900
+          },
+          "expires": true
+        },
+        "cmtl:0198c0df-bbbb-7000-8000-000000000004": {
+          "text": "0",
+          "expires": true
+        },
+        "cmtlm:0198c0de-aaaa-7000-8000-000000000001": {
+          "making": true,
+          "expires": true
+        },
+        "cmtlm:0198c0de-aaaa-7000-8000-000000000002": {
+          "making": false,
+          "expires": true
+        },
+        "sum:0198c0de-1111-4000-8000-000000000003": {
+          "brotli": "1793620800000 1793620800000 0 0\n0198c0de-0000-4000-8000-0000000000a1\naudio/mpeg\nmusic\naudio\na song",
+          "expires": true
+        }
+      }
+    }
+  }
+}

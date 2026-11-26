@@ -148,7 +148,7 @@ function bytesKey(of: BytesOwner): string {
  * video: `putBytes`, `adopt`, `putMeta`, `remove` and `removeImage` are its own. What a request writes is a
  * staged file (`stageFile`, `stageUpload`), once, which it alone knows of until it commits.
  *
- * A video the server processes (src/video) is staged by its request like any file. The video
+ * A video the server processes (compactor/src/video) is staged by its request like any file. The video
  * worker then reads it from there (`fetchTo`), stages the MP4 it makes in its place, and for a
  * post writes the poster and the stream beside the posts' bytes (`putFile`, to a file of the
  * video: see mediaKey), under an id that no write names until the worker's commit does. The

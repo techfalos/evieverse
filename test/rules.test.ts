@@ -5,12 +5,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DEFAULT_SUPPORT_EMAIL, loadConfig, MAX_MINIMUM_AGE } from '../src/config.js';
+import { DEFAULT_GEN_AI, DEFAULT_SUPPORT_EMAIL, GEN_AI_SETTINGS, loadConfig, MAX_MINIMUM_AGE } from '../src/config.js';
 import { loadLanguages } from '../src/language.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { RELEASE } from '../src/release.js';
 import { MAX_RULE_CHARS, MAX_RULES } from '../src/routes/rules.js';
-import { as, createTestContext, readAudit, TARGETS, type TestContext, type User } from './helpers.js';
+import { as, BASE_ENV, createTestContext, readAudit, TARGETS, type TestContext, type User } from './helpers.js';
 
 const NO_RULE = '00000000-0000-4000-8000-000000000000';
 const ADMIN_ONLY = 'only an admin can do this';
@@ -22,7 +22,7 @@ const AS_RELEASED = { modified: false, release: RELEASE, sourceUrl: null };
 const ALL_AGES = 'All Legal Ages Allowed';
 
 type Rule = { ruleId: string; position: number; text: string; createdAt: string; updatedAt: string };
-type Rules = { modificationDisclosure: { modified: boolean; release: string; sourceUrl: string | null }; supportEmail: string; minimumAge: number | string; rules: Rule[] };
+type Rules = { modificationDisclosure: { modified: boolean; release: string; sourceUrl: string | null }; supportEmail: string; minimumAge: number | string; genAi: string; rules: Rule[] };
 
 for (const target of TARGETS) {
   describe(`rules (${target.name})`, () => {
@@ -56,7 +56,7 @@ for (const target of TARGETS) {
 
     it('gives the rules and the modification disclosure to anyone, with a key or without', async () => {
       const { root, alice } = await setup();
-      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, rules: [] });
 
       const at = now();
       const first = await add(root, '  Be kind.  ');
@@ -64,7 +64,7 @@ for (const target of TARGETS) {
       const second = await add(root, 'No spam.\nNot even a little.');
       expect(second).toMatchObject({ position: 2, text: 'No spam.\nNot even a little.' });
 
-      const expected = { modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, rules: [first, second] };
+      const expected = { modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, rules: [first, second] };
       expect(await published()).toEqual(expected);
       expect(ok(await req(alice, 'GET', '/rules'))).toEqual(expected);
       // The body's credentials are as good as the headers', as on every route.
@@ -74,9 +74,9 @@ for (const target of TARGETS) {
     it('says it runs a modified version, the release that is based on and where its source is, on a server whose operator says so', async () => {
       const { root } = await setup({ modified: true, sourceUrl: SOURCE });
       const modificationDisclosure = { modified: true, release: RELEASE, sourceUrl: SOURCE };
-      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, rules: [] });
       const rule = await add(root, 'Be kind.');
-      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, rules: [rule] });
+      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, rules: [rule] });
       // No request changes it: not an admin's, and not one that names it.
       ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', modified: false, modificationDisclosure: AS_RELEASED }));
       expect((await published()).modificationDisclosure).toEqual(modificationDisclosure);
@@ -84,7 +84,7 @@ for (const target of TARGETS) {
 
     it('says where its source is on a server that runs a release, if its operator says', async () => {
       await setup({ sourceUrl: SOURCE });
-      expect(await published()).toEqual({ modificationDisclosure: { ...AS_RELEASED, sourceUrl: SOURCE }, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: { ...AS_RELEASED, sourceUrl: SOURCE }, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, rules: [] });
     });
 
     it('gives the address to write to for support: the one its operator set, and a placeholder until they do', async () => {
@@ -111,7 +111,7 @@ for (const target of TARGETS) {
       expect(ok(await req(alice, 'GET', '/rules')).minimumAge).toBe(13);
       // It comes with the rest, and beside the rules, not among them.
       const rule = await add(root, 'Be kind.');
-      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: 13, rules: [rule] });
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: 13, genAi: DEFAULT_GEN_AI, rules: [rule] });
       // No request changes it: not an admin's, and not one that names it.
       ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', minimumAge: 21 }));
       ok(await req(root, 'POST', '/rules', { text: 'Be older.', minimumAge: 21 }), 201);
@@ -136,6 +136,27 @@ for (const target of TARGETS) {
         expect((await inSpanish()).minimumAge).toBe(16);
       } finally {
         await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('says what its operator set of generative AI, and that it is allowed with no word needed of it until they set something', async () => {
+      await setup();
+      expect((await published()).genAi).toBe('disclosure_optional');
+
+      for (const genAi of GEN_AI_SETTINGS) {
+        await ctx.close();
+        const { root, alice } = await setup({ genAi });
+        expect((await published()).genAi).toBe(genAi);
+        expect(ok(await req(alice, 'GET', '/rules')).genAi).toBe(genAi);
+        // The setting as it is written, whatever language the request asks for.
+        expect(ok(await ctx.app.inject({ method: 'GET', url: '/rules', headers: { 'accept-language': 'es-MX' } })).genAi).toBe(genAi);
+        // It comes with the rest, and beside the rules, not among them.
+        const rule = await add(root, 'Be kind.');
+        expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi, rules: [rule] });
+        // No request changes it: not an admin's, and not one that names it.
+        ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', genAi: 'not_allowed' }));
+        ok(await req(root, 'POST', '/rules', { text: 'Be human.', genAi: 'disclosure_optional' }), 201);
+        expect((await published()).genAi).toBe(genAi);
       }
     });
 
@@ -227,7 +248,7 @@ for (const target of TARGETS) {
       expect(await add(root, 'E', 2)).toMatchObject({ position: 2 });
       expect(await texts()).toEqual(['A', 'E', 'C', 'D']);
       for (const rule of (await published()).rules) ok(await req(root, 'DELETE', `/rules/${rule.ruleId}`));
-      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, rules: [] });
     });
 
     it(`has at most ${MAX_RULES} rules`, async () => {
@@ -267,7 +288,7 @@ for (const target of TARGETS) {
 }
 
 describe('the support address', () => {
-  const supportEmail = (env: Record<string, string>, overrides = {}) => loadConfig(overrides, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).supportEmail;
+  const supportEmail = (env: Record<string, string>, overrides = {}) => loadConfig(overrides, { ...BASE_ENV, ...env }).supportEmail;
 
   it('is noreply@yoururl.com unless SUPPORT_EMAIL says otherwise', () => {
     expect(DEFAULT_SUPPORT_EMAIL).toBe('noreply@yoururl.com');
@@ -289,7 +310,7 @@ describe('the support address', () => {
 });
 
 describe('the minimum age', () => {
-  const minimumAge = (env: Record<string, string>, overrides = {}) => loadConfig(overrides, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).minimumAge;
+  const minimumAge = (env: Record<string, string>, overrides = {}) => loadConfig(overrides, { ...BASE_ENV, ...env }).minimumAge;
 
   it('is none unless MINIMUM_AGE says otherwise', () => {
     expect(minimumAge({})).toBeNull();
@@ -321,9 +342,41 @@ describe('the minimum age', () => {
   });
 });
 
+describe('what the server says of generative AI', () => {
+  const genAi = (env: Record<string, string>, overrides = {}) => loadConfig(overrides, { ...BASE_ENV, ...env }).genAi;
+
+  it('is that it is allowed, with no word needed of it, unless GEN_AI says otherwise', () => {
+    expect(GEN_AI_SETTINGS).toEqual(['disclosure_optional', 'disclosure_required', 'not_allowed']);
+    expect(DEFAULT_GEN_AI).toBe('disclosure_optional');
+    expect(genAi({})).toBe(DEFAULT_GEN_AI);
+    // An empty value counts as unset, as it does for every setting.
+    for (const unset of ['', '   ']) expect(genAi({ GEN_AI: unset }), `"${unset}"`).toBe(DEFAULT_GEN_AI);
+    expect(genAi({}, { genAi: '' })).toBe(DEFAULT_GEN_AI);
+    for (const setting of GEN_AI_SETTINGS) {
+      expect(genAi({ GEN_AI: setting })).toBe(setting);
+      // In any case, and with space around it.
+      expect(genAi({ GEN_AI: ` ${setting.toUpperCase()} ` })).toBe(setting);
+      // As a config file has it.
+      expect(genAi({}, { genAi: setting })).toBe(setting);
+      // Settings that were read can be read again, as a function's are from the server's.
+      expect(genAi({}, { genAi: genAi({ GEN_AI: setting }) })).toBe(setting);
+    }
+    // The environment is over the config file, and what a caller passes is over both.
+    expect(genAi({ GEN_AI: 'not_allowed' }, { genAi: 'disclosure_required' })).toBe('disclosure_required');
+  });
+
+  it('does not start a server whose GEN_AI is none of the three', () => {
+    for (const setting of ['allowed', 'disclosure', 'optional', 'required', 'not allowed', 'not-allowed', 'no', 'false', 'true', '0', 'disclosure_optional,not_allowed']) {
+      expect(() => genAi({ GEN_AI: setting }), setting).toThrow(/GEN_AI is what the server says of content made with generative AI/);
+    }
+    // What isn't text is refused too, whatever it holds.
+    for (const setting of [true, 1, null, ['not_allowed'], { allowed: false }]) expect(() => genAi({}, { genAi: setting }), String(setting)).toThrow();
+  });
+});
+
 describe('the modification disclosure', () => {
   const disclosure = (env: Record<string, string>, overrides = {}) => {
-    const { modified, sourceUrl } = loadConfig(overrides, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env });
+    const { modified, sourceUrl } = loadConfig(overrides, { ...BASE_ENV, ...env });
     return { modified, sourceUrl };
   };
 

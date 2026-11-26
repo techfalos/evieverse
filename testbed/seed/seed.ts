@@ -1,17 +1,17 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { execFileSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { InjectOptions, LightMyRequestResponse } from 'fastify';
-import pino from 'pino';
 import { buildApp } from '../../src/app.js';
 import { attest, signingKeys } from '../../src/attestation.js';
 import { issueApiKey } from '../../src/auth/apiKey.js';
-import { createCompactor } from '../../src/compact/compactor.js';
 import { loadConfig } from '../../src/config.js';
-import { bootstrap, createStores } from '../../src/deps.js';
+import { bootstrap, createSummaryStore } from '../../src/deps.js';
 import { setAdmin } from '../../src/moderation/policy.js';
+import { compactorPath } from '../../src/native.js';
 import { keysAddress, type KeyFetcher } from '../../src/originKeys.js';
 import { DAY, HOUR, iso } from '../../src/time.js';
 import { mapLimit } from '../../src/util.js';
@@ -97,7 +97,7 @@ const keyFetcher: KeyFetcher = async (address) => {
 };
 
 // Summaries are written on the real clock, whatever the request's.
-const { summaries } = createStores(config, Date.now, deps.hot);
+const summaries = createSummaryStore(config, deps.hot);
 const app = await buildApp({ ...deps, summaries }, { logger: { level: 'error' }, keyFetcher });
 await app.ready();
 
@@ -354,10 +354,11 @@ if (Number(span.first) > start - (DAYS - 7) * DAY) {
   throw new Error(`posts were not backdated: the oldest is from ${iso(Number(span.first))}`);
 }
 
+// The compactor is a program of its own, which reads the environment this process was given: one pass of it, on
+// the real clock, that builds everything from the database and the meta files.
 log('rebuilding the feed index');
-const compactor = createCompactor({ ...deps, summaries }, pino({ level: 'warn' }));
-const { tags } = await compactor.runOnce({ rebuild: true });
-log(`indexed ${tags.length} hashtags`);
+execFileSync(compactorPath(), ['--rebuild', '--once'], { stdio: 'inherit', env: { ...process.env, LOG_LEVEL: 'warn' } });
+log('rebuilt the feed index');
 
 const checks = [
   '/feed?tags=news&hours=24',

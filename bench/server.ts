@@ -1,15 +1,16 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { closeSync, fsyncSync, openSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, fsyncSync, openSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { devNull } from 'node:os';
 import { join } from 'node:path';
 import type { InjectOptions, LightMyRequestResponse } from 'fastify';
 import pino from 'pino';
 import { buildApp } from '../src/app.js';
 import { issueApiKey } from '../src/auth/apiKey.js';
-import { createCompactor } from '../src/compact/compactor.js';
 import { loadConfig } from '../src/config.js';
-import { bootstrap, createStores } from '../src/deps.js';
+import { bootstrap, createSummaryStore } from '../src/deps.js';
+import { compactorPath } from '../src/native.js';
 import { DAY, HOUR } from '../src/time.js';
 import { mapLimit } from '../src/util.js';
 import { article, gauss, pick, PUBLISHERS, readerNames, rng, shuffle } from '../testbed/seed/corpus.js';
@@ -19,6 +20,8 @@ export interface BenchServer {
   dataset: Dataset;
   /** Milliseconds the disk takes to flush a small file, where the server keeps its files: what every file a write stores waits for. */
   flushMs: number;
+  /** The process of the compactor that runs beside the server, whose work is the server's too. */
+  compactorPid: number;
 }
 
 /** The median time to write a small file to `dir` and flush it. */
@@ -45,8 +48,9 @@ const COMMENTS_EACH = 20;
 
 /**
  * Starts a server as `npm run dev` runs one, listening on `host` and `port`: SQLite in a file,
- * content and summaries in a directory (both in `dir`), the feed index in the process, and the
- * compactor running in it, all with the settings a server has by default. It logs each request as
+ * content and summaries in a directory (both in `dir`), the feed index in the Redis that
+ * REDIS_URL names, and the compactor running beside it, as a process of its own that this one
+ * starts, all with the settings a server has by default. It logs each request as
  * a server does, to nowhere. Two things differ, without which there would be no load to measure:
  * a user may post and comment as often as they like, and feeds are read as often as they are
  * asked for, however many at once: the load is one address.
@@ -71,25 +75,27 @@ export async function startServer({
   log: (message: string) => void;
 }): Promise<BenchServer> {
   const flushMs = flushTime(dir);
-  const config = loadConfig(
-    {
-      db: { dialect: 'sqlite', url: join(dir, 'evieverse.sqlite') },
-      storage: { content: { scheme: 'fs', options: { root: join(dir, 'content') } }, tmpPath: join(dir, 'tmp') },
-      // The users are registered from one address, by an admin, whose requests count like anyone's.
-      registerRateLimitPerHour: 1_000_000,
-      postRateLimitPerMinute: 0,
-      // The load is one address, and at its largest more connections than a server answers feeds for at a time.
-      feed: { rateLimitPerMinute: 0, maxConcurrent: 0 },
-      comments: { perMinute: 0 },
-    },
-    // Neither the environment nor a config file changes what is measured.
-    { EVIEVERSE_CONFIG: join(dir, 'no-config.json') },
-  );
+  const settings = {
+    db: { dialect: 'sqlite', url: join(dir, 'evieverse.sqlite') },
+    storage: { content: { scheme: 'fs', options: { root: join(dir, 'content') } }, tmpPath: join(dir, 'tmp') },
+    // The users are registered from one address, by an admin, whose requests count like anyone's.
+    registerRateLimitPerHour: 1_000_000,
+    postRateLimitPerMinute: 0,
+    // The load is one address, and at its largest more connections than a server answers feeds for at a time.
+    feed: { rateLimitPerMinute: 0, maxConcurrent: 0 },
+    comments: { perMinute: 0 },
+  };
+  // Neither the environment nor a config file changes what is measured: all the environment says is where Redis is.
+  const config = loadConfig(settings, { EVIEVERSE_CONFIG: join(dir, 'no-config.json'), REDIS_URL: process.env.REDIS_URL });
+  // The compactor reads its settings itself, from a file and the environment: the same ones, and nothing else of this process's.
+  const settingsFile = join(dir, 'bench-config.json');
+  writeFileSync(settingsFile, JSON.stringify(settings));
+  const compactorEnv = { PATH: process.env.PATH, EVIEVERSE_CONFIG: settingsFile, REDIS_URL: process.env.REDIS_URL };
 
   const clock = new AsyncLocalStorage<number>();
   const { close: _close, ...stores } = await bootstrap(config, () => clock.getStore() ?? Date.now());
   // Summaries are written on the real clock, whatever the request's: it decides which of them Redis keeps.
-  const deps = { ...stores, summaries: createStores(config, Date.now, stores.hot).summaries };
+  const deps = { ...stores, summaries: createSummaryStore(config, stores.hot) };
   const { db } = deps;
   const app = await buildApp(deps, { logger: { level: config.logLevel, stream: pino.destination({ dest: devNull, sync: true }) }, cli: null });
   await app.ready();
@@ -165,15 +171,25 @@ export async function startServer({
   const asFollower = { authorization: `Bearer ${follower.apiKey}`, 'x-user-id': follower.userId };
   for (const { userId } of publishers) await call(start, { method: 'PUT', url: `/users/${follower.userId}/following/${userId}`, headers: asFollower });
 
-  // On the real clock, as after Redis lost its data: every day's index is built from the database.
+  // On the real clock, as after Redis lost its data: every day's index is built from the database, by one pass of
+  // the compactor. It logs as the server does, to nowhere, and says what stops it.
   log('building the feed index');
-  const compactor = createCompactor(deps);
-  await compactor.runOnce({ rebuild: true });
-  compactor.start();
+  const run = { env: compactorEnv, stdio: ['ignore', 'ignore', 'inherit'] as ['ignore', 'ignore', 'inherit'] };
+  execFileSync(compactorPath(), ['--rebuild', '--once'], run);
+  // Then pass after pass, beside the server, for as long as it is up: in its container, so what the compactor uses
+  // is counted with what the server does. A server whose compactor is gone measures nothing a server does.
+  const compactor = spawn(compactorPath(), [], run);
+  compactor.once('exit', (code, signal) => {
+    log(`the compactor ended (${signal ?? code}), and the server with it`);
+    process.exit(1);
+  });
+  process.once('exit', () => compactor.kill());
+  if (compactor.pid === undefined) throw new Error('the compactor did not start');
 
   await app.listen({ host, port });
   return {
     flushMs,
+    compactorPid: compactor.pid,
     dataset: {
       publishers,
       readers,

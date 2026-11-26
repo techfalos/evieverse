@@ -98,7 +98,7 @@ export interface Origin {
  * the alternative text of each image, in the order of the images, '' for one that has none.
  * Absent where none has any.
  *
- * `video` is on a video post whose video the server has processed (src/video): what it is, and
+ * `video` is on a video post whose video the server has processed (compactor/src/video): what it is, and
  * where its poster image and its adaptive stream are read. `url` is then an MP4 that plays
  * anywhere. Absent on a video stored as it was sent: by a server that processes none, or before
  * this one did.

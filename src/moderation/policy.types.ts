@@ -1,8 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
-import type { Config } from '../config.js';
-import type { Db } from '../db/index.js';
-import type { TrustRoute } from './trust.js';
-import type { TrustClient, TrustPlugin } from './trust.types.js';
+import type { TrustEngine } from './trust.js';
+import type { TrustClient, TrustRoute } from './trust.types.js';
 
 /**
  * Why a post didn't get a hashtag: the publisher is muted on it (or, for a repost, the reposter is),
@@ -21,13 +19,11 @@ export interface RemovedTag {
   reason: RemovalReason;
 }
 
-/** What moderation of a post or a comment works with: the database, the settings, and the trust plugins. */
+/** What moderation of a post or a comment works with: the server's trust plugins and the policy over them, which read the database and the settings themselves. */
 export interface ModerationDeps {
-  db: Db;
-  config: Config;
-  trustPlugins: TrustPlugin[];
+  trust: TrustEngine;
   now?: () => number;
-  /** The request's log, which is told of a blocked pattern that took too long to read the post (see scanTexts). */
+  /** The request's log, which is told of a blocked pattern that took too long to read the post, and of what a plugin has to say. */
   log?: FastifyBaseLogger;
   /** Who sent the request, for the trust plugins that keep it with what they tell an admin of (see TrustContext.client). */
   client?: TrustClient;

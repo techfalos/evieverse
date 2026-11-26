@@ -1,7 +1,7 @@
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { attest, signingKeys, type Attestable } from '../src/attestation.js';
-import type { SigningKey } from '../src/attestation.types.js';
+import { attest, signingKeys } from '../src/attestation.js';
+import type { Attestable, SigningKey } from '../src/attestation.types.js';
 import { HOUR } from '../src/time.js';
 import { as, createTestContext, requests, TARGETS, type FeedItem, type TestContext, type User } from './helpers.js';
 

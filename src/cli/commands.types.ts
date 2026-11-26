@@ -92,4 +92,6 @@ export interface WhoAmI {
   showFollowers: boolean;
   /** Whether a server moderator or an admin banned them: they can't post, comment, like or send messages. */
   banned?: boolean;
+  /** Whether a server moderator or an admin barred them from claiming hashtags. */
+  claimsBarred?: boolean;
 }

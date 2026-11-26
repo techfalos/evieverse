@@ -7,7 +7,7 @@
 
 locals {
   root        = abspath("${path.module}/../../..")
-  source_hash = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), sort(fileset(local.root, "languages/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json", "scripts/build-cli.mjs"]) : filesha1("${local.root}/${f}")]))
+  source_hash = sha1(join("", [for f in concat(sort(fileset(local.root, "src/**")), sort(fileset(local.root, "languages/**")), sort(fileset(local.root, "compactor/src/**")), sort(fileset(local.root, "compactor/crates/**")), ["package.json", "package-lock.json", "Dockerfile", "tsconfig.json", "tsconfig.build.json", "scripts/build-cli.mjs", "compactor/Cargo.toml", "compactor/Cargo.lock", "compactor/rust-toolchain.toml"]) : filesha1("${local.root}/${f}")]))
   registry    = "${var.region}-docker.pkg.dev"
   image       = var.image != "" ? var.image : "${local.registry}/${var.project_id}/${google_artifact_registry_repository.app.repository_id}/app:${substr(local.source_hash, 0, 12)}"
   url         = "https://${google_api_gateway_gateway.main.default_hostname}"
@@ -62,10 +62,9 @@ locals {
     CONTENT_SCHEME = "gcs"
     # The bucket and no key: the services and the compactor reach it as their own service account,
     # and sign its links as that account too (see google_service_account_iam_member.sign).
-    CONTENT_OPTIONS    = jsonencode({ bucket = google_storage_bucket.content.name })
-    PUBLIC_BASE_URL    = local.url
-    SUPPORT_EMAIL      = var.support_email
-    COMPACT_IN_PROCESS = "false"
+    CONTENT_OPTIONS = jsonencode({ bucket = google_storage_bucket.content.name })
+    PUBLIC_BASE_URL = local.url
+    SUPPORT_EMAIL   = var.support_email
     # 1 GiB. Files go straight to the bucket with a signed link, so their size is not Cloud Run's
     # to limit: this is an estimate of what /store can check within `request_timeout`, not a
     # measurement.
@@ -784,8 +783,7 @@ resource "google_cloud_run_v2_worker_pool" "compactor" {
 
     containers {
       image   = local.image
-      command = ["node"]
-      args    = ["dist/compact/main.js"]
+      command = ["compactor"]
       resources {
         limits = { cpu = var.compactor_cpu, memory = var.compactor_memory }
       }
@@ -819,7 +817,7 @@ resource "google_cloud_run_v2_worker_pool" "compactor" {
 }
 
 # `--rebuild` rebuilds the whole feed index from the database and the bucket, after Redis lost data.
-# It is a job, started by hand (see docs/DEPLOY.md): nothing schedules it. It can run beside the
+# It is a job, started by hand (see docs/IAC.md): nothing schedules it. It can run beside the
 # compactor: the lease makes each wait for the other's pass.
 resource "google_cloud_run_v2_job" "rebuild" {
   name                = "${var.name}-rebuild"
@@ -851,8 +849,8 @@ resource "google_cloud_run_v2_job" "rebuild" {
 
       containers {
         image   = local.image
-        command = ["node"]
-        args    = ["dist/compact/main.js", "--once", "--rebuild"]
+        command = ["compactor"]
+        args    = ["--once", "--rebuild"]
         resources {
           limits = { cpu = "1", memory = "1Gi" }
         }

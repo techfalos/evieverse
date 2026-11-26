@@ -1,50 +1,15 @@
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { setAdmin } from '../src/moderation/policy.js';
-import type { TrustPlugin } from '../src/moderation/trust.types.js';
-import { reindex } from '../src/search/backfill.js';
-import { foldUsername, keywordsOf, MAX_QUERY_TERMS, queryTerms } from '../src/search/keywords.js';
+import type { TestPlugin } from '../src/moderation/trust.types.js';
+import { foldUsername, queryTerms } from '../src/search/keywords.js';
 import { DAY } from '../src/time.js';
 import { as, createTestContext, multipart, PNG, requests, TARGETS, type FeedItem, type TestContext, type User } from './helpers.js';
 
 const NO_WORDS = 'q has nothing to search for: give at least one word, hashtag, or the start of a username';
 
+/** What a search goes by, as far as the API reads it: the words of a query, and a username. What a post is found by is the compactor's (compactor/crates/core/src/search.rs). */
 describe('search keywords', () => {
-  const text = (words: string, tags: string[] = []) => ({ text: words, preview: { kind: 'text' as const, text: words }, tags });
-
-  it('are the words of a post, folded, without the ones that say nothing, and its hashtags', () => {
-    expect(keywordsOf(text('Flooding closes the Coast Road in Mumbai', ['news']), 100)).toEqual(['flooding', 'closes', 'coast', 'road', 'mumbai', 'news']);
-    // Whatever their case and accents, and each once.
-    expect(keywordsOf(text('Café, CAFE and cafe\u0301!'), 100)).toEqual(['cafe']);
-    // A word with an apostrophe is the words on each side of it; a single letter or digit is none.
-    expect(keywordsOf(text("Mumbai's l\u2019amour, a b c 1 2 42"), 100)).toEqual(['mumbai', 'amour', '42']);
-    // What formats a text is no word of it: a link's address isn't, and its label is.
-    expect(keywordsOf(text('**Bold** news at [the harbour](https://example.com/secret-path)'), 100)).toEqual(['bold', 'news', 'harbour']);
-    // A hashtag that is also a word of the text is one term.
-    expect(keywordsOf(text('Rain #weather tomorrow', ['weather', 'rain']), 100)).toEqual(['rain', 'tomorrow', 'weather']);
-    // A hashtag the text writes is no word of it: the post is found by the hashtags it has.
-    expect(keywordsOf(text('Flooding #news ＃Mumbai in C# and at stand#4', ['weather']), 100)).toEqual(['flooding', 'stand', 'weather']);
-    // Scripts written without spaces have words too.
-    expect(keywordsOf(text('東京は大きい'), 100)).toContain('東京');
-    // A word longer than a term can be is none.
-    expect(keywordsOf(text(`short ${'x'.repeat(65)} ${'y'.repeat(64)}`), 100)).toEqual(['short', 'y'.repeat(64)]);
-  });
-
-  it('are the most frequent words where a post has more than the most it is found by, and every hashtag', () => {
-    const meta = text('one two two three three three four', ['alpha', 'beta', 'gamma']);
-    expect(keywordsOf(meta, 2)).toEqual(['three', 'two', 'alpha', 'beta', 'gamma']);
-    // Of two as frequent, the one the text has first.
-    expect(keywordsOf(text('zebra apple zebra apple mango'), 1)).toEqual(['zebra']);
-    expect(keywordsOf(meta, 0)).toEqual(['alpha', 'beta', 'gamma']);
-  });
-
-  it('are read from the caption of a file, from the preview of an entry that has no text, and from hashtags alone for a link', () => {
-    expect(keywordsOf({ text: 'Sunset over the bay', preview: { kind: 'image', url: '/content/x/raw', text: 'Sunset over the bay' }, tags: ['pics'] }, 100)).toEqual(['sunset', 'bay', 'pics']);
-    expect(keywordsOf({ preview: { kind: 'text', text: 'Flooding closes the coast road.' }, tags: ['news'] }, 100)).toEqual(['flooding', 'closes', 'coast', 'road', 'news']);
-    expect(keywordsOf({ preview: { kind: 'link', url: 'https://news.example/flooding' }, tags: ['news'] }, 100)).toEqual(['news']);
-    expect(keywordsOf({ preview: { kind: 'image', url: '/content/x/raw' }, tags: ['pics'] }, 100)).toEqual(['pics']);
-  });
-
   it('are what a query is read into: its words as a post has them, and its hashtags', () => {
     expect(queryTerms('  Mumbai   FLOODING ')).toEqual(['mumbai', 'flooding']);
     expect(queryTerms('café Café')).toEqual(['cafe']);
@@ -57,7 +22,7 @@ describe('search keywords', () => {
     expect(queryTerms('the #news')).toEqual(['news']);
     expect(queryTerms('!!! ... #')).toEqual([]);
     expect(queryTerms('a')).toEqual([]);
-    expect(queryTerms(Array.from({ length: 20 }, (_, i) => `word${i}`).join(' '))).toHaveLength(MAX_QUERY_TERMS);
+    expect(queryTerms(Array.from({ length: 20 }, (_, i) => `word${i}`).join(' '))).toHaveLength(8);
   });
 
   it('fold a username to what a search compares', () => {
@@ -281,7 +246,7 @@ for (const target of TARGETS) {
 
     it('finds no post that is set for deletion, held for review, gone from its own server, or of a closed account', async () => {
       /** Holds what shouts for an admin to look at. */
-      const shouting: TrustPlugin = { name: 'shouting', assess: ({ texts }) => (texts.some((text) => text.includes('FREE')) ? { reduce: 30 } : null) };
+      const shouting: TestPlugin = { name: 'shouting', rules: [{ includes: 'FREE', reduce: 30 }] };
       ctx = await createTestContext(target, { trustPlugins: [shouting] });
       const root = await admin();
       const alice = await ctx.register('alice');
@@ -374,7 +339,7 @@ for (const target of TARGETS) {
       expect(await found('lighthouse')).toEqual([]);
       expect(await terms(contentId)).toEqual([]);
       // A reindex leaves it to the compactor, which has its meta file to write.
-      expect(await reindex(ctx)).toEqual({ posts: 0, pending: 1, usernames: 0 });
+      expect(await ctx.compactor.reindex()).toEqual({ posts: 0, pending: 1, usernames: 0 });
       expect(await terms(contentId)).toEqual([]);
       await ctx.compactor.runOnce();
       expect(await found('lighthouse')).toEqual([contentId]);
@@ -403,7 +368,7 @@ for (const target of TARGETS) {
       expect(await names('jose')).toEqual([]);
 
       const progress: number[] = [];
-      expect(await reindex(ctx, ({ posts: n }) => progress.push(n))).toEqual({ posts: 2, pending: 0, usernames: 1 });
+      expect(await ctx.compactor.reindex(({ posts: n }) => progress.push(n))).toEqual({ posts: 2, pending: 0, usernames: 1 });
       expect(progress.at(-1)).toBe(2);
       expect(await found('coast road')).toEqual([second, first]);
       expect(await found('#traffic')).toEqual([second]);
@@ -412,7 +377,7 @@ for (const target of TARGETS) {
 
       // Again, it finds nothing to change; and it waits its turn while a compactor's run is under way.
       const before = await ctx.db.selectFrom('search_terms').selectAll().orderBy('content_id').orderBy('term').execute();
-      expect(await reindex(ctx)).toEqual({ posts: 2, pending: 0, usernames: 0 });
+      expect(await ctx.compactor.reindex()).toEqual({ posts: 2, pending: 0, usernames: 0 });
       expect(await ctx.db.selectFrom('search_terms').selectAll().orderBy('content_id').orderBy('term').execute()).toEqual(before);
       // The lease is free once it is done: the compactor's next run isn't skipped.
       expect((await ctx.compactor.runOnce()).skipped).toBe(false);

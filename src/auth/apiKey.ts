@@ -135,6 +135,7 @@ async function verifyApiKey(db: Db, userId: string, apiKey: string, languages: L
       'users.show_following',
       'users.show_followers',
       'users.banned_at',
+      'users.claims_barred_at',
     ])
     .where('api_keys.user_id', '=', userId)
     .where('api_keys.key_hash', '=', hashKey(apiKey))
@@ -153,6 +154,7 @@ async function verifyApiKey(db: Db, userId: string, apiKey: string, languages: L
     showFollowing: row.show_following === 1,
     showFollowers: row.show_followers === 1,
     banned: row.banned_at !== null,
+    claimsBarred: row.claims_barred_at !== null,
   };
 }
 

@@ -1,8 +1,11 @@
-# Local infrastructure for development and integration tests.
+# Local infrastructure for development and integration tests. Every server needs Redis, and so does every
+# test: `npm test` runs against the one this starts (TEST_REDIS_URL names another), on SQLite, and on the
+# other databases where it is given them.
+#   docker compose up -d redis
+#   npm test
 #   docker compose up -d postgres mysql redis
 #   TEST_POSTGRES_URL=postgres://evieverse:evieverse@localhost:5432/evieverse \
-#   TEST_MYSQL_URL=mysql://evieverse:evieverse@localhost:3306/evieverse \
-#   TEST_REDIS_URL=redis://127.0.0.1:6379 npm test
+#   TEST_MYSQL_URL=mysql://evieverse:evieverse@localhost:3306/evieverse npm test
 # Or run the whole stack (Postgres, an S3-compatible store for content and summaries, Valkey for the feed
 # index, a compactor):
 #   docker compose --profile app up --build
@@ -10,7 +13,6 @@
 # The services shared with the other compose files are defined in compose.base.yml.
 x-app-env: &app-env
   PUBLIC_BASE_URL: http://localhost:3000
-  COMPACT_IN_PROCESS: 'false'
   # Ads in hashtag feeds and at the end of posts, which admins keep at /monetization/ads. Off unless set to
   # true. The app and the compactor share them: the compactor publishes the ads the app shows.
   MONETIZATION_FEED_ADS: ${MONETIZATION_FEED_ADS:-false}

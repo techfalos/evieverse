@@ -4,50 +4,30 @@ import { readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LightMyRequestResponse } from 'fastify';
-import pino from 'pino';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { masterPlaylist, probeVideo, renditionSizes } from '../src/video/ffmpeg.js';
-import { createVideoWorker } from '../src/video/worker.js';
 import { as, createTestContext, feedItems, multipart, sha256, TARGETS, type FilePart, type TestContext, type User } from './helpers.js';
 
 /** Whether this machine has the ffmpeg the server processes videos with: the tests that process one are skipped where it hasn't. */
 const FFMPEG = spawnSync('ffmpeg', ['-version']).status === 0 && spawnSync('ffprobe', ['-version']).status === 0;
-const TOOLS = { ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe' };
 
 /** What the test videos say of themselves, which nothing the server publishes may: where they were filmed, and what they are called. */
 const PLACE = '+48.8584+002.2945/';
 const TITLE = 'Holiday with the family';
 
-describe('video renditions', () => {
-  it('makes a video at each of the sizes it is large enough for, by its shorter side, and at its own if it is smaller than all', () => {
-    const heights = [1080, 720, 480, 240];
-    expect(renditionSizes({ width: 1920, height: 1080 }, heights)).toEqual([1080, 720, 480, 240]);
-    // Filmed upright: it is as large as its width.
-    expect(renditionSizes({ width: 720, height: 1280 }, heights)).toEqual([720, 480, 240]);
-    expect(renditionSizes({ width: 640, height: 361 }, heights)).toEqual([240]);
-    // Smaller than the smallest, with a side that is odd: its own size, made even.
-    expect(renditionSizes({ width: 320, height: 181 }, heights)).toEqual([180]);
-    expect(renditionSizes({ width: 3840, height: 2160 }, [720])).toEqual([720]);
-  });
-
-  it('lists the renditions in the master playlist, each with its bitrate and its size', () => {
-    const rendition = (short: number, width: number, bitrate: number) => ({ short, name: `${short}p`, path: '', width, height: short, size: 1, bitrate });
-    expect(masterPlaylist([rendition(720, 1280, 2_928_000), rendition(240, 426, 528_000)]).split('\n')).toEqual([
-      '#EXTM3U',
-      '#EXT-X-VERSION:6',
-      '#EXT-X-INDEPENDENT-SEGMENTS',
-      '#EXT-X-STREAM-INF:BANDWIDTH=2928000,RESOLUTION=1280x720',
-      '720p.m3u8',
-      '#EXT-X-STREAM-INF:BANDWIDTH=528000,RESOLUTION=426x240',
-      '240p.m3u8',
-      '',
-    ]);
-  });
-});
+/** What ffprobe says a video file is, as far as these tests read it: its picture's size, whether it has sound, and the tags of the file and of its picture and sound, by their names in lower case. */
+function probeVideo(path: string): { width: number; height: number; audio: boolean; tags: Record<string, string> } {
+  type Described = { tags?: Record<string, string>; codec_type?: string; width?: number; height?: number };
+  const said = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_format', '-show_streams', '-of', 'json', path]).toString('utf8')) as { format?: Described; streams?: Described[] };
+  const picture = said.streams?.find((stream) => stream.codec_type === 'video');
+  const sound = said.streams?.find((stream) => stream.codec_type === 'audio');
+  const tags = [said.format, picture, sound].flatMap((of) => Object.entries(of?.tags ?? {}).map(([name, value]) => [name.toLowerCase(), String(value)]));
+  return { width: picture?.width ?? 0, height: picture?.height ?? 0, audio: sound !== undefined, tags: Object.fromEntries(tags) };
+}
 
 /**
- * Videos as the server processes them (src/video): a post's, and a comment's. With ffmpeg, which
- * the tests make their videos with too.
+ * Videos as the server processes them (compactor/src/video): a post's, and a comment's. With
+ * ffmpeg, which the tests make their videos with too. What the worker makes of what ffprobe says,
+ * the sizes it makes a video in and the playlist it lists them in are tested with it, in Rust.
  */
 for (const target of TARGETS) {
   describe.skipIf(!FFMPEG)(`video processing (${target.name})`, () => {
@@ -108,7 +88,7 @@ for (const target of TARGETS) {
     const probe = async (bytes: Buffer, name: string) => {
       const path = join(made, name);
       await writeFile(path, bytes);
-      return probeVideo(TOOLS, path);
+      return probeVideo(path);
     };
     /** Whether bytes say anything of what the test videos say of themselves. */
     const tells = (bytes: Buffer) => bytes.includes(PLACE) || bytes.includes(TITLE);
@@ -294,9 +274,9 @@ for (const target of TARGETS) {
       expect(await read(contentId)).toMatchObject({ processing: true });
 
       // A worker that has no ffmpeg fails, which is nothing the video did: the job waits, and is taken again later.
-      const broken = createVideoWorker({ ...ctx, config: { ...ctx.config, video: { ...ctx.config.video, ffmpegPath: join(made, 'no-ffmpeg') } } }, pino({ level: 'silent' }));
-      await expect(broken.check()).rejects.toThrow(/ffmpeg was not found .*VIDEO_PROCESSING=false/s);
-      expect(await broken.runOnce()).toBe(true);
+      const broken = { ffmpegPath: join(made, 'no-ffmpeg') };
+      await expect(ctx.compactor.videoCheck(broken)).rejects.toThrow(/ffmpeg was not found .*VIDEO_PROCESSING=false/s);
+      expect(await ctx.compactor.video(broken)).toBe(true);
       expect(await jobs()).toBe(1);
       expect(await ctx.processVideo()).toBe(false);
       ctx.clock.now += 60_000;

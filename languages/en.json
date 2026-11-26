@@ -173,6 +173,7 @@
     "block.yourself": "you can't block yourself",
     "block.feeds_not_updated": "you block them, but the following feeds couldn't be updated; send the request again",
 
+    "notice.post_held": "Your post is held in the moderation queue for review. It is not published, and only you and this server's moderators can read it, until one of them accepts it.",
     "notice.post_accepted": "Your post was accepted from the moderation queue, and is published.",
     "notice.post_rejected": "Your post was rejected from the moderation queue, and deleted.",
     "notice.post_deleted": "An admin deleted your post.",
@@ -192,6 +193,8 @@
     "notice.comment_video_refused": "This server doesn't trust the video of your comment enough to keep it, so the comment was not published.",
     "notice.user_banned": "A moderator banned your account: you can't post, comment, like or send messages. You can still read, and your inbox still works.",
     "notice.user_unbanned": "Your account is no longer banned.",
+    "notice.claims_barred": "A moderator barred you from claiming hashtags on this server. Nothing else changes: the hashtags you moderate are still yours to moderate.",
+    "notice.claims_unbarred": "You can claim hashtags on this server again.",
     "notice.csam_match_refused": "An image that {username} sent matches this server's list of hashes of known child sexual abuse material. It was refused: nothing of it was published, or stored as a post or a comment. It was sent at {at} from {ip} by the user {userId}. The image's SHA-256 is {sha256}; its PDQ hash {pdq} is {distance} of 256 bits from the listed hash {listed}. A match is a strong sign, not proof. You may have a duty to report it: in the United States, to NCMEC's CyberTipline (https://report.cybertip.org). Check what the law where you operate asks of you.",
     "notice.csam_match_held": "An image that {username} sent matches this server's list of hashes of known child sexual abuse material. It was not published: it is stored, and waits in the moderation queue, since this server deletes nothing on arrival. Accepting it there would publish it. It was sent at {at} from {ip} by the user {userId}. The image's SHA-256 is {sha256}; its PDQ hash {pdq} is {distance} of 256 bits from the listed hash {listed}. A match is a strong sign, not proof. You may have a duty to report it: in the United States, to NCMEC's CyberTipline (https://report.cybertip.org). Check what the law where you operate asks of you.",
     "notice.csam_video_refused": "A video that {username} sent matches this server's list of hashes of known child sexual abuse material: the picture it shows {seconds} seconds in. It was refused: nothing of it was published, and the file was deleted from where it waited to be processed. It was sent at {at} from {ip} by the user {userId}. The file's SHA-256 is {sha256}; the picture's PDQ hash {pdq} is {distance} of 256 bits from the listed hash {listed}. A match is a strong sign, not proof. You may have a duty to report it: in the United States, to NCMEC's CyberTipline (https://report.cybertip.org). Check what the law where you operate asks of you.",
@@ -200,7 +203,7 @@
     "notice.post_mention_unnamed": "You were mentioned in a post.",
     "notice.comment_mention": "{username} mentioned you in a comment.",
     "notice.comment_mention_unnamed": "You were mentioned in a comment.",
-    "notice.tag_claimed": "{username} claimed #{tag}, to moderate it. They become its moderator at {reviewUntil}, unless an admin or a server moderator refuses the claim before then (DELETE /tags/{tag}/claim).",
+    "notice.tag_claimed": "{username} claimed #{tag}, and moderates it now. An admin or a server moderator can end that at any time (DELETE /tags/{tag}/moderators/{userId}), and can bar them from claiming hashtags (PUT /claim-barred/{userId}).",
     "notice.tag_claim_granted": "Your claim to #{tag} went through: you are now a moderator of the hashtag.",
     "notice.tag_claim_refused": "Your claim to moderate #{tag} was refused.",
     "notice.tag_moderator_added": "You were made a moderator of #{tag}.",
@@ -269,8 +272,7 @@
     "claim.off": "this server chooses its hashtags itself, so they can't be claimed: an admin appoints their moderators",
     "claim.staff": "you moderate every hashtag already, as an admin or a server moderator",
     "claim.has_moderators": "#{tag} has a moderator already, so it can't be claimed: its moderators, or an admin, appoint the others",
-    "claim.taken": "another user's claim to #{tag} is waiting",
-    "claim.not_allowed": "only whoever made the claim can withdraw it, and only an admin or a server moderator can refuse it",
+    "claim.barred": "a moderator barred you from claiming hashtags on this server",
     "claim.rate_limited": {
       "one": "too many claims; try again in {count} hour",
       "other": "too many claims; try again in {count} hours"

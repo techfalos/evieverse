@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import { seedOf } from './attestation.js';
 import { loadLanguages, REFERENCE_LANGUAGE } from './language.js';
 import { parseTagList } from './tags.js';
 
@@ -10,6 +9,20 @@ export const DEFAULT_SUPPORT_EMAIL = 'noreply@yoururl.com';
 
 /** The highest minimum age a server can set (MINIMUM_AGE), in years: past it a number is no age, and more likely a slip of the keys (180 for 18). */
 export const MAX_MINIMUM_AGE = 120;
+
+/**
+ * What a server can say of content made with generative AI (GEN_AI), which GET /rules gives as
+ * `genAi`: that it is allowed and its author may declare it (`disclosure_optional`), that it is
+ * allowed and its author has to declare it (`disclosure_required`), or that it is not allowed
+ * (`not_allowed`). The declaration is the one a post and a comment are sent with (`aiGenerated`).
+ */
+export const GEN_AI_SETTINGS = ['disclosure_optional', 'disclosure_required', 'not_allowed'] as const;
+
+/** What a server whose operator has set none says of generative AI (GEN_AI): what a server does of itself, which is take such content and leave declaring it to its author. */
+export const DEFAULT_GEN_AI: GenAi = 'disclosure_optional';
+
+/** What a server that is given no Redis says, rather than start: every process keeps the feed index there, so none runs without it. */
+const REDIS_URL_NEEDED = 'REDIS_URL is not set: the server needs the redis:// or rediss:// URL of a Redis or Valkey server, which holds the feed index';
 
 /**
  * Which setting each environment variable sets, as the path of the setting's keys in the
@@ -24,11 +37,14 @@ const ENV_MAP: Record<string, string> = {
   EVIEVERSE_SOURCE_URL: 'sourceUrl',
   SUPPORT_EMAIL: 'supportEmail',
   MINIMUM_AGE: 'minimumAge',
+  GEN_AI: 'genAi',
   DB_DIALECT: 'db.dialect',
   DATABASE_URL: 'db.url',
   DB_POOL_SIZE: 'db.poolSize',
   DB_IDLE_TIMEOUT_MS: 'db.idleTimeoutMs',
   DB_MIGRATE_ON_START: 'db.migrateOnStart',
+  DB_REQUIRE_VOLUME: 'db.requireVolume',
+  FIRST_ADMIN_PROFILE: 'firstAdminProfile',
   PUBLIC_BASE_URL: 'publicBaseUrl',
   CORS_ORIGINS: 'corsOrigins',
   TRUST_PROXY: 'trustProxy',
@@ -46,7 +62,6 @@ const ENV_MAP: Record<string, string> = {
   AUDIT_OPTIONS: 'audit.options',
   TAGGING_MODE: 'tagging.mode',
   TAGGING_SERVER_TAGS: 'tagging.serverTags',
-  TAG_CLAIM_REVIEW_HOURS: 'tagging.claimReviewHours',
   TAG_CLAIMS_PER_DAY: 'tagging.claimsPerDay',
   TAG_MODERATOR_INACTIVE_DAYS: 'tagging.moderatorInactiveDays',
   TAG_LOG_RATE_LIMIT_PER_MINUTE: 'tagging.logRateLimitPerMinute',
@@ -95,7 +110,6 @@ const ENV_MAP: Record<string, string> = {
   SUMMARY_BROTLI_QUALITY: 'feed.summaryBrotliQuality',
   SUMMARY_CACHE_SIZE: 'feed.summaryCacheSize',
   SUMMARY_CACHE_SECONDS: 'feed.summaryCacheSeconds',
-  COMPACT_IN_PROCESS: 'compact.inProcess',
   COMPACT_INTERVAL_SECONDS: 'compact.intervalSeconds',
   COMPACT_GRACE_SECONDS: 'compact.graceSeconds',
   COMPACT_CONCURRENCY: 'compact.concurrency',
@@ -251,6 +265,25 @@ const ConfigSchema = z.object({
       return z.NEVER;
     }),
 
+  /**
+   * What the server says of content made with generative AI, which GET /rules gives to anyone
+   * who asks, beside the rules: one of GEN_AI_SETTINGS, in any case. It is the operator's own
+   * rule, and the server holds nobody to it yet: whatever this says, a post's or a comment's
+   * declaration that it was created with AI (`aiGenerated`) is its author's to make or to leave
+   * out, and none is refused for making it. Unset or empty: DEFAULT_GEN_AI.
+   */
+  genAi: z
+    .string()
+    .trim()
+    .default(DEFAULT_GEN_AI)
+    .transform((v, ctx) => {
+      if (!v) return DEFAULT_GEN_AI;
+      const setting = GEN_AI_SETTINGS.find((one) => one === v.toLowerCase());
+      if (setting) return setting;
+      ctx.addIssue({ code: 'custom', message: `"${v}" is not one of ${GEN_AI_SETTINGS.join(', ')}: GEN_AI is what the server says of content made with generative AI` });
+      return z.NEVER;
+    }),
+
   db: z.object({
     dialect: z.enum(['postgres', 'sqlite', 'mysql']).default('sqlite'),
     /** Connection URL for postgres/mysql, or a file path (or ":memory:") for sqlite. */
@@ -260,7 +293,23 @@ const ConfigSchema = z.object({
     idleTimeoutMs: z.coerce.number().int().positive().optional(),
     /** Bring the schema up to date whenever a process opens the database. Functions don't: their deploy runs `npm run migrate`. */
     migrateOnStart: bool(true),
+    /**
+     * Refuse a SQLite database that would be lost with the container it is in: one in memory, or
+     * a file that is not on a mounted volume (see db/volume.ts). The Docker image turns it on, so
+     * a container doesn't start on a database its next one wouldn't have. Postgres and MySQL keep
+     * their data themselves, and are not checked. Unset: off.
+     */
+    requireVolume: z.preprocess((v) => (typeof v === 'string' ? ['1', 'true', 'yes'].includes(v.toLowerCase()) : v), z.boolean()).optional(),
   }),
+
+  /**
+   * Where the long-running server (server.ts) writes the profile of the admin it creates the
+   * first time it starts: a file the server's CLI reads, with the account's id and its API key,
+   * for its owner alone to read. With it set, a server that starts on a database with no admin
+   * creates one, named `admin` (see moderation/firstAdmin.ts). The Docker image sets it. Unset:
+   * the server creates no account.
+   */
+  firstAdminProfile: z.string().trim().min(1).optional(),
 
   /** Absolute base URL used for media links in feed records, e.g. https://api.example.com. Empty = relative links. */
   publicBaseUrl: z.string().default(''),
@@ -299,8 +348,15 @@ const ConfigSchema = z.object({
 
   /** The RAM tier: feed index, summaries of the last few days, publisher credits. */
   redis: z.object({
-    /** redis:// or rediss:// URL of any Redis-protocol server. Unset: an in-process store, for a single node only. */
-    url: z.string().optional(),
+    /**
+     * redis:// or rediss:// URL of any Redis-protocol server (Redis, Valkey). Every process needs
+     * it, and the same one: the API, each function and the compactor share the feed index it holds.
+     * A server doesn't start without it.
+     */
+    url: z
+      .string({ error: REDIS_URL_NEEDED })
+      .trim()
+      .min(1, REDIS_URL_NEEDED),
     /**
      * Put in front of every key, so instances can share a Redis. It was `tu:` before: a
      * deployment that leaves it unset reads an empty index after this change, until the index is
@@ -361,14 +417,11 @@ const ConfigSchema = z.object({
           return z.NEVER;
         }),
       /**
-       * In user mode, a user can claim a hashtag that has no moderator, to moderate it
-       * (POST /tags/:tag/claim, src/moderation/claims.ts). The server's admins and server
-       * moderators are told of the claim, and this is how long, in hours, any of them has to
-       * refuse it: once it has passed, the compactor's next run makes the user a moderator of the
-       * hashtag. 0: a claim is granted by the next run, and is an admin's to undo.
+       * In user mode, a user can claim a hashtag that has no moderator, and moderates it from
+       * then on (POST /tags/:tag/claim, src/moderation/claims.ts). This is how many hashtags
+       * one user can claim in a day. Each claim leaves a notice with every admin and server
+       * moderator, any of whom can end it (0: no limit).
        */
-      claimReviewHours: z.coerce.number().int().min(0).default(24),
-      /** Hashtags one user can claim in a day; each claim leaves a notice with every admin and server moderator (0: no limit). */
       claimsPerDay: z.coerce.number().int().min(0).default(2),
       /**
        * Days a hashtag's moderator can go without doing anything as one on the hashtag before
@@ -407,17 +460,17 @@ const ConfigSchema = z.object({
     }),
 
   /**
-   * What the server makes of the videos it is sent (src/video): of a video post's, and of the one
+   * What the server makes of the videos it is sent (compactor/src/video): of a video post's, and of the one
    * a comment comes with. A video is not published as it was sent. It is transcoded to H.264 and
    * AAC in MP4, which plays on any device, without the metadata its file came with (where and
    * when it was taken, on what), and a post's is also given a poster image and an adaptive stream
    * (HLS) at several sizes, so that a slow connection plays a small one. The post, or the
    * comment, is published once that is done: until then it says `processing`.
    *
-   * The work is done with ffmpeg, by the video worker, which runs in the process that runs the
-   * compactor (`npm run compact`, or the server's own with COMPACT_IN_PROCESS): that process
-   * needs `ffmpeg` and `ffprobe`, which the Docker image has, and refuses to start without them
-   * while this is on. Requests only mark a video to be processed, and need neither.
+   * The work is done with ffmpeg, by the video worker, which runs in the compactor's process
+   * (`npm run compact`): that process needs `ffmpeg` and `ffprobe`, which the Docker image has,
+   * and refuses to start without them while this is on. Requests only mark a video to be
+   * processed, and need neither.
    */
   video: z.object({
     /**
@@ -483,9 +536,9 @@ const ConfigSchema = z.object({
       .default([])
       .transform((v, ctx) => {
         const keys = (typeof v === 'string' ? v.split(/[\s,]+/) : v).map((key) => key.trim()).filter(Boolean);
-        if (keys.every((key) => seedOf(key) !== null)) return keys;
+        if (keys.every(isSigningSeed)) return keys;
         // Which one, by its place: a key is never put in an error.
-        ctx.addIssue({ code: 'custom', message: `key ${keys.findIndex((key) => seedOf(key) === null) + 1} of REPOSTS_SIGNING_KEYS is not 32 random bytes in base64 or hex, such as \`openssl rand -base64 32\` makes` });
+        ctx.addIssue({ code: 'custom', message: `key ${keys.findIndex((key) => !isSigningSeed(key)) + 1} of REPOSTS_SIGNING_KEYS is not 32 random bytes in base64 or hex, such as \`openssl rand -base64 32\` makes` });
         return z.NEVER;
       }),
     /**
@@ -610,9 +663,11 @@ const ConfigSchema = z.object({
     message: 'FEED_PAGE_SIZE can be at most FEED_MAX_PAGE_SIZE',
   }),
 
+  /**
+   * The compactor's settings. It is a process of its own (compactor/src/main.rs, `npm run
+   * compact`), which reads these as the server does: a deployment gives both the same ones.
+   */
   compact: z.object({
-    /** Run the compactor inside the API process. Enable on one node (or run `npm run compact`); runs elsewhere would only skip. */
-    inProcess: bool(true),
     /**
      * The compactor is one process that runs for as long as it is up: a run starts this long after the
      * previous one started, or as soon as that one ends if it took longer. So runs never overlap, and
@@ -671,7 +726,7 @@ const ConfigSchema = z.object({
       allowFrom: z.coerce.number().int().min(0).max(101).default(75),
       /**
        * The optional trust plugins the server runs, by the names of their folders in
-       * src/plugins/trust (separated by commas or spaces in the environment), such as urlhaus. A
+       * compactor/crates/trust/src/plugins (separated by commas or spaces in the environment), such as urlhaus. A
        * plugin that isn't optional runs whatever this says. Empty: no optional plugin runs.
        */
       optionalPlugins: z
@@ -685,7 +740,7 @@ const ConfigSchema = z.object({
     }),
 
   /**
-   * The urlhaus trust plugin (src/plugins/trust/urlhaus), which gives a post or a comment with a
+   * The urlhaus trust plugin (compactor/crates/trust/src/plugins/urlhaus), which gives a post or a comment with a
    * link that spreads malware a trust score of 0. It checks links against the list URLhaus
    * publishes (https://urlhaus.abuse.ch), which each process downloads and keeps in memory.
    * It is optional: these are read only where `trust.optionalPlugins` names urlhaus.
@@ -709,7 +764,7 @@ const ConfigSchema = z.object({
   }),
 
   /**
-   * The pdq trust plugin (src/plugins/trust/pdq), which gives a post or a comment with an image
+   * The pdq trust plugin (compactor/crates/trust/src/plugins/pdq), which gives a post or a comment with an image
    * of known child sexual abuse material a trust score of 0, and tells the server's admins of it.
    * It matches each image's PDQ hash against a list of hashes of such material, which each
    * process reads and keeps in memory. It is optional: these are read only where
@@ -876,6 +931,16 @@ type Stores = {
 /** A store as the settings name one: an OpenDAL scheme and its options. */
 type Store = { scheme: string; options: Record<string, string> };
 
+/**
+ * Whether a text is what a signing key is made from, as a setting writes it: 32 random bytes, in
+ * base64 (either alphabet, padded or not) or in hex. The key itself is made of it in Rust
+ * (compactor/crates/core/src/attestation.rs), which reads it the same way.
+ */
+function isSigningSeed(text: string): boolean {
+  const bytes = /^[0-9a-f]{64}$/i.test(text) ? Buffer.from(text, 'hex') : /^[A-Za-z0-9+/_-]{43}=?$/.test(text) ? Buffer.from(text, 'base64') : null;
+  return bytes?.length === 32;
+}
+
 /** Where a store's options say it is, in one form: the options in the order of their names, with a path's trailing slashes left out. */
 function placeOf({ scheme, options }: Partial<Store>): string {
   const entries = Object.entries(options ?? {})
@@ -900,6 +965,9 @@ function sharedStore({ storage, audit, quarantine }: Stores): string | null {
 }
 
 export type Config = z.infer<typeof ConfigSchema>;
+
+/** One of the things a server can say of content made with generative AI (GEN_AI_SETTINGS). */
+export type GenAi = (typeof GEN_AI_SETTINGS)[number];
 
 type Json = { [k: string]: unknown };
 

@@ -4,6 +4,7 @@ import { contentNotFound, withheld } from './content.js';
 import { updateOnConflict } from './db/index.js';
 import type { AppDeps } from './deps.types.js';
 import { badRequest, conflict, unprocessable } from './http/errors.js';
+import { notify } from './inbox.js';
 import { msg } from './language.js';
 import { effectiveMeta, insertPending, nextSeq } from './pending.js';
 import { mediaType } from './posts.js';
@@ -18,7 +19,7 @@ import type { ContentWrite, OriginGone, RepostRemoval, RepostWrite } from './wri
 
 /**
  * How long after the server's entry for a post on another server was hidden, on that server's
- * word that the post is gone, the server asks it about the post again (src/originSweep.ts), and
+ * word that the post is gone, the server asks it about the post again (compactor/src/sweep.rs), and
  * how long after each such answer: sooner than it asks about an entry that is published
  * (REPOSTS_REFRESH_HOURS), since a post that only waited in a moderation queue there may be back.
  */
@@ -107,6 +108,15 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
    * the content unmoderated again under its hashtags: the approvals of their moderators were of
    * what it was.
    *
+   * Whoever the content belongs to is told that it waits, by a notice in their inbox
+   * (`post_held`, see NOTICES in src/inbox.ts), once the write that put it in the queue has
+   * committed: new content that is held, and content that was published until this write of it.
+   * It is left here, so that every write that holds content tells its owner, whichever route
+   * made it: the owner of an entry for a post on another server is not who sent the attestation
+   * that had it held (POST /repost/refresh). A write of content that waits there already tells
+   * nobody again: it keeps its place in the queue, and its owner has the notice of that. Like
+   * any notice, one that can't be left is logged, and the write stands.
+   *
    * The hashtags an update dropped are queued with the ones it has, which is what takes its
    * entries out of their indexes. They are told from the hashtags the content had (`previous`),
    * which the request read before it began: if anything was written to the content, or under it,
@@ -132,7 +142,7 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
    *
    * A video post's write waits longer where the server processes videos (`processVideo`): its
    * row says its file is yet to be processed, and the commit adds the job the video worker
-   * takes (src/video). The compactor leaves the write, and the rows it queued, until the worker
+   * takes (compactor/src/video). The compactor leaves the write, and the rows it queued, until the worker
    * has put the processed file in the row; until then the post is read by its id as written,
    * with `processing`, and nothing of the file that was sent is served.
    *
@@ -173,6 +183,8 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
     // The hashtags the write gives the content, and its meta file with them: as it came, unless a repost was removed meanwhile.
     let tags = summary.tags;
     let written = stored;
+    // Whether this write is what put the content in the moderation queue: it is held, and the content didn't wait there already.
+    let newlyHeld = false;
     try {
       await db.transaction().execute(async (trx) => {
         if (previous) {
@@ -210,6 +222,9 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
             .execute();
         }
         if (queued) {
+          // Read with the row locked: no other write of the content puts it in the queue, or takes it out, before this commits.
+          const waiting = previous !== undefined && (await trx.selectFrom('moderation_queue').select('content_id').where('content_id', '=', contentId).executeTakeFirst()) !== undefined;
+          newlyHeld = !waiting;
           // Content that was waiting keeps its place in the queue.
           await updateOnConflict(
             trx.insertInto('moderation_queue').values({ content_id: contentId, trust_score: queued.trustScore, created_at: ts }),
@@ -258,6 +273,8 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
     }
 
     await publishers.put(publisher).catch((err) => log.warn({ err, userId: publisher.userId }, 'could not refresh the publisher credit in Redis'));
+    // The server held it, and nobody else: `by` is nobody's id, so its owner is told whoever sent the write.
+    if (newlyHeld) await notify({ db, content, now }, { userId: publisher.userId, kind: 'post_held', contentId, by: '' }, log);
     // Not the hashtags a repost gave it, which the repost counted, whether the meta file had them yet or not.
     const reposted = new Set(repostedTags(places));
     // Stamped now, not when the write began: the compactor goes by it, and must find the rows written by then.
@@ -420,7 +437,7 @@ export function contentWriter({ db, config, content, publishers, now = Date.now 
    * the update that brings (see write) puts the entry back where it was, reposts and all. Or it
    * doesn't, and the compactor sets the entry for deletion once it has been hidden for
    * REPOSTS_GONE_DAYS (see Compactor). Until then the server asks about the post again every
-   * GONE_RECHECK_MS (src/originSweep.ts).
+   * GONE_RECHECK_MS (compactor/src/sweep.rs).
    *
    * It is a numbered write of the entry, as an update is: the row is locked, the meta file is
    * read with every write that committed before, and `recheck` refuses word that is no newer

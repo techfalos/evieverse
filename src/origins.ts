@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { FastifyBaseLogger } from 'fastify';
-import { ATTESTATION_MAX_AGE_MS, ATTESTATION_SKEW_MS, AttestedGone, AttestedPost, POST_PATH, readAttestation, saysGone, signedBy, signingKeys } from './attestation.js';
-import type { PublishedKey } from './attestation.types.js';
+import { ATTESTATION_MAX_AGE_MS, ATTESTATION_SKEW_MS, postOf, readAttestation, signedBy, signingKeys } from './attestation.js';
+import type { AttestedGone, AttestedPost, PublishedKey } from './attestation.types.js';
 import { loadContent, publisherOf, requireMeta } from './content.js';
 import type { RouteDeps } from './deps.types.js';
 import { plainText } from './format.js';
@@ -17,7 +17,7 @@ import { MINUTE } from './time.js';
 import { requirePostType } from './upload.js';
 
 /** What `originEntries` works with: of what the routes that write posts share, what reads and writes an entry and checks an attestation. */
-export type OriginDeps = Pick<RouteDeps, 'db' | 'config' | 'content' | 'writer' | 'trustPlugins' | 'originKeys' | 'now'>;
+export type OriginDeps = Pick<RouteDeps, 'db' | 'config' | 'content' | 'writer' | 'trust' | 'originKeys' | 'now'>;
 
 /** What a later attestation did to the entry it is of (see originEntries' refresh). */
 export type Refreshed = RefreshedNone | RefreshedGone | RefreshedUpdated;
@@ -30,9 +30,9 @@ export const originHash = (url: string) => createHash('sha256').update(url).dige
  * attestation goes: checking one, reading what it says of a post, and bringing the entry of its
  * original up to it. It is what the routes do with an attestation a client brings (POST /repost,
  * POST /repost/refresh), and what the server does with one it asked the original's server for
- * itself (src/originSweep.ts).
+ * itself (the compactor's sweep, compactor/src/sweep.rs, which has its own of this).
  */
-export function originEntries({ db, config, content, writer, trustPlugins, originKeys, now = Date.now }: OriginDeps) {
+export function originEntries({ db, config, content, writer, trust, originKeys, now = Date.now }: OriginDeps) {
   const cut = previewCutter(config.feed);
   /** This server's own address, as an origin under it is told by. None: no address is known to be its own. */
   const ownBase = ownAddress(config.publicBaseUrl);
@@ -42,7 +42,7 @@ export function originEntries({ db, config, content, writer, trustPlugins, origi
   /** The id of the post an address names, if the address is one of this server's. */
   function ownContentId(url: string): string | null {
     if (ownBase === null) return null;
-    const id = POST_PATH.exec(url)?.[1];
+    const id = postOf(url)?.id;
     return id !== undefined && url === postAddress(ownBase, id) ? id : null;
   }
 
@@ -67,20 +67,19 @@ export function originEntries({ db, config, content, writer, trustPlugins, origi
   async function attested(attestation: string, asking: () => Promise<void>): Promise<AttestedPost | AttestedGone> {
     const read = readAttestation(attestation);
     if (!read) throw badRequest(msg('repost.attestation_invalid'));
-    const said = saysGone(read.payload) ? AttestedGone.safeParse(read.payload) : AttestedPost.safeParse(read.payload);
-    if (!said.success) throw badRequest(msg('repost.attestation_invalid'), said.error.issues);
-    const post = said.data;
+    if (!read.said) throw badRequest(msg('repost.attestation_invalid'), read.issues);
+    const post = read.said;
     const age = now() - post.issuedAt;
     if (age > ATTESTATION_MAX_AGE_MS || age < -ATTESTATION_SKEW_MS) throw badRequest(msg('repost.attestation_expired', { minutes: ATTESTATION_MAX_AGE_MS / MINUTE }));
 
     let key: PublishedKey | undefined;
     if (ownContentId(post.url) !== null) key = ownKeys.find(({ id }) => id === post.kid);
     else {
-      const server = post.url.replace(POST_PATH, '');
-      // The URL parser leaves out the port that is https's own, so one that is there is another.
-      if (!server.startsWith('https://') || new URL(post.url).port !== '') throw badRequest(msg('repost.origin_not_https'));
-      const found = await originKeys.find(server, post.kid, asking);
-      if (found === 'unavailable') throw new HttpError(502, msg('repost.origin_keys_unavailable', { server }));
+      // Asked over https only, on the port that is https's own.
+      const at = postOf(post.url);
+      if (!at?.asked) throw badRequest(msg('repost.origin_not_https'));
+      const found = await originKeys.find(at.server, post.kid, asking);
+      if (found === 'unavailable') throw new HttpError(502, msg('repost.origin_keys_unavailable', { server: at.server }));
       if (found !== 'unknown') key = found;
     }
     if (!key || !signedBy(key, read)) throw badRequest(msg('repost.attestation_unsigned'));
@@ -187,7 +186,7 @@ export function originEntries({ db, config, content, writer, trustPlugins, origi
     // there or named here.
     const taken = await removedRepostTags(db, row.id);
     const moderated = await moderatePost(
-      { db, config, trustPlugins, now, log },
+      { trust, now, log },
       { userId: row.user_id, contentId: row.id, tags: [...meta.tags.filter((tag) => !given.includes(tag) && !taken.includes(tag)), ...given], texts },
     );
     const queued = moderated.route === 'queue';

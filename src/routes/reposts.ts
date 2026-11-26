@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { MAX_ATTESTATION_CHARS, type AttestedPost } from '../attestation.js';
+import { MAX_ATTESTATION_CHARS } from '../attestation.js';
+import type { AttestedPost } from '../attestation.types.js';
 import { authenticate } from '../auth/apiKey.js';
 import type { AuthUser } from '../auth/apiKey.types.js';
 import { blocks } from '../blocks.js';
@@ -69,10 +70,10 @@ const RefreshBody = Credentials.extend({ origin: OriginFields });
  * And what keeps such an entry to what its original is (POST /repost/refresh).
  */
 export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
-  const { db, config, content, hot, writer, trustPlugins, now = Date.now } = deps;
+  const { db, config, content, hot, writer, trust, now = Date.now } = deps;
   const serverTags = allowedTags(config.tagging);
   const allowed = serverTags && new Set(serverTags);
-  /** What checks an attestation, reads a post from it, and brings an entry up to it: the same as the server's own asking does (src/originSweep.ts). */
+  /** What checks an attestation, reads a post from it, and brings an entry up to it: the same as the server's own asking does (compactor/src/sweep.rs). */
   const origins = originEntries(deps);
   const { ownKeys, ownContentId, summarised } = origins;
 
@@ -171,7 +172,7 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
    * Brings the server's entry for a post on another server up to what the post is now: the entry
    * holds the original's summary as it was when it was last attested, and learns what the
    * original became from a later attestation of it. The server asks the original's server for
-   * one itself, now and then (src/originSweep.ts); this is for one that anyone with an account
+   * one itself, now and then (compactor/src/sweep.rs); this is for one that anyone with an account
    * brings, which is sooner. It is checked as a repost's is (see attestedOrigin), and then does
    * what the server's own does (see originEntries' refresh). It says one of two things:
    *
@@ -280,7 +281,7 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
     const [meta, places] = await Promise.all([requireMeta({ db, content }, contentId), repostsOf(db, contentId)]);
     if (places.some((r) => r.tag === authorIndex(user.id))) throw alreadyReposted();
 
-    const moderated = await moderateRepost({ db, log: req.log }, { userId: user.id, publisherId: row.user_id, contentId, tags, texts: readableOf(meta) });
+    const moderated = await moderateRepost({ trust, now, log: req.log }, { userId: user.id, publisherId: row.user_id, contentId, tags, texts: readableOf(meta) });
     const given = repostedTags(places);
     const has = new Set([...meta.tags, ...given]);
     const removedTags: RemovedTag[] = [...moderated.removedTags, ...moderated.tags.filter((tag) => has.has(tag)).map((tag) => ({ tag, reason: 'already_tagged' as const }))];
@@ -314,13 +315,13 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
    * The summary is the original's server's word, as it signed it when the repost was made (see
    * attestedOrigin): this server doesn't read the original, then or later. What the original
    * becomes afterwards is seen here from a later attestation of it, which the server asks the
-   * original's server for now and then (src/originSweep.ts) and anybody can bring sooner (POST
+   * original's server for now and then (compactor/src/sweep.rs) and anybody can bring sooner (POST
    * /repost/refresh), and which is told from an earlier one by when this one was signed (see
    * ContentMeta.originAttestedAt).
    */
   async function repostFrom(req: FastifyRequest, reply: FastifyReply, user: AuthUser, sent: AttestedPost, hash: string, tags: string[]) {
     const { mimeType, origin, preview, texts } = summarised(sent);
-    const moderated = await moderatePost({ db, config, trustPlugins, now, log: req.log }, { userId: user.id, tags, texts });
+    const moderated = await moderatePost({ trust, now, log: req.log }, { userId: user.id, tags, texts });
     const queued = moderated.route === 'queue';
 
     const contentId = randomUUID();

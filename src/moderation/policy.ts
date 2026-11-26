@@ -1,14 +1,12 @@
-import type { FastifyBaseLogger } from 'fastify';
 import type { AuthUser } from '../auth/apiKey.types.js';
 import type { Db } from '../db/index.js';
 import type { ModeratorRole } from '../db/schema.js';
 import { plainText } from '../format.js';
 import { forbidden, unprocessable } from '../http/errors.js';
 import { msg } from '../language.js';
-import type { Moderated, ModerationDeps, RemovedTag } from './policy.types.js';
-import { routeOf, trustOf, type TrustRoute } from './trust.js';
-import type { TrustImage } from './trust.types.js';
-import { scanTexts } from './words.js';
+import type { Moderated, ModerationDeps } from './policy.types.js';
+import type { TrustEngine } from './trust.js';
+import type { Moderation, ReadImage, TrustImage, TrustRoute } from './trust.types.js';
 
 /**
  * Whether `user` works through the server's moderation queue: reads it and the content that waits
@@ -65,9 +63,33 @@ export async function setAdmin(db: Db, user: string, admin: boolean): Promise<{ 
 }
 
 /**
+ * The images as the trust plugins are given them: each read to a file here, with its hash. None
+ * on a server none of whose plugins reads images: nothing of an image is read for them, and one
+ * sent with an upload link stays in the content store.
+ */
+async function read(trust: TrustEngine, images: (TrustImage | undefined)[]): Promise<ReadImage[]> {
+  if (!trust.readsImages) return [];
+  const read: ReadImage[] = [];
+  for (const image of images) {
+    if (image) read.push({ mimeType: image.mimeType, filename: image.filename, file: await image.file(), sha256: await image.sha256() });
+  }
+  return read;
+}
+
+/** The texts there are among these: what is neither absent nor empty. */
+const said = (texts: (string | null | undefined)[]): string[] => texts.filter((text): text is string => !!text);
+
+/** What moderation answered; throws 422, with what the sender is told, for what it refused: nothing of that is stored. */
+function settled<T>(answer: Moderation<T>): T {
+  if ('ok' in answer) return answer.ok;
+  const { message, removedTags } = answer.refused;
+  throw unprocessable(message, removedTags && { removedTags });
+}
+
+/**
  * Moderation of a new comment by `userId` on the post `contentId`, or of an edit of one. It goes
- * through the gate a post does: the same trust plugins give it a score, each told it is a comment
- * (`commentOn`), and the same thresholds say where the score sends it (see routeOf). What there
+ * through the gate a post does: the same trust plugins give it a score, each told it is a comment,
+ * and the same thresholds say where the score sends it (`config.trust`). What there
  * is of it to read is its text, the name of the image or video it comes with (`filename`) and
  * what describes that image (`alt`), as a post's caption, filename and alternative texts are;
  * `image` is the image it comes with, if it is one, as a post's
@@ -77,30 +99,19 @@ export async function setAdmin(db: Db, user: string, admin: boolean): Promise<{ 
  * words, its mutes) doesn't reach the comments on posts under it: they have no say over comments.
  */
 export async function moderateComment(
-  { db, config, trustPlugins, now = Date.now, log, client }: ModerationDeps,
+  { trust, now = Date.now, log, client }: ModerationDeps,
   comment: { userId: string; contentId: string; text: string; filename?: string | null; alt?: string; image?: TrustImage },
 ): Promise<{ trustScore: number; route: Exclude<TrustRoute, 'delete'> }> {
-  const trust = await trustOf(
-    trustPlugins,
-    {
-      userId: comment.userId,
-      commentOn: comment.contentId,
-      tags: [],
-      // Its text as its readers read it: without its formatting, with where its links lead (format.ts).
-      texts: [plainText(comment.text, true), comment.filename, comment.alt].filter((text): text is string => !!text),
-      ...(comment.image && { images: [comment.image] }),
-    },
-    { db, config, now, log, client },
-  );
-  const route = routeOf(trust.score, config.trust);
-  if (route === 'delete') throw unprocessable(trust.reason ?? msg('comment.not_trusted'));
-  return { trustScore: trust.score, route };
+  const [image] = await read(trust, [comment.image]);
+  // Its text as its readers read it: without its formatting, with where its links lead (format.ts).
+  const sent = { userId: comment.userId, contentId: comment.contentId, texts: said([plainText(comment.text, true), comment.filename, comment.alt]), ...(image && { image }) };
+  return settled(await trust.ask('moderateComment', now(), { client, sent }, log));
 }
 
 /**
  * Moderation of what `userId` puts on their profile: a bio, links, an avatar, or whichever of them
  * the request sets. It goes through the gate a post does: the same trust plugins give it a score,
- * each told it is a profile (`profile`). What there is of it to read is the bio, as its readers
+ * each told it is a profile. What there is of it to read is the bio, as its readers
  * read it, the links, and the name the avatar was sent with (`filename`); `image` is the avatar,
  * as a post's images are given.
  *
@@ -112,22 +123,13 @@ export async function moderateComment(
  * That is all of it. A profile has no hashtags, so no hashtag's moderators have a say over it.
  */
 export async function moderateProfile(
-  { db, config, trustPlugins, now = Date.now, log, client }: ModerationDeps,
+  { trust, now = Date.now, log, client }: ModerationDeps,
   profile: { userId: string; bio?: string | null; links?: string[] | null; filename?: string | null; image?: TrustImage },
 ): Promise<void> {
-  const trust = await trustOf(
-    trustPlugins,
-    {
-      userId: profile.userId,
-      profile: true,
-      tags: [],
-      // The bio as its readers read it: without its formatting, with where its links lead (format.ts).
-      texts: [profile.bio ? plainText(profile.bio, true) : null, ...(profile.links ?? []), profile.filename].filter((text): text is string => !!text),
-      ...(profile.image && { images: [profile.image] }),
-    },
-    { db, config, now, log, client },
-  );
-  if (routeOf(trust.score, config.trust) !== 'allow') throw unprocessable(trust.reason ?? msg('user.profile_not_trusted'));
+  const [image] = await read(trust, [profile.image]);
+  // The bio as its readers read it: without its formatting, with where its links lead (format.ts).
+  const sent = { userId: profile.userId, texts: said([profile.bio ? plainText(profile.bio, true) : null, ...(profile.links ?? []), profile.filename]), ...(image && { image }) };
+  settled(await trust.ask<null>('moderateProfile', now(), { client, sent }, log));
 }
 
 /**
@@ -135,8 +137,8 @@ export async function moderateProfile(
  * there is of it to read: its text or caption, link, and filename. `images` is an image post's
  * images, for the plugins that look at pictures (see trustImage).
  *
- * The post is given a trust score by the trust plugins, each of which may lower it (see trustOf),
- * and the score says where the post goes (see routeOf; `config.trust` holds the thresholds). Throws
+ * The post is given a trust score by the trust plugins, each of which may lower it,
+ * and the score says where the post goes (`config.trust` holds the thresholds). Throws
  * 422 for a post whose score has it deleted: nothing of it is stored.
  *
  * Returns the hashtags the post gets, and those it doesn't with why: one its publisher is muted on,
@@ -146,21 +148,12 @@ export async function moderateProfile(
  * there already, and stays, in no hashtag's feed.
  */
 export async function moderatePost(
-  { db, config, trustPlugins, now = Date.now, log, client }: ModerationDeps,
+  { trust, now = Date.now, log, client }: ModerationDeps,
   post: { userId: string; contentId?: string; tags: string[]; texts: (string | null | undefined)[]; images?: TrustImage[] },
 ): Promise<Moderated> {
-  const { userId, contentId, tags, images } = post;
-  const texts = post.texts.filter((text): text is string => !!text);
-  const [trust, rules] = await Promise.all([
-    trustOf(trustPlugins, { userId, contentId, tags, texts, ...(images?.length ? { images } : {}) }, { db, config, now, log, client }),
-    tagRules(db, { userIds: [userId], contentId, tags }),
-  ]);
-  const route = routeOf(trust.score, config.trust);
-  if (route === 'delete') throw unprocessable(trust.reason ?? msg('moderation.not_trusted'));
-
-  const { kept, removedTags } = rules.apply(texts, log);
-  if (!kept.length && contentId === undefined) throw unprocessable(msg('moderation.no_tags_left'), { removedTags });
-  return { tags: kept, removedTags, trustScore: trust.score, route };
+  const images = await read(trust, post.images ?? []);
+  const sent = { userId: post.userId, contentId: post.contentId, tags: post.tags, texts: said(post.texts), ...(images.length && { images }) };
+  return settled(await trust.ask('moderatePost', now(), { client, sent }, log));
 }
 
 /**
@@ -174,49 +167,8 @@ export async function moderatePost(
  * nothing of what it says.
  */
 export async function moderateRepost(
-  { db, log }: Pick<ModerationDeps, 'db' | 'log'>,
+  { trust, now = Date.now, log }: Pick<ModerationDeps, 'trust' | 'now' | 'log'>,
   repost: { userId: string; publisherId: string; contentId: string; tags: string[]; texts: (string | null | undefined)[] },
 ): Promise<Pick<Moderated, 'tags' | 'removedTags'>> {
-  const { userId, publisherId, contentId, tags } = repost;
-  const { kept, removedTags } = (await tagRules(db, { userIds: [userId, publisherId], contentId, tags })).apply(repost.texts.filter((text): text is string => !!text), log);
-  return { tags: kept, removedTags };
-}
-
-/**
- * What hashtags' moderators keep that says whether content gets their hashtag: the mutes of
- * `userIds` on these `tags`, the hashtags a moderator removed from `contentId`, and their blocked
- * words. `apply` holds the hashtags to them, given what there is of the content to read.
- */
-async function tagRules(db: Db, { userIds, contentId, tags }: { userIds: string[]; contentId?: string; tags: string[] }) {
-  const [words, mutes, removals] = await Promise.all([
-    tags.length ? db.selectFrom('blocked_words').select(['tag', 'word']).where('tag', 'in', tags).execute() : [],
-    tags.length ? db.selectFrom('tag_mutes').select('tag').where('user_id', 'in', userIds).where('tag', 'in', tags).execute() : [],
-    contentId && tags.length
-      ? db.selectFrom('tag_moderation').select('tag').where('content_id', '=', contentId).where('decision', '=', 'removed').where('tag', 'in', tags).execute()
-      : [],
-  ]);
-  const lists = new Map<string, string[]>();
-  for (const { tag, word } of words) {
-    const list = lists.get(tag);
-    if (list) list.push(word);
-    else lists.set(tag, [word]);
-  }
-  const muted = new Set(mutes.map((r) => r.tag));
-  const removed = new Set(removals.map((r) => r.tag));
-
-  return {
-    apply: (texts: string[], log?: FastifyBaseLogger) => {
-      // With no hashtag's list that applies to the post, nothing needs reading.
-      const blocked = lists.size ? scanTexts(lists, [...texts, ...tags], log) : null;
-      const removedTags: RemovedTag[] = [];
-      return {
-        kept: tags.filter((tag) => {
-          const reason = muted.has(tag) ? 'muted' : removed.has(tag) ? 'removed' : blocked?.has(tag) ? 'blocked_word' : null;
-          if (reason) removedTags.push({ tag, reason });
-          return !reason;
-        }),
-        removedTags,
-      };
-    },
-  };
+  return settled(await trust.ask('moderateRepost', now(), { sent: { ...repost, texts: said(repost.texts) } }, log));
 }

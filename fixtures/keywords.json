@@ -1,0 +1,1051 @@
+{
+  "note": "Made by the TypeScript implementation (src/search/keywords.ts, src/tags.ts) before the Rust one (compactor/crates/core/src/search.rs, tags.rs) replaced it: the Rust tests are held to it. The words of a script written without spaces are where a dictionary says, and the Rust side reads its dictionaries otherwise than the API did: a post whose words it makes differently has them as `here`, written by the Rust test (UPDATE_FIXTURES=1), and is held to that.",
+  "posts": [
+    {
+      "text": "The **Café** in Mumbai's centre: café, #news and l'amour. A b",
+      "preview": {
+        "kind": "text",
+        "text": "The Café"
+      },
+      "tags": [
+        "mumbai"
+      ],
+      "max": 3,
+      "keywords": [
+        "cafe",
+        "mumbai",
+        "centre"
+      ]
+    },
+    {
+      "text": "one two two three three three four four four four",
+      "preview": {
+        "kind": "text",
+        "text": ""
+      },
+      "tags": [
+        "two",
+        "zzz"
+      ],
+      "max": 2,
+      "keywords": [
+        "four",
+        "three",
+        "two",
+        "zzz"
+      ]
+    },
+    {
+      "text": "one two two three three three four four four four",
+      "preview": {
+        "kind": "text",
+        "text": ""
+      },
+      "tags": [],
+      "max": 0,
+      "keywords": []
+    },
+    {
+      "text": "tie b a tie a b c",
+      "preview": {
+        "kind": "text",
+        "text": ""
+      },
+      "tags": [],
+      "max": 3,
+      "keywords": [
+        "tie"
+      ]
+    },
+    {
+      "preview": {
+        "kind": "text",
+        "text": "only the preview of an entry from another server"
+      },
+      "tags": [
+        "remote"
+      ],
+      "max": 10,
+      "keywords": [
+        "preview",
+        "entry",
+        "another",
+        "server",
+        "remote"
+      ]
+    },
+    {
+      "preview": {
+        "kind": "link",
+        "url": "https://example.com/a-link",
+        "text": "ignored words"
+      },
+      "tags": [
+        "links"
+      ],
+      "max": 10,
+      "keywords": [
+        "links"
+      ]
+    },
+    {
+      "preview": {
+        "kind": "image"
+      },
+      "tags": [
+        "photo"
+      ],
+      "max": 10,
+      "keywords": [
+        "photo"
+      ]
+    },
+    {
+      "text": "",
+      "preview": {
+        "kind": "image",
+        "text": "caption not read when text is empty"
+      },
+      "tags": [],
+      "max": 10,
+      "keywords": []
+    },
+    {
+      "text": "a caption with #Hashtags, ＃full_width and x#notatag plus #日本語 and # alone and ##double #a-b",
+      "preview": {
+        "kind": "image"
+      },
+      "tags": [
+        "hashtags"
+      ],
+      "max": 20,
+      "keywords": [
+        "caption",
+        "notatag",
+        "plus",
+        "alone",
+        "hashtags"
+      ]
+    },
+    {
+      "text": "don't can't we'll they've it's o'clock rock'n'roll ’quoted’ l’été ʼokina",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "don",
+        "clock",
+        "rock",
+        "roll",
+        "quoted",
+        "ete",
+        "okina"
+      ]
+    },
+    {
+      "text": "ÀÉÎÕÜ Straße STRASSE İstanbul ﬁne ΣΟΦΟΣ σοφός Ǆ ǅ ǆ",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "dz",
+        "σοφος",
+        "aeiou",
+        "straße",
+        "strasse",
+        "istanbul",
+        "fine"
+      ]
+    },
+    {
+      "text": "日本語のテキストです。東京都に住んでいます。",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "で",
+        "日本語",
+        "の",
+        "テキスト",
+        "す",
+        "東京",
+        "都",
+        "に",
+        "住",
+        "ん",
+        "い",
+        "ます"
+      ],
+      "here": [
+        "日本語",
+        "の",
+        "テキスト",
+        "です",
+        "東京",
+        "都",
+        "に",
+        "住",
+        "んで",
+        "いま",
+        "す"
+      ]
+    },
+    {
+      "text": "我爱北京天安门，中文分词测试。",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "我",
+        "爱",
+        "北京",
+        "天安门",
+        "中文",
+        "分词",
+        "测试"
+      ]
+    },
+    {
+      "text": "ภาษาไทยไม่มีช่องว่างระหว่างคำ",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "ภาษา",
+        "ไทย",
+        "ไม่มี",
+        "ช่อง",
+        "ว่าง",
+        "ระ",
+        "หว่าง",
+        "คํา"
+      ],
+      "here": [
+        "ภาษา",
+        "ไทย",
+        "ไม่มี",
+        "ช่อง",
+        "ว่าง",
+        "ระหว่าง",
+        "คํา"
+      ]
+    },
+    {
+      "text": "한국어 텍스트 입니다",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "한국어",
+        "텍스트",
+        "입니다"
+      ]
+    },
+    {
+      "text": "नमस्ते दुनिया, यह एक परीक्षण है",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "नमस्ते",
+        "दुनिया",
+        "यह",
+        "एक",
+        "परीक्षण",
+        "है"
+      ]
+    },
+    {
+      "text": "مرحبا بالعالم هذا اختبار",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "مرحبا",
+        "بالعالم",
+        "هذا",
+        "اختبار"
+      ]
+    },
+    {
+      "text": "שלום עולם זה מבחן",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "שלום",
+        "עולם",
+        "זה",
+        "מבחן"
+      ]
+    },
+    {
+      "text": "numbers 3.14 1,000 42 7 x y2k 2024-01-02 10:30 3rd v1.2.3 a1 1a",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "numbers",
+        "3.14",
+        "1,000",
+        "42",
+        "y2k",
+        "2024",
+        "01",
+        "02",
+        "10",
+        "30",
+        "3rd",
+        "v1.2.3",
+        "a1",
+        "1a"
+      ]
+    },
+    {
+      "text": "under_score snake_case_word kebab-case dot.name e-mail@example.com https://example.com/path",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "example.com",
+        "under_score",
+        "snake_case_word",
+        "kebab",
+        "case",
+        "dot.name",
+        "mail",
+        "https",
+        "path"
+      ]
+    },
+    {
+      "text": "long xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé 𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜 𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "long",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    },
+    {
+      "text": "emoji 😀 👍🏽 words 🇫🇷 flag e‍zwj a­b soft",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "emoji",
+        "words",
+        "flag",
+        "e‍zwj",
+        "a­b",
+        "soft"
+      ]
+    },
+    {
+      "text": "**bold** _it_ `code words` [label](https://example.com/hidden) > quote\n- item one\n- item two",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "item",
+        "bold",
+        "code",
+        "words",
+        "label",
+        "quote",
+        "one",
+        "two"
+      ]
+    },
+    {
+      "text": "the and of to a in is it that was",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [
+        "the"
+      ],
+      "max": 30,
+      "keywords": [
+        "the"
+      ]
+    },
+    {
+      "text": "é 中 я ω 1 a 가 あ",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 30,
+      "keywords": [
+        "中",
+        "я",
+        "ω",
+        "가",
+        "あ"
+      ]
+    },
+    {
+      "text": "Buy   NOW! limited offer, call 555-1234 today",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "buy",
+        "limited",
+        "offer",
+        "call",
+        "555",
+        "1234",
+        "today"
+      ]
+    },
+    {
+      "text": "这是垃圾广告内容,请勿相信",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "这",
+        "是",
+        "垃圾",
+        "广告",
+        "内容",
+        "请",
+        "勿",
+        "相信"
+      ]
+    },
+    {
+      "text": "CAFE au lait and a cafe, plus SPAM spam",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "cafe",
+        "spam",
+        "au",
+        "lait",
+        "plus"
+      ]
+    },
+    {
+      "text": "すごい? がり ぎり ガード ガード",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "り",
+        "ガード",
+        "す",
+        "ご",
+        "い",
+        "が",
+        "ぎ"
+      ],
+      "here": [
+        "ガード",
+        "すごい",
+        "がり",
+        "ぎり"
+      ]
+    },
+    {
+      "text": "promo at start? no. scammers scam",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "promo",
+        "start",
+        "scammers",
+        "scam"
+      ]
+    },
+    {
+      "text": "free money $100 FREEDOM xfree",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "free",
+        "money",
+        "100",
+        "freedom",
+        "xfree"
+      ]
+    },
+    {
+      "text": "aaaa bbbb heeeeello the the cat",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "aaaa",
+        "bbbb",
+        "heeeeello",
+        "cat"
+      ]
+    },
+    {
+      "text": "Привет мир ΑΒΓ σς Σ s K ẞ ß I i",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "ß",
+        "привет",
+        "мир",
+        "αβγ",
+        "σς",
+        "σ"
+      ]
+    },
+    {
+      "text": "😀😃😄 emoji 👍🏽 text 🇺🇸",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "emoji",
+        "text"
+      ]
+    },
+    {
+      "text": "line one\nline two\r\nline three sep nbsp﻿bom",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "line",
+        "one",
+        "two",
+        "three",
+        "sep",
+        "nbsp﻿bom"
+      ]
+    },
+    {
+      "text": "x",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": []
+    },
+    {
+      "text": "Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. ",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "lorem",
+        "ipsum",
+        "dolor",
+        "sit",
+        "amet",
+        "consectetur",
+        "adipiscing",
+        "elit",
+        "42",
+        "sed",
+        "eiusmod",
+        "tempor"
+      ]
+    },
+    {
+      "text": "ab aab aaab ba",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "ab",
+        "aab",
+        "aaab",
+        "ba"
+      ]
+    },
+    {
+      "text": "AEIOU aeiou Dz dz DZ",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "dz",
+        "aeiou"
+      ]
+    },
+    {
+      "text": "tel: +1 (555) 010-9999, email a.b@example.com, http://bad.example/path?q=1",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "tel",
+        "555",
+        "010",
+        "9999",
+        "email",
+        "a.b",
+        "example.com",
+        "http",
+        "bad.example",
+        "path"
+      ]
+    },
+    {
+      "text": "spam SPAM SpAm s.p.a.m s p a m 5pam",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "spam",
+        "s.p.a.m",
+        "5pam"
+      ]
+    },
+    {
+      "text": "a\tb  c d",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": []
+    },
+    {
+      "text": "१२३ ٣٤٥ 678",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "१२३",
+        "٣٤٥",
+        "678"
+      ]
+    },
+    {
+      "text": "CamelCaseWORDS and ALLCAPSSHOUTING",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "camelcasewords",
+        "allcapsshouting"
+      ]
+    },
+    {
+      "text": "abababababababababababababababababababababababababababababab",
+      "preview": {
+        "kind": "text"
+      },
+      "tags": [],
+      "max": 12,
+      "keywords": [
+        "abababababababababababababababababababababababababababababab"
+      ]
+    }
+  ],
+  "queries": [
+    [
+      "",
+      []
+    ],
+    [
+      " ",
+      []
+    ],
+    [
+      "cafe",
+      [
+        "cafe"
+      ]
+    ],
+    [
+      "Café  MUMBAI",
+      [
+        "cafe",
+        "mumbai"
+      ]
+    ],
+    [
+      "  The #Central-Mumbai café ",
+      [
+        "centralmumbai",
+        "cafe"
+      ]
+    ],
+    [
+      "the",
+      [
+        "the"
+      ]
+    ],
+    [
+      "the of",
+      [
+        "the",
+        "of"
+      ]
+    ],
+    [
+      "the #news",
+      [
+        "news"
+      ]
+    ],
+    [
+      "#news #News ＃ＮＥＷＳ",
+      [
+        "news"
+      ]
+    ],
+    [
+      "# ## #! #-",
+      []
+    ],
+    [
+      "mumbai's l'amour",
+      [
+        "mumbai",
+        "amour"
+      ]
+    ],
+    [
+      "a b c",
+      []
+    ],
+    [
+      "a",
+      []
+    ],
+    [
+      "é",
+      []
+    ],
+    [
+      "中",
+      [
+        "中"
+      ]
+    ],
+    [
+      "one two three four five six seven eight nine ten",
+      [
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight"
+      ]
+    ],
+    [
+      "one one one two",
+      [
+        "one",
+        "two"
+      ]
+    ],
+    [
+      "#one one",
+      [
+        "one"
+      ]
+    ],
+    [
+      "x#y",
+      []
+    ],
+    [
+      "日本語のテキスト",
+      [
+        "日本語",
+        "の",
+        "テキスト"
+      ]
+    ],
+    [
+      "tab\tseparated\nlines nbsp　wide",
+      [
+        "tab",
+        "separated",
+        "lines",
+        "nbsp",
+        "wide"
+      ]
+    ],
+    [
+      "snake_case kebab-case",
+      [
+        "snake_case",
+        "kebab",
+        "case"
+      ]
+    ],
+    [
+      "3.14 42 7",
+      [
+        "3.14",
+        "42"
+      ]
+    ],
+    [
+      "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx ok",
+      [
+        "ok"
+      ]
+    ],
+    [
+      "#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    ],
+    [
+      "ÀÉÎ straße",
+      [
+        "aei",
+        "straße"
+      ]
+    ],
+    [
+      "😀 emoji",
+      [
+        "emoji"
+      ]
+    ],
+    [
+      "'quoted' ’curly’",
+      [
+        "quoted",
+        "curly"
+      ]
+    ]
+  ],
+  "usernames": [
+    [
+      "José",
+      "jose"
+    ],
+    [
+      "ÀÉÎÕÜ",
+      "aeiou"
+    ],
+    [
+      "İstanbul",
+      "istanbul"
+    ],
+    [
+      "Straße",
+      "straße"
+    ],
+    [
+      "ﬁne",
+      "fine"
+    ],
+    [
+      "太郎",
+      "太郎"
+    ],
+    [
+      "ǅungla",
+      "dzungla"
+    ],
+    [
+      "①②③",
+      "123"
+    ],
+    [
+      "ΣΟΦΟΣ",
+      "σοφος"
+    ],
+    [
+      "ﷺﷺﷺﷺﷺﷺﷺﷺﷺﷺﷺﷺﷺﷺﷺﷺﷺﷺﷺﷺ",
+      "صلى الله عليه وسلمصلى الله عليه وسلمصلى الله عليه وسلمصلى الله عليه وسلمصلى الله عليه وسلمصلى الله عليه وسلمصلى الله عليه وسلمصلى الله عليه وسلمصلى الله عليه وسلمصلى الله عليه وسلمصلى الله عليه وسلمصلى الله عليه وسلمصلى الله عليه وسلمصلى الله عليه وسلمصلى"
+    ],
+    [
+      "ǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆǆ",
+      "dzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzdzd"
+    ],
+    [
+      "𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    [
+      "",
+      ""
+    ]
+  ],
+  "tags": [
+    [
+      "#Central-Mumbai",
+      "centralmumbai"
+    ],
+    [
+      "＃Café_1",
+      "cafe_1"
+    ],
+    [
+      "##",
+      null
+    ],
+    [
+      "",
+      null
+    ],
+    [
+      "#",
+      null
+    ],
+    [
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    [
+      "news",
+      "news"
+    ],
+    [
+      "NEWS",
+      "news"
+    ],
+    [
+      "new s",
+      "news"
+    ],
+    [
+      "ñandú",
+      "nandu"
+    ],
+    [
+      "日本語",
+      null
+    ],
+    [
+      "a_b",
+      "a_b"
+    ],
+    [
+      "_",
+      "_"
+    ],
+    [
+      "#_#",
+      "_"
+    ],
+    [
+      "ǅ",
+      "dz"
+    ],
+    [
+      "ﬁ",
+      "fi"
+    ],
+    [
+      "①",
+      "1"
+    ],
+    [
+      "½",
+      "12"
+    ],
+    [
+      "İ",
+      "i"
+    ],
+    [
+      "ß",
+      null
+    ],
+    [
+      "ẞ",
+      null
+    ],
+    [
+      "#a#b",
+      "ab"
+    ],
+    [
+      "x-y-z",
+      "xyz"
+    ],
+    [
+      "١٢٣",
+      null
+    ],
+    [
+      "123",
+      "123"
+    ]
+  ]
+}

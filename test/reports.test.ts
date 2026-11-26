@@ -2,8 +2,8 @@ import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
-import { HOUR } from '../src/time.js';
-import { as, createTestContext, requests, TARGETS, type TestContext, type User } from './helpers.js';
+import { HOUR, MINUTE } from '../src/time.js';
+import { as, BASE_ENV, createTestContext, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 const NO_CONTENT = '00000000-0000-4000-8000-000000000000';
 const NOT_REPORTED = 'the content has no reports waiting for a decision';
@@ -11,7 +11,7 @@ const NOT_A_MODERATOR = 'only an admin or a server moderator can do this';
 
 describe('REPORTS_PER_HOUR', () => {
   it('is 20 unless set, and 0 for no limit', () => {
-    const load = (env: Record<string, string> = {}) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', ...env }).reportsPerHour;
+    const load = (env: Record<string, string> = {}) => loadConfig({}, { ...BASE_ENV, ...env }).reportsPerHour;
     expect(load()).toBe(20);
     expect(load({ REPORTS_PER_HOUR: '0' })).toBe(0);
     expect(() => load({ REPORTS_PER_HOUR: '-1' })).toThrow();
@@ -237,10 +237,12 @@ for (const target of TARGETS) {
       ok(await report(carol, p2));
       expect(ids((await queue(root)).queue)).toEqual([p0, p1, p2]);
       expect((await queue(root)).queue.map((p: { reports: number }) => p.reports)).toEqual([1, 1, 1]);
-      if (target.hot === 'memory') {
-        ctx.clock.now += HOUR;
-        ok(await report(bob, p3));
-      }
+      // The hour is Redis's to count, from the first report: once it is over, the next is taken.
+      const [left] = Object.values(await ctx.lapse(`reports:${bob.userId}`));
+      expect(left).toBeGreaterThan(HOUR - MINUTE);
+      expect(left).toBeLessThanOrEqual(HOUR);
+      ctx.clock.now += HOUR;
+      ok(await report(bob, p3));
 
       // What its publisher deletes leaves the queue; what an update has held stays in it, to be decided on.
       ok(await req(alice, 'DELETE', `/content/${p0}`), 202);

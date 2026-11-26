@@ -1,6 +1,7 @@
-# The services this repo's compose files share. It isn't a stack of its own: docker-compose.yml,
-# docker-compose.server.yml and testbed/docker-compose.yml take their services from here with `extends`,
-# and add their own ports, volumes, dependencies and settings.
+# The services this repo's compose files share. It isn't a stack of its own: docker-compose.yml and
+# testbed/docker-compose.yml take their services from here with `extends`, and add their own ports,
+# volumes, dependencies and settings. (docker-compose.server.yml is one container that holds a whole
+# server, and takes nothing from here.)
 services:
   postgres:
     image: postgres:17
@@ -65,9 +66,10 @@ services:
       CONTENT_SCHEME: s3
       CONTENT_OPTIONS: '{"bucket":"evieverse","region":"us-east-1","endpoint":"http://s3:9000","access_key_id":"evieverse","secret_access_key":"evieverse-secret"}'
 
-  # The standalone compactor: the same image and settings, running the compactor instead of the API.
+  # The compactor: the same image and settings, running the compactor's program instead of the API.
+  # Every stack has one, beside however many of the API it runs.
   compactor:
     extends: app-s3
-    command: ['node', 'dist/compact/main.js']
+    command: ['compactor']
     healthcheck:
       disable: true

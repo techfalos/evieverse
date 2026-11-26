@@ -4,11 +4,9 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createCompactor } from '../src/compact/compactor.js';
 import { loadConfig } from '../src/config.js';
 import { createDb } from '../src/db/index.js';
 import { migrateToLatest } from '../src/db/migrator.js';
-import { bootstrap } from '../src/deps.js';
 import { checkSettings, migrateDeployment } from '../src/functions/deploy.js';
 import { GROUP_NAMES, type GroupName } from '../src/functions/groups.js';
 import { createFunction, functionConfig, type RouteFunction } from '../src/functions/handler.js';
@@ -17,39 +15,44 @@ import { EDGE_SECRET_HEADER, httpApiHandler, runLambda, toRequest, toResult } fr
 import type { HttpApiEvent } from '../src/functions/lambdaRuntime.types.js';
 import { loadLanguages } from '../src/language.js';
 import type { Message } from '../src/language.types.js';
-import { MemoryHotStore } from '../src/storage/index.js';
-import { readAudit, solution } from './helpers.js';
+import { createHotStore } from '../src/storage/index.js';
+import { startHarness } from './harness.js';
+import { BASE_ENV, readAudit, solution, TEST_REDIS_URL } from './helpers.js';
+
+/** A key prefix of a test's own in the tests' Redis, named after the directory the test keeps its files in. */
+const keyPrefixOf = (dir: string) => `test:${dir.split('/').pop()}:`;
 
 /**
- * The route groups as separate functions over one database file, one content directory and one hot
- * store, the way a deployment's functions share a database, a bucket and a Redis.
+ * The route groups as separate functions over one database file, one content directory and one
+ * Redis, each with connections of its own, the way a deployment's functions share a database, a
+ * bucket and a Redis.
  */
 async function deployment() {
   const dir = await mkdtemp(join(tmpdir(), 'evieverse-fn-'));
   const clock = { now: Date.UTC(2026, 10, 6, 12) };
   const now = () => clock.now;
-  const config = loadConfig(
-    {
-      logLevel: 'silent',
-      db: { dialect: 'sqlite', url: join(dir, 'db.sqlite'), poolSize: 2, migrateOnStart: false },
-      storage: {
-        content: { scheme: 'fs', options: { root: join(dir, 'content') } },
-        summaries: { scheme: 'fs', options: { root: join(dir, 'summaries') } },
-        tmpPath: join(dir, 'tmp'),
-      },
-      feed: { headCacheMs: 0 },
-      // A proof of work quick enough for tests, and an answer accepted at once: the clock stands still here.
-      challenge: { powBits: 8, minSolveMs: 0 },
-      postRateLimitPerMinute: 0,
+  const settings = {
+    logLevel: 'silent',
+    redis: { url: TEST_REDIS_URL, keyPrefix: keyPrefixOf(dir) },
+    db: { dialect: 'sqlite', url: join(dir, 'db.sqlite'), poolSize: 2, migrateOnStart: false },
+    storage: {
+      content: { scheme: 'fs', options: { root: join(dir, 'content') } },
+      summaries: { scheme: 'fs', options: { root: join(dir, 'summaries') } },
+      tmpPath: join(dir, 'tmp'),
     },
-    {},
-  );
-  const hot = new MemoryHotStore(now);
-  const opts = { now, hot, server: { logger: false } };
+    feed: { headCacheMs: 0 },
+    // A proof of work quick enough for tests, and an answer accepted at once: the clock stands still here.
+    challenge: { powBits: 8, minSolveMs: 0 },
+    postRateLimitPerMinute: 0,
+  };
+  const config = loadConfig(settings, {});
+  // The test's own connection to the functions' Redis: where it reads the challenges they ask for, and what it clears when it is done.
+  const hot = createHotStore(config.redis);
+  const opts = { now, server: { logger: false } };
   const fns = Object.fromEntries(GROUP_NAMES.map((group) => [group, createFunction(group, config, opts)])) as Record<GroupName, RouteFunction>;
-  /** The compactor is no function: it is a process of its own beside them, over the same database and stores. */
-  let beside: ReturnType<typeof bootstrap> | undefined;
-  const compact = async () => createCompactor(await (beside ??= bootstrap(config, now, hot))).runOnce();
+  /** The compactor is no function: it is a process of its own beside them, over the same database and stores, with the same settings. */
+  let beside: ReturnType<typeof startHarness> | undefined;
+  const compact = async () => (await (beside ??= startHarness(dir, settings, clock))).runOnce();
   /** What a deploy does once, before any function runs. */
   const migrate = async () => {
     const db = await createDb(config.db);
@@ -84,6 +87,8 @@ async function deployment() {
     async close() {
       for (const fn of Object.values(fns)) await fn.close();
       await (await beside)?.close();
+      await hot.clear();
+      await hot.close();
       await rm(dir, { recursive: true, force: true });
     },
   };
@@ -94,10 +99,9 @@ describe('functions', () => {
   afterEach(() => d?.close());
 
   it('gives functions settings for many short-lived instances, unless the environment says otherwise', () => {
-    const base = { EVIEVERSE_CONFIG: '/nonexistent.json' };
+    const base = BASE_ENV;
     expect(functionConfig(base)).toMatchObject({
       db: { migrateOnStart: false, poolSize: 2, idleTimeoutMs: 10_000 },
-      compact: { inProcess: false },
     });
     expect(functionConfig({ ...base, DB_POOL_SIZE: '5', DB_MIGRATE_ON_START: 'true', DB_IDLE_TIMEOUT_MS: '' }).db).toMatchObject({
       migrateOnStart: true,
@@ -175,7 +179,7 @@ describe('functions', () => {
 
   it('refuses requests that did not come through the edge when given its secret, except health checks', async () => {
     d = await deployment();
-    const fn = createFunction('feed', d.config, { hot: new MemoryHotStore(), server: { logger: false, edgeSecret: 's3cret' } });
+    const fn = createFunction('feed', d.config, { server: { logger: false, edgeSecret: 's3cret' } });
     const get = async (url: string, headers: Record<string, string> = {}) => (await fn.handle({ method: 'GET', url, headers })).statusCode;
     try {
       expect(await get('/feed?tags=news')).toBe(403);
@@ -288,8 +292,8 @@ describe('Lambda adapter', () => {
       // address a request is taken to come from is written down.
       const audit = join(d.dir, 'audit');
       const config = loadConfig({ ...d.config, trustProxy: 1, registerRateLimitPerHour: 2, audit: { scheme: 'fs', options: { root: audit } } }, {});
-      // Over the deployment's hot store, where the challenges it asks for are read from to be solved.
-      const fn = createFunction('api', config, { hot: d.hot, server: { logger: false } });
+      // Over the deployment's Redis, where the challenges it asks for are read from to be solved.
+      const fn = createFunction('api', config, { server: { logger: false } });
       const handler = httpApiHandler(fn, { edgeSecret: 's3cret' });
       const send = (body: object, client: string, headers: Record<string, string>) =>
         handler(
@@ -416,7 +420,7 @@ describe('Lambda adapter', () => {
     const stop = new AbortController();
     // As lambda.ts runs it: the settings are read by each invocation, here a bad set and then a good one.
     const settings = [deploySettings(dir, { TRUST_OPTIONAL_PLUGINS: 'urlhouse' }), deploySettings(dir)];
-    const loop = runLambda(() => migrateDeployment(settings.shift()!, { hot: new MemoryHotStore() }), { api: runtime.api, signal: stop.signal, log: () => {} });
+    const loop = runLambda(() => migrateDeployment(settings.shift()!), { api: runtime.api, signal: stop.signal, log: () => {} });
     await runtime.idle;
     stop.abort();
     await loop;
@@ -426,7 +430,7 @@ describe('Lambda adapter', () => {
     expect(runtime.calls).toEqual([
       {
         path: '/invocation/req-1/error',
-        body: expect.objectContaining({ errorMessage: expect.stringMatching(/^the functions would not start with these settings, so nothing was changed: TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't a folder of /) }),
+        body: expect.objectContaining({ errorMessage: expect.stringMatching(/^the functions would not start with these settings, so nothing was changed: TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't one of the trust plugins this server was built with: it has blocked_words, pdq, urlhaus/) }),
         errorType: 'Unhandled',
       },
       { path: '/invocation/req-2/response', body: { migrated: true, dialect: 'sqlite' }, errorType: undefined },
@@ -437,7 +441,8 @@ describe('Lambda adapter', () => {
 /** The settings of a deployment as its migrate step is given them: in the environment, as the functions are. */
 function deploySettings(dir: string, more: Record<string, string> = {}): Record<string, string> {
   return {
-    EVIEVERSE_CONFIG: '/nonexistent.json',
+    ...BASE_ENV,
+    REDIS_KEY_PREFIX: keyPrefixOf(dir),
     LOG_LEVEL: 'silent',
     DB_DIALECT: 'sqlite',
     DATABASE_URL: join(dir, 'db.sqlite'),
@@ -455,7 +460,6 @@ describe('the deploy step', () => {
   });
   afterEach(() => rm(dir, { recursive: true, force: true }));
 
-  const hot = () => ({ hot: new MemoryHotStore() });
   /** The tables of the deployment's database: none until the step has migrated it. */
   const tables = async () => {
     const db = await createDb({ dialect: 'sqlite', url: join(dir, 'db.sqlite'), poolSize: 1 });
@@ -470,21 +474,21 @@ describe('the deploy step', () => {
     const admin = { userId: '7b0e3a52-5f0c-4e06-9d6c-0d8b1f3f5a10', username: 'root', keyHash: 'a'.repeat(64) };
     const env = deploySettings(dir, { BOOTSTRAP_ADMIN: JSON.stringify(admin), TRUST_OPTIONAL_PLUGINS: 'urlhaus', URLHAUS_AUTH_KEY: 'KEY' });
     expect(await tables()).toEqual([]);
-    expect(await migrateDeployment(env, hot())).toEqual({
+    expect(await migrateDeployment(env)).toEqual({
       migrated: true,
       dialect: 'sqlite',
       admin: { userId: admin.userId, username: 'root', created: true, keyChanged: true, keyReplaced: false },
     });
     expect(await tables()).toContain('users');
     // Again, as every deploy that changes a setting runs it: nothing is left to do.
-    expect(await migrateDeployment(env, hot())).toMatchObject({ migrated: true, admin: { created: false, keyChanged: false } });
-    expect(await checkSettings(env, hot())).toMatchObject({ trust: { optionalPlugins: ['urlhaus'] }, db: { migrateOnStart: false } });
+    expect(await migrateDeployment(env)).toMatchObject({ migrated: true, admin: { created: false, keyChanged: false } });
+    expect(await checkSettings(env)).toMatchObject({ trust: { optionalPlugins: ['urlhaus'] }, db: { migrateOnStart: false } });
   });
 
   it('refuses settings a function would not start with, by name, and changes nothing', async () => {
     const refused: [Record<string, string>, RegExp][] = [
       // A typo in a plugin's name, which only loading the plugins finds.
-      [{ TRUST_OPTIONAL_PLUGINS: 'urlhouse' }, /TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't a folder of /],
+      [{ TRUST_OPTIONAL_PLUGINS: 'urlhouse' }, /TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't one of the trust plugins this server was built with: it has blocked_words, pdq, urlhaus/],
       [{ TRUST_OPTIONAL_PLUGINS: 'urlhaus' }, /TRUST_OPTIONAL_PLUGINS turns on urlhaus, which needs URLHAUS_AUTH_KEY/],
       // Settings that are refused when they are read.
       [{ TRUST_SCORE_DELETE_BELOW: '80' }, /TRUST_SCORE_DELETE_BELOW can be at most TRUST_SCORE_ALLOW_FROM/],
@@ -498,7 +502,7 @@ describe('the deploy step', () => {
       [{ TRUST_PROXY: 'yes please' }, /invalid IP address: yes/],
     ];
     for (const [setting, why] of refused) {
-      const failed = await migrateDeployment(deploySettings(dir, setting), hot()).then(
+      const failed = await migrateDeployment(deploySettings(dir, setting)).then(
         () => null,
         (err: Error) => err.message,
       );
@@ -506,7 +510,8 @@ describe('the deploy step', () => {
       expect(failed, JSON.stringify(setting)).toMatch(why);
       expect(await tables(), JSON.stringify(setting)).toEqual([]);
     }
-    // Functions share one feed index, so their settings need Redis: only a test stands in for it.
-    await expect(checkSettings(deploySettings(dir))).rejects.toThrow(/nothing was changed: functions need REDIS_URL/);
+    // Every process shares one feed index, which Redis holds: settings that name no Redis are refused like the rest.
+    await expect(checkSettings(deploySettings(dir, { REDIS_URL: '' }))).rejects.toThrow(/nothing was changed: redis\.url: REDIS_URL is not set/);
+    expect(await tables()).toEqual([]);
   });
 });

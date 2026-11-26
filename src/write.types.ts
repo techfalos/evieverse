@@ -40,7 +40,7 @@ export interface ContentWrite {
   stageBytes?: ((writeId: string) => Promise<StagedBytes>)[];
   /**
    * The file `stageBytes` stages is a video the server is to process before it is published
-   * (src/video): the write's commit says so in its row (see PostPayload.process) and adds the
+   * (compactor/src/video): the write's commit says so in its row (see PostPayload.process) and adds the
    * job the video worker takes (`media_jobs`). The compactor applies the write once the worker
    * has made the staged file what is published.
    */

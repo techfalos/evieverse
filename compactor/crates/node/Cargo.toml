@@ -1,0 +1,35 @@
+[package]
+name = "evieverse-node"
+description = "The addon the API loads: the Rust code it shares with the compactor (trust plugins, moderation policy, blocked words, attestations, requests to other servers), called from Node."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[lib]
+crate-type = ["cdylib"]
+
+# Not the workspace's lints: what makes a function one Node can call is written by a macro,
+# and is unsafe code by its nature. None is written here by hand.
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[features]
+# With the plugin a test configures (crates/trust/src/testing.rs). The tests build the addon
+# with it; a build that serves never does.
+test-plugin = ["evieverse-trust/test-plugin"]
+
+[dependencies]
+anyhow = "1.0.105"
+evieverse-core = { path = "../core" }
+evieverse-trust = { path = "../trust" }
+napi = { version = "3.16.3", features = ["napi8", "tokio_rt"] }
+napi-derive = "3.7.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+tokio = { version = "1.54.1", features = ["sync"] }
+
+[build-dependencies]
+napi-build = "2.7.0"

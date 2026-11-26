@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
-import { createTestContext, TARGETS, type TestContext } from './helpers.js';
+import { BASE_ENV, createTestContext, TARGETS, type TestContext } from './helpers.js';
 
 const APP = 'http://localhost:5173';
 
@@ -57,12 +57,12 @@ describe('CORS', () => {
 });
 
 describe('CORS_ORIGINS', () => {
-  const load = (CORS_ORIGINS: string) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', CORS_ORIGINS });
+  const load = (CORS_ORIGINS: string) => loadConfig({}, { ...BASE_ENV, CORS_ORIGINS });
 
   it('reads origins separated by commas or spaces, without trailing slashes', () => {
     expect(load('http://localhost:5173/, https://app.example.com  https://APP.example.com').corsOrigins).toEqual([APP, 'https://app.example.com']);
     expect(load('https://app.example.com *').corsOrigins).toEqual(['*']);
-    expect(loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json' }).corsOrigins).toEqual([]);
+    expect(loadConfig({}, BASE_ENV).corsOrigins).toEqual([]);
   });
 
   it('refuses anything but a scheme, host and port', () => {

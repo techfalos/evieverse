@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { setAdmin } from '../src/moderation/policy.js';
-import { MAX_LIST_PATTERNS, normalizeWord, PATTERN_BUDGET_MS, scanTexts, WordScanner } from '../src/moderation/words.js';
+import { MAX_LIST_PATTERNS, normalizeWord, PATTERN_BUDGET_MS, scanTexts } from '../src/moderation/words.js';
 import { insertPending, nextSeq } from '../src/pending.js';
 import { touchTags } from '../src/tags.js';
 import { as, createTestContext, multipart, PNG, queued, requests, TARGETS, type TestContext, type User } from './helpers.js';
@@ -24,27 +24,19 @@ describe('blocked words', () => {
     expect(normalizeWord('x'.repeat(101))).toBeNull();
   });
 
-  it('matches whole words and phrases, whatever their case, accents or chunks', () => {
-    const matched = (texts: string[][]) => {
-      const scanner = new WordScanner(new Map(Object.entries({ '*': ['spam'], news: ['buy now'], cafes: ['cafe'] })));
-      for (const chunks of texts) {
-        for (const chunk of chunks) scanner.feed(chunk);
-        scanner.end();
-      }
-      return [...scanner.matched].sort();
-    };
-    expect(matched([['This is SPAM!']])).toEqual(['*']);
-    expect(matched([['spammers, spammy, antispam']])).toEqual([]);
-    expect(matched([['Meet at the Café']])).toEqual(['cafes']);
-    expect(matched([['Buy... now']])).toEqual(['news']);
-    expect(matched([['Buy spam now']])).toEqual(['*']);
-    // Chunks cut anywhere read as one text, but separate texts don't run into each other.
-    expect(matched([['please b', 'uy', '  n', 'ow']])).toEqual(['news']);
-    expect(matched([['sp', 'am']])).toEqual(['*']);
-    expect(matched([['buy'], ['now']])).toEqual([]);
+  it('matches whole words and phrases, whatever their case or accents', async () => {
+    const lists = new Map(Object.entries({ '*': ['spam'], news: ['buy now'], cafes: ['cafe'] }));
+    const matched = async (...texts: string[]) => [...(await scanTexts(lists, texts)).matched].sort();
+    expect(await matched('This is SPAM!')).toEqual(['*']);
+    expect(await matched('spammers, spammy, antispam')).toEqual([]);
+    expect(await matched('Meet at the Café')).toEqual(['cafes']);
+    expect(await matched('Buy... now')).toEqual(['news']);
+    expect(await matched('Buy spam now')).toEqual(['*']);
+    // Separate texts don't run into each other.
+    expect(await matched('buy', 'now')).toEqual([]);
     // A word longer than any entry matches none, however long it runs on.
-    expect(matched([['spam'.repeat(100), 'spam']])).toEqual([]);
-    expect(matched([['x'.repeat(10_000), ' spam']])).toEqual(['*']);
+    expect(await matched('spam'.repeat(100))).toEqual([]);
+    expect(await matched(`${'x'.repeat(10_000)} spam`)).toEqual(['*']);
   });
 
   it('takes an entry between slashes for a pattern, and refuses one that is not a regular expression or matches everything', () => {
@@ -65,7 +57,7 @@ describe('blocked words', () => {
     expect(normalizeWord(`/${'x'.repeat(99)}/`)).toBeNull();
   });
 
-  it('matches patterns anywhere in a text, whatever its case, accents or width, and words as before', () => {
+  it('matches patterns anywhere in a text, whatever its case, accents or width, and words as before', async () => {
     const lists = {
       '*': ['/垃圾|广告/'],
       // A word only matches a whole run of a script written without spaces, which is what patterns are for.
@@ -78,42 +70,42 @@ describe('blocked words', () => {
       phrase: ['/buy.*now/'],
       digits: ['/\\d{3}-\\d{4}/'],
     };
-    const matched = (...texts: string[]) => [...scanTexts(new Map(Object.entries(lists)), texts)].sort();
-    expect(matched('这是垃圾邮件')).toEqual(['*']);
-    expect(matched('垃圾')).toEqual(['*', 'whole']);
-    expect(matched('Beware of SCAMMERS')).toEqual(['news']);
-    expect(matched('A rumour, and no rumours')).toEqual(['news']);
-    expect(matched('Promo codes')).toEqual(['news']);
-    expect(matched('A promo code')).toEqual([]);
-    expect(matched('Meet at the CAFÉ')).toEqual(['cafes']);
-    expect(matched('ｃａｆｅ')).toEqual(['cafes']);
-    expect(matched('Free SPAM', 'ｓｐａｍ')).toEqual(['wide']);
-    expect(matched('すごい？')).toEqual(['jp']);
-    expect(matched('すごい?')).toEqual(['jp']);
-    expect(matched('すごい')).toEqual([]);
+    const matched = async (...texts: string[]) => [...(await scanTexts(new Map(Object.entries(lists)), texts)).matched].sort();
+    expect(await matched('这是垃圾邮件')).toEqual(['*']);
+    expect(await matched('垃圾')).toEqual(['*', 'whole']);
+    expect(await matched('Beware of SCAMMERS')).toEqual(['news']);
+    expect(await matched('A rumour, and no rumours')).toEqual(['news']);
+    expect(await matched('Promo codes')).toEqual(['news']);
+    expect(await matched('A promo code')).toEqual([]);
+    expect(await matched('Meet at the CAFÉ')).toEqual(['cafes']);
+    expect(await matched('ｃａｆｅ')).toEqual(['cafes']);
+    expect(await matched('Free SPAM', 'ｓｐａｍ')).toEqual(['wide']);
+    expect(await matched('すごい？')).toEqual(['jp']);
+    expect(await matched('すごい?')).toEqual(['jp']);
+    expect(await matched('すごい')).toEqual([]);
     // One letter of the text is one of the pattern's, however either was typed.
-    expect(matched('ぎりぎり')).toEqual(['jp']);
-    expect(matched('き\u3099り')).toEqual(['jp']);
-    expect(matched('ガード')).toEqual(['jp']);
-    expect(matched('call 555-1234')).toEqual(['digits']);
+    expect(await matched('ぎりぎり')).toEqual(['jp']);
+    expect(await matched('き\u3099り')).toEqual(['jp']);
+    expect(await matched('ガード')).toEqual(['jp']);
+    expect(await matched('call 555-1234')).toEqual(['digits']);
     // Each text is read on its own.
-    expect(matched('buy it\nnow')).toEqual([]);
-    expect(matched('buy', 'now')).toEqual([]);
-    expect(matched('Buy it now')).toEqual(['phrase']);
+    expect(await matched('buy it\nnow')).toEqual([]);
+    expect(await matched('buy', 'now')).toEqual([]);
+    expect(await matched('Buy it now')).toEqual(['phrase']);
   });
 
-  it('counts a list as matched when its patterns take too long, and tells the log which one', () => {
-    const warn = vi.fn();
+  it('counts a list as matched when its patterns take too long, and tells the log which one', async () => {
     const lists = new Map(Object.entries({ slow: ['/quick/', '/(a+)+$/'], fine: ['/lazy/'], word: ['aaa', '/(a+)+$/'] }));
     const text = `${'a'.repeat(60)}!`;
     const started = performance.now();
-    expect([...scanTexts(lists, [text, 'aaa'], { warn })].sort()).toEqual(['slow', 'word']);
+    const slow = await scanTexts(lists, [text, 'aaa']);
+    expect([...slow.matched].sort()).toEqual(['slow', 'word']);
     // The list's time is all it took, and a list whose word matched ran no pattern.
     expect(performance.now() - started).toBeLessThan(PATTERN_BUDGET_MS * 3);
-    expect(warn.mock.calls).toEqual([[{ list: 'slow', pattern: '/(a+)+$/', budgetMs: PATTERN_BUDGET_MS }, expect.stringContaining('took too long')]]);
+    expect(slow.said).toEqual([{ level: 'warn', fields: { list: 'slow', pattern: '/(a+)+$/', budgetMs: PATTERN_BUDGET_MS }, msg: expect.stringContaining('took too long') }]);
     // What comes after is read as ever.
-    expect([...scanTexts(lists, ['the lazy dog'], { warn })]).toEqual(['fine']);
-    expect(warn).toHaveBeenCalledTimes(1);
+    const after = await scanTexts(lists, ['the lazy dog']);
+    expect([[...after.matched], after.said]).toEqual([['fine'], []]);
   });
 });
 
@@ -361,15 +353,17 @@ for (const target of TARGETS) {
         expect(Object.fromEntries((await feedOf(tag)).map((i) => [i.contentId, i.moderated]))).toEqual({ [untouched[tag]!]: false, [approved[tag]!]: true });
       }
 
-      // What takes an admin still does: the server's blocked words, who moderates a hashtag, and content that isn't theirs.
+      // What takes an admin still does: the server's blocked words, appointing a hashtag's moderator, and content that isn't theirs.
       const notTheirs: [method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: Record<string, unknown>][] = [
         ['GET', '/moderation/blocked-words'],
         ['POST', '/moderation/blocked-words', { words: ['rumour'] }],
         ['PUT', `/tags/news/moderators/${bob.userId}`],
-        ['DELETE', `/tags/news/moderators/${bob.userId}`],
         ['DELETE', `/content/${untouched.news}`],
       ];
       for (const [method, url, payload] of notTheirs) expect((await req(mod, method, url, payload)).statusCode, `${method} ${url}`).toBe(403);
+      // Ending a hashtag moderator's time is theirs too, on every hashtag.
+      ok(await req(root, 'PUT', `/tags/news/moderators/${bob.userId}`), 201);
+      expect(ok(await req(mod, 'DELETE', `/tags/news/moderators/${bob.userId}`), 200)).toEqual({ tag: 'news', userId: bob.userId, wasModerator: true });
 
       // No longer one: every hashtag is closed to them at once, and what they decided stays decided.
       ok(await req(root, 'DELETE', `/moderators/${mod.userId}`), 200);
@@ -534,12 +528,15 @@ for (const target of TARGETS) {
       const { contentId } = ok(await ctx.app.inject({ method: 'POST', url: '/store', payload: mp.payload, headers: mp.headers }));
       const link = await post(alice, '', { type: 'link', text: undefined, url: 'https://news.example/a', tags: ['links', 'news'] });
 
+      // Neither the server nor the compactor writes the file again.
       const putFile = vi.spyOn(ctx.content, 'putFile');
+      const written = [ctx.compactor.watch('content.putFile'), ctx.compactor.watch('content.putBytes')];
       expect(ok(await req(root, 'DELETE', `/content/${contentId}/tags/news`), 200)).toMatchObject({ tags: ['pics'] });
       expect(ok(await req(root, 'DELETE', `/content/${link.contentId}/tags/news`), 200)).toMatchObject({ tags: ['links'] });
       expect(await feedOf('news')).toEqual([]);
       await ctx.compact();
       expect(putFile).not.toHaveBeenCalled();
+      for (const watch of written) expect(watch.calls).toEqual([]);
       expect((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}/raw` })).rawPayload).toEqual(PNG);
       const preview = { kind: 'image', url: `/content/${contentId}/raw`, text: 'One pixel' };
       expect((await feedOf('pics'))[0]).toMatchObject({ preview, tags: ['pics'] });

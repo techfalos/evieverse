@@ -1,0 +1,563 @@
+{
+  "publicBaseUrl": "https://api.example.com",
+  "quality": 5,
+  "written": [
+    {
+      "name": "text",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "createdAt": 1793880000000,
+        "updatedAt": 1793880000000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "text/plain",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "news",
+          "world"
+        ],
+        "preview": {
+          "kind": "text",
+          "text": "hello #news\nand a second line, with \"quotes\" and ünïcödé 🎉"
+        }
+      },
+      "text": "1793880000000 1793880000000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews world\ntext\nhello #news\nand a second line, with \"quotes\" and ünïcödé 🎉",
+      "brotli": "G6AAAOT/bvoX+u/iu8Y2HGOBbtA4yqLsUHKDA/a3s2ShLRtsGnlcb3gppzQSLbmpbNqqZUk6IHJLKIMk25Yn+QFFSTXHcpJKpjky9MHci7QHtAEs7hHAzhAFUXBKHx0cvjBPyuDKglCzO/Kl4cu/kj8ef31+43+dCw==",
+      "decoded": {
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "createdAt": 1793880000000,
+        "updatedAt": 1793880000000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "text/plain",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "news",
+          "world"
+        ],
+        "preview": {
+          "kind": "text",
+          "text": "hello #news\nand a second line, with \"quotes\" and ünïcödé 🎉"
+        }
+      },
+      "redisKey": "sum:0198c0de-1111-4000-8000-000000000001",
+      "objectKey": "summaries/20762/0198c0de-1111-4000-8000-000000000001.br"
+    },
+    {
+      "name": "mentions",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "createdAt": 1793880000000,
+        "updatedAt": 1793962800000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "text/markdown",
+        "aiGenerated": true,
+        "comments": false,
+        "tags": [
+          "news"
+        ],
+        "preview": {
+          "kind": "text",
+          "text": "hi @bob"
+        },
+        "mentions": [
+          {
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "username": "bob"
+          }
+        ]
+      },
+      "text": "1793880000000 1793962800000 1 0 0 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/markdown\nnews\ntext\n{\"mentions\":[{\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"username\":\"bob\"}]}\nhi @bob",
+      "brotli": "G7sAAMSyufwadRldYlVboQHh4YO7EjWcJITwlpJvRiS3sSs4aliF40RdNm3VsiQwU8A2FEuZxEsmSbatXCpKvia8FthnvJRGKtNRPodoIIv5nsgPyUFfPDErOxz/i4OHrVfAwWJXwM08p3Qs4SCbM/zDPzUtc7M5Aw==",
+      "decoded": {
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "createdAt": 1793880000000,
+        "updatedAt": 1793962800000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "text/markdown",
+        "aiGenerated": true,
+        "comments": false,
+        "tags": [
+          "news"
+        ],
+        "preview": {
+          "kind": "text",
+          "text": "hi @bob"
+        },
+        "mentions": [
+          {
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "username": "bob"
+          }
+        ]
+      },
+      "redisKey": "sum:0198c0de-1111-4000-8000-000000000001",
+      "objectKey": "summaries/20762/0198c0de-1111-4000-8000-000000000001.br"
+    },
+    {
+      "name": "noTags",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "createdAt": 1793966400000,
+        "updatedAt": 1793966400000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "text/plain",
+        "aiGenerated": false,
+        "comments": false,
+        "tags": [],
+        "preview": {
+          "kind": "text",
+          "text": ""
+        }
+      },
+      "text": "1793966400000 1793966400000 0 0\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\n\ntext\n",
+      "brotli": "G1UAAETn1l8SoTDPdAgtOiU0go5x4P5wbfhgKw4esioaF6XtnOm+qCHkUwhaxuUrpdDRGkG0Ooau3+N2ogM=",
+      "decoded": {
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "createdAt": 1793966400000,
+        "updatedAt": 1793966400000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "text/plain",
+        "aiGenerated": false,
+        "comments": false,
+        "tags": [],
+        "preview": {
+          "kind": "text",
+          "text": ""
+        }
+      },
+      "redisKey": "sum:0198c0de-1111-4000-8000-000000000001",
+      "objectKey": "summaries/20763/0198c0de-1111-4000-8000-000000000001.br"
+    },
+    {
+      "name": "link",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000002",
+        "createdAt": 1793793600000,
+        "updatedAt": 1793793600000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a2",
+        "mimeType": "text/uri-list",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "links"
+        ],
+        "preview": {
+          "kind": "link",
+          "url": "https://example.com/a?b=c d"
+        }
+      },
+      "text": "1793793600000 1793793600000 0 1\n0198c0de-0000-4000-8000-0000000000a2\ntext/uri-list\nlinks\nlink\nhttps://example.com/a?b=c d",
+      "brotli": "G3gAAGTpmk9oIFf1SRxROjk/qH7nb2lgYRhgilHOQ0l0pzPbFC4oF5TlXrC5OQrgIviK1w1pg+gAb86/kHA3/82ecyDzcN2AXKdLBf197w+n0+FSvcjLtMIa",
+      "decoded": {
+        "contentId": "0198c0de-1111-4000-8000-000000000002",
+        "createdAt": 1793793600000,
+        "updatedAt": 1793793600000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a2",
+        "mimeType": "text/uri-list",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "links"
+        ],
+        "preview": {
+          "kind": "link",
+          "url": "https://example.com/a?b=c d"
+        }
+      },
+      "redisKey": "sum:0198c0de-1111-4000-8000-000000000002",
+      "objectKey": "summaries/20761/0198c0de-1111-4000-8000-000000000002.br"
+    },
+    {
+      "name": "image",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000002",
+        "createdAt": 1793707200000,
+        "updatedAt": 1793707200000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a2",
+        "mimeType": "image/png",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "art"
+        ],
+        "preview": {
+          "kind": "image",
+          "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000002/raw",
+          "text": "a caption"
+        }
+      },
+      "text": "1793707200000 1793707200000 0 1\n0198c0de-0000-4000-8000-0000000000a2\nimage/png\nart\nimage\na caption",
+      "brotli": "G2EAAES3+ftcHo80K1C/Uyr6IiLHOB9crn2ReaIN9xgb+iRT6Uu1aAab0gCYH6wEDR+YS1JJN3BCnJXejFW5Z1O+D1NyHw==",
+      "decoded": {
+        "contentId": "0198c0de-1111-4000-8000-000000000002",
+        "createdAt": 1793707200000,
+        "updatedAt": 1793707200000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a2",
+        "mimeType": "image/png",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "art"
+        ],
+        "preview": {
+          "kind": "image",
+          "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000002/raw",
+          "text": "a caption"
+        }
+      },
+      "redisKey": "sum:0198c0de-1111-4000-8000-000000000002",
+      "objectKey": "summaries/20760/0198c0de-1111-4000-8000-000000000002.br"
+    },
+    {
+      "name": "album",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000002",
+        "createdAt": 1793707200000,
+        "updatedAt": 1793707200000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a2",
+        "mimeType": "image/jpeg",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "art"
+        ],
+        "preview": {
+          "kind": "image",
+          "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000002/raw",
+          "text": "",
+          "imageCount": 3
+        }
+      },
+      "text": "1793707200000 1793707200000 0 1 0 3\n0198c0de-0000-4000-8000-0000000000a2\nimage/jpeg\nart\nimage\n",
+      "brotli": "G10AAES3+ftcHo80M1C/MyqCroicch4wJm1ZkMj5RDe8x1i2wWDrm+ppDp/SAbACVnxG0IyBuaSxNCIEa6/0aGyXc9em/n5EAg==",
+      "decoded": {
+        "contentId": "0198c0de-1111-4000-8000-000000000002",
+        "createdAt": 1793707200000,
+        "updatedAt": 1793707200000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a2",
+        "mimeType": "image/jpeg",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "art"
+        ],
+        "preview": {
+          "kind": "image",
+          "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000002/raw",
+          "imageCount": 3
+        }
+      },
+      "redisKey": "sum:0198c0de-1111-4000-8000-000000000002",
+      "objectKey": "summaries/20760/0198c0de-1111-4000-8000-000000000002.br"
+    },
+    {
+      "name": "described",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000002",
+        "createdAt": 1793707200000,
+        "updatedAt": 1793707200000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a2",
+        "mimeType": "image/jpeg",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "art"
+        ],
+        "preview": {
+          "kind": "image",
+          "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000002/raw",
+          "text": "three of them, for @bob",
+          "imageCount": 3,
+          "alt": [
+            "a cat",
+            "",
+            "a \"dog\"\n"
+          ]
+        },
+        "mentions": [
+          {
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "username": "bob"
+          }
+        ]
+      },
+      "text": "1793707200000 1793707200000 0 1 0 3 1\n0198c0de-0000-4000-8000-0000000000a2\nimage/jpeg\nart\nimage\n{\"alt\":[\"a cat\",\"\",\"a \\\"dog\\\"\\n\"],\"mentions\":[{\"userId\":\"0198c0de-0000-4000-8000-0000000000a2\",\"username\":\"bob\"}]}\nthree of them, for @bob",
+      "brotli": "G+kAAASiftv3V9LNZswTlZC/4tIY3jgfWMbraVgGfJ1o8EUG39eTXRYIzKRH+0Q7jN3QCqnUWJaEWmLb7oqtLDuOSquq9R7rnkNEVrLcUT+NVXPY6lblx1V6UDf5dJG8yKXMLzTQyOVNtbZv3gsfoMRZOkleN+cQ46wiYa2gzdyWfK5JKNaC5/OoqzvqWsRWZNbI5GmxFg==",
+      "decoded": {
+        "contentId": "0198c0de-1111-4000-8000-000000000002",
+        "createdAt": 1793707200000,
+        "updatedAt": 1793707200000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a2",
+        "mimeType": "image/jpeg",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "art"
+        ],
+        "preview": {
+          "kind": "image",
+          "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000002/raw",
+          "text": "three of them, for @bob",
+          "imageCount": 3,
+          "alt": [
+            "a cat",
+            "",
+            "a \"dog\"\n"
+          ]
+        },
+        "mentions": [
+          {
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "username": "bob"
+          }
+        ]
+      },
+      "redisKey": "sum:0198c0de-1111-4000-8000-000000000002",
+      "objectKey": "summaries/20760/0198c0de-1111-4000-8000-000000000002.br"
+    },
+    {
+      "name": "video",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000003",
+        "createdAt": 1793620800000,
+        "updatedAt": 1793620800005,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "video/mp4",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "clips"
+        ],
+        "preview": {
+          "kind": "video",
+          "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/raw",
+          "text": "a clip",
+          "video": {
+            "id": "0198c0de-2222-4000-8000-000000000001",
+            "width": 1280,
+            "height": 720,
+            "duration": 12.5,
+            "poster": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/media/0198c0de-2222-4000-8000-000000000001/poster.jpg",
+            "hls": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/media/0198c0de-2222-4000-8000-000000000001/master.m3u8"
+          }
+        }
+      },
+      "text": "1793620800000 1793620800005 0 1 0 0 1\n0198c0de-0000-4000-8000-0000000000a1\nvideo/mp4\nclips\nvideo\n{\"video\":{\"id\":\"0198c0de-2222-4000-8000-000000000001\",\"width\":1280,\"height\":720,\"duration\":12.5}}\na clip",
+      "brotli": "G8gAAMSszXyMyqymbA66c738K4anRxoQV5KmQdwKqC2Krtr1hsmjdpBmufy6ZUWUOuaMR5lIlGp5U01oRd6w7fyh+jFQRxQXq0wWZridsdwzw+RFDyhfOEqsE+e7FQ0ePlcMlOZyeviW80GZOXpo//e5oOAKku+TSpt1OgE=",
+      "decoded": {
+        "contentId": "0198c0de-1111-4000-8000-000000000003",
+        "createdAt": 1793620800000,
+        "updatedAt": 1793620800005,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "video/mp4",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "clips"
+        ],
+        "preview": {
+          "kind": "video",
+          "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/raw",
+          "text": "a clip",
+          "video": {
+            "id": "0198c0de-2222-4000-8000-000000000001",
+            "width": 1280,
+            "height": 720,
+            "duration": 12.5,
+            "poster": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/video/0198c0de-2222-4000-8000-000000000001/poster.jpg",
+            "hls": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/video/0198c0de-2222-4000-8000-000000000001/master.m3u8"
+          }
+        }
+      },
+      "redisKey": "sum:0198c0de-1111-4000-8000-000000000003",
+      "objectKey": "summaries/20759/0198c0de-1111-4000-8000-000000000003.br"
+    },
+    {
+      "name": "audio",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000003",
+        "createdAt": 1793620800000,
+        "updatedAt": 1793620800000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "audio/mpeg",
+        "aiGenerated": false,
+        "comments": false,
+        "tags": [
+          "music"
+        ],
+        "preview": {
+          "kind": "audio",
+          "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/raw",
+          "text": "a song"
+        }
+      },
+      "text": "1793620800000 1793620800000 0 0\n0198c0de-0000-4000-8000-0000000000a1\naudio/mpeg\nmusic\naudio\na song",
+      "brotli": "G2EAAMTy1r+kD+XnHuO/RcMk2LjBAXsFlCbWNuCKQ/Po2yeSE7Ot1VOJMOhg8oNBULeOMYVacsGCSJGm9P4I+81FB+Smxv+eBQ==",
+      "decoded": {
+        "contentId": "0198c0de-1111-4000-8000-000000000003",
+        "createdAt": 1793620800000,
+        "updatedAt": 1793620800000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "audio/mpeg",
+        "aiGenerated": false,
+        "comments": false,
+        "tags": [
+          "music"
+        ],
+        "preview": {
+          "kind": "audio",
+          "url": "https://api.example.com/content/0198c0de-1111-4000-8000-000000000003/raw",
+          "text": "a song"
+        }
+      },
+      "redisKey": "sum:0198c0de-1111-4000-8000-000000000003",
+      "objectKey": "summaries/20759/0198c0de-1111-4000-8000-000000000003.br"
+    },
+    {
+      "name": "origin",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000003",
+        "createdAt": 1793534400000,
+        "updatedAt": 1793534400000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "image/png",
+        "aiGenerated": true,
+        "comments": false,
+        "tags": [
+          "art"
+        ],
+        "preview": {
+          "kind": "image",
+          "url": "https://other.example/content/0198c0de-1111-4000-8000-000000000001/raw",
+          "text": "theirs",
+          "imageCount": 2
+        },
+        "origin": {
+          "url": "https://other.example/content/0198c0de-1111-4000-8000-000000000001",
+          "publisher": {
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "username": "a name with spaces"
+          }
+        }
+      },
+      "text": "1793534400000 1793534400000 1 0 1 2\n0198c0de-0000-4000-8000-0000000000a1\nimage/png\nart\nimage\nhttps://other.example/content/0198c0de-1111-4000-8000-000000000001 0198c0de-0000-4000-8000-0000000000a2 a name with spaces\ntheirs",
+      "brotli": "G90AAETVzdeoCjO2/Sf8Ti5AQJGHz2YHDlHXWlthCyTA9vbye/A3+W8al4+EiNm72vRj1L22ZnSjBeRfgfnop123eCABLl0xExWOH40tOr8H8ael8WbO+0bt6LY/hz4ib5qaHffwas76WRhHBU5GOINY2EYs",
+      "decoded": {
+        "contentId": "0198c0de-1111-4000-8000-000000000003",
+        "createdAt": 1793534400000,
+        "updatedAt": 1793534400000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "image/png",
+        "aiGenerated": true,
+        "comments": false,
+        "tags": [
+          "art"
+        ],
+        "preview": {
+          "kind": "image",
+          "url": "https://other.example/content/0198c0de-1111-4000-8000-000000000001/raw",
+          "text": "theirs",
+          "imageCount": 2
+        },
+        "origin": {
+          "url": "https://other.example/content/0198c0de-1111-4000-8000-000000000001",
+          "publisher": {
+            "userId": "0198c0de-0000-4000-8000-0000000000a2",
+            "username": "a name with spaces"
+          }
+        }
+      },
+      "redisKey": "sum:0198c0de-1111-4000-8000-000000000003",
+      "objectKey": "summaries/20758/0198c0de-1111-4000-8000-000000000003.br"
+    },
+    {
+      "name": "reposted",
+      "summary": {
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "createdAt": 1776686400000,
+        "updatedAt": 1776686400000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "text/plain",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "news",
+          "again"
+        ],
+        "preview": {
+          "kind": "text",
+          "text": "old news"
+        },
+        "repostedAt": [
+          1793793600000,
+          1793797200000,
+          1793962800000
+        ]
+      },
+      "text": "1776686400000 1776686400000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews again\ntext\nold news",
+      "brotli": "G2cAAETd1l/SQznuIPe2KPomGhTUKQcOWdKWYVF6xXuMXVPiKH2ppZi5ZeBg5wcrQat3jBCXElpcCFRN6ca/aXZSjb1xQJK05+AV7wA=",
+      "decoded": {
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "createdAt": 1776686400000,
+        "updatedAt": 1776686400000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "text/plain",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [
+          "news",
+          "again"
+        ],
+        "preview": {
+          "kind": "text",
+          "text": "old news"
+        }
+      },
+      "redisKey": "sum:0198c0de-1111-4000-8000-000000000001",
+      "objectKey": "summaries/20563/0198c0de-1111-4000-8000-000000000001.br"
+    }
+  ],
+  "stored": [
+    {
+      "name": "beforeComments",
+      "contentId": "0198c0de-1111-4000-8000-000000000001",
+      "text": "1793966400000 1793966400000 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews\ntext\nfrom before posts took comments",
+      "decoded": {
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "createdAt": 1793966400000,
+        "updatedAt": 1793966400000,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "text/plain",
+        "aiGenerated": true,
+        "comments": false,
+        "tags": [
+          "news"
+        ],
+        "preview": {
+          "kind": "text",
+          "text": "from before posts took comments"
+        }
+      }
+    },
+    {
+      "name": "fourNumbers",
+      "contentId": "0198c0de-1111-4000-8000-000000000001",
+      "text": "1793966400000 1793966400001 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\n\ntext\nno hashtags\n\nand two lines",
+      "decoded": {
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "createdAt": 1793966400000,
+        "updatedAt": 1793966400001,
+        "userId": "0198c0de-0000-4000-8000-0000000000a1",
+        "mimeType": "text/plain",
+        "aiGenerated": false,
+        "comments": true,
+        "tags": [],
+        "preview": {
+          "kind": "text",
+          "text": "no hashtags\n\nand two lines"
+        }
+      }
+    }
+  ]
+}

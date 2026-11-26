@@ -85,7 +85,7 @@ function decodePostCursor(cursor: string): { createdAt: number; id: string } {
  * it. The bio and the links are fields of PATCH /users/:userId, and the profile itself is
  * GET /users/:userId (routes/register.ts). Nothing of it is shown of a user who is banned.
  */
-export function profileRoutes(app: FastifyInstance, { db, config, content, summaries, trustPlugins, now = Date.now }: RouteDeps) {
+export function profileRoutes(app: FastifyInstance, { db, config, content, summaries, trust, now = Date.now }: RouteDeps) {
   const { dialect } = config.db;
   /** The image an avatar is made of is held to what an image post's image is (see readPost), and to a size of its own. */
   const limits = { tmpPath: config.storage.tmpPath, maxUploadBytes: Math.min(config.storage.maxUploadBytes, MAX_AVATAR_BYTES) };
@@ -150,7 +150,7 @@ export function profileRoutes(app: FastifyInstance, { db, config, content, summa
         throw err;
       }
       await moderateProfile(
-        { db, config, trustPlugins, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } },
+        { trust, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } },
         { userId, filename: image.filename, image: trustImage(image) },
       );
 

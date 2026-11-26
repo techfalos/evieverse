@@ -1,15 +1,21 @@
 # Evieverse API reference
 
-Every Evieverse instance serves the same HTTP API. Clients, the [CLI](CLI.md) and `curl` all use it. This reference says what each endpoint takes and returns.
+## Evieverse clients
 
-- [README.md](../README.md) introduces the project and how to run an instance.
-- [APP.md](APP.md#6-request-flows) explains what the server does with each request, and why.
+Evieverse is designed for single-page apps that each work with several instances at once. A client should:
 
-Names in capitals, such as `FEED_PAGE_SIZE`, are an instance's settings ([`.env.example`](../.env.example)). The values given with them are the defaults, which an instance may have changed.
+1. Allow the user to register on several instances with a single interface.
+2. Keep one set of credentials that unlocks the user's API key for each instance.
+3. Let the user set the parameters of each request, such as a feed's tags, window and algorithm.
+4. Syndicate a post to several instances by reposting it appropriately. 
 
-## Endpoints
+## The API
 
-"Anyone" needs no key. "Any user" is any account, with its key ([authentication](#authentication)).
+Every Evieverse instance serves the same HTTP API.
+
+### Endpoints
+
+"Any user" implies a user account and a key. See ([authentication](#authentication)).
 
 | Endpoint | Who can call it | What it does |
 | --- | --- | --- |
@@ -26,7 +32,7 @@ Names in capitals, such as `FEED_PAGE_SIZE`, are an instance's settings ([`.env.
 | [`POST /users/:userId/key`](#post-usersuseridkey) | The user, or an admin | Replaces the user's API key with a new one, and revokes the old one. |
 | [`DELETE /users/:userId`](#delete-usersuserid) | The user, or an admin | Deletes an account, and the posts it published. |
 | [`GET /users/:userId/export`](#get-usersuseridexport) | The user | The user's export of their own data: everything the instance holds of them, a page at a time. |
-| [`GET /whoami`](#get-whoami) | Any user | The account a key belongs to, its roles, whether it's banned, its language and its settings. |
+| [`GET /whoami`](#get-whoami) | Any user | The account a key belongs to, its roles, whether it's banned or barred from claiming hashtags, its language and its settings. |
 | [`GET /languages`](#get-languages) | Anyone | The languages the instance answers in. |
 | [`POST /store`](#post-store) | Any user | Creates a post, or updates one of the user's own. |
 | [`POST /uploads`](#post-uploads) | Any user | Gives a link for sending a large file straight to the content store. |
@@ -72,7 +78,7 @@ Names in capitals, such as `FEED_PAGE_SIZE`, are an instance's settings ([`.env.
 | [`GET /monetization/ads/:adId`](#keeping-the-ads) | Admins | One ad. |
 | [`PATCH /monetization/ads/:adId`](#keeping-the-ads) | Admins | Changes an ad. |
 | [`DELETE /monetization/ads/:adId`](#keeping-the-ads) | Admins | Deletes an ad, and its image. |
-| [`GET /rules`](#get-rules) | Anyone | The server's rules, its minimum age, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version. |
+| [`GET /rules`](#get-rules) | Anyone | The server's rules, its minimum age, what it says of content made with generative AI, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version. |
 | [`POST /rules`](#keeping-the-rules) | Admins | Adds a rule. |
 | [`PATCH /rules/:ruleId`](#keeping-the-rules) | Admins | Changes a rule's text, or its place among the others. |
 | [`DELETE /rules/:ruleId`](#keeping-the-rules) | Admins | Removes a rule. |
@@ -80,9 +86,8 @@ Names in capitals, such as `FEED_PAGE_SIZE`, are an instance's settings ([`.env.
 | [`POST /tags/:tag/rules`](#a-hashtags-rules) | The hashtag's moderators, server moderators, and admins | Adds a rule to the hashtag's. |
 | [`PATCH /tags/:tag/rules/:ruleId`](#a-hashtags-rules) | The hashtag's moderators, server moderators, and admins | Changes one of the hashtag's rules, or its place among the others. |
 | [`DELETE /tags/:tag/rules/:ruleId`](#a-hashtags-rules) | The hashtag's moderators, server moderators, and admins | Removes one of the hashtag's rules. |
-| [`POST /tags/:tag/claim`](#claiming-a-hashtag) | Any user, where publishers choose their posts' hashtags | Claims a hashtag that has no moderator, to moderate it. |
-| [`DELETE /tags/:tag/claim`](#claiming-a-hashtag) | The claim's user, server moderators, and admins | Withdraws a claim that waits, or refuses it. |
-| [The moderation endpoints](#moderation-endpoints) | Mostly admins and moderators | Roles, bans, blocked words, mutes, a hashtag's moderators and the claims to hashtags, the two kinds of moderation queue, a hashtag's log, and the report queue. |
+| [`POST /tags/:tag/claim`](#claiming-a-hashtag) | Any user, where publishers choose their posts' hashtags | Claims a hashtag that has no moderator: the user moderates it from then on. |
+| [The moderation endpoints](#moderation-endpoints) | Mostly admins and moderators | Roles, bans, who is barred from claiming hashtags, blocked words, mutes, a hashtag's moderators, the two kinds of moderation queue, a hashtag's log, and the report queue. |
 | [`/moderation/quarantine` and the endpoints under it](#the-quarantine) | Admins | The files that matched the server's list of hashes of known child sexual abuse material, where the server keeps them: listing them, reading one, recording the report made of it, and deleting one that was never reported. |
 | [`GET /cli` and the files under it](#the-cli-download) | Anyone | The CLI the instance ships. |
 | `GET /health` | Anyone | `{ "ok": true }`, for a load balancer to check. |
@@ -445,7 +450,7 @@ Every record says what it is in `type`. They come in this order, each kind in an
 
 | `type` | What it is | It has |
 | --- | --- | --- |
-| `account` | The account, once. | `userId`, `username`, `createdAt`, `usernameSetAt` (when the user registered, or last changed their name), their [profile](#a-users-profile) (`bio`, `links`, `avatarUrl`, and `pinnedContentIds`: every post they pinned, the one pinned last first, whether or not anyone else can read it now), `language` (`null` for the instance's default), `admin`, `moderator`, `messages`, `showFollowing`, `showFollowers`, and `bannedAt` (`null` unless they're banned). Not why they were banned, nor by whom. |
+| `account` | The account, once. | `userId`, `username`, `createdAt`, `usernameSetAt` (when the user registered, or last changed their name), their [profile](#a-users-profile) (`bio`, `links`, `avatarUrl`, and `pinnedContentIds`: every post they pinned, the one pinned last first, whether or not anyone else can read it now), `language` (`null` for the instance's default), `admin`, `moderator`, `messages`, `showFollowing`, `showFollowers`, `bannedAt` (`null` unless they're banned), and `claimsBarredAt` (`null` unless they're [barred from claiming hashtags](#barring-a-user-from-claiming)). Not why they were banned or barred, nor by whom. |
 | `apiKey` | Each API key the account has had. Never the key. | `keyId`, `createdAt`, `revokedAt` |
 | `post` | Each of the user's posts, oldest first, as [`GET /content/:contentId`](#get-contentcontentid) gives it to its publisher. Posts that wait in the moderation queue are there, with their `status`; posts set for deletion aren't. | `contentId`, `preview`, `text`, `mentions`, `tags`, `mimeType`, `comments`, `size`, `images`, `likes`, `aiGenerated`, `contentUrl`, `createdAt`, `updatedAt`, and `origin` on a repost of a post on another server |
 | `comment` | Each [comment](#comments) the user wrote, oldest first, with the ones that wait in the moderation queue (`status: "pending_review"`). | `commentId`, `contentId`, `parentId`, `text`, `mentions`, `aiGenerated`, `media`, `createdAt`, `editedAt`. Not its likes or its replies, which are what others did. |
@@ -479,7 +484,7 @@ What to know about it:
 
 ### `GET /whoami`
 
-Authenticated. Returns the account the key belongs to, its language, its roles and its settings: `{ userId, username, language, admin, moderator, moderates, banned, messages, showFollowing, showFollowers }`, with `admin`, `moderator` and `moderates` as in the profile. `banned` is whether a moderator [banned](#bans) the account, which can't then post, comment, like or send messages. `language` is the code of the language the instance answers the user in, `messages` is whether the user takes part in [messages between users](#post-messages), and `showFollowing` and `showFollowers` are whether they show whom they [follow](#following) and who follows them. The [CLI](CLI.md) checks a key with it when you sign in.
+Authenticated. Returns the account the key belongs to, its language, its roles and its settings: `{ userId, username, language, admin, moderator, moderates, banned, claimsBarred, messages, showFollowing, showFollowers }`, with `admin`, `moderator` and `moderates` as in the profile. `banned` is whether a moderator [banned](#bans) the account, which can't then post, comment, like or send messages. `claimsBarred` is whether a moderator [barred it from claiming hashtags](#barring-a-user-from-claiming). `language` is the code of the language the instance answers the user in, `messages` is whether the user takes part in [messages between users](#post-messages), and `showFollowing` and `showFollowers` are whether they show whom they [follow](#following) and who follows them. The [CLI](CLI.md) checks a key with it when you sign in.
 
 ### `GET /languages`
 
@@ -1345,7 +1350,7 @@ Who can read the two lists:
 ## Inbox
 
 Every user has an inbox, which only they can read. Two things arrive in it:
-- Notices from the server, when a moderator or an admin does something to one of the user's posts or comments, or mutes them on a hashtag, when they're made a moderator of a hashtag or are one no more, when their [claim to a hashtag](#claiming-a-hashtag) is granted or refused, and when a post or a comment [mentions](#mentions) them. Admins and server moderators also get one when a user claims a hashtag, and an admin when the server finds an image or a video of known child sexual abuse material ([below](#notices)).
+- Notices from the server, when a moderator or an admin does something to one of the user's posts or comments, or mutes them on a hashtag, when they're made a moderator of a hashtag or are one no more, when they're [barred from claiming hashtags](#barring-a-user-from-claiming) or can claim them again, and when a post or a comment [mentions](#mentions) them. Admins and server moderators also get one when a user claims a hashtag, and an admin when the server finds an image or a video of known child sexual abuse material ([below](#notices)).
 - Messages from other users, unless the user turned those off or blocked the sender.
 
 ### Reading the inbox
@@ -1376,7 +1381,7 @@ A path naming another user's inbox gets `403`, for admins too. Messages and noti
 
 ### Notices
 
-A notice has no `from`, except the notice of a [mention](#mentions): its `from` is who wrote the post or the comment, as a message's is who sent it, and `null` once their account is gone. Its `kind` says what happened, `text` says it in the reader's [language](#get-languages), and it names the post (`contentId`) and hashtag (`tag`) it's about, where there is one. `excerpt` is the start of the post, at most 200 characters (its text or caption without its [formatting](TEXT_EDITORS.md), or a link's URL), so the publisher can tell which post it was once it's gone. A notice about a comment names the post the comment is on, and its `excerpt` is the start of the comment instead. The last two kinds of the table quote nothing, and have `details` in place of an `excerpt` ([below](#an-image-that-matches-the-servers-list)). So has `tag_claimed`, whose `details` are `{ userId, username, reviewUntil }`: who claims the hashtag, and until when the claim can be refused.
+A notice has no `from`, except the notice of a [mention](#mentions): its `from` is who wrote the post or the comment, as a message's is who sent it, and `null` once their account is gone. Its `kind` says what happened, `text` says it in the reader's [language](#get-languages), and it names the post (`contentId`) and hashtag (`tag`) it's about, where there is one. `excerpt` is the start of the post, at most 200 characters (its text or caption without its [formatting](TEXT_EDITORS.md), or a link's URL), so the publisher can tell which post it was once it's gone. A notice about a comment names the post the comment is on, and its `excerpt` is the start of the comment instead. The last two kinds of the table quote nothing, and have `details` in place of an `excerpt` ([below](#an-image-that-matches-the-servers-list)). So has `tag_claimed`, whose `details` are `{ userId, username }`: who claimed the hashtag.
 
 | `kind` | What happened | It has |
 | --- | --- | --- |
@@ -1388,11 +1393,10 @@ A notice has no `from`, except the notice of a [mention](#mentions): its `from` 
 | `tag_muted` | A moderator muted the user on a hashtag. | `tag` |
 | `tag_unmuted` | A moderator ended the mute. | `tag` |
 | `tag_moderator_added` | An admin, or a moderator of the hashtag, made the user a [moderator of it](#a-hashtags-moderators). | `tag` |
-| `tag_moderator_removed` | One of them ended the user's time as a moderator of the hashtag. | `tag` |
+| `tag_moderator_removed` | One of them, or a server moderator, ended the user's time as a moderator of the hashtag. | `tag` |
 | `tag_moderator_lapsed` | The user's time as a moderator of the hashtag ended by itself: they [did nothing as its moderator](#a-hashtags-moderators) for too long (`TAG_MODERATOR_INACTIVE_DAYS`). | `tag` |
-| `tag_claimed` | For admins and server moderators: a user [claimed a hashtag](#claiming-a-hashtag), and becomes its moderator at `reviewUntil` unless one of them refuses the claim before (`DELETE /tags/:tag/claim`). | `tag`, `details` |
-| `tag_claim_granted` | The user's claim to a hashtag went through: they're a moderator of it now. | `tag` |
-| `tag_claim_refused` | The user's claim to a hashtag was refused: by an admin or a server moderator, because the hashtag was given another moderator meanwhile, or because the user was banned while it waited. | `tag` |
+| `tag_claimed` | For admins and server moderators: a user [claimed a hashtag](#claiming-a-hashtag), and moderates it now. Any of them can end that (`DELETE /tags/:tag/moderators/:userId`), and bar the user from claiming hashtags (`PUT /claim-barred/:userId`). | `tag`, `details` |
+| `tag_claim_granted`, `tag_claim_refused` | No longer sent. They're from when a claim waited before it was granted, and say that the user's claim to a hashtag went through, or was refused. An inbox that has one still shows it. | `tag` |
 | `comment_accepted` | A server moderator or an admin accepted the user's [comment](#comments) from the moderation queue: it's published. | `contentId`, `excerpt` |
 | `comment_rejected` | They rejected it there: it's deleted. | `contentId`, `excerpt` |
 | `comment_deleted` | Someone else deleted the user's comment: the post's publisher, an admin, or a server moderator or an admin from the report queue. | `contentId`, `excerpt` |
@@ -1404,6 +1408,8 @@ A notice has no `from`, except the notice of a [mention](#mentions): its `from` 
 | `comment_video_refused` | The server didn't trust the video of the user's comment: the comment isn't published, its text neither. | `contentId`, `excerpt` |
 | `user_banned` | A server moderator or an admin [banned](#bans) the user. | |
 | `user_unbanned` | They ended the ban. | |
+| `claims_barred` | A server moderator or an admin [barred the user from claiming hashtags](#barring-a-user-from-claiming). | |
+| `claims_unbarred` | They let the user claim hashtags again. | |
 | `post_mention` | A post that was published [mentions](#mentions) the user, in its text or caption. | `from`, `contentId`, `excerpt` |
 | `comment_mention` | A comment that was published mentions the user. `contentId` is the post it's on, and `excerpt` the start of the comment. | `from`, `contentId`, `commentId`, `excerpt` |
 | `csam_match_refused` | For admins, on a server that runs the `pdq` [trust plugin](#moderation): an image someone sent matches the server's list of hashes of known child sexual abuse material, and the post or comment was refused. | `details`, and `contentId` for an update or a comment |
@@ -1411,7 +1417,7 @@ A notice has no `from`, except the notice of a [mention](#mentions): its `from` 
 | `csam_video_refused` | For admins, on a server that runs `pdq` and [processes videos](#videos): a picture of a video someone sent matches the list, and the video was refused. | `details`, `contentId` |
 
 - A notice doesn't say which moderator or admin it was, and a `comment_deleted` notice doesn't say whether it was one of them or the post's publisher.
-- Nobody gets a notice of what they did themselves: a moderator who removes a hashtag from their own post, say, or one who stops moderating a hashtag, or a user who withdraws their claim.
+- Nobody gets a notice of what they did themselves: a moderator who removes a hashtag from their own post, say, or one who stops moderating a hashtag, or a user who claims one.
 - There's no notice when a post is approved under a hashtag, or when a post or a comment is reported. A post that's refused or held when it's sent has that in the response to `POST /store`, not in a notice, and likewise a comment: whoever sent it gets no notice, whatever the admins get of it. Nor is there one for the comments that go when their post is deleted, or for a new comment on a user's post.
 - Notices can't be turned off, and they don't count towards any limit. A [block](#blocks) stops one kind only: the notices of mentions between the two users.
 - A client should show a `kind` it doesn't know by its `text`: later versions may add kinds.
@@ -1814,7 +1820,7 @@ What else to know:
 
 ### `GET /rules`
 
-Gives the server's rules, its minimum age, the email address to write to for support, and its modification disclosure. It needs no key, so a client can show all four to someone before they register.
+Gives the server's rules, its minimum age, what it says of content made with generative AI, the email address to write to for support, and its modification disclosure. It needs no key, so a client can show all five to someone before they register.
 
 ```bash
 curl localhost:3000/rules
@@ -1825,6 +1831,7 @@ curl localhost:3000/rules
   "modificationDisclosure": { "modified": true, "release": "0.1.0", "sourceUrl": "https://git.example.com/our-evieverse" },
   "supportEmail": "support@example.com",
   "minimumAge": 13,
+  "genAi": "disclosure_required",
   "rules": [
     { "ruleId": "0b7c0f5e-…", "position": 1, "text": "Be kind.", "createdAt": "2026-11-15T14:02:00.000Z", "updatedAt": "2026-11-15T14:02:00.000Z" },
     { "ruleId": "5e1a9d42-…", "position": 2, "text": "No spam.", "createdAt": "2026-11-15T14:03:00.000Z", "updatedAt": "2026-11-15T14:03:00.000Z" }
@@ -1839,11 +1846,9 @@ curl localhost:3000/rules
 | `modificationDisclosure.sourceUrl` | Where the server's source code can be obtained: an `http` or `https` address (`EVIEVERSE_SOURCE_URL`). A modified version always gives one. Otherwise `null`, unless the operator set one. |
 | `supportEmail` | The email address to write to for support, which the server's operator sets (`SUPPORT_EMAIL`). It's always there: a server whose operator set none gives `noreply@yoururl.com`, a placeholder that nobody reads. The server sends it nothing, and no request changes it. |
 | `minimumAge` | The youngest a person may be to use the server, which the server's operator sets (`MINIMUM_AGE`): a number of years, such as `13`. A server whose operator set none gives the string `"All Legal Ages Allowed"` in its place, in the language the request's `Accept-Language` header asks for, so it's always there: a number is an age, and a string is what to show where there is none. The server asks nobody's age and holds nobody to it, and no request changes it. |
+| `genAi` | What the server says of content made with generative AI, which the server's operator sets (`GEN_AI`). It's always there, and one of three: `"disclosure_optional"` (it's allowed, and its author may declare that it was created with AI), which is what a server whose operator set none gives; `"disclosure_required"` (it's allowed, and its author has to declare it); `"not_allowed"` (it isn't allowed). It's the same word in every language, for a client to show in its own. The declaration is the `aiGenerated` a post is sent with ([`POST /store`](#post-store)), and a comment. The server doesn't hold anyone to it yet: whatever it says, a post or a comment is taken with the declaration or without it. No request changes it. |
 | `rules` | Every rule, in the order the admins gave them. It's the whole list: there are no pages, and a server has at most 100. `[]` where there are none. |
-| `ruleId` | The rule's id, which the admin endpoints take. |
-| `position` | The rule's place in the list, counted from 1. |
-| `text` | The rule, as its admin wrote it: at most 2,000 characters. |
-| `createdAt`, `updatedAt` | When the rule was added, and when its text or its place was last changed. A rule that moved only because another was added, moved or removed keeps its `updatedAt`. |
+| `rules[].createdAt`, `rules[].updatedAt` | When the rule was added, and when its text or its place was last changed. A rule that moved only because another was added, moved or removed keeps its `updatedAt`. |
 
 The server gives the rules and does nothing else with them: no post is checked against a rule. What it enforces is under [Moderation](#moderation).
 
@@ -1903,7 +1908,7 @@ There are three queues to decide on. The first two hold [comments](#comments) as
 
 **Server moderators** are appointed by an admin (`PUT /moderators/:userId`) to work through [the moderation queue](#the-moderation-queue) and [the report queue](#the-report-queue), so that doesn't take an admin. They can read the moderation queue and the posts and comments waiting in it, and accept or reject each; and read the report queue and the reports of each post or comment in it, and accept or delete each. They can also do whatever a tag moderator can, on every hashtag, without being appointed to any. That's all the role gives:
 - They can't delete published content or a published comment that nobody has reported, or anyone else's outside the two queues.
-- They can't keep the server's blocked words, or appoint anyone, a hashtag's moderators included. They can refuse a [claim to a hashtag](#claiming-a-hashtag), as an admin can.
+- They can't keep the server's blocked words, or appoint anyone, a hashtag's moderators included. They can [remove any hashtag's moderator](#a-hashtags-moderators) at any time, and [bar a user from claiming hashtags](#barring-a-user-from-claiming), as an admin can.
 
 Admins and moderators can do all of it with the [CLI](CLI.md) the server ships, which signs in with their own API key.
 
@@ -1917,28 +1922,28 @@ Admins and moderators can do all of it with the [CLI](CLI.md) the server ships, 
 - set the hashtag's [rules](#a-hashtags-rules);
 - appoint other moderators of the hashtag, and remove the ones who became one after them.
 
-Server moderators and admins can do all of that but the last on every hashtag, without being appointed to it. The last is an admin's on every hashtag, and not a server moderator's.
+Server moderators and admins can do all of that but the last on every hashtag, without being appointed to it. Of the last, appointing is an admin's on every hashtag, and not a server moderator's; removing is both's, of any of a hashtag's moderators, at any time.
 
 A tag moderator has no say over comments. A hashtag's blocked words and mutes apply to posts alone, and a comment on a post under the hashtag isn't its moderators' to accept, reject or delete.
 
 A user's profile (`GET /users/:userId`) shows whether they're an `admin` or a server moderator (`moderator`), and the hashtags they moderate (`moderates`). `moderates` lists the hashtags a user was appointed to or claimed, so it's empty for an admin or a server moderator who has neither, though they moderate every hashtag.
 
-**Server moderators and admins can [ban](#bans) a user**, and admins can delete any [account](#delete-usersuserid).
+**Server moderators and admins can [ban](#bans) a user**, or [bar one from claiming hashtags](#barring-a-user-from-claiming), and admins can delete any [account](#delete-usersuserid).
 
 ### A hashtag's moderators
 
-`GET /tags/:tag/moderators` lists a hashtag's moderators, to anyone, in the order they became one: `{ tag, moderators: [{ userId, username, since }] }`, and `claim` too while a [claim to the hashtag](#claiming-a-hashtag) waits.
+`GET /tags/:tag/moderators` lists a hashtag's moderators, to anyone, in the order they became one: `{ tag, moderators: [{ userId, username, since }] }`.
 
-**Appointing.** `PUT /tags/:tag/moderators/:userId` makes a user a moderator of the hashtag. An admin can, and so can any of the hashtag's own moderators. Whoever is appointed moderates the hashtag as the others do, and can appoint in turn.
+**Appointing.** `PUT /tags/:tag/moderators/:userId` makes a user a moderator of the hashtag. An admin can, and so can any of the hashtag's own moderators. Whoever is appointed moderates the hashtag as the others do, and can appoint in turn. Anyone else gets `403`, a server moderator included, unless they're also one of the hashtag's moderators.
 
 **Removing.** `DELETE /tags/:tag/moderators/:userId` ends a user's time as a moderator of the hashtag.
-- An admin can remove any of them.
-- One of the hashtag's moderators can remove those who became a moderator after them (a later `since`), whoever appointed them, and themselves. Removing one who was there before them, or since the same moment, gets `403`. So a moderator can't be turned out by someone they brought in, and whoever was the hashtag's first moderator stays until they leave or an admin removes them.
+- An admin or a server moderator can remove any of them, at any time: whether they were appointed or claimed the hashtag, and however long ago.
+- One of the hashtag's moderators can remove those who became a moderator after them (a later `since`), whoever appointed them, and themselves. Removing one who was there before them, or since the same moment, gets `403`. So a moderator can't be turned out by someone they brought in, and whoever was the hashtag's first moderator stays until they leave or an admin or a server moderator removes them.
 - A moderator who is removed and appointed again is there since the second time.
 
-Anyone else gets `403` from both, a server moderator included, unless they're also one of the hashtag's moderators.
+Anyone else gets `403`.
 
-The user is told, by a [notice](#notices): `tag_moderator_added` when they're made a moderator, and `tag_moderator_removed` when they're one no more. Neither says who did it. There's none for a request that changed nothing, or for a moderator who left of their own accord.
+The user is told, by a [notice](#notices): `tag_moderator_added` when they're made a moderator, and `tag_moderator_removed` when they're one no more. Neither says who did it. There's none for a request that changed nothing, for a moderator who left of their own accord, or for a user who claimed the hashtag themselves.
 
 **Inactivity.** A hashtag's moderator stays one by moderating it. One who does nothing as its moderator for 365 days (`TAG_MODERATOR_INACTIVE_DAYS`; `0`: never) is its moderator no more, and gets the notice `tag_moderator_lapsed`.
 - What counts is a request they make as the hashtag's moderator that the server carries out: approving content under the hashtag or removing the hashtag from content, muting a user on it or ending a mute, adding to its blocked words or taking from them, adding, changing or removing one of its rules, and appointing or removing a moderator of it. A request that found nothing to change counts too. One that was refused doesn't, and nor does reading.
@@ -1950,7 +1955,7 @@ A hashtag whose last moderator left, was removed or went this way has none, and 
 
 ### Claiming a hashtag
 
-Where publishers choose their posts' hashtags (`TAGGING_MODE=user`), hashtags come to be as posts use them, and nobody was there to appoint a moderator for each. So a user can claim a hashtag that has no moderator. A claim isn't granted at once: it waits 24 hours (`TAG_CLAIM_REVIEW_HOURS`), the server's admins and server moderators are told, and any of them can refuse it. A claim nobody refused is granted when the wait is over, by the compactor's next run: the user is a moderator of the hashtag from then on, its first, like one an admin appointed.
+Where publishers choose their posts' hashtags (`TAGGING_MODE=user`), hashtags come to be as posts use them, and nobody was there to appoint a moderator for each. So a user can claim a hashtag that has no moderator. A claim is granted at once: the user is a moderator of the hashtag from that moment, its first, like one an admin appointed. Nothing waits. The server's admins and server moderators are told, and any of them can end it at any time, and [bar the user from claiming](#barring-a-user-from-claiming) another.
 
 `POST /tags/:tag/claim` claims the hashtag for the caller. The hashtag needn't have a post yet.
 
@@ -1960,36 +1965,50 @@ curl -X POST localhost:3000/tags/cars/claim -H "Authorization: Bearer $KEY" -H "
 
 ```json
 { "tag": "cars", "userId": "...", "username": "alice",
-  "claimedAt": "2026-11-18T09:00:00.000Z", "reviewUntil": "2026-11-19T09:00:00.000Z",
-  "alreadyClaimed": false }
+  "since": "2026-11-18T09:00:00.000Z",
+  "alreadyModerator": false }
 ```
 
-It answers `201`, or `200` with `alreadyClaimed: true` if the caller's claim to the hashtag already waits, which changes nothing. `reviewUntil` is until when the claim can be refused, and after which it's granted. It's refused with:
+It answers `201`, or `200` with `alreadyModerator: true` if the caller moderates the hashtag already, which changes nothing. `since` is since when they're its moderator, as [`GET /tags/:tag/moderators`](#a-hashtags-moderators) gives it. It's refused with:
 
 | Status | When |
 | --- | --- |
 | `403` | The caller is [banned](#bans). |
 | `400` | The server chooses its hashtags itself (`TAGGING_MODE=server`): an admin appoints their moderators. |
 | `409` | The caller is an admin or a server moderator, who moderate every hashtag already. |
-| `409` | The hashtag has a moderator. Only a hashtag with none can be claimed: its moderators, or an admin, appoint the others. |
-| `409` | Another user's claim to the hashtag waits. A hashtag has one claim at a time. |
+| `403` | A server moderator or an admin [barred the caller from claiming hashtags](#barring-a-user-from-claiming). |
+| `409` | The hashtag has a moderator. Only a hashtag with none can be claimed: its moderators, or an admin, appoint the others. Of two users who claim a hashtag at the same moment, one gets it and the other gets this. |
 | `429` | The caller already made 2 claims in a day (`TAG_CLAIMS_PER_DAY`). The response says when to try again, in a `Retry-After` header and as `retryAfterSeconds`. A claim that was refused for another reason doesn't count, and nor does claiming a hashtag again. |
 
-**Every admin and server moderator gets a notice** (`tag_claimed`) that says who claimed which hashtag and until when the claim can be refused, with `details: { userId, username, reviewUntil }`. `GET /moderation/tag-claims` lists the claims that wait, for them, and `GET /tags/:tag/moderators` shows a hashtag's, to anyone, as `claim`: `{ tag, userId, username, claimedAt, reviewUntil }`.
+**Every admin and server moderator gets a notice** (`tag_claimed`) that says who claimed which hashtag, and how to end it and to bar the user, with `details: { userId, username }`. The user gets none: they did it themselves.
 
-`DELETE /tags/:tag/claim` ends the claim that waits, and returns `{ tag, wasClaimed, userId, refused }`:
-- From an admin or a server moderator, it refuses the claim (`refused: true`), and the claim's user gets the notice `tag_claim_refused`.
-- From the claim's own user, it withdraws it (`refused: false`). Nobody is told.
-- From anyone else, `403`.
-- Where no claim waits, `{ tag, wasClaimed: false, refused: false }`.
+**Ending it.** An admin or a server moderator removes the user as they would any of a hashtag's moderators, with [`DELETE /tags/:tag/moderators/:userId`](#a-hashtags-moderators): the moment the claim is made, or at any time after. The user gets the notice `tag_moderator_removed`. The hashtag then has no moderator, and can be claimed again, by the same user too unless they're barred. The user can also give the hashtag up themselves, with the same request.
 
-What ends a claim otherwise:
-- It's granted. The user gets the notice `tag_claim_granted`. With `TAG_CLAIM_REVIEW_HOURS=0` that's the compactor's next run, seconds later, so the admins and server moderators learn of the claim as it's granted, and an admin can only undo it (`DELETE /tags/:tag/moderators/:userId`).
-- The hashtag is given a moderator meanwhile. Appointing anyone to the hashtag ends the claim to it. If it's the claim's own user who was appointed, they have what they asked for; otherwise the claim's user is told it was refused.
-- The user is banned when the wait is over. The claim isn't granted, and they're told it was refused.
-- The user's account is closed. The claim goes with it.
+A hashtag that was claimed before a server was set to `TAGGING_MODE=server` stays its user's to moderate. Closing an account ends its moderation of every hashtag.
 
-A claim made before a server was set to `TAGGING_MODE=server` is still granted, unless it's refused.
+A server that was upgraded from a version where claims waited to be granted has no claims waiting after it: the upgrade granted them, except those of banned users and those to hashtags that had a moderator by then. `DELETE /tags/:tag/claim` and `GET /moderation/tag-claims`, which refused, withdrew and listed the claims that waited, are gone.
+
+### Barring a user from claiming
+
+A server moderator or an admin bars a user from claiming hashtags with `PUT /claim-barred/:userId`, and lets them claim again with `DELETE /claim-barred/:userId`. It's for a user who claims hashtags they shouldn't have, and it stops that and nothing else.
+
+```bash
+curl -X PUT localhost:3000/claim-barred/$THEIR_ID -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID" \
+  -H 'Content-Type: application/json' -d '{ "reason": "Claims hashtags and leaves them unmoderated" }'
+```
+
+```json
+{ "userId": "...", "username": "alice", "barredAt": "2026-11-18T09:00:00.000Z",
+  "reason": "Claims hashtags and leaves them unmoderated", "alreadyBarred": false }
+```
+
+- A barred user's `POST /tags/:tag/claim` is refused with `403`. A claim that is refused this way doesn't count towards their claims of the day.
+- It takes back nothing. The hashtags the user moderates stay theirs, the ones they claimed included: end each with `DELETE /tags/:tag/moderators/:userId`. They can still be appointed to a hashtag, by an admin or by its moderators, and they post, comment and like as before.
+- The user gets a [notice](#notices), once: `claims_barred`, and `claims_unbarred` when they can claim again. `reason` is optional (at most 500 characters), and only server moderators and admins can read it.
+- Barring a user who is barred changes nothing, and returns `200` with `alreadyBarred: true` and the first bar's time and reason. Letting a user claim again who wasn't barred returns `wasBarred: false`. `404` for a user there isn't.
+- A user's own [`GET /whoami`](#get-whoami) says whether they're barred (`claimsBarred`). Their public profile doesn't. Why, and by whom, is in neither.
+- `GET /claim-barred` lists who is barred, for server moderators and admins ([below](#moderation-endpoints)).
+- An admin or a server moderator can be barred too. It changes nothing for them while they have the role, as neither claims hashtags.
 
 ### Bans
 
@@ -2257,14 +2276,15 @@ They authenticate as the other write endpoints do. `:tag` is a hashtag as `/feed
 | `GET /banned` | Server moderators, and admins | The banned users, most recently banned first: `{ banned: [{ userId, username, bannedAt, reason, bannedBy }], nextCursor }`. `reason` is `null` where none was given, and `bannedBy` is `{ userId, username }`, or `null` once that account is gone. Takes `limit` (100 by default, at most 1,000) and `cursor`. |
 | `PUT /banned/:userId` | Server moderators, and admins | [Bans](#bans) a user, with `{ "reason": "..." }` if there's one to give: `201` with `{ userId, username, bannedAt, reason, alreadyBanned: false }`, or `200` with `alreadyBanned: true` and the first ban's `bannedAt` and `reason`. Not an admin or a server moderator (`403`), or yourself (`400`). |
 | `DELETE /banned/:userId` | Server moderators, and admins | Ends a ban: `{ userId, wasBanned }`. |
+| `GET /claim-barred` | Server moderators, and admins | The users who are [barred from claiming hashtags](#barring-a-user-from-claiming), most recently barred first: `{ barred: [{ userId, username, barredAt, reason, barredBy }], nextCursor }`. `reason` is `null` where none was given, and `barredBy` is `{ userId, username }`, or `null` once that account is gone. Takes `limit` (100 by default, at most 1,000) and `cursor`. |
+| `PUT /claim-barred/:userId` | Server moderators, and admins | Bars a user from claiming hashtags, with `{ "reason": "..." }` if there's one to give: `201` with `{ userId, username, barredAt, reason, alreadyBarred: false }`, or `200` with `alreadyBarred: true` and the first bar's `barredAt` and `reason`. |
+| `DELETE /claim-barred/:userId` | Server moderators, and admins | Lets the user claim hashtags again: `{ userId, wasBarred }`. |
 | `GET`, `POST`, `DELETE /moderation/blocked-words` | Admins | Lists, adds or removes the server's blocked words. `POST` and `DELETE` take `{ "words": [...] }`, 1 to 1,000 words, phrases or patterns at a time. Each returns the whole list: `{ words }`. `400` for an entry that can't be blocked: one with no letters or digits, one that's too long, or a pattern that isn't a regular expression or matches empty text. `409` if the list would hold more than 10,000 entries, or more than 100 patterns. |
 | `GET`, `POST`, `DELETE /tags/:tag/blocked-words` | The hashtag's moderators, server moderators, and admins | The same, for the hashtag's list: `{ tag, words }`. |
-| `GET /tags/:tag/moderators` | Anyone | `{ tag, moderators: [{ userId, username, since }] }`, in the order they became one, with `claim: { tag, userId, username, claimedAt, reviewUntil }` while a [claim](#claiming-a-hashtag) to the hashtag waits. |
-| `PUT /tags/:tag/moderators/:userId` | Admins, and the hashtag's moderators | [Appoints a moderator](#a-hashtags-moderators): `201` with `{ tag, userId, since, alreadyModerator: false }`, or `200` with `alreadyModerator: true` if they already were. Ends a claim to the hashtag that waits. |
-| `DELETE /tags/:tag/moderators/:userId` | Admins, and the hashtag's moderators | `{ tag, userId, wasModerator }`. One of the hashtag's moderators can remove only those who became one after them, and themselves: `403` for any other. |
-| `POST /tags/:tag/claim` | Any user, in `user` tagging mode | [Claims the hashtag](#claiming-a-hashtag): `201` with `{ tag, userId, username, claimedAt, reviewUntil, alreadyClaimed: false }`, or `200` with `alreadyClaimed: true`. |
-| `DELETE /tags/:tag/claim` | The claim's user, server moderators, and admins | Withdraws the claim that waits, or refuses it: `{ tag, wasClaimed, userId, refused }`. |
-| `GET /moderation/tag-claims` | Server moderators, and admins | The claims that wait, longest waiting first: `{ claims: [{ tag, userId, username, claimedAt, reviewUntil }], nextCursor }`. Takes `limit` (100 by default, at most 1,000) and `cursor`. |
+| `GET /tags/:tag/moderators` | Anyone | `{ tag, moderators: [{ userId, username, since }] }`, in the order they became one. |
+| `PUT /tags/:tag/moderators/:userId` | Admins, and the hashtag's moderators | [Appoints a moderator](#a-hashtags-moderators): `201` with `{ tag, userId, since, alreadyModerator: false }`, or `200` with `alreadyModerator: true` if they already were. |
+| `DELETE /tags/:tag/moderators/:userId` | Admins, server moderators, and the hashtag's moderators | `{ tag, userId, wasModerator }`. An admin or a server moderator can remove any of them, at any time. One of the hashtag's moderators can remove only those who became one after them, and themselves: `403` for any other. |
+| `POST /tags/:tag/claim` | Any user, in `user` tagging mode | [Claims the hashtag](#claiming-a-hashtag), which the user moderates from then on: `201` with `{ tag, userId, username, since, alreadyModerator: false }`, or `200` with `alreadyModerator: true`. |
 | `GET /tags/:tag/rules` | Anyone | The hashtag's [rules](#a-hashtags-rules): `{ tag, rules }`. |
 | `POST /tags/:tag/rules`, `PATCH`, `DELETE /tags/:tag/rules/:ruleId` | The hashtag's moderators, server moderators, and admins | Adds, changes or removes one of the hashtag's rules. |
 | `GET /tags/:tag/muted` | The hashtag's moderators, server moderators, and admins | Users muted on the hashtag, most recently muted first: `{ tag, muted: [{ userId, username, mutedAt }], nextCursor }`. Takes `limit` (100 by default, at most 1,000) and `cursor`. |

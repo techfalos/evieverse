@@ -4,7 +4,7 @@ export type { Comment, CommentMark, CommentMedia, CommentPageQuery } from './com
 export { ContentStore, MEDIA_FILE, stagedKey, type BytesOwner } from './contentStore.js';
 export type { ContentMeta, Origin, Preview, PreviewVideo, StagedBytes, StoredBytes, StoredImage, StoredVideo, UploadLink } from './contentStore.types.js';
 export { FollowStore } from './followStore.js';
-export { createHotStore, MemoryHotStore } from './hotStore.js';
+export { createHotStore } from './hotStore.js';
 export type { HotStore } from './hotStore.types.js';
 export { PublisherStore } from './publisherStore.js';
 export type { Publisher } from './publisherStore.types.js';

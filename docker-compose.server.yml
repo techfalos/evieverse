@@ -1,34 +1,40 @@
-# Just the API server, for building a frontend against: the app built from this repo, on Postgres and
-# Valkey, with no seed data and no testbed page. Content and summaries are on a local volume, so
-# /content/:id/raw streams bytes from the server itself rather than redirecting to an object store.
+# A whole server in one container, for building a frontend against or for running one: the API, the
+# compactor and Valkey, built from this repo (the Dockerfile's `standalone` target), with no seed data
+# and no testbed page. Everything it keeps is on one volume: the database (SQLite), the content and
+# summaries, and Valkey's data. Content is on that volume, so /content/:id/raw streams bytes from the
+# server itself rather than redirecting to an object store.
 #
 #   docker compose -f docker-compose.server.yml up -d --build
 #   curl http://localhost:3000/health
 #
-# To start over: docker compose -f docker-compose.server.yml down -v
+# The first time it starts, the server creates its admin and writes the admin's profile for the CLI,
+# API key included, to the volume: docker compose -f docker-compose.server.yml exec app cat /app/data/admin-profile.json
 #
-# The services shared with the other compose files are defined in compose.base.yml.
+# To start over: docker compose -f docker-compose.server.yml down -v
 name: evieverse-server
 
 services:
-  postgres:
-    extends: { file: compose.base.yml, service: postgres }
-    ports: ['${SERVER_POSTGRES_PORT:-25432}:5432']
-    volumes: [postgres:/var/lib/postgresql/data]
-
-  redis:
-    extends: { file: compose.base.yml, service: redis }
-    ports: ['${SERVER_REDIS_PORT:-26379}:6379']
-    volumes: [redis:/data]
-
   app:
-    extends: { file: compose.base.yml, service: app }
-    image: evieverse-server-app
-    depends_on:
-      postgres: { condition: service_healthy }
-      redis: { condition: service_healthy }
+    build:
+      context: .
+      target: standalone
+    image: evieverse-standalone
     ports: ['${SERVER_PORT:-3000}:3000']
+    # Time for the requests under way and the compactor's pass to end, and for Valkey to write what it holds.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:3000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 3s
+      retries: 30
     environment:
+      # The database: SQLite, a file on the volume, unless these name a Postgres or a MySQL somewhere else
+      # (DB_DIALECT=postgres with DATABASE_URL=postgres://user:password@host:5432/database).
+      DB_DIALECT: ${DB_DIALECT:-sqlite}
+      DATABASE_URL: ${DATABASE_URL:-/app/data/evieverse.sqlite}
+      # The feed index: the container's own Valkey, which keeps its data on the volume, unless this names a
+      # Redis or a Valkey somewhere else. VALKEY_MAXMEMORY is the most the container's own may hold.
+      REDIS_URL: ${REDIS_URL:-redis://127.0.0.1:6379}
+      VALKEY_MAXMEMORY: ${VALKEY_MAXMEMORY:-512mb}
       CONTENT_SCHEME: fs
       CONTENT_OPTIONS: '{"root":"/app/data/content"}'
       PUBLIC_BASE_URL: http://localhost:${SERVER_PORT:-3000}
@@ -64,6 +70,9 @@ services:
       # The youngest a person may be to use the server, in years, which GET /rules gives beside the rules.
       # None unless set: GET /rules then says "All Legal Ages Allowed".
       MINIMUM_AGE: ${MINIMUM_AGE:-}
+      # What the server says of content made with generative AI, which GET /rules gives beside the rules:
+      # disclosure_optional (allowed), disclosure_required (allowed if it says so) or not_allowed.
+      GEN_AI: ${GEN_AI:-disclosure_optional}
       # Ads in hashtag feeds and at the end of posts, which admins keep at /monetization/ads. Off unless set to true.
       MONETIZATION_FEED_ADS: ${MONETIZATION_FEED_ADS:-false}
       MONETIZATION_POST_ADS: ${MONETIZATION_POST_ADS:-false}
@@ -83,9 +92,7 @@ services:
       QUARANTINE_SCHEME: ${QUARANTINE_SCHEME:-}
       QUARANTINE_OPTIONS: ${QUARANTINE_OPTIONS:-}
       QUARANTINE_RETENTION_DAYS: ${QUARANTINE_RETENTION_DAYS:-365}
-    volumes: [content:/app/data]
+    volumes: [data:/app/data]
 
 volumes:
-  postgres:
-  redis:
-  content:
+  data:

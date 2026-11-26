@@ -151,8 +151,8 @@ function changeRule(db: Db, list: RuleList, ruleId: string, body: { text?: strin
 }
 
 /**
- * The server's rules, its minimum age, its support address and its modification disclosure; and
- * each hashtag's rules.
+ * The server's rules, its minimum age, what it says of generative AI, its support address and
+ * its modification disclosure; and each hashtag's rules.
  *
  * The rules are what the operator asks of the people who use the server, a list its admins keep
  * (`server_rules`): they add a rule, change its text or its place among the others, and remove
@@ -178,7 +178,12 @@ function changeRule(db: Db, list: RuleList, ruleId: string, body: { text?: strin
  * words, "All Legal Ages Allowed", in the language the request is answered in. The server holds
  * nobody to it: it asks nobody's age.
  *
- * GET /rules gives all four to anyone, with a key or without, so a client can show them to
+ * What the server says of generative AI is whether content made with it is allowed, and whether
+ * its author has to declare that it was (`GEN_AI`): one of three words, the operator's to set
+ * as well, which a client shows in its own. The server holds nobody to it either, yet: a post
+ * or a comment is taken with the declaration (`aiGenerated`) or without it, whatever this says.
+ *
+ * GET /rules gives all five to anyone, with a key or without, so a client can show them to
  * someone before they register. GET /tags/:tag/rules gives a hashtag's the same way.
  */
 export function rulesRoutes(app: FastifyInstance, deps: AppDeps) {
@@ -201,15 +206,17 @@ export function rulesRoutes(app: FastifyInstance, deps: AppDeps) {
   const acted = (req: FastifyRequest, user: AuthUser, tag: string) => recordAction(deps, user.id, tag, req.log);
 
   /**
-   * The rules, in their order, the minimum age, the support address and the modification
-   * disclosure. For anyone: it needs no key, and reads none. The minimum age is the number of
-   * years the operator set, or where they set none, the words that say so, in the language the
-   * request asks for.
+   * The rules, in their order, the minimum age, what the server says of generative AI, the
+   * support address and the modification disclosure. For anyone: it needs no key, and reads
+   * none. The minimum age is the number of years the operator set, or where they set none, the
+   * words that say so, in the language the request asks for. `genAi` is the setting as it is
+   * written (GEN_AI_SETTINGS in src/config.ts), the same in every language.
    */
   app.get('/rules', async (req) => ({
     modificationDisclosure: { modified: config.modified, release: RELEASE, sourceUrl: config.sourceUrl },
     supportEmail: config.supportEmail,
     minimumAge: config.minimumAge ?? say(req, msg('rule.all_ages')),
+    genAi: config.genAi,
     rules: (await serverRules.inOrder(db)).map(record),
   }));
 

@@ -19,4 +19,6 @@ export interface AuthUser {
   showFollowers: boolean;
   /** Whether a server moderator or an admin banned the user: they are refused posts, comments, likes, messages and upload links (see refuseBanned). */
   banned: boolean;
+  /** Whether a server moderator or an admin barred the user from claiming hashtags (see claimTag): it keeps them from nothing else. */
+  claimsBarred: boolean;
 }

@@ -8,26 +8,6 @@ export interface QuarantineDeps {
   now?: () => number;
 }
 
-/** The log of whatever deletes the files whose time is over (see expireQuarantine): the compactor's. */
-export interface QuarantineLog {
-  info(o: object, msg?: string): void;
-  warn(o: object, msg?: string): void;
-  error(o: object, msg?: string): void;
-}
-
-/** A file to keep in the quarantine, as whatever found the match gives it (see quarantineFile). */
-export interface QuarantineFile {
-  /** Who sent it. */
-  userId: string;
-  /** The path of a file on this machine that holds it: read, and neither changed nor kept. */
-  path: string;
-  /** The SHA-256 of that file, in hex. */
-  sha256: string;
-  /** What it was sent as. */
-  mimeType: string;
-  /** What the admins are told of the match (MatchFacts), which is kept with the file for as long as the file is. */
-  facts: object;
-}
 
 /**
  * What can be done with an item of the quarantine, each of which leaves a row of

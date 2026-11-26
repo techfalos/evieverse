@@ -1,15 +1,58 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { Kysely, MysqlDialect, PostgresDialect, SqliteDialect, type AnyColumn, type Dialect, type InsertQueryBuilder, type Transaction, type UpdateObject } from 'kysely';
+import {
+  CompiledQuery,
+  Kysely,
+  MysqlDialect,
+  PostgresDialect,
+  SqliteDialect,
+  SqliteDriver,
+  type AnyColumn,
+  type DatabaseConnection,
+  type Dialect,
+  type Driver,
+  type InsertQueryBuilder,
+  type SqliteDialectConfig,
+  type Transaction,
+  type UpdateObject,
+} from 'kysely';
 import type { Config } from '../config.js';
 import { migrateToLatest } from './migrator.js';
 import type { Database } from './schema.js';
+import { requireVolume } from './volume.js';
 
 export type Db = Kysely<Database>;
 export type DbDialect = Config['db']['dialect'];
 
 /** How to connect; whether the schema is migrated first is openDb's business. */
 type Connection = Omit<Config['db'], 'migrateOnStart'>;
+
+/**
+ * SQLite's driver, with transactions that take the database's write lock as they begin (BEGIN
+ * IMMEDIATE). The compactor is a second process on the same file: a transaction that began by
+ * reading, and then finds the other process wrote meanwhile, is refused when it writes
+ * (SQLITE_BUSY, with no waiting), where one that takes the lock first waits its turn for
+ * `busy_timeout`. The compactor's transactions begin the same way (compactor/crates/core/src/db.rs).
+ */
+class ImmediateSqliteDriver extends SqliteDriver {
+  override async beginTransaction(connection: DatabaseConnection): Promise<void> {
+    await connection.executeQuery(CompiledQuery.raw('begin immediate'));
+  }
+}
+
+/** The SQLite dialect, with the driver above. */
+class ImmediateSqliteDialect extends SqliteDialect {
+  readonly #config: SqliteDialectConfig;
+
+  constructor(config: SqliteDialectConfig) {
+    super(config);
+    this.#config = config;
+  }
+
+  override createDriver(): Driver {
+    return new ImmediateSqliteDriver(this.#config);
+  }
+}
 
 async function createDialect(cfg: Connection): Promise<Dialect> {
   const idle = cfg.idleTimeoutMs;
@@ -38,19 +81,23 @@ async function createDialect(cfg: Connection): Promise<Dialect> {
     }
     case 'sqlite': {
       const Sqlite = (await import('better-sqlite3')).default;
+      // Before anything is created: a database that would be lost with its container is refused where the settings ask for that.
+      if (cfg.requireVolume) requireVolume(cfg.url);
       if (cfg.url !== ':memory:') mkdirSync(dirname(cfg.url), { recursive: true });
       const sqlite = new Sqlite(cfg.url);
       sqlite.pragma('journal_mode = WAL');
       sqlite.pragma('foreign_keys = ON');
       sqlite.pragma('busy_timeout = 5000');
-      return new SqliteDialect({ database: sqlite });
+      return new ImmediateSqliteDialect({ database: sqlite });
     }
   }
 }
 
 /**
  * The database `cfg` names, with its schema as it is: nothing is migrated (see `openDb`). A SQLite
- * file's directory is created if it isn't there. The caller closes it with `destroy()`.
+ * file's directory is created if it isn't there. With `requireVolume`, a SQLite database that
+ * isn't a file on a mounted volume is refused instead (see `requireVolume` in volume.ts). The
+ * caller closes it with `destroy()`.
  */
 export async function createDb(cfg: Connection): Promise<Db> {
   return new Kysely<Database>({ dialect: await createDialect(cfg) });

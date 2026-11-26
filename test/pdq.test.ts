@@ -1,21 +1,14 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { LightMyRequestResponse } from 'fastify';
 import sharp from 'sharp';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
-import { msg } from '../src/language.js';
 import { setAdmin } from '../src/moderation/policy.js';
-import { loadTrustPlugins } from '../src/moderation/trust.js';
-import type { TrustContext, TrustImage, TrustPost } from '../src/moderation/trust.types.js';
-import { bitsOf, distance, fromHex, lumaOf, pdqHash, toHex } from '../src/plugins/trust/pdq/hash.js';
-import { framesOf, MAX_FRAMES, UnreadableImage } from '../src/plugins/trust/pdq/image.js';
-import { pdq } from '../src/plugins/trust/pdq/index.js';
-import { hashOfLine, listOf, nearest } from '../src/plugins/trust/pdq/list.js';
-import { as, createTestContext, multipart, requests, sha256, TARGETS, type TestContext, type User } from './helpers.js';
+import { as, BASE_ENV, createTestContext, multipart, requests, sha256, TARGETS, type TestContext, type User } from './helpers.js';
 
 /**
  * A picture to hash: `rows` by `cols` of soft light and dark patches, as a photo out of focus has,
@@ -25,7 +18,9 @@ type Picture = { rows: number; cols: number; seed: number; block: number };
 
 /**
  * Pictures, each with the hash and quality that Meta's reference implementation of PDQ gives its
- * pixels (the pdqhash binding of pdq/cpp, which hashes an image at the size it is given).
+ * pixels (the pdqhash binding of pdq/cpp, which hashes an image at the size it is given). The
+ * plugin is the server's own (compactor/crates/trust/src/plugins/pdq), whose tests cover how it
+ * hashes a picture, reads a list and finds a hash in one: here is what a server does with it.
  */
 const REFERENCE: (Picture & { hash: string; quality: number })[] = [
   { rows: 240, cols: 320, seed: 1, block: 20, hash: '286c319d7379a2467424a3467379799de8ec4bbb981bc672d1e25af2d3121e29', quality: 100 },
@@ -75,469 +70,17 @@ const png = (picture: Picture) => drawn(picture).png().toBuffer();
 /** The picture as a copy of it goes round: at another size, and compressed until it shows. */
 const copy = (picture: Picture, width = 200, quality = 60) => drawn(picture).resize({ width }).jpeg({ quality }).toBuffer();
 
-/** A hash's words, from how it is written. */
-function wordsOf(hex: string): Uint16Array {
-  const words = new Uint16Array(16);
-  expect(fromHex(hex, words), hex).toBe(true);
-  return words;
-}
 /** How many bits two hashes, as they are written, differ in. */
-const apart = (a: string, b: string) => distance(wordsOf(a), 0, wordsOf(b), 0);
-/** `hex` with `count` of its bits changed: every `step`th, from `from`. */
-function changed(hex: string, count: number, step = 7, from = 3): string {
-  const words = wordsOf(hex);
-  for (let i = 0; i < count; i++) {
-    const bit = (from + i * step) % 256;
-    words[bit >> 4]! ^= 1 << (bit & 15);
+function apart(a: string, b: string): number {
+  let bits = 0;
+  for (let i = 0; i < 64; i++) {
+    for (let differ = Number.parseInt(a[i]!, 16) ^ Number.parseInt(b[i]!, 16); differ; differ >>= 1) bits += differ & 1;
   }
-  return toHex(words);
+  return bits;
 }
-
-/** Numbers from 0 to 1 that are the same every run. */
-function random(seed: number) {
-  let state = seed;
-  return () => {
-    state = (state + 0x6d2b79f5) | 0;
-    let t = Math.imul(state ^ (state >>> 15), 1 | state);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** The lines of a list, as `listOf` is given them. */
-async function* lines(text: string) {
-  yield* text.split('\n');
-}
-
-describe('the PDQ hash', () => {
-  it("is the reference implementation's, bit for bit, with its quality", () => {
-    for (const picture of REFERENCE) {
-      const { words, quality } = pdqHash(lumaOf(grey(picture), 1), picture.rows, picture.cols);
-      expect([toHex(words), quality], `${picture.cols}x${picture.rows}`).toEqual([picture.hash, picture.quality]);
-    }
-    // Colour is read as its luminance: a grey picture's hash is the same from its red, green and blue.
-    const rgb = Buffer.from([...grey(LISTED)].flatMap((value) => [value, value, value, 255]));
-    expect(toHex(pdqHash(lumaOf(rgb, 4), LISTED.rows, LISTED.cols).words)).toBe(LISTED.hash);
-  });
-
-  it('is nearly the same for the same picture at another size, and not for another picture', () => {
-    // The same squares at twice the size.
-    expect(apart(REFERENCE[0]!.hash, REFERENCE[3]!.hash)).toBeLessThanOrEqual(31);
-    expect(apart(LISTED.hash, OTHER.hash)).toBeGreaterThan(90);
-    expect(apart(LISTED.hash, ALSO_LISTED.hash)).toBeGreaterThan(90);
-  });
-
-  it('has no quality for a picture with nothing in it, and none at all for one too small to hash', () => {
-    const flat = pdqHash(new Float32Array(100 * 100).fill(77), 100, 100);
-    expect(flat.quality).toBe(0);
-    const small = pdqHash(lumaOf(grey({ rows: 4, cols: 9, seed: 1, block: 2 }), 1), 4, 9);
-    expect([toHex(small.words), small.quality]).toEqual(['0'.repeat(64), 0]);
-  });
-
-  it('is written as 64 hex digits, and compared by the bits that differ', () => {
-    expect(toHex(wordsOf(LISTED.hash))).toBe(LISTED.hash);
-    expect(toHex(wordsOf(LISTED.hash.toUpperCase()))).toBe(LISTED.hash);
-    const words = new Uint16Array(16).fill(7);
-    for (const hex of ['', LISTED.hash.slice(1), `${LISTED.hash}0`, `g${LISTED.hash.slice(1)}`]) expect(fromHex(hex, words), hex).toBe(false);
-    expect([...words]).toEqual(Array(16).fill(7));
-    expect([0, 1, 0x8000, 0xffff, 0x0f0f].map(bitsOf)).toEqual([0, 1, 1, 16, 8]);
-    expect(apart(LISTED.hash, LISTED.hash)).toBe(0);
-    expect(apart(LISTED.hash, changed(LISTED.hash, 31))).toBe(31);
-    expect(apart('0'.repeat(64), 'f'.repeat(64))).toBe(256);
-    // Counted only as far as it is asked to.
-    expect(distance(wordsOf('0'.repeat(64)), 0, wordsOf('f'.repeat(64)), 0, 31)).toBeGreaterThan(31);
-  });
-});
-
-describe('an image read for its hash', () => {
-  let dir: string;
-  beforeAll(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'evieverse-pdq-'));
-  });
-  afterAll(() => rm(dir, { recursive: true, force: true }));
-
-  /** The hash and quality of each frame of the image `bytes` are. */
-  async function hashes(bytes: Buffer, name = 'image') {
-    const path = join(dir, name);
-    await writeFile(path, bytes);
-    const found: { hash: string; quality: number }[] = [];
-    for await (const { luma, rows, cols } of framesOf(path)) {
-      const { words, quality } = pdqHash(luma, rows, cols);
-      found.push({ hash: toHex(words), quality });
-    }
-    return found;
-  }
-
-  it('is hashed as the reference hashes it, whichever type of file it is', async () => {
-    for (const picture of REFERENCE.slice(0, 3)) {
-      const exact = { hash: picture.hash, quality: picture.quality };
-      expect(await hashes(await png(picture)), 'png').toEqual([exact]);
-      expect(await hashes(await drawn(picture).webp({ lossless: true }).toBuffer()), 'webp').toEqual([exact]);
-      expect(await hashes(await drawn(picture).gif().toBuffer()), 'gif').toEqual([exact]);
-      // A JPEG isn't the picture to the bit, and neither is its hash.
-      const [jpeg] = await hashes(await drawn(picture).jpeg({ quality: 90 }).toBuffer());
-      expect(apart(jpeg!.hash, picture.hash), 'jpeg').toBeLessThanOrEqual(20);
-    }
-  });
-
-  it('is the picture as it shows: what is transparent is white, and a copy of it has nearly its hash', async () => {
-    // Half transparent over black is, on white, grey: not the black a reader that drops the transparency sees.
-    const veiled = await sharp(Buffer.from([...grey(LISTED)].flatMap((value) => [0, 0, 0, 255 - value])), { raw: { width: LISTED.cols, height: LISTED.rows, channels: 4 } })
-      .png()
-      .toBuffer();
-    expect(await hashes(veiled)).toEqual([{ hash: LISTED.hash, quality: 100 }]);
-
-    for (const [width, quality] of [[200, 60], [320, 30], [96, 80], [900, 85]] as const) {
-      const [found] = await hashes(await copy(LISTED, width, quality));
-      expect(apart(found!.hash, LISTED.hash), `${width} wide at quality ${quality}`).toBeLessThanOrEqual(20);
-    }
-    // Larger than it is hashed at: brought down first, which costs its hash a few bits.
-    const [large] = await hashes(await drawn({ rows: 1500, cols: 2000, seed: 1, block: 125 }).png().toBuffer());
-    expect(apart(large!.hash, LISTED.hash)).toBeLessThanOrEqual(20);
-    // What the hash doesn't see through: the picture mirrored.
-    const [mirrored] = await hashes(await drawn(LISTED).flop().png().toBuffer());
-    expect(apart(mirrored!.hash, LISTED.hash)).toBeGreaterThan(31);
-  });
-
-  it('is each frame of an animation, up to a number of them', async () => {
-    const frames = [LISTED, { ...LISTED, seed: 2 }, { ...LISTED, seed: 5 }];
-    const film = (count: number, picture = (i: number) => frames[i % frames.length]!) =>
-      sharp(Buffer.concat(Array.from({ length: count }, (_, i) => grey(picture(i)))), { raw: { width: LISTED.cols, height: LISTED.rows * count, channels: 1, pageHeight: LISTED.rows } });
-    const expected = frames.map((picture) => toHex(pdqHash(lumaOf(grey(picture), 1), picture.rows, picture.cols).words));
-    for (const [type, bytes] of [['gif', await film(3).gif().toBuffer()], ['webp', await film(3).webp({ lossless: true }).toBuffer()]] as const) {
-      expect((await hashes(bytes)).map(({ hash }) => hash), type).toEqual(expected);
-    }
-    // A long one: its first frames, and no more.
-    const small = { rows: 40, cols: 60, seed: 0, block: 5 };
-    const long = sharp(Buffer.concat(Array.from({ length: MAX_FRAMES + 8 }, (_, i) => grey({ ...small, seed: i }))), { raw: { width: 60, height: 40 * (MAX_FRAMES + 8), channels: 1, pageHeight: 40 } });
-    const found = await hashes(await long.gif().toBuffer());
-    expect(found).toHaveLength(MAX_FRAMES);
-    expect(new Set(found.map(({ hash }) => hash)).size).toBe(MAX_FRAMES);
-  });
-
-  it("is unreadable if it can't be decoded", async () => {
-    for (const bytes of [Buffer.from('not an image at all'), (await png(LISTED)).subarray(0, 20), Buffer.alloc(0)]) {
-      await expect(hashes(bytes)).rejects.toBeInstanceOf(UnreadableImage);
-    }
-    await expect(framesOf(join(dir, 'missing')).next()).rejects.toBeInstanceOf(UnreadableImage);
-  });
-});
-
-describe('the list of hashes', () => {
-  it('is read a hash a line, wherever in the line it is', () => {
-    const hash = LISTED.hash;
-    expect(hashOfLine(hash)).toBe(hash);
-    expect(hashOfLine(`  ${hash.toUpperCase()} \r`)).toBe(hash);
-    expect(hashOfLine(`7,${hash},2026-11-06`)).toBe(hash);
-    expect(hashOfLine(`"7","${hash}","csam"`)).toBe(hash);
-    expect(hashOfLine(`pdq\t${hash}\t100`)).toBe(hash);
-    expect(hashOfLine(`{"hash":"${hash}"}`)).toBe(hash);
-    // The first of two.
-    expect(hashOfLine(`${hash},${OTHER.hash}`)).toBe(hash);
-    for (const line of ['', '   ', '# a comment', `# ${hash}`, 'id,pdq,added', hash.slice(1), `${hash}0`, `0${hash}`, 'd41d8cd98f00b204e9800998ecf8427e']) {
-      expect(hashOfLine(line), line).toBeNull();
-    }
-  });
-
-  it('refuses what holds no hash, and hashes that are not PDQ hashes', async () => {
-    const list = await listOf(lines(LIST));
-    expect(list.size).toBe(2);
-    await expect(listOf(lines('# nothing\n\n<html>Maintenance</html>\n'))).rejects.toThrow(/PDQ_HASH_LIST has no hash in it/);
-    // SHA-256s, which are written as PDQ hashes are.
-    const sums = Array.from({ length: 40 }, (_, i) => sha256(Buffer.from(String(i))));
-    await expect(listOf(lines(sums.join('\n')))).rejects.toThrow(/PDQ_HASH_LIST doesn't hold PDQ hashes: only \d+ of its 40 have half their bits set/);
-    // A few hashes of pictures whose values tie, which don't set exactly half, are a list all the same.
-    expect((await listOf(lines([LISTED.hash, OTHER.hash, REFERENCE[2]!.hash].join('\n')))).size).toBe(3);
-  });
-
-  it('finds the listed hash nearest another, within the distance asked for', async () => {
-    const list = await listOf(lines(LIST));
-    expect(nearest(list, wordsOf(LISTED.hash), 31)).toEqual({ listed: LISTED.hash, distance: 0 });
-    expect(nearest(list, wordsOf(ALSO_LISTED.hash), 0)).toEqual({ listed: ALSO_LISTED.hash, distance: 0 });
-    expect(nearest(list, wordsOf(changed(LISTED.hash, 1)), 31)).toEqual({ listed: LISTED.hash, distance: 1 });
-    expect(nearest(list, wordsOf(changed(LISTED.hash, 31)), 31)).toEqual({ listed: LISTED.hash, distance: 31 });
-    expect(nearest(list, wordsOf(changed(LISTED.hash, 32)), 31)).toBeNull();
-    expect(nearest(list, wordsOf(changed(LISTED.hash, 32)), 32)).toEqual({ listed: LISTED.hash, distance: 32 });
-    expect(nearest(list, wordsOf(changed(LISTED.hash, 1)), 0)).toBeNull();
-    // All the bits that differ in a few words, as they are when one part of a picture was changed.
-    expect(nearest(list, wordsOf(changed(LISTED.hash, 31, 1, 16)), 31)).toEqual({ listed: LISTED.hash, distance: 31 });
-    expect(nearest(list, wordsOf(OTHER.hash), 63)).toBeNull();
-  });
-
-  it('finds in a long list what comparing with every hash finds', async () => {
-    const next = random(11);
-    // Hashes with half their bits set, as PDQ's have.
-    const hashes = Array.from({ length: 4000 }, () => {
-      const bits = Array.from({ length: 256 }, (_, i) => i < 128);
-      for (let i = 255; i > 0; i--) {
-        const j = Math.floor(next() * (i + 1));
-        [bits[i], bits[j]] = [bits[j]!, bits[i]!];
-      }
-      const words = new Uint16Array(16);
-      bits.forEach((set, bit) => set && (words[bit >> 4]! |= 1 << (bit & 15)));
-      return toHex(words);
-    });
-    // And some that are near each other, so that the nearest isn't the only one near.
-    for (let i = 0; i < 200; i++) hashes.push(changed(hashes[i]!, 2 + (i % 20), 11, i));
-    const list = await listOf(lines(hashes.join('\n')));
-    expect(list.size).toBe(hashes.length);
-    const all = hashes.map(wordsOf);
-    for (let i = 0; i < 300; i++) {
-      const flips = [0, 1, 5, 16, 30, 31, 32, 40, 47, 48, 60, 63, 64, 90][i % 14]!;
-      const words = wordsOf(changed(hashes[Math.floor(next() * hashes.length)]!, flips, 1 + Math.floor(next() * 40), Math.floor(next() * 256)));
-      const best = Math.min(...all.map((listed) => distance(words, 0, listed, 0)));
-      for (const most of [0, 15, 16, 31, 47, 63]) {
-        const found = nearest(list, words, most);
-        expect(found?.distance ?? null, `${flips} bits changed, within ${most}`).toBe(best <= most ? best : null);
-        if (found) expect(distance(words, 0, wordsOf(found.listed), 0)).toBe(best);
-      }
-    }
-  });
-});
-
-describe('the pdq trust plugin', () => {
-  let dir: string;
-  beforeAll(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'evieverse-pdq-'));
-  });
-  afterAll(() => rm(dir, { recursive: true, force: true }));
-
-  /** An image as a plugin is given it: `bytes` in a file of the test's. */
-  async function image(bytes: Buffer, filename = `${sha256(bytes).slice(0, 12)}.img`): Promise<TrustImage> {
-    const path = join(dir, filename);
-    await writeFile(path, bytes);
-    return { mimeType: 'image/png', filename, file: async () => path, sha256: async () => sha256(bytes) };
-  }
-
-  /** What stands in for where a list is downloaded from: answers with `body`, and keeps the requests it got. */
-  function listServer(body = LIST) {
-    const server = {
-      body,
-      status: 200,
-      down: false,
-      requests: [] as { url: string; authorization: string | null }[],
-      fetcher: (async (input: string | URL | Request, init?: RequestInit) => {
-        server.requests.push({ url: String(input), authorization: new Headers(init?.headers).get('authorization') });
-        if (server.down) throw new TypeError('fetch failed');
-        return new Response(server.body, { status: server.status });
-      }) as typeof fetch,
-    };
-    return server;
-  }
-
-  /** The plugin with a list of its own, on a clock the test moves, as `assess` is called with it. The database is one that can't be reached. */
-  function setup(settings: Record<string, unknown> = { hashList: 'https://lists.example/pdq.csv' }, body?: string) {
-    const server = listServer(body);
-    const clock = { now: Date.UTC(2026, 10, 6, 12) };
-    const logged: { level: string; fields: Record<string, unknown>; text: string }[] = [];
-    const log = Object.fromEntries(['info', 'warn', 'error'].map((level) => [level, (fields: Record<string, unknown>, text: string) => logged.push({ level, fields, text })]));
-    const db = { selectFrom: () => { throw new Error('no database'); } };
-    const ctx = { config: loadConfig({ pdq: settings }, {}), now: () => clock.now, score: 100, log, db, client: { ip: '203.0.113.9', userAgent: 'TestClient/1.0' } } as unknown as TrustContext;
-    const plugin = pdq(server.fetcher);
-    const assess = async (images: TrustImage[], post: Partial<TrustPost> = {}) => plugin.assess({ userId: 'u', tags: ['news'], texts: [], ...(images.length ? { images } : {}), ...post }, ctx);
-    return { server, clock, logged, assess };
-  }
-
-  const MATCH = { set: 0 };
-
-  it('is optional: a plugin the server comes with, and runs only if it names it', async () => {
-    expect(pdq().optional).toBe(true);
-    expect((await loadTrustPlugins()).map((plugin) => plugin.name)).not.toContain('pdq');
-    expect((await loadTrustPlugins(['pdq'])).map((plugin) => plugin.name)).toContain('pdq');
-  });
-
-  it('downloads the list once, with its Authorization header, and gives an image near a listed hash no trust, without a reason', async () => {
-    const { server, assess } = setup({ hashList: 'https://lists.example/pdq.csv?token=1', authorization: 'Bearer SECRET' });
-    expect(await assess([await image(await png(LISTED))])).toEqual(MATCH);
-    expect(await assess([await image(await copy(LISTED))])).toEqual(MATCH);
-    expect(await assess([await image(await copy(ALSO_LISTED, 300, 50))])).toEqual(MATCH);
-    // A comment's image is a post's.
-    expect(await assess([await image(await copy(LISTED))], { commentOn: 'c1' })).toEqual(MATCH);
-    // Any image of several.
-    expect(await assess([await image(await png(OTHER)), await image(await copy(LISTED))])).toEqual(MATCH);
-    expect(server.requests).toEqual([{ url: 'https://lists.example/pdq.csv?token=1', authorization: 'Bearer SECRET' }]);
-  });
-
-  it('leaves a post whose images are not near a listed hash as it is, and one that has none', async () => {
-    const { server, assess } = setup();
-    expect(await assess([await image(await png(OTHER))])).toBeNull();
-    expect(await assess([await image(await copy(OTHER)), await image(await png(REFERENCE[2]!))])).toBeNull();
-    expect(await assess([await image(await drawn(LISTED).flop().png().toBuffer())])).toBeNull();
-    expect(await assess([])).toBeNull();
-    expect(await assess([], { texts: [LISTED.hash] })).toBeNull();
-    expect(server.requests.map(({ authorization }) => authorization)).toEqual([null]);
-  });
-
-  it('matches at the distance and the quality the server sets', async () => {
-    // A list with a hash 20 bits from the picture's, and not the picture's own.
-    const far = [changed(LISTED.hash, 20), ALSO_LISTED.hash, OTHER.hash].join('\n');
-    const bytes = await png(LISTED);
-    expect(await setup({ hashList: 'https://lists.example/a' }, far).assess([await image(bytes)])).toEqual(MATCH);
-    expect(await setup({ hashList: 'https://lists.example/a', maxDistance: 20 }, far).assess([await image(bytes)])).toEqual(MATCH);
-    expect(await setup({ hashList: 'https://lists.example/a', maxDistance: 19 }, far).assess([await image(bytes)])).toBeNull();
-    expect(await setup({ hashList: 'https://lists.example/a', maxDistance: 0 }, far).assess([await image(bytes)])).toBeNull();
-    expect(await setup({ hashList: 'https://lists.example/a', maxDistance: 0 }).assess([await image(bytes)])).toEqual(MATCH);
-
-    // A picture with little in it: a soft gradient, whose hash is on the list. It is matched only where the server asks for no quality.
-    const soft = Buffer.from(Array.from({ length: 200 * 200 }, (_, i) => 100 + Math.floor((i % 200) / 8)));
-    const gradient = await sharp(soft, { raw: { width: 200, height: 200, channels: 1 } }).png().toBuffer();
-    const { words, quality } = pdqHash(lumaOf(soft, 1), 200, 200);
-    expect(quality).toBeLessThan(50);
-    const list = `${toHex(words)}\n${LIST}`;
-    expect(await setup({ hashList: 'https://lists.example/a' }, list).assess([await image(gradient)])).toBeNull();
-    expect(await setup({ hashList: 'https://lists.example/a', minQuality: 0 }, list).assess([await image(gradient)])).toEqual(MATCH);
-  });
-
-  it('checks every frame of an animated image', async () => {
-    const { assess } = setup();
-    const film = (pictures: Picture[]) =>
-      sharp(Buffer.concat(pictures.map(grey)), { raw: { width: LISTED.cols, height: LISTED.rows * pictures.length, channels: 1, pageHeight: LISTED.rows } }).gif().toBuffer();
-    const frame = (seed: number) => ({ ...LISTED, seed });
-    expect(await assess([await image(await film([frame(7), frame(8), frame(9)]))])).toBeNull();
-    expect(await assess([await image(await film([frame(7), frame(8), LISTED, frame(9)]))])).toEqual(MATCH);
-  });
-
-  it("holds an image it can't decode for a person to look at, or has it refused where there is no queue", async () => {
-    const { assess, logged } = setup();
-    const broken = await image(Buffer.from('not an image at all'), 'broken.png');
-    // One under the score that publishes, which is 75 unless the server says otherwise.
-    expect(await assess([broken])).toEqual({ set: 74, reason: msg('moderation.image_unreadable') });
-    expect(await assess([broken], { commentOn: 'c1' })).toEqual({ set: 74, reason: msg('comment.image_unreadable') });
-    expect(await assess([await image(await png(OTHER)), broken])).toEqual({ set: 74, reason: msg('moderation.image_unreadable') });
-    expect(logged.filter(({ level }) => level === 'warn').map(({ text, fields }) => [text, fields.filename])).toContainEqual(["pdq: an image couldn't be decoded, so it wasn't checked against the list", 'broken.png']);
-    // A match among them is a match.
-    expect(await assess([broken, await image(await png(LISTED))])).toEqual(MATCH);
-  });
-
-  it('tells the log of a match with what a report is written from, whether or not the admins can be told', async () => {
-    const { assess, logged } = setup();
-    const bytes = await copy(LISTED);
-    expect(await assess([await image(bytes, 'holiday\n.jpg')], { userId: 'user-1', contentId: 'content-1' })).toEqual(MATCH);
-    const [told] = logged.filter(({ level }) => level === 'error');
-    expect(told!.text).toBe("pdq: an image matches the list of hashes of known child sexual abuse material, and the admins couldn't be told in their inboxes");
-    expect(told!.fields.match).toMatchObject({
-      userId: 'user-1',
-      listed: LISTED.hash,
-      at: '2026-11-06T12:00:00.000Z',
-      ip: '203.0.113.9',
-      userAgent: 'TestClient/1.0',
-      sentAs: 'update',
-      contentId: 'content-1',
-      filename: 'holiday .jpg',
-      mimeType: 'image/png',
-      sha256: sha256(bytes),
-      quality: 100,
-      frame: 0,
-      outcome: 'refused',
-    });
-    const { pdq: hash, distance: bits } = told!.fields.match as { pdq: string; distance: number };
-    expect(apart(hash, LISTED.hash)).toBe(bits);
-    expect(bits).toBeLessThanOrEqual(31);
-  });
-
-  it('reads the list again when it is due, without making a post wait, and keeps the one it has if that fails', async () => {
-    const { server, clock, assess } = setup({ hashList: 'https://lists.example/pdq.csv', refreshMinutes: 10 });
-    const listed = await image(await png(LISTED));
-    const other = await image(await png(OTHER));
-    expect(await assess([listed])).toEqual(MATCH);
-    expect(await assess([other])).toBeNull();
-
-    // Not yet due: nothing is asked for, whatever is posted.
-    server.body = `${LIST}\n${OTHER.hash}\n`;
-    clock.now += 9 * 60_000;
-    expect(await assess([other])).toBeNull();
-    expect(await assess([])).toBeNull();
-    expect(server.requests).toHaveLength(1);
-
-    // Due: the post that finds it so is answered from the list there is, and the next ones from the new one. A post with no image does as well.
-    clock.now += 60_000;
-    expect(await assess([])).toBeNull();
-    expect(server.requests).toHaveLength(2);
-    await vi.waitFor(async () => expect(await assess([other])).toEqual(MATCH));
-    expect(server.requests).toHaveLength(2);
-
-    // A download that fails leaves the list as it was, and is tried again a minute later.
-    clock.now += 10 * 60_000;
-    server.down = true;
-    expect(await assess([other])).toEqual(MATCH);
-    expect(server.requests).toHaveLength(3);
-    clock.now += 59_000;
-    expect(await assess([listed])).toEqual(MATCH);
-    expect(server.requests).toHaveLength(3);
-    clock.now += 1000;
-    // An answer that isn't the list doesn't take its place either.
-    Object.assign(server, { down: false, body: '<html>Maintenance</html>' });
-    expect(await assess([listed])).toEqual(MATCH);
-    expect(server.requests).toHaveLength(4);
-    clock.now += 60_000;
-    Object.assign(server, { body: `${OTHER.hash}\n` });
-    expect(await assess([listed])).toEqual(MATCH);
-    await vi.waitFor(async () => expect(await assess([listed])).toBeNull());
-    expect(await assess([other])).toEqual(MATCH);
-    expect(server.requests).toHaveLength(5);
-  });
-
-  it("fails a post with an image while it has no list, and no other, and doesn't put the address or its key in the error", async () => {
-    const { server, clock, assess } = setup({ hashList: 'https://lists.example/pdq.csv?token=SECRET-TOKEN', authorization: 'Bearer SECRET-KEY' });
-    server.status = 403;
-    const picture = await image(await png(OTHER));
-    const failure = await assess([picture]).catch((err: Error) => err);
-    expect(failure).toBeInstanceOf(Error);
-    expect((failure as Error).message).toBe(
-      'the pdq trust plugin has no list of hashes to check images with: the server PDQ_HASH_LIST names answered 403: it refused the request (PDQ_HASH_LIST_AUTHORIZATION)',
-    );
-    expect(JSON.stringify([failure, (failure as Error).cause, (failure as Error).stack])).not.toMatch(/SECRET|lists\.example/);
-    // What has no image isn't failed, and the list isn't asked for again for each: once a minute, until it is there.
-    expect(await assess([])).toBeNull();
-    await expect(assess([picture])).rejects.toThrow(/answered 403/);
-    expect(server.requests).toHaveLength(1);
-
-    clock.now += 60_000;
-    server.down = true;
-    await expect(assess([picture])).rejects.toThrow('the pdq trust plugin has no list of hashes to check images with: fetch failed');
-    clock.now += 60_000;
-    Object.assign(server, { down: false, status: 200, body: 'Not a list.' });
-    await expect(assess([picture])).rejects.toThrow(/PDQ_HASH_LIST has no hash in it/);
-    expect(server.requests).toHaveLength(3);
-
-    clock.now += 60_000;
-    server.body = LIST;
-    expect(await assess([picture])).toBeNull();
-    expect(await assess([await image(await png(LISTED))])).toEqual(MATCH);
-    expect(server.requests).toHaveLength(4);
-  });
-
-  it('reads the list once for the posts that wait for it together', async () => {
-    const { server, assess } = setup();
-    const answers = await Promise.all([[await image(await png(LISTED))], [await image(await png(OTHER))], []].map((images) => assess(images)));
-    expect(answers).toEqual([MATCH, null, null]);
-    expect(server.requests).toHaveLength(1);
-  });
-
-  it('reads the list from a file, and again once the file has changed', async () => {
-    const file = join(dir, 'hashes.txt');
-    await writeFile(file, LIST);
-    const { server, clock, assess } = setup({ hashList: file, refreshMinutes: 5 });
-    const other = await image(await png(OTHER));
-    expect(await assess([await image(await png(LISTED))])).toEqual(MATCH);
-    expect(await assess([other])).toBeNull();
-
-    await writeFile(file, `${LIST}\n${OTHER.hash}\n`);
-    // So that the file is seen to have changed, however coarse the clock of where it is kept.
-    await utimes(file, new Date(), new Date(Date.now() + 5000));
-    expect(await assess([other])).toBeNull();
-    clock.now += 5 * 60_000;
-    expect(await assess([])).toBeNull();
-    await vi.waitFor(async () => expect(await assess([other])).toEqual(MATCH));
-    // Nothing is downloaded for a list that is a file.
-    expect(server.requests).toEqual([]);
-
-    await expect(setup({ hashList: join(dir, 'missing.txt') }).assess([other])).rejects.toThrow(/the pdq trust plugin has no list of hashes to check images with: ENOENT/);
-  });
-});
 
 describe('PDQ_HASH_LIST and the other settings of the pdq trust plugin', () => {
-  const load = (env: Record<string, string>) => loadConfig({}, env).pdq;
+  const load = (env: Record<string, string>) => loadConfig({}, { ...BASE_ENV, ...env }).pdq;
 
   it('are no list, 31 bits, a quality of 50 and an hour, unless set', () => {
     expect(load({})).toEqual({ maxDistance: 31, minQuality: 50, refreshMinutes: 60 });
@@ -551,7 +94,7 @@ describe('PDQ_HASH_LIST and the other settings of the pdq trust plugin', () => {
   });
 
   it('are needed by a server that turns the plugin on, which must also hold back what it does not trust', () => {
-    const plugins = (env: Record<string, string>) => loadConfig({}, env).trust.optionalPlugins;
+    const plugins = (env: Record<string, string>) => loadConfig({}, { ...BASE_ENV, ...env }).trust.optionalPlugins;
     expect(plugins({ TRUST_OPTIONAL_PLUGINS: 'pdq', PDQ_HASH_LIST: '/etc/evieverse/pdq.txt' })).toEqual(['pdq']);
     // A server that turns pdq on without a list doesn't start, rather than run it with nothing to match images against.
     expect(() => plugins({ TRUST_OPTIONAL_PLUGINS: 'pdq' })).toThrow(/TRUST_OPTIONAL_PLUGINS turns on pdq, which needs PDQ_HASH_LIST/);
@@ -584,7 +127,7 @@ for (const target of TARGETS) {
 
     /** A server that runs the plugin with the test's list, beside the plugins every server runs. */
     const serverWithPlugin = async (opts: Parameters<typeof createTestContext>[1] = {}) =>
-      createTestContext(target, { ...opts, pdq: { hashList: list }, trustPlugins: [...(await loadTrustPlugins()), { name: 'pdq', ...pdq() }] });
+      createTestContext(target, { ...opts, trust: { ...opts.trust, optionalPlugins: ['pdq'] }, pdq: { hashList: list } });
     const admin = async (name = 'root') => {
       const user = await ctx.register(name);
       await setAdmin(ctx.db, name, true);
@@ -829,9 +372,8 @@ for (const target of TARGETS) {
         expect(answer(await post(bob))).toEqual([422, POST_REFUSED]);
         expect(await inbox(root)).toMatchObject([{ kind: 'csam_match_refused', details: { username: 'bob' } }]);
         expect((await sendImages(bob, [{ name: 'fine.png', type: 'image/png', data: await png(OTHER) }])).statusCode).toBe(201);
-        // The process has one copy of the list, so only its first server of this file downloads it.
-        expect(asked.length).toBeLessThanOrEqual(1);
-        expect(asked.every((request) => request === '/pdq.csv Bearer KEY')).toBe(true);
+        // Downloaded once, for the posts after the first too.
+        expect(asked).toEqual(['/pdq.csv Bearer KEY']);
       } finally {
         http.closeAllConnections();
         await new Promise((resolve) => http.close(resolve));

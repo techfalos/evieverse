@@ -1,11 +1,9 @@
-import type { FastifyBaseLogger } from 'fastify';
-import type { Config } from '../config.js';
-import type { Db } from '../db/index.js';
 import type { Text } from '../language.js';
+import type { RemovedTag } from './policy.types.js';
 
 /**
- * An image of a post or of a comment, for a plugin that looks at pictures. Nothing of it is read
- * unless a plugin asks: one that doesn't costs a post nothing.
+ * An image of a post or of a comment, for a trust plugin that looks at pictures. Nothing of it is
+ * read unless a plugin the server runs reads images: where none does, it costs a post nothing.
  */
 export interface TrustImage {
   /** Which image its bytes are (image/jpeg, image/png, image/gif or image/webp), read from the bytes themselves. */
@@ -21,6 +19,14 @@ export interface TrustImage {
   file(): Promise<string>;
   /** The SHA-256 of that file, in hex: what the post's meta file would keep of it. */
   sha256(): Promise<string>;
+}
+
+/** An image as the trust plugins are given it, once it is read: where its file is, and the file's hash. */
+export interface ReadImage {
+  mimeType: string;
+  filename: string | null;
+  file: string;
+  sha256: string;
 }
 
 /** Who sent a request, as far as the server can tell. */
@@ -58,57 +64,75 @@ export interface TrustPost {
    * Its images: those of an image post, in their order, the one a comment comes with, and a
    * profile's avatar. Absent for anything else: a post of another type, a comment with a video or
    * with no file, the edit of a comment (which keeps its file), a profile whose avatar isn't
-   * what is set, and a repost of a post on another server, whose image isn't here.
+   * what is set, a repost of a post on another server, whose image isn't here, and on a server
+   * none of whose plugins reads images.
    */
-  images?: TrustImage[];
-}
-
-/** What a plugin works with. */
-export interface TrustContext {
-  db: Db;
-  config: Config;
-  now: () => number;
-  /** The log of the request that sent the post, for what its operator should know. Absent where a post is scored outside a request. */
-  log?: FastifyBaseLogger;
-  /** Who sent the request the post came in. Absent where a post is scored outside a request. */
-  client?: TrustClient;
-  /** The post's score as the plugins before this one left it. */
-  score: number;
+  images?: ReadImage[];
 }
 
 /**
- * What a plugin does to a post's score: sets it, or reduces it by so much. Either way the score
- * only goes down: a plugin that sets it higher than it is changes nothing.
- *
- * `reason` is what the publisher is told if this change is what has the post refused: a message of
- * the language files (`msg`, src/language.ts), which they are told in their language, or the
- * plugin's own words, which they are told as written.
+ * Why something that was sent is refused, with nothing of it stored: what its sender is told,
+ * which is a message of the language files or a plugin's own words.
  */
-export type TrustChange = ({ set: number; reduce?: never } | { reduce: number; set?: never }) & { reason?: Text };
-
-/** What a plugin's index file exports as its default. */
-export interface TrustAlgorithm {
-  /**
-   * Whether the plugin is optional: one that runs only on a server that turns it on, by naming it
-   * in `trust.optionalPlugins` (TRUST_OPTIONAL_PLUGINS). A plugin that doesn't say runs on every server.
-   */
-  optional?: boolean;
-  /** Looks at a post, and says what to do to its score. null, or nothing, leaves it as it is. */
-  assess(post: TrustPost, ctx: TrustContext): TrustChange | null | undefined | void | Promise<TrustChange | null | undefined | void>;
-}
-
-/** A plugin as loaded: its algorithm, named after its folder. */
-export interface TrustPlugin extends TrustAlgorithm {
-  name: string;
+export interface Refusal {
+  message: Text;
+  /** For a post left with no hashtag: the ones it was sent with, and why it got none. */
+  removedTags?: RemovedTag[];
 }
 
 /**
- * The trust score of a post or a comment as `trustOf` works it out. `moderatePost` and
- * `moderateComment` read it: one whose score has it deleted is refused with `reason`, if it has
- * one.
+ * Where a score sends a post, by the server's `trust` settings. delete (less than `deleteBelow`):
+ * it is refused, and nothing of it is kept. queue (less than `allowFrom`): it is stored but not
+ * published until an admin accepts it. allow: it is published.
  */
-export interface Trust {
-  score: number;
-  /** The reason given with the change that brought the score to what it is, if it gave one. */
+export type TrustRoute = 'delete' | 'queue' | 'allow';
+
+/** What moderation came to: its answer, or what the sender is told of what it refuses. */
+export type Moderation<T> = { ok: T } | { refused: Refusal };
+
+/**
+ * One thing a test's trust plugin does (compactor/crates/trust/src/testing.rs). It applies to a
+ * post that has `includes` in one of its texts, and to every post if it names none. Of the rules
+ * that apply, the first that sets or fails is the plugin's answer; without one, the reductions
+ * add up.
+ */
+export interface TestRule {
+  includes?: string;
+  /** Whether that is found whatever its case. */
+  ignoreCase?: boolean;
+  /** Whether the rule applies to comments only. */
+  comments?: boolean;
+  set?: number;
+  reduce?: number;
+  /** Fails the plugin, with these words. */
+  fails?: string;
+  /** What the sender is told, if this is what has the post refused. */
   reason?: Text;
+}
+
+/** A trust plugin a test describes, which only an addon built for tests has. */
+export interface TestPlugin {
+  name: string;
+  rules?: TestRule[];
+  /** Whether it keeps what it is shown, for the test to read (see TrustEngine.seen). */
+  record?: boolean;
+  /** Whether it reads a post's images, so that they are read for it. */
+  readsImages?: boolean;
+}
+
+/** What a test's plugin that records was shown. */
+export interface Shown {
+  /** The plugin's name. */
+  plugin: string;
+  /** The post's score as the plugins before it left it. */
+  score: number;
+  post: TrustPost;
+}
+
+/** What a server's trust is opened with beside its settings: only a test gives any. */
+export interface TrustOptions {
+  /** Plugins a test describes, which run after the server's own. */
+  testPlugins?: TestPlugin[];
+  /** Whether they run in place of the server's own. */
+  onlyTestPlugins?: boolean;
 }

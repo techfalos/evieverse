@@ -272,7 +272,7 @@ export async function readCommentFile(
 /**
  * One file of an image, video or audio post, as a request stores it. A video's or audio's type
  * is the one it was sent as, and its bytes are staged as they came: a video's are then
- * processed before they are the post's, where the server processes videos (src/video). An image
+ * processed before they are the post's, where the server processes videos (compactor/src/video). An image
  * is checked by its bytes and stored without its metadata (see PostBytes.image): its type is the
  * one its bytes are of, and it keeps the alternative text it was sent with (see altOf).
  */

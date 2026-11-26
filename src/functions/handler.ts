@@ -14,8 +14,6 @@ const FUNCTION_DEFAULTS: NodeJS.ProcessEnv = {
   // few connections, and gives them up soon after going idle.
   DB_POOL_SIZE: '2',
   DB_IDLE_TIMEOUT_MS: '10000',
-  // The compactor is a process that stays up, which a function isn't: it is deployed beside them.
-  COMPACT_IN_PROCESS: 'false',
 };
 
 /** The settings of a function: the environment's, over defaults that suit many short-lived instances. */
@@ -23,11 +21,6 @@ export function functionConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const merged = { ...env };
   for (const [name, value] of Object.entries(FUNCTION_DEFAULTS)) if (!merged[name]) merged[name] = value;
   return loadConfig({}, merged);
-}
-
-/** Functions share one feed index, which only Redis can hold for them: so a function doesn't start without it. */
-export function requireRedis(config: Config): void {
-  if (!config.redis.url) throw new Error('functions need REDIS_URL: without it the feed index would live inside each instance');
 }
 
 /**
@@ -38,7 +31,7 @@ export function requireRedis(config: Config): void {
 export function createFunction(group: GroupName, config: Config = functionConfig(), opts: FunctionOptions & { server?: AppOptions } = {}) {
   let starting: Promise<{ app: FastifyInstance; close(): Promise<void> }> | undefined;
   const start = async () => {
-    const deps = GROUPS[group].database ? await bootstrap(config, opts.now, opts.hot) : bootstrapStores(config, opts.now, opts.hot);
+    const deps = GROUPS[group].database ? await bootstrap(config, opts.now) : bootstrapStores(config, opts.now);
     try {
       const app = await buildApp(deps, opts.server, [group]);
       await app.ready();

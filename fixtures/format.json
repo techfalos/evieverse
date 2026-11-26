@@ -1,0 +1,3101 @@
+{
+ "note": "What src/format.ts makes of each text with `users`: plainText without and with addresses, mentionsIn, and cutFormatted at a few lengths. The texts and the users are written by hand, and the rest by test/fixtures.test.ts with UPDATE_FIXTURES=1. Both sides are held to it: that test and compactor/crates/core/src/format.rs.",
+ "users": [
+  {
+   "userId": "u1",
+   "username": "Ann"
+  },
+  {
+   "userId": "u2",
+   "username": "Ann Lee"
+  },
+  {
+   "userId": "u3",
+   "username": "snake_case"
+  },
+  {
+   "userId": "u4",
+   "username": "José"
+  },
+  {
+   "userId": "u5",
+   "username": "太郎"
+  },
+  {
+   "userId": "u6",
+   "username": "a.b"
+  },
+  {
+   "userId": "u7",
+   "username": "x*y"
+  },
+  {
+   "userId": "u1",
+   "username": "Annie Old"
+  },
+  {
+   "userId": "u8",
+   "username": ""
+  },
+  {
+   "userId": "u9",
+   "username": "two\nlines"
+  },
+  {
+   "userId": "u10",
+   "username": "𝒜lice"
+  },
+  {
+   "userId": "u11",
+   "username": "Bob"
+  },
+  {
+   "userId": "u12",
+   "username": "bob"
+  }
+ ],
+ "cases": [
+  {
+   "text": "",
+   "plain": "",
+   "addresses": "",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": ""
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": ""
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": ""
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": ""
+    }
+   ]
+  },
+  {
+   "text": " ",
+   "plain": "",
+   "addresses": "",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": ""
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": ""
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": ""
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": ""
+    }
+   ]
+  },
+  {
+   "text": "plain text",
+   "plain": "plain text",
+   "addresses": "plain text",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "plain text"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "plain text"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "plain text"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "plain text"
+    }
+   ]
+  },
+  {
+   "text": "**bold** and __bold__ and *it* and _it_ and ~~gone~~ and ~not~ and ~~~no~~~",
+   "plain": "bold and bold and it and it and gone and ~not~ and ~~~no~~~",
+   "addresses": "bold and bold and it and it and gone and ~not~ and ~~~no~~~",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "**bold** and __bol__ …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "**bold** and __bold__ and *it* …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "**bold** and __bold__ and *it* …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "**bold** and __bold__ and *it* and _it_ and ~~gone~~ and ~not~ and ~~~no~~~"
+    }
+   ]
+  },
+  {
+   "text": "***both*** ___both___ ****four**** **a *b* c** *a **b** c* **a **b** c**",
+   "plain": "both both ****four**** a b c a b c a **b c**",
+   "addresses": "both both ****four**** a b c a b c a **b c**",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "***both*** ___bot___ …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "***both*** ___both___ ****four**** **a** …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "***both*** ___both___ ****four …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "***both*** ___both___ ****four**** **a *b* c** *a **b** c* **a \\*\\*b** c\\*\\*"
+    }
+   ]
+  },
+  {
+   "text": "*open and never closed",
+   "plain": "*open and never closed",
+   "addresses": "*open and never closed",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\*open and never …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\*open and never closed"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\*open and never closed"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\*open and never closed"
+    }
+   ]
+  },
+  {
+   "text": "** spaced ** * alone * _ _ ~~ ~~",
+   "plain": "** spaced ** * alone * _ _ ~~ ~~",
+   "addresses": "** spaced ** * alone * _ _ ~~ ~~",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "** spaced \\*\\* …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "** spaced ** * alone …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "** spaced ** * alone * _ \\_ …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "** spaced ** * alone * _ _ ~~ ~~"
+    }
+   ]
+  },
+  {
+   "text": "snake_case and _snake_case_ and __init__ and a_b_c and _a_b_ 1_2 _é_ é_é",
+   "plain": "snake_case and snake_case and init and a_b_c and a_b 1_2 é é_é",
+   "addresses": "snake_case and snake_case and init and a_b_c and a_b 1_2 é é_é",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "snake_case and _sna_ …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "snake_case and _snake_case_ and __init__ …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "snake_case and _snake_case_ an …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "snake_case and _snake_case_ and __init__ and a_b_c and _a_b_ 1_2 _é_ é_é"
+    }
+   ]
+  },
+  {
+   "text": "a*b*c a**b**c *a*b 2*3*4 **x*",
+   "plain": "abc abc ab 234 **x*",
+   "addresses": "abc abc ab 234 **x*",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "a*b*c a**b**c *a*b …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "a*b*c a**b**c *a*b 2*3*4 \\*\\*x\\*"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "a*b*c a**b**c *a*b 2*3*4 \\*\\*x …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "a*b*c a**b**c *a*b 2*3*4 \\*\\*x\\*"
+    }
+   ]
+  },
+  {
+   "text": "`code *not bold*` and `` and `unclosed and `multi\nline`",
+   "plain": "code *not bold* and ` and unclosed and `multi\nline`",
+   "addresses": "code *not bold* and ` and unclosed and `multi\nline`",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "`code *not bold*` …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "`code *not bold*` and \\` …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "`code *not bold*` and \\` `and` …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "`code *not bold*` and \\` `and` unclosed and \\`multi line\\`"
+    }
+   ]
+  },
+  {
+   "text": "`a` `b``c` \\`not code\\`",
+   "plain": "a bc `not code`",
+   "addresses": "a bc `not code`",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "`a` `b``c` \\`not …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "`a` `b``c` \\`not code\\`"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "`a` `b``c` \\`not code\\`"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "`a` `b``c` \\`not code\\`"
+    }
+   ]
+  },
+  {
+   "text": "escapes \\* \\_ \\~ \\[ \\] \\@ \\\\ \\a \\ end\\",
+   "plain": "escapes * _ ~ [ ] @ \\ \\a \\ end\\",
+   "addresses": "escapes * _ ~ [ ] @ \\ \\a \\ end\\",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "escapes \\* \\_ …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "escapes \\* \\_ \\~ \\[ …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "escapes \\* \\_ \\~ \\[ \\] \\@ \\\\ …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "escapes \\* \\_ \\~ \\[ \\] \\@ \\\\ \\a \\ end\\"
+    }
+   ]
+  },
+  {
+   "text": "\\",
+   "plain": "\\",
+   "addresses": "\\",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\"
+    }
+   ]
+  },
+  {
+   "text": "line one\nline two\n\nnew paragraph\r\nwindows line\rmac line",
+   "plain": "line one\nline two\nnew paragraph\nwindows line\nmac line",
+   "addresses": "line one\nline two\nnew paragraph\nwindows line\nmac line",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "line one line …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "line one line two new …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "line one line two new paragrap …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "line one line two new paragraph windows line mac line"
+    }
+   ]
+  },
+  {
+   "text": "> quote\n>more quote\n> \n>\tlast\nnot quote\n\n>",
+   "plain": "quote\nmore quote\n\nlast\nnot quote\n",
+   "addresses": "quote\nmore quote\n\nlast\nnot quote\n",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\> quote more …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\> quote more quote last …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\> quote more quote last not qu …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\> quote more quote last not quote >"
+    }
+   ]
+  },
+  {
+   "text": "- one\n- two\n* three\n1. four\n2. five\n\n-not an item\n- \n-  spaced item\n1.no\n1234567890. too long\n123456789. long enough",
+   "plain": "one\ntwo\nthree\nfour\nfive\n-not an item\n- \nspaced item\n1.no\n1234567890. too long\nlong enough",
+   "addresses": "one\ntwo\nthree\nfour\nfive\n-not an item\n- \nspaced item\n1.no\n1234567890. too long\nlong enough",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\- one - …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\- one - two - …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\- one - two - three 1. four …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\- one - two - three 1. four 2. five -not an item - - spaced item 1.no 1234567890. too long 123456789. long enough"
+    }
+   ]
+  },
+  {
+   "text": "- **bold item**\n- [link](https://example.com/a) item\n> _quoted_ `code`",
+   "plain": "bold item\nlink item\nquoted code",
+   "addresses": "bold item\nlink https://example.com/a item\nquoted code",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\- **bold item** …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\- **bold item** - …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\- **bold item** - …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\- **bold item** - [link](https://example.com/a) item > _quoted_ `code`"
+    }
+   ]
+  },
+  {
+   "text": " > not a quote\n> has   inside\n- item   inside\n \n﻿",
+   "plain": " > not a quote\n> has   inside\n- item   inside",
+   "addresses": " > not a quote\n> has   inside\n- item   inside",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\> not a …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\> not a quote > …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\> not a quote > has inside - …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\> not a quote > has inside - item inside"
+    }
+   ]
+  },
+  {
+   "text": "see https://example.com/path?x=1&y=2#frag. And HTTP://EXAMPLE.COM/UP! (http://a.example/b_(c)) http://a.example/b).",
+   "plain": "see https://example.com/path?x=1&y=2#frag. And HTTP://EXAMPLE.COM/UP! (http://a.example/b_(c)) http://a.example/b).",
+   "addresses": "see https://example.com/path?x=1&y=2#frag . And HTTP://EXAMPLE.COM/UP ! (http://a.example/b_(c) ) http://a.example/b ).",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "see https\\://example …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "see https\\://example.com/path?x=1&y=2#fr …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "see https\\://example.com/path? …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "see https://example.com/path?x=1&y=2#frag. And HTTP://EXAMPLE.COM/UP! (http://a.example/b_(c)) http://a.example/b)."
+    }
+   ]
+  },
+  {
+   "text": "https://example.com/a*b*c and *https://example.com/x* and _https://example.com/y_ and **https://example.com/z**",
+   "plain": "https://example.com/a*b*c and https://example.com/x and https://example.com/y and https://example.com/z",
+   "addresses": "https://example.com/a*b*c and https://example.com/x and https://example.com/y and https://example.com/z",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "https\\://example.com …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "https://example.com/a*b*c and *https\\:/* …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "https://example.com/a*b*c and …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "https://example.com/a*b*c and *https://example.com/x* and _https://example.com/y_ and **https://example.com/z**"
+    }
+   ]
+  },
+  {
+   "text": "http:// https://. https://, xhttps://example.com ahttp://b.example 9https://c.example éhttps://d.example 𝒜https://e.example _https://f.example",
+   "plain": "http:// https://. https://, xhttps://example.com ahttp://b.example 9https://c.example éhttps://d.example 𝒜https://e.example _https://f.example",
+   "addresses": "http:// https://. https://, xhttps://example.com ahttp://b.example 9https://c.example éhttps://d.example 𝒜https://e.example _https://f.example",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "http:// https://. ht …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "http:// https://. https://, xhttps://exa …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "http:// https://. https://, xh …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "http:// https://. https://, xhttps://example.com ahttp://b.example 9https://c.example éhttps://d.example 𝒜https://e.example \\_https://f.example"
+    }
+   ]
+  },
+  {
+   "text": "https://example.com/a\"b https://example.com/a<b> https://example.com/a[b] https://example.com/`c` https://example.com/\\d",
+   "plain": "https://example.com/a\"b https://example.com/a<b> https://example.com/a[b] https://example.com/c https://example.com/\\d",
+   "addresses": "https://example.com/a \"b https://example.com/a <b> https://example.com/a [b] https://example.com/ c https://example.com/ \\d",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "https\\://example.com …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "https://example.com/a\"b https\\://example …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "https://example.com/a\"b https …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "https://example.com/a\"b https://example.com/a<b> https://example.com/a\\[b] https://example.com/`c` https://example.com/\\d"
+    }
+   ]
+  },
+  {
+   "text": "https://example.com/it's. https://example.com/end~ https://example.com/q?! https://example.com/;:,.",
+   "plain": "https://example.com/it's. https://example.com/end~ https://example.com/q?! https://example.com/;:,.",
+   "addresses": "https://example.com/it's . https://example.com/end ~ https://example.com/q ?! https://example.com/ ;:,.",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "https\\://example.com …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "https://example.com/it's. https\\://examp …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "https://example.com/it's. http …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "https://example.com/it's. https://example.com/end~ https://example.com/q?! https://example.com/;:,."
+    }
+   ]
+  },
+  {
+   "text": "https://例え.example/パス https://example.com/𝒜𝒜 https://example.com/a b https://example.com/a　b",
+   "plain": "https://例え.example/パス https://example.com/𝒜𝒜 https://example.com/a b https://example.com/a　b",
+   "addresses": "https://例え.example/パス https://example.com/𝒜𝒜 https://example.com/a b https://example.com/a　b",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "https\\://例え.example/ …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "https://例え.example/パス https\\://example.c …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "https://例え.example/パス https\\:/ …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "https://例え.example/パス https://example.com/𝒜𝒜 https://example.com/a b https://example.com/a b"
+    }
+   ]
+  },
+  {
+   "text": "[label](https://example.com) [a](http://b.example)c [d](https://e.example) f [g](https://h.example)\nnext",
+   "plain": "label ac d f g\nnext",
+   "addresses": "label https://example.com a http://b.example c d https://e.example f g https://h.example\nnext",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": " …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "[label](https://example.com) …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "[label](https://example.com) …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "[label](https://example.com) [a](http://b.example)c [d](https://e.example) f [g](https://h.example) next"
+    }
+   ]
+  },
+  {
+   "text": "[here](http://example.com)now [ here ](https://example.com/x) [](https://example.com) [ ](https://example.com)",
+   "plain": "herenow  here  [](https://example.com) [ ](https://example.com)",
+   "addresses": "here http://example.com now  here  https://example.com/x [](https://example.com ) [ ](https://example.com )",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": " …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "[here](http://example.com)now …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "[here](http://example.com)now …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "[here](http://example.com)now [here](https://example.com/x) \\[\\](https://example.com) \\[ \\](https://example.com)"
+    }
+   ]
+  },
+  {
+   "text": "[https://example.com](https://example.com) [see https://a.example](https://b.example) [x](https://example.com/a(b)c) [x](https://example.com/a(b) [x](https://example.com/a)b)",
+   "plain": "https://example.com see https://a.example x [x](https://example.com/a(b) xb)",
+   "addresses": "https://example.com see https://a.example https://b.example x https://example.com/a(b)c [x](https://example.com/a(b) x https://example.com/a b)",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": " …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "[https://example.c](https://example.com) …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "[https:/](https://example.com) …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "[https://example.com](https://example.com) [see https://a.example](https://b.example) [x](https://example.com/a(b)c) \\[x](https://example.com/a(b) [x](https://example.com/a)b)"
+    }
+   ]
+  },
+  {
+   "text": "[x](ftp://example.com) [x](https://) [x](https://a b) [x] (https://example.com) [x](HTTPS://EXAMPLE.COM) [x](https://example.com/\"q\")",
+   "plain": "[x](ftp://example.com) [x](https://) [x](https://a b) [x] (https://example.com) x [x](https://example.com/\"q\")",
+   "addresses": "[x](ftp://example.com) [x](https://) [x](https://a b) [x] (https://example.com ) x HTTPS://EXAMPLE.COM [x](https://example.com/ \"q\")",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\[x](ftp://example.c …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\[x](ftp://example.com) \\[x](https://) …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\[x](ftp://example.com) \\[x](h …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\[x](ftp://example.com) \\[x](https://) \\[x](https://a b) \\[x] (https://example.com) [x](HTTPS://EXAMPLE.COM) \\[x](https://example.com/\"q\")"
+    }
+   ]
+  },
+  {
+   "text": "[a [b](https://c.example)](https://d.example) [a *b](https://c.example) c* *a [b*](https://c.example) [**a**](https://c.example) **[a](https://c.example)**",
+   "plain": "[a b](https://d.example) a *b c* a [b](https://c.example) a a",
+   "addresses": "[a b https://c.example ](https://d.example ) a *b https://c.example c* a [b](https://c.example ) a https://c.example a https://c.example",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\[a …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\[a [b](https://c.example)\\](https\\://d. …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\[a [b](https://c.example)\\](h …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\[a [b](https://c.example)\\](https://d.example) [a \\*b](https://c.example) c\\* *a \\[b*\\](https://c.example) [**a**](https://c.example) **[a](https://c.example)**"
+    }
+   ]
+  },
+  {
+   "text": "[a]b] ]( [[x]](https://example.com) [x]](https://example.com) ] [ ][",
+   "plain": "[a]b] ]( [[x]](https://example.com) [x]](https://example.com) ] [ ][",
+   "addresses": "[a]b] ]( [[x]](https://example.com ) [x]](https://example.com ) ] [ ][",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\[a]b] ]( \\[\\[x]\\](h …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\[a]b] ]( \\[\\[x]\\](https://example.com) …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\[a]b] ]( \\[\\[x]\\](https\\://ex …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\[a]b] ]( \\[\\[x]\\](https://example.com) \\[x]\\](https://example.com) ] \\[ ]\\["
+    }
+   ]
+  },
+  {
+   "text": "[long](https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) [too long](https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)",
+   "plain": "[long](https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) [too long](https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)",
+   "addresses": "[long](https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ) [too long](https://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa )",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\[long](https\\://exa …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\[long](https\\://example.com/aaaaaaaaaaa …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\[long](https\\://example.com/a …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\[long](https\\://example.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa …"
+    }
+   ]
+  },
+  {
+   "text": "[astral](https://example.com/𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜) [astral too long](https://example.com/𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜)",
+   "plain": "astral [astral too long](https://example.com/𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜)",
+   "addresses": "astral https://example.com/𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜 [astral too long](https://example.com/𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜 )",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": " …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": " …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": " …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": " …"
+    }
+   ]
+  },
+  {
+   "text": "[@Ann](https://example.com) [hi @Ann Lee](https://example.com) `@Ann` \\@Ann @Ann",
+   "plain": "@Ann hi @Ann Lee @Ann @Ann @Ann",
+   "addresses": "@Ann https://example.com hi @Ann Lee https://example.com @Ann @Ann @Ann",
+   "mentions": [
+    {
+     "userId": "u1",
+     "username": "Ann"
+    }
+   ],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": " …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "[\\@Ann](https://example.com) …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "[\\@Ann](https://example.com) …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "[\\@Ann](https://example.com) [hi \\@Ann Lee](https://example.com) `@Ann` \\@Ann @Ann"
+    }
+   ]
+  },
+  {
+   "text": "hi @Ann Lee and @Ann, not ann@Ann nor @Annie or @Ann_marie or @Ann\\_marie but @Ann_ and @Ann. @Ann's @Ann!",
+   "plain": "hi @Ann Lee and @Ann, not ann@Ann nor @Annie or @Ann_marie or @Ann_marie but @Ann_ and @Ann. @Ann's @Ann!",
+   "addresses": "hi @Ann Lee and @Ann, not ann@Ann nor @Annie or @Ann_marie or @Ann_marie but @Ann_ and @Ann. @Ann's @Ann!",
+   "mentions": [
+    {
+     "userId": "u2",
+     "username": "Ann Lee"
+    },
+    {
+     "userId": "u1",
+     "username": "Ann"
+    }
+   ],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "hi @Ann Lee …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "hi @Ann Lee and @Ann, …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "hi @Ann Lee and @Ann, not ann@ …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "hi @Ann Lee and @Ann, not ann@Ann nor \\@Annie or \\@Ann_marie or \\@Ann\\_marie but @Ann\\_ and @Ann. @Ann's @Ann!"
+    }
+   ]
+  },
+  {
+   "text": "@snake_case @snake\\_case @snake_cases @snake_case_ @snake_case__x @snake_case\\_x",
+   "plain": "@snake_case @snake_case @snake_cases @snake_case_ @snake_case__x @snake_case_x",
+   "addresses": "@snake_case @snake_case @snake_cases @snake_case_ @snake_case__x @snake_case_x",
+   "mentions": [
+    {
+     "userId": "u3",
+     "username": "snake_case"
+    }
+   ],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "@snake_case …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "@snake_case @snake\\_case \\@snake_cases …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "@snake_case @snake\\_case \\@sna …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "@snake_case @snake\\_case \\@snake_cases @snake_case\\_ \\@snake_case__x \\@snake_case\\_x"
+    }
+   ]
+  },
+  {
+   "text": "@José @Jose @太郎 @太郎さん @a.b @a\\.b @a.bc @x*y @x\\*y *@Ann* **@Ann Lee** _@Ann_ ~~@Ann~~",
+   "plain": "@José @Jose @太郎 @太郎さん @a.b @a.b @a.bc @xy @x*y *@Ann @Ann Lee @Ann @Ann",
+   "addresses": "@José @Jose @太郎 @太郎さん @a.b @a.b @a.bc @xy @x*y *@Ann @Ann Lee @Ann @Ann",
+   "mentions": [
+    {
+     "userId": "u4",
+     "username": "José"
+    },
+    {
+     "userId": "u5",
+     "username": "太郎"
+    },
+    {
+     "userId": "u6",
+     "username": "a.b"
+    },
+    {
+     "userId": "u7",
+     "username": "x*y"
+    },
+    {
+     "userId": "u1",
+     "username": "Ann"
+    },
+    {
+     "userId": "u2",
+     "username": "Ann Lee"
+    }
+   ],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "@José \\@Jose @太郎 …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "@José \\@Jose @太郎 \\@太郎さん @a.b …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "@José \\@Jose @太郎 \\@太郎さん @a.b …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "@José \\@Jose @太郎 \\@太郎さん @a.b @a\\.b \\@a.bc @x*y @x\\*y *@Ann* **@Ann Lee** _@Ann_ ~~@Ann~~"
+    }
+   ]
+  },
+  {
+   "text": "@Annie Old @Annie @two\nlines @𝒜lice @𝒜licex é@Ann 1@Ann _@Ann 𝒜@Ann @Ann𝒜 @Ann𝒳",
+   "plain": "@Annie Old @Annie @two\nlines @𝒜lice @𝒜licex é@Ann 1@Ann _@Ann 𝒜@Ann @Ann𝒜 @Ann𝒳",
+   "addresses": "@Annie Old @Annie @two\nlines @𝒜lice @𝒜licex é@Ann 1@Ann _@Ann 𝒜@Ann @Ann𝒜 @Ann𝒳",
+   "mentions": [
+    {
+     "userId": "u1",
+     "username": "Annie Old"
+    },
+    {
+     "userId": "u10",
+     "username": "𝒜lice"
+    },
+    {
+     "userId": "u1",
+     "username": "Ann"
+    }
+   ],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "@Annie Old \\@Annie …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "@Annie Old \\@Annie \\@two lines …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "@Annie Old \\@Annie \\@two lines …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "@Annie Old \\@Annie \\@two lines @𝒜lice \\@𝒜licex é@Ann 1@Ann \\_@Ann 𝒜@Ann \\@Ann𝒜 \\@Ann𝒳"
+    }
+   ]
+  },
+  {
+   "text": "@Bob @bob @BOB @Ann @Ann @Ann Lee",
+   "plain": "@Bob @bob @BOB @Ann @Ann @Ann Lee",
+   "addresses": "@Bob @bob @BOB @Ann @Ann @Ann Lee",
+   "mentions": [
+    {
+     "userId": "u11",
+     "username": "Bob"
+    },
+    {
+     "userId": "u12",
+     "username": "bob"
+    },
+    {
+     "userId": "u1",
+     "username": "Ann"
+    },
+    {
+     "userId": "u2",
+     "username": "Ann Lee"
+    }
+   ],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "@Bob @bob \\@BOB …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "@Bob @bob \\@BOB @Ann @Ann …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "@Bob @bob \\@BOB @Ann @Ann …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "@Bob @bob \\@BOB @Ann @Ann @Ann Lee"
+    }
+   ]
+  },
+  {
+   "text": "- @Ann item\n> @José quote\n@nobody @ @@Ann @",
+   "plain": "@Ann item\n@José quote\n@nobody @ @@Ann @",
+   "addresses": "@Ann item\n@José quote\n@nobody @ @@Ann @",
+   "mentions": [
+    {
+     "userId": "u1",
+     "username": "Ann"
+    },
+    {
+     "userId": "u4",
+     "username": "José"
+    }
+   ],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\- @Ann item …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\- @Ann item > @José …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\- @Ann item > @José quote \\@no …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\- @Ann item > @José quote \\@nobody \\@ \\@@Ann \\@"
+    }
+   ]
+  },
+  {
+   "text": "email ann@example.com and (@Ann) and \"@Ann\" and @Ann/@Bob",
+   "plain": "email ann@example.com and (@Ann) and \"@Ann\" and @Ann/@Bob",
+   "addresses": "email ann@example.com and (@Ann) and \"@Ann\" and @Ann/@Bob",
+   "mentions": [
+    {
+     "userId": "u1",
+     "username": "Ann"
+    },
+    {
+     "userId": "u11",
+     "username": "Bob"
+    }
+   ],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "email ann@example.co …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "email ann@example.com and (@Ann) and …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "email ann@example.com and ( …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "email ann@example.com and (@Ann) and \"@Ann\" and @Ann/@Bob"
+    }
+   ]
+  },
+  {
+   "text": "tabs\tand nbsp　ideographic * x* *x * *　y*",
+   "plain": "tabs\tand nbsp　ideographic * x* x * *　y",
+   "addresses": "tabs\tand nbsp　ideographic * x* x * *　y",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "tabs and nbsp …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "tabs and nbsp ideographic \\* …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "tabs and nbsp ideographic * x …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "tabs and nbsp ideographic * x\\* *x * * y*"
+    }
+   ]
+  },
+  {
+   "text": "𝒜*bold*𝒜 𝒜_it_𝒜 *𝒜* _𝒜_ 😀*x*😀 😀_x_😀",
+   "plain": "𝒜bold𝒜 𝒜it𝒜 𝒜 𝒜 😀x😀 😀x😀",
+   "addresses": "𝒜bold𝒜 𝒜it𝒜 𝒜 𝒜 😀x😀 😀x😀",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "𝒜*bold*𝒜 𝒜_it_𝒜 …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "𝒜*bold*𝒜 𝒜_it_𝒜 *𝒜* _𝒜_ 😀*x*😀 …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "𝒜*bold*𝒜 𝒜_it_𝒜 *𝒜* _𝒜_ …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "𝒜*bold*𝒜 𝒜_it_𝒜 *𝒜* _𝒜_ 😀*x*😀 😀_x_😀"
+    }
+   ]
+  },
+  {
+   "text": "~~a~~b~~c~~ ~~~~ ~ ~~a~b~~ **a~~b**c~~",
+   "plain": "abc ~~~~ ~ a~b a~~bc~~",
+   "addresses": "abc ~~~~ ~ a~b a~~bc~~",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "~~a~~b~~c~~ ~~~~ \\~ …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "~~a~~b~~c~~ ~~~~ ~ ~~a~b~~ **a\\~\\~b**c …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "~~a~~b~~c~~ ~~~~ ~ ~~a~b~~ …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "~~a~~b~~c~~ ~~~~ ~ ~~a~b~~ **a\\~\\~b**c\\~\\~"
+    }
+   ]
+  },
+  {
+   "text": "*a _b* c_ **a *b** c* _a **b_ c**",
+   "plain": "a _b c_ a *b c* a **b c**",
+   "addresses": "a _b c_ a *b c* a **b c**",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "*a \\_b* c\\_ …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "*a \\_b* c\\_ **a \\*b** …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "*a \\_b* c\\_ **a \\*b** c\\* _a_ …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "*a \\_b* c\\_ **a \\*b** c\\* _a \\*\\*b_ c\\*\\*"
+    }
+   ]
+  },
+  {
+   "text": "***a** b* ***a* b** *a **b*** **a *b***",
+   "plain": "*a b* a b a b a b",
+   "addresses": "*a b* a b a b a b",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "**\\*a** b\\* ***a*** …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "**\\*a** b\\* ***a* b** *a* …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "**\\*a** b\\* ***a* b** *a* …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "**\\*a** b\\* ***a* b** *a **b*** **a *b***"
+    }
+   ]
+  },
+  {
+   "text": "#heading is text\n1) not a list\n+ not a list\n-- not a list\n--- \n* * *",
+   "plain": "#heading is text\n1) not a list\n+ not a list\n-- not a list\n--- \n* *",
+   "addresses": "#heading is text\n1) not a list\n+ not a list\n-- not a list\n--- \n* *",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "#heading is text …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "#heading is text 1) not …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "#heading is text 1) not a list …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "#heading is text 1) not a list + not a list -- not a list --- - * *"
+    }
+   ]
+  },
+  {
+   "text": "mixed: **bold [link](https://example.com/x) `code` @Ann** tail",
+   "plain": "mixed: bold link code @Ann tail",
+   "addresses": "mixed: bold link https://example.com/x code @Ann tail",
+   "mentions": [
+    {
+     "userId": "u1",
+     "username": "Ann"
+    }
+   ],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "mixed: **bold** …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "mixed: **bold** …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "mixed: **bold** …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "mixed: **bold [link](https://example.com/x) `code` @Ann** tail"
+    }
+   ]
+  },
+  {
+   "text": "नमस्ते **दुनिया** _ไทย_ https://example.com/ไทย @太郎",
+   "plain": "नमस्ते दुनिया ไทย https://example.com/ไทย @太郎",
+   "addresses": "नमस्ते दुनिया ไทย https://example.com/ไทย @太郎",
+   "mentions": [
+    {
+     "userId": "u5",
+     "username": "太郎"
+    }
+   ],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "नमस्ते **दुनिया** …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "नमस्ते **दुनिया** _ไทย_ https\\://example …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "नमस्ते **दुनिया** _ไทย_ https …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "नमस्ते **दुनिया** _ไทย_ https://example.com/ไทย @太郎"
+    }
+   ]
+  },
+  {
+   "text": "Buy   NOW! limited offer, call 555-1234 today",
+   "plain": "Buy   NOW! limited offer, call 555-1234 today",
+   "addresses": "Buy   NOW! limited offer, call 555-1234 today",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "Buy NOW! limited …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "Buy NOW! limited offer, call …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "Buy NOW! limited offer, call 5 …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "Buy NOW! limited offer, call 555-1234 today"
+    }
+   ]
+  },
+  {
+   "text": "这是垃圾广告内容,请勿相信",
+   "plain": "这是垃圾广告内容,请勿相信",
+   "addresses": "这是垃圾广告内容,请勿相信",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "这是垃圾广告内容,请勿相信"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "这是垃圾广告内容,请勿相信"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "这是垃圾广告内容,请勿相信"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "这是垃圾广告内容,请勿相信"
+    }
+   ]
+  },
+  {
+   "text": "CAFE au lait and a cafe, plus SPAM spam",
+   "plain": "CAFE au lait and a cafe, plus SPAM spam",
+   "addresses": "CAFE au lait and a cafe, plus SPAM spam",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "CAFE au lait …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "CAFE au lait and a …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "CAFE au lait and a cafe, plus …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "CAFE au lait and a cafe, plus SPAM spam"
+    }
+   ]
+  },
+  {
+   "text": "すごい? がり ぎり ガード ガード",
+   "plain": "すごい? がり ぎり ガード ガード",
+   "addresses": "すごい? がり ぎり ガード ガード",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "すごい? がり ぎり …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "すごい? がり ぎり ガード ガード"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "すごい? がり ぎり ガード ガード"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "すごい? がり ぎり ガード ガード"
+    }
+   ]
+  },
+  {
+   "text": "promo at start? no. scammers scam",
+   "plain": "promo at start? no. scammers scam",
+   "addresses": "promo at start? no. scammers scam",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "promo at start? …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "promo at start? no. scammers …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "promo at start? no. scammers s …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "promo at start? no. scammers scam"
+    }
+   ]
+  },
+  {
+   "text": "free money $100 FREEDOM xfree",
+   "plain": "free money $100 FREEDOM xfree",
+   "addresses": "free money $100 FREEDOM xfree",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "free money $100 …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "free money $100 FREEDOM xfree"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "free money $100 FREEDOM xfree"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "free money $100 FREEDOM xfree"
+    }
+   ]
+  },
+  {
+   "text": "aaaa bbbb heeeeello the the cat",
+   "plain": "aaaa bbbb heeeeello the the cat",
+   "addresses": "aaaa bbbb heeeeello the the cat",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "aaaa bbbb heeeeello …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "aaaa bbbb heeeeello the the …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "aaaa bbbb heeeeello the the ca …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "aaaa bbbb heeeeello the the cat"
+    }
+   ]
+  },
+  {
+   "text": "Привет мир ΑΒΓ σς Σ s K ẞ ß I i",
+   "plain": "Привет мир ΑΒΓ σς Σ s K ẞ ß I i",
+   "addresses": "Привет мир ΑΒΓ σς Σ s K ẞ ß I i",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "Привет мир ΑΒΓ …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "Привет мир ΑΒΓ σς Σ …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "Привет мир ΑΒΓ σς Σ s K ẞ …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "Привет мир ΑΒΓ σς Σ s K ẞ ß I i"
+    }
+   ]
+  },
+  {
+   "text": "😀😃😄 emoji 👍🏽 text 🇺🇸",
+   "plain": "😀😃😄 emoji 👍🏽 text 🇺🇸",
+   "addresses": "😀😃😄 emoji 👍🏽 text 🇺🇸",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "😀😃😄 emoji 👍🏽 …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "😀😃😄 emoji 👍🏽 text 🇺🇸"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "😀😃😄 emoji 👍🏽 text 🇺🇸"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "😀😃😄 emoji 👍🏽 text 🇺🇸"
+    }
+   ]
+  },
+  {
+   "text": "line one\nline two\r\nline three sep nbsp﻿bom",
+   "plain": "line one\nline two\nline three sep nbsp﻿bom",
+   "addresses": "line one\nline two\nline three sep nbsp﻿bom",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "line one line …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "line one line two line …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "line one line two line three s …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "line one line two line three sep nbsp bom"
+    }
+   ]
+  },
+  {
+   "text": "x",
+   "plain": "x",
+   "addresses": "x",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "x"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "x"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "x"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "x"
+    }
+   ]
+  },
+  {
+   "text": "Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. ",
+   "plain": "Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. ",
+   "addresses": "Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. ",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "Lorem ipsum dolor …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "Lorem ipsum dolor sit amet, …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "Lorem ipsum dolor sit amet, co …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum dolor sit amet, consectetur adipiscing elit 42, sed do eiusmod tempor incididunt ut labore. Lorem ipsum …"
+    }
+   ]
+  },
+  {
+   "text": "ab aab aaab ba",
+   "plain": "ab aab aaab ba",
+   "addresses": "ab aab aaab ba",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "ab aab aaab …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "ab aab aaab ba"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "ab aab aaab ba"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "ab aab aaab ba"
+    }
+   ]
+  },
+  {
+   "text": "AEIOU aeiou Dz dz DZ",
+   "plain": "AEIOU aeiou Dz dz DZ",
+   "addresses": "AEIOU aeiou Dz dz DZ",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "AEIOU aeiou Dz …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "AEIOU aeiou Dz dz DZ"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "AEIOU aeiou Dz dz DZ"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "AEIOU aeiou Dz dz DZ"
+    }
+   ]
+  },
+  {
+   "text": "tel: +1 (555) 010-9999, email a.b@example.com, http://bad.example/path?q=1",
+   "plain": "tel: +1 (555) 010-9999, email a.b@example.com, http://bad.example/path?q=1",
+   "addresses": "tel: +1 (555) 010-9999, email a.b@example.com, http://bad.example/path?q=1",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "tel: +1 (555) …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "tel: +1 (555) 010-9999, email …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "tel: +1 (555) 010-9999, email …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "tel: +1 (555) 010-9999, email a.b@example.com, http://bad.example/path?q=1"
+    }
+   ]
+  },
+  {
+   "text": "spam SPAM SpAm s.p.a.m s p a m 5pam",
+   "plain": "spam SPAM SpAm s.p.a.m s p a m 5pam",
+   "addresses": "spam SPAM SpAm s.p.a.m s p a m 5pam",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "spam SPAM SpAm …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "spam SPAM SpAm s.p.a.m s …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "spam SPAM SpAm s.p.a.m s p a m …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "spam SPAM SpAm s.p.a.m s p a m 5pam"
+    }
+   ]
+  },
+  {
+   "text": "a\tb  c d",
+   "plain": "a\tb  c d",
+   "addresses": "a\tb  c d",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "a b c …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "a b c d"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "a b c d"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "a b c d"
+    }
+   ]
+  },
+  {
+   "text": "१२३ ٣٤٥ 678",
+   "plain": "१२३ ٣٤٥ 678",
+   "addresses": "१२३ ٣٤٥ 678",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "१२३ ٣٤٥ 678"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "१२३ ٣٤٥ 678"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "१२३ ٣٤٥ 678"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "१२३ ٣٤٥ 678"
+    }
+   ]
+  },
+  {
+   "text": "CamelCaseWORDS and ALLCAPSSHOUTING",
+   "plain": "CamelCaseWORDS and ALLCAPSSHOUTING",
+   "addresses": "CamelCaseWORDS and ALLCAPSSHOUTING",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "CamelCaseWORDS and A …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "CamelCaseWORDS and ALLCAPSSHOUTING"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "CamelCaseWORDS and ALLCAPSSHOU …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "CamelCaseWORDS and ALLCAPSSHOUTING"
+    }
+   ]
+  },
+  {
+   "text": "abababababababababababababababababababababababababababababab",
+   "plain": "abababababababababababababababababababababababababababababab",
+   "addresses": "abababababababababababababababababababababababababababababab",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "abababababababababab …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "abababababababababababababababababababab …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "ababababababababababababababab …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "abababababababababababababababababababababababababababababab"
+    }
+   ]
+  },
+  {
+   "text": "one two three four five six seven eight nine ten",
+   "plain": "one two three four five six seven eight nine ten",
+   "addresses": "one two three four five six seven eight nine ten",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "one two three …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "one two three four five …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "one two three four five six se …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "one two three four five six seven eight nine ten"
+    }
+   ]
+  },
+  {
+   "text": "**bold words that go on and on** and more text after it",
+   "plain": "bold words that go on and on and more text after it",
+   "addresses": "bold words that go on and on and more text after it",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "**bold words that** …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "**bold words that go on** …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "**bold words that go on and** …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "**bold words that go on and on** and more text after it"
+    }
+   ]
+  },
+  {
+   "text": "a [link label](https://example.com/a/very/long/address/that/has/no/room) after",
+   "plain": "a link label after",
+   "addresses": "a link label https://example.com/a/very/long/address/that/has/no/room after",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "a …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "a …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "a …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "a [link label](https://example.com/a/very/long/address/that/has/no/room) after"
+    }
+   ]
+  },
+  {
+   "text": "see https://example.com/a/very/long/address/that/goes/on/and/on here",
+   "plain": "see https://example.com/a/very/long/address/that/goes/on/and/on here",
+   "addresses": "see https://example.com/a/very/long/address/that/goes/on/and/on here",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "see https\\://example …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "see https\\://example.com/a/very/long/add …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "see https\\://example.com/a/ver …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "see https://example.com/a/very/long/address/that/goes/on/and/on here"
+    }
+   ]
+  },
+  {
+   "text": "hi @Ann Lee and @Ann Leeds and more words here",
+   "plain": "hi @Ann Lee and @Ann Leeds and more words here",
+   "addresses": "hi @Ann Lee and @Ann Leeds and more words here",
+   "mentions": [
+    {
+     "userId": "u2",
+     "username": "Ann Lee"
+    },
+    {
+     "userId": "u1",
+     "username": "Ann"
+    }
+   ],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "hi @Ann Lee …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "hi @Ann Lee and @Ann …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "hi @Ann Lee and @Ann Leeds and …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "hi @Ann Lee and @Ann Leeds and more words here"
+    }
+   ]
+  },
+  {
+   "text": "one two @Ann Lee three four five six seven",
+   "plain": "one two @Ann Lee three four five six seven",
+   "addresses": "one two @Ann Lee three four five six seven",
+   "mentions": [
+    {
+     "userId": "u2",
+     "username": "Ann Lee"
+    }
+   ],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "one two …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "one two @Ann Lee three …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "one two @Ann Lee three four fi …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "one two @Ann Lee three four five six seven"
+    }
+   ]
+  },
+  {
+   "text": "- milk\n- eggs\n- bread and butter and jam and more",
+   "plain": "milk\neggs\nbread and butter and jam and more",
+   "addresses": "milk\neggs\nbread and butter and jam and more",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\- milk - …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\- milk - eggs - …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\- milk - eggs - bread and butt …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\- milk - eggs - bread and butter and jam and more"
+    }
+   ]
+  },
+  {
+   "text": "1. first\n2. second\n3. third item goes on",
+   "plain": "first\nsecond\nthird item goes on",
+   "addresses": "first\nsecond\nthird item goes on",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "1\\. first 2. …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "1\\. first 2. second 3. …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "1\\. first 2. second 3. third it …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "1\\. first 2. second 3. third item goes on"
+    }
+   ]
+  },
+  {
+   "text": "9. nine\n10. ten\n11. eleven",
+   "plain": "nine\nten\neleven",
+   "addresses": "nine\nten\neleven",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "9\\. nine 10. …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "9\\. nine 10. ten 11. …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "9\\. nine 10. ten 11. eleven"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "9\\. nine 10. ten 11. eleven"
+    }
+   ]
+  },
+  {
+   "text": "> quoted words\n> more of them\n\nthen a paragraph",
+   "plain": "quoted words\nmore of them\nthen a paragraph",
+   "addresses": "quoted words\nmore of them\nthen a paragraph",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\> quoted words …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\> quoted words more of …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\> quoted words more of them th …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\> quoted words more of them then a paragraph"
+    }
+   ]
+  },
+  {
+   "text": "a * b ** c _ d ~~ e and more words to cut after",
+   "plain": "a * b ** c _ d ~~ e and more words to cut after",
+   "addresses": "a * b ** c _ d ~~ e and more words to cut after",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "a * b …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "a * b ** c …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "a * b ** c _ d \\~\\~ …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "a * b ** c _ d ~~ e and more words to cut after"
+    }
+   ]
+  },
+  {
+   "text": "`code with spaces in it` and `more code` then text",
+   "plain": "code with spaces in it and more code then text",
+   "addresses": "code with spaces in it and more code then text",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "`code with spaces` …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "`code with spaces in it` …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "`code with spaces in it` and …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "`code with spaces in it` and `more code` then text"
+    }
+   ]
+  },
+  {
+   "text": "superlongwordwithoutanyspacesthatgoesonandonandonandon and",
+   "plain": "superlongwordwithoutanyspacesthatgoesonandonandonandon and",
+   "addresses": "superlongwordwithoutanyspacesthatgoesonandonandonandon and",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "superlongwordwithout …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "superlongwordwithoutanyspacesthatgoesona …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "superlongwordwithoutanyspacest …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "superlongwordwithoutanyspacesthatgoesonandonandonandon and"
+    }
+   ]
+  },
+  {
+   "text": "**a [b *c](https://x.example) d** e f g h i j",
+   "plain": "a b *c d e f g h i j",
+   "addresses": "a b *c https://x.example d e f g h i j",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "**a** …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "**a [b \\*c](https://x.example) d** e …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "**a [b](https://x.example)** …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "**a [b \\*c](https://x.example) d** e f g h i j"
+    }
+   ]
+  },
+  {
+   "text": "word [ label ](https://x.example) more * and more words",
+   "plain": "word  label  more * and more words",
+   "addresses": "word  label  https://x.example more * and more words",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "word …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "word [label](https://x.example) more * a …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "word [labe](https://x.example) …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "word [label](https://x.example) more * and more words"
+    }
+   ]
+  },
+  {
+   "text": "- a",
+   "plain": "a",
+   "addresses": "a",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\- a"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\- a"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\- a"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\- a"
+    }
+   ]
+  },
+  {
+   "text": "> a",
+   "plain": "a",
+   "addresses": "a",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\> a"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\> a"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\> a"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\> a"
+    }
+   ]
+  },
+  {
+   "text": "12. x",
+   "plain": "x",
+   "addresses": "x",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "12\\. x"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "12\\. x"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "12\\. x"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "12\\. x"
+    }
+   ]
+  },
+  {
+   "text": "\\- not a list",
+   "plain": "- not a list",
+   "addresses": "- not a list",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\- not a …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\- not a list"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\- not a list"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\- not a list"
+    }
+   ]
+  },
+  {
+   "text": "2\\. not a list either",
+   "plain": "2. not a list either",
+   "addresses": "2. not a list either",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "2\\. not a …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "2\\. not a list either"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "2\\. not a list either"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "2\\. not a list either"
+    }
+   ]
+  },
+  {
+   "text": "* starred\n* items",
+   "plain": "starred\nitems",
+   "addresses": "starred\nitems",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\- starred - …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\- starred - items"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\- starred - items"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\- starred - items"
+    }
+   ]
+  },
+  {
+   "text": "𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜 x",
+   "plain": "𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜 x",
+   "addresses": "𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜 x",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜 …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜 …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜 …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜𝒜 x"
+    }
+   ]
+  },
+  {
+   "text": "@Ann @nobody @x*y \\@Ann end of the text here",
+   "plain": "@Ann @nobody @x*y @Ann end of the text here",
+   "addresses": "@Ann @nobody @x*y @Ann end of the text here",
+   "mentions": [
+    {
+     "userId": "u1",
+     "username": "Ann"
+    },
+    {
+     "userId": "u7",
+     "username": "x*y"
+    }
+   ],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "@Ann \\@nobody @x*y …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "@Ann \\@nobody @x*y \\@Ann end …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "@Ann \\@nobody @x*y \\@Ann end o …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "@Ann \\@nobody @x*y \\@Ann end of the text here"
+    }
+   ]
+  },
+  {
+   "text": "*a* **b** ~~c~~ `d` [e](https://e.example) @Bob f g h",
+   "plain": "a b c d e @Bob f g h",
+   "addresses": "a b c d e https://e.example @Bob f g h",
+   "mentions": [
+    {
+     "userId": "u11",
+     "username": "Bob"
+    }
+   ],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "*a* **b** ~~c~~ …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "*a* **b** ~~c~~ `d` …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "*a* **b** ~~c~~ `d` …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "*a* **b** ~~c~~ `d` [e](https://e.example) @Bob f g h"
+    }
+   ]
+  },
+  {
+   "text": "a\\*b \\_c\\_ d\\\\e and so on and so forth",
+   "plain": "a*b _c_ d\\e and so on and so forth",
+   "addresses": "a*b _c_ d\\e and so on and so forth",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "a\\*b \\_c\\_ d\\\\e …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "a\\*b \\_c\\_ d\\\\e and so …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "a\\*b \\_c\\_ d\\\\e and so on and …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "a\\*b \\_c\\_ d\\\\e and so on and so forth"
+    }
+   ]
+  },
+  {
+   "text": "text ending in a lone star * ] and [ more",
+   "plain": "text ending in a lone star * ] and [ more",
+   "addresses": "text ending in a lone star * ] and [ more",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "text ending in …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "text ending in a lone …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "text ending in a lone star \\* …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "text ending in a lone star * ] and \\[ more"
+    }
+   ]
+  },
+  {
+   "text": "**unclosed bold and words",
+   "plain": "**unclosed bold and words",
+   "addresses": "**unclosed bold and words",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "\\*\\*unclosed bold an …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "\\*\\*unclosed bold and words"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "\\*\\*unclosed bold and words"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "\\*\\*unclosed bold and words"
+    }
+   ]
+  },
+  {
+   "text": "[x](https://x.example)* **y z** w and more and more",
+   "plain": "x* y z w and more and more",
+   "addresses": "x https://x.example * y z w and more and more",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": " …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "[x](https://x.example)\\* **y z** w and …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "[x](https://x.example)\\* **y** …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "[x](https://x.example)\\* **y z** w and more and more"
+    }
+   ]
+  },
+  {
+   "text": "***both at once*** and _under_ __double__ ~~struck~~ words",
+   "plain": "both at once and under double struck words",
+   "addresses": "both at once and under double struck words",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "***both at once*** …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "***both at once*** and _under_ …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "***both at once*** and _under_ …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "***both at once*** and _under_ __double__ ~~struck~~ words"
+    }
+   ]
+  },
+  {
+   "text": "[a * ](https://x.example) b c",
+   "plain": "a *  b c",
+   "addresses": "a *  https://x.example b c",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": " …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "[a \\*](https://x.example) b c"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "[a \\*](https://x.example) b c"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "[a \\*](https://x.example) b c"
+    }
+   ]
+  },
+  {
+   "text": "**[a * ](https://x.example)** b c d e f g h i",
+   "plain": "a *  b c d e f g h i",
+   "addresses": "a *  https://x.example b c d e f g h i",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": " …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "**[a \\*](https://x.example)** b c d …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "**[a \\*](https://x.example)** …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "**[a \\*](https://x.example)** b c d e f g h i"
+    }
+   ]
+  },
+  {
+   "text": "a `b c",
+   "plain": "a `b c",
+   "addresses": "a `b c",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "a \\`b c"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "a \\`b c"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "a \\`b c"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "a \\`b c"
+    }
+   ]
+  },
+  {
+   "text": "see [https://in.label.example @Ann](https://x.example) and on",
+   "plain": "see https://in.label.example @Ann and on",
+   "addresses": "see https://in.label.example @Ann https://x.example and on",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "see …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "see [https://in.labe](https://x.example) …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "see [https](https://x.example) …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "see [https://in.label.example \\@Ann](https://x.example) and on"
+    }
+   ]
+  },
+  {
+   "text": "tab\tseparated words and\nlines\r\nof all\rkinds",
+   "plain": "tab\tseparated words and\nlines\nof all\nkinds",
+   "addresses": "tab\tseparated words and\nlines\nof all\nkinds",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "tab separated words …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "tab separated words and lines …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "tab separated words and lines …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "tab separated words and lines of all kinds"
+    }
+   ]
+  },
+  {
+   "text": "ends with a backslash \\",
+   "plain": "ends with a backslash \\",
+   "addresses": "ends with a backslash \\",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "ends with a …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "ends with a backslash \\"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "ends with a backslash \\"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "ends with a backslash \\"
+    }
+   ]
+  },
+  {
+   "text": "emoji 😀 words 😀😀 and 👩‍👩‍👧 more of them to cut here",
+   "plain": "emoji 😀 words 😀😀 and 👩‍👩‍👧 more of them to cut here",
+   "addresses": "emoji 😀 words 😀😀 and 👩‍👩‍👧 more of them to cut here",
+   "mentions": [],
+   "cuts": [
+    {
+     "words": 3,
+     "chars": 20,
+     "cut": "emoji 😀 words …"
+    },
+    {
+     "words": 5,
+     "chars": 40,
+     "cut": "emoji 😀 words 😀😀 and …"
+    },
+    {
+     "words": 8,
+     "chars": 30,
+     "cut": "emoji 😀 words 😀😀 and 👩‍👩‍ …"
+    },
+    {
+     "words": 50,
+     "chars": 500,
+     "cut": "emoji 😀 words 😀😀 and 👩‍👩‍👧 more of them to cut here"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,6 @@
+# The Rust the compactor, the trust plugins and the API's addon are built with: the same one
+# on every machine and in CI, so a build doesn't change with whatever `stable` is that day.
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

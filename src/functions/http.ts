@@ -1,7 +1,7 @@
 import { buildApp } from '../app.js';
 import { bootstrap, bootstrapStores } from '../deps.js';
 import { GROUPS, isGroup } from './groups.js';
-import { functionConfig, requireRedis } from './handler.js';
+import { functionConfig } from './handler.js';
 
 /**
  * The entry point of a function on a platform that runs containers behind HTTP and scales them with
@@ -9,7 +9,7 @@ import { functionConfig, requireRedis } from './handler.js';
  * on PORT. FUNCTION_GROUP says which route group (groups.ts) it serves, and nothing else: feed,
  * content, store or api.
  *
- * The compactor isn't one of them: it is a process that stays up (`node dist/compact/main.js`),
+ * The compactor isn't one of them: it is a process that stays up (the program in `compactor`, `npm run compact`),
  * which the same platforms run from the same image as a worker with no address.
  *
  * FUNCTION_EDGE_SECRET, if set, is what the CDN in front of a route group sends as
@@ -21,7 +21,6 @@ import { functionConfig, requireRedis } from './handler.js';
 const group = process.env.FUNCTION_GROUP;
 /** The function's settings: the environment's, over the defaults of a function (see `functionConfig`). */
 const config = functionConfig();
-requireRedis(config);
 if (!isGroup(group)) {
   throw new Error(`FUNCTION_GROUP must be feed, content, store or api (got ${JSON.stringify(group)})`);
 }

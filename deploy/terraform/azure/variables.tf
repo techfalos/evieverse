@@ -50,7 +50,7 @@ variable "request_timeout" {
 }
 
 variable "trust_proxy" {
-  description = "How many proxies in front of an app add to X-Forwarded-For (Front Door, then the Container Apps ingress). The client address that the limits by address count, and that the audit log and the request log record, is read that many entries from the end. 2 is what a live deployment showed: `remoteAddress` in an app's request log is the client's own address, whatever X-Forwarded-For the client sent. The exception is a request that waited for an app to start from no replicas: it arrives with one hop more, as if Front Door had sent it again through a second address of its own, and is recorded under a Front Door address. Raising this for those would let every other request choose its own address. See docs/DEPLOY.md."
+  description = "How many proxies in front of an app add to X-Forwarded-For (Front Door, then the Container Apps ingress). The client address that the limits by address count, and that the audit log and the request log record, is read that many entries from the end. 2 is what a live deployment showed: `remoteAddress` in an app's request log is the client's own address, whatever X-Forwarded-For the client sent. The exception is a request that waited for an app to start from no replicas: it arrives with one hop more, as if Front Door had sent it again through a second address of its own, and is recorded under a Front Door address. Raising this for those would let every other request choose its own address. See docs/IAC.md."
   type        = number
   default     = 2
 }
@@ -85,7 +85,7 @@ variable "db_location" {
 }
 
 variable "redis_sku" {
-  description = "Azure Managed Redis SKU. Size it for the feed index (~30 bytes per indexed post) plus 8 days of compressed summaries; see docs/DEPLOY.md."
+  description = "Azure Managed Redis SKU. Size it for the feed index (~30 bytes per indexed post) plus 8 days of compressed summaries; see docs/IAC.md."
   type        = string
   default     = "Balanced_B1"
 }

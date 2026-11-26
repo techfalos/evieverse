@@ -1,12 +1,13 @@
+import { createPrivateKey, sign } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { attest, readAttestation, signedBy, signingKeys, type Attestable } from '../src/attestation.js';
-import type { PublishedKey, SigningKey } from '../src/attestation.types.js';
+import { attest, readAttestation, signedBy, signingKeys } from '../src/attestation.js';
+import type { Attestable, PublishedKey, SigningKey } from '../src/attestation.types.js';
 import { summaryOf } from '../src/content.js';
 import { setAdmin } from '../src/moderation/policy.js';
-import type { TrustPlugin } from '../src/moderation/trust.types.js';
+import type { TestPlugin } from '../src/moderation/trust.types.js';
 import { authorIndex } from '../src/tagfeed/layout.js';
 import { DAY, HOUR, MINUTE, utcDay } from '../src/time.js';
 import { contentWriter } from '../src/write.js';
@@ -22,6 +23,16 @@ const seed = (byte: number) => Buffer.alloc(32, byte).toString('base64');
 /** The key the other server signs with, the one it changes to, one that is no server's, and the ones this server is given. */
 const [KEY, NEXT_KEY, STRAY_KEY] = signingKeys([seed(1), seed(2), seed(9)]) as [SigningKey, SigningKey, SigningKey];
 const OWN_SEEDS = [seed(3), seed(4)];
+/**
+ * An attestation signed again, with the key `seed(signer)` makes, under the id of another key:
+ * what somebody with a key of their own can write, which the server's own signing never does.
+ */
+const underId = (attestation: string, signer: number, id: string) => {
+  const said = JSON.parse(Buffer.from(attestation.split('.')[0]!, 'base64url').toString()) as object;
+  const payload = Buffer.from(JSON.stringify({ ...said, kid: id })).toString('base64url');
+  const privateKey = createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.alloc(32, signer)]), format: 'der', type: 'pkcs8' });
+  return `${payload}.${sign(null, Buffer.from(`evieverse-repost-attestation-v1.${payload}`), privateKey).toString('base64url')}`;
+};
 /** What a server answers GET /repost/keys with. */
 const published = (...keys: PublishedKey[]) => ({ keys: keys.map(({ id, publicKey }) => ({ id, publicKey, algorithm: 'ed25519' })) });
 const KEYS = `${OTHER}/repost/keys`;
@@ -832,14 +843,9 @@ for (const target of TARGETS) {
     });
 
     it('moderates a repost from another server as the post it is here: by what there is of it to read', async () => {
-      const seen: { userId: string; contentId?: string; tags: string[]; texts: string[] }[] = [];
-      const wary: TrustPlugin = {
-        name: 'wary',
-        assess: (assessed) => {
-          seen.push(assessed);
-          return assessed.texts.some((t) => t.includes('scam')) ? { set: 50 } : assessed.texts.some((t) => t.includes('malware')) ? { set: 0 } : null;
-        },
-      };
+      const wary: TestPlugin = { name: 'wary', record: true, rules: [{ includes: 'scam', set: 50 }, { includes: 'malware', set: 0 }] };
+      /** What the plugin was shown since this was last asked. */
+      const seen = async () => (await ctx.trust.seen()).map((shown) => shown.post);
       ctx = await createTestContext(target, { trustPlugins: [wary], keyFetcher });
       const root = await admin();
       const [bob, carol] = await Promise.all(['bob', 'carol'].map((name) => ctx.register(name)));
@@ -849,8 +855,9 @@ for (const target of TARGETS) {
       // The trust plugins read its summary, where it is from and who by, and its hashtags' own rules apply.
       const fine = ok(await repost(bob!, { origin: origin({ url: other(1), preview: { kind: 'text', text: 'Cheap **pills** today' } }), tags: ['news', 'health', 'deals'] }), 201);
       expect(fine).toMatchObject({ tags: ['news'], removedTags: [{ tag: 'health', reason: 'blocked_word' }, { tag: 'deals', reason: 'muted' }] });
-      expect(seen.at(-1)).toMatchObject({ userId: bob!.userId, tags: ['news', 'health', 'deals'], texts: ['Cheap pills today', other(1), DANA.username] });
-      expect(seen.at(-1)!.contentId).toBeUndefined();
+      const shown = (await seen()).at(-1)!;
+      expect(shown).toMatchObject({ userId: bob!.userId, tags: ['news', 'health', 'deals'], texts: ['Cheap pills today', other(1), DANA.username] });
+      expect(shown.contentId).toBeUndefined();
       const none = await repost(bob!, { origin: origin({ url: other(2), preview: { kind: 'text', text: 'Cheap pills today' } }), tags: ['health'] });
       expect(refused(none)).toEqual([422, "none of the post's hashtags is allowed on it, and a post needs one, so it wasn't published"]);
 
@@ -859,6 +866,8 @@ for (const target of TARGETS) {
       expect(refused(bad)).toEqual([422, "this server doesn't trust the post enough to keep it, so it wasn't published"]);
       const held = ok(await repost(bob!, { origin: origin({ url: other(4), preview: { kind: 'link', url: 'https://scam.example/win' } }), tags: 'news' }), 202);
       expect(held).toMatchObject({ status: 'pending_review', tags: ['news'], origin: { url: other(4) } });
+      // Whoever made the entry is told that it waits, as the publisher of a post that is held is: it quotes what the entry shows.
+      expect((await inbox(bob!)).filter((notice) => notice.kind === 'post_held')).toMatchObject([{ contentId: held.contentId, excerpt: 'https://scam.example/win' }]);
       expect(refused(await repost(carol!, { origin: origin({ url: other(4) }), tags: 'deals' }))).toEqual([
         409,
         "this server's entry for the original isn't published: it waits in the moderation queue, or is being deleted",
@@ -876,9 +885,9 @@ for (const target of TARGETS) {
       expect(ok(await repost(carol!, { origin: origin({ url: other(4) }), tags: 'offers' }), 201)).toMatchObject({ contentId: held.contentId, tags: ['offers'] });
 
       // A repost of a post that is here is not scored again: the post was, when it was written.
-      const scored = seen.length;
+      await seen();
       ok(await repost(carol!, { contentId: fine.contentId, tags: 'local' }), 201);
-      expect(seen).toHaveLength(scored);
+      expect(await seen()).toEqual([]);
     });
 
     it("takes a post on another server on that server's signature, and on nothing else", async () => {
@@ -899,10 +908,11 @@ for (const target of TARGETS) {
       expect(asked).toEqual([]);
 
       // Signed by somebody else, under the id of the server's key: the id is what is claimed, the signature what is checked.
-      const forger = { ...NEXT_KEY, id: KEY.id };
-      expect(await send(bob!, attested({}, { key: forger }))).toEqual([400, UNSIGNED]);
+      const forged = underId(attested({}, { key: NEXT_KEY }), 2, KEY.id);
+      expect(readAttestation(forged)!.said).toMatchObject({ kid: KEY.id });
+      expect(await send(bob!, forged)).toEqual([400, UNSIGNED]);
       // The server's signature, moved to a payload it didn't sign.
-      const changed = attested({ publisher: { ...DANA, username: 'Mallory' } }, { key: forger }).split('.')[0]!;
+      const changed = attested({ publisher: { ...DANA, username: 'Mallory' } }).split('.')[0]!;
       expect(await send(bob!, `${changed}.${signature}`)).toEqual([400, UNSIGNED]);
       // Signed with a key the server never had.
       expect(await send(bob!, attested({}, { key: STRAY_KEY }))).toEqual([400, UNSIGNED]);
@@ -926,7 +936,7 @@ for (const target of TARGETS) {
       expect(ok(await repost(carol!, { origin: origin({ url: other(1) }, { at: now + MINUTE }), tags: 'news' }), 201).origin.url).toBe(other(1));
 
       // An original the server has an entry of is no easier to forge a repost of: the signature is checked all the same.
-      expect(await send(carol!, attested({}, { key: forger }), 'weather')).toEqual([400, UNSIGNED]);
+      expect(await send(carol!, underId(attested({}, { key: NEXT_KEY }), 2, KEY.id), 'weather')).toEqual([400, UNSIGNED]);
       expect(await places(made.contentId)).toEqual([]);
       expect(ok(await repost(carol!, { origin: origin(), tags: 'weather' }), 201)).toMatchObject({ contentId: made.contentId, tags: ['weather'] });
       expect(await entries()).toBe(2);
@@ -1012,10 +1022,7 @@ for (const target of TARGETS) {
     });
 
     it('brings its entry for a post on another server up to a later attestation of it, and never back to an earlier one', async () => {
-      const wary: TrustPlugin = {
-        name: 'wary',
-        assess: (assessed) => (assessed.texts.some((t) => t.includes('scam')) ? { set: 50 } : assessed.texts.some((t) => t.includes('malware')) ? { set: 0 } : null),
-      };
+      const wary: TestPlugin = { name: 'wary', rules: [{ includes: 'scam', set: 50 }, { includes: 'malware', set: 0 }] };
       ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com', reposts: { signingKeys: OWN_SEEDS }, trustPlugins: [wary], keyFetcher });
       const root = await admin();
       const [alice, bob, carol, dave] = await Promise.all(['alice', 'bob', 'carol', 'dave'].map((name) => ctx.register(name)));
@@ -1082,6 +1089,9 @@ for (const target of TARGETS) {
       expect(refused(await refresh(alice!, attested({ ...edited, preview: { kind: 'text', text: 'Free malware on the coast road.' } })))).toEqual([422, NOT_TRUSTED]);
       expect((await content(contentId)).preview.text).toBe('Sewage on the coast road.');
       expect(ok(await refresh(alice!, attested({ ...edited, preview: { kind: 'text', text: 'A scam on the coast road.' } })), 202)).toMatchObject({ contentId, status: 'pending_review', tags: ['news'] });
+      // The entry is bob's, who brought none of this: he finds in his inbox that it waits. Alice, who brought it, was told by the answer.
+      expect(await inbox(bob!)).toMatchObject([{ kind: 'post_held', contentId, excerpt: 'A scam on the coast road.' }]);
+      expect(await inbox(alice!)).toEqual([]);
       await ctx.compact();
       expect(await feedOf('news')).toEqual([]);
       ok(await req(root, 'POST', `/moderation/queue/${contentId}/accept`));
@@ -1199,7 +1209,7 @@ for (const target of TARGETS) {
     });
 
     it('takes a repost of a hidden entry as word that the post is there again', async () => {
-      const wary: TrustPlugin = { name: 'wary', assess: (assessed) => (assessed.texts.some((t) => t.includes('scam')) ? { set: 50 } : null) };
+      const wary: TestPlugin = { name: 'wary', rules: [{ includes: 'scam', set: 50 }] };
       ctx = await createTestContext(target, { trustPlugins: [wary], keyFetcher });
       const [alice, bob, carol] = await Promise.all(['alice', 'bob', 'carol'].map((name) => ctx.register(name)));
       const { contentId } = ok(await repost(bob!, { origin: origin(), tags: 'news' }), 201);
@@ -1230,6 +1240,9 @@ for (const target of TARGETS) {
       expect(await content(held, bob!)).toMatchObject({ status: 'pending_review', preview: scam.preview });
       expect((await req(null, 'GET', `/content/${held}`)).statusCode).toBe(404);
       expect(await places(held)).toEqual([]);
+      // Bob, whose entry it is, is told that it waits; carol, whose repost brought it, is told by the refusal.
+      expect(await inbox(bob!)).toMatchObject([{ kind: 'post_held', contentId: held, excerpt: 'A scam on the coast road.' }]);
+      expect(await inbox(carol!)).toEqual([]);
     });
 
     it('asks the servers of the posts it holds reposts of what the posts are now, itself, a day after it last heard', async () => {
@@ -1244,7 +1257,8 @@ for (const target of TARGETS) {
       };
       /** The addresses asked since this was last called. */
       const asks = () => fetched.splice(0);
-      ctx = await createTestContext(target, { keyFetcher, attestationFetcher });
+      const wary: TestPlugin = { name: 'wary', rules: [{ includes: 'scam', set: 50 }] };
+      ctx = await createTestContext(target, { trustPlugins: [wary], keyFetcher, attestationFetcher });
       servers['https://slow.example/repost/keys'] = published(KEY);
       const [bob, carol] = await Promise.all(['bob', 'carol'].map((name) => ctx.register(name)));
       const address = `${OTHER}/content/${ORIGINAL}`;
@@ -1318,6 +1332,26 @@ for (const target of TARGETS) {
       expect(await shown(first)).toBe('Back on the coast road.');
       await ctx.compact();
       expect(ids(await week('news')).sort()).toEqual([contentId, first, second].sort());
+      expect(await inbox(bob!)).toEqual([]);
+
+      // What a post now says is moderated as an update is, and can have its entry held for a moderator. Nobody sent
+      // that, so no answer tells anyone: bob, whose entry it is, finds in his inbox that it waits.
+      ctx.clock.now += 25 * HOUR;
+      answers[`${address}/attestation`] = is(address, 'A scam on the coast road.');
+      expect(await ctx.sweep()).toBe(3);
+      expect(await content(contentId, bob!)).toMatchObject({ status: 'pending_review', preview: { kind: 'text', text: 'A scam on the coast road.' } });
+      expect((await req(null, 'GET', `/content/${contentId}`)).statusCode).toBe(404);
+      expect(await inbox(bob!)).toMatchObject([
+        { kind: 'post_held', contentId, excerpt: 'A scam on the coast road.', readAt: null, text: expect.stringMatching(/^Your post is held in the moderation queue for review\./) },
+      ]);
+      // Carol reposted it, and it isn't hers.
+      expect(await inbox(carol!)).toEqual([]);
+      // Once: the entry keeps its place in the queue through what the post says next, and he is told nothing new.
+      ctx.clock.now += 25 * HOUR;
+      answers[`${address}/attestation`] = is(address, 'Another scam on the coast road.');
+      expect(await ctx.sweep()).toBe(3);
+      expect((await content(contentId, bob!)).preview.text).toBe('Another scam on the coast road.');
+      expect(await inbox(bob!)).toHaveLength(1);
     });
 
     it('keeps the later of two attestations that arrive at once, whichever is written first', async () => {
@@ -1365,7 +1399,7 @@ for (const target of TARGETS) {
     });
 
     it('attests its own published posts, signed with its first key, and publishes its keys', async () => {
-      const wary: TrustPlugin = { name: 'wary', assess: (assessed) => (assessed.texts.some((t) => t.includes('scam')) ? { set: 50 } : null) };
+      const wary: TestPlugin = { name: 'wary', rules: [{ includes: 'scam', set: 50 }] };
       ctx = await createTestContext(target, { publicBaseUrl: 'https://api.example.com/', reposts: { signingKeys: OWN_SEEDS }, trustPlugins: [wary], keyFetcher });
       const [alice, bob] = await Promise.all(['alice', 'bob'].map((name) => ctx.register(name)));
       const [first, second] = signingKeys(OWN_SEEDS) as [SigningKey, SigningKey];

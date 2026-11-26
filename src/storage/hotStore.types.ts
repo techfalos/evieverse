@@ -4,8 +4,9 @@
  * only kept for a while: challenges, the counts that limits are held to, and the compactor's state.
  * Keys are relative to REDIS_KEY_PREFIX, and whatever keeps a kind of thing here names its keys
  * with a prefix of its own (`sum:`, `pub:`, `head:`, ...). Any Redis-protocol server
- * works (Redis, Valkey, ElastiCache, Memorystore, Azure); without one, MemoryHotStore keeps
- * everything in this process, which only suits a single node.
+ * works (Redis, Valkey, ElastiCache, Memorystore, Azure), and every process is given the same
+ * one: it is where the API, the functions and the compactor meet. Keys expire by that server's
+ * clock, whatever clock a process was given.
  */
 export interface HotStore {
   get(key: string): Promise<Buffer | null>;

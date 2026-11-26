@@ -1,10 +1,11 @@
-import { generateKeyPairSync, sign } from 'node:crypto';
+import { createPrivateKey, generateKeyPairSync, sign } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { attest, AttestedGone, AttestedPost, publishedKey, readAttestation, saysGone, seedOf, signedBy, signingKeys, type Attestable } from '../src/attestation.js';
-import type { SigningKey } from '../src/attestation.types.js';
+import { attest, postOf, publishedKey, readAttestation, signedBy, signingKeys } from '../src/attestation.js';
+import type { Attestable, SigningKey } from '../src/attestation.types.js';
 import { loadConfig } from '../src/config.js';
 import { fetchPublicJson, isPublicAddress } from '../src/http/publicFetch.js';
 import { ownAddress, postAddress } from '../src/posts.js';
+import { BASE_ENV } from './helpers.js';
 
 const ID = '3f2b8c1e-9a4d-4e6f-8b7a-1c2d3e4f5a6b';
 const POST: Attestable = {
@@ -15,34 +16,55 @@ const POST: Attestable = {
   preview: { kind: 'text', text: 'Flooding closes the coast road. \u{1F30A}' },
 };
 const seed = (byte: number) => Buffer.alloc(32, byte);
+/** What is written as an attestation and says `payload`, whoever signed it: nobody did. */
+const written = (payload: unknown) => `${Buffer.from(JSON.stringify(payload)).toString('base64url')}.${'A'.repeat(86)}`;
+
+/**
+ * Attestations as the API has them, which is as the addon gives them: how one is signed, read and
+ * checked is tested where it is written (compactor/crates/core/src/attestation.rs), and here what
+ * the API makes of that.
+ */
 
 describe('attestations', () => {
   const [key, other] = signingKeys([seed(1).toString('base64'), seed(2).toString('hex')]) as [SigningKey, SigningKey];
 
   it('reads a signing key from 32 bytes, in base64 or hex, and nothing else', () => {
-    for (const text of [seed(1).toString('base64'), seed(1).toString('base64url'), seed(1).toString('hex'), seed(1).toString('hex').toUpperCase(), seed(1).toString('base64').replace('=', '')]) {
-      expect(seedOf(text), text).toEqual(seed(1));
-    }
-    for (const text of ['', 'secret', seed(1).subarray(1).toString('base64'), Buffer.alloc(33, 1).toString('base64'), seed(1).toString('hex').slice(2), `${seed(1).toString('base64')} `]) {
-      expect(seedOf(text), text).toBeNull();
-    }
     // The same bytes make the same key, however they were written, and other bytes another.
-    const [again] = signingKeys([seed(1).toString('hex')]);
-    expect([again!.id, again!.publicKey]).toEqual([key.id, key.publicKey]);
+    for (const text of [seed(1).toString('base64'), seed(1).toString('base64url'), seed(1).toString('hex'), seed(1).toString('hex').toUpperCase(), seed(1).toString('base64').replace('=', '')]) {
+      const [again] = signingKeys([text]);
+      expect([again!.id, again!.publicKey], text).toEqual([key.id, key.publicKey]);
+    }
     expect(other.id).not.toBe(key.id);
     expect(key.id).toMatch(/^[0-9a-f]{16}$/);
     expect(key.publicKey).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    // What is not a key is named by its place, and never by what it is.
+    for (const text of ['', 'secret-that-is-no-key', seed(1).subarray(1).toString('base64'), Buffer.alloc(33, 1).toString('base64'), seed(1).toString('hex').slice(2), `${seed(1).toString('base64')} `]) {
+      let said = '';
+      try {
+        signingKeys([seed(2).toString('hex'), text]);
+      } catch (err) {
+        said = String((err as Error).message);
+      }
+      expect(said, text).toBe('signing key 2 is not 32 random bytes, in base64 or hex');
+    }
+  });
+
+  it('keeps what a key is made from out of whatever the key is copied, sent or logged as', () => {
+    expect(key.seed).toBe(seed(1).toString('base64'));
+    expect(Object.keys(key)).toEqual(['id', 'publicKey']);
+    expect(JSON.parse(JSON.stringify({ ...key }))).toEqual({ id: key.id, publicKey: key.publicKey });
+    expect(JSON.stringify([key, other])).not.toContain(key.seed);
   });
 
   it('takes its keys from the configuration, which says which one is wrong and never what it is', () => {
-    const load = (value: string) => loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json', REPOSTS_SIGNING_KEYS: value }).reposts.signingKeys;
+    const load = (value: string) => loadConfig({}, { ...BASE_ENV, REPOSTS_SIGNING_KEYS: value }).reposts.signingKeys;
     const [first, second] = [seed(1).toString('base64'), seed(2).toString('hex')];
-    expect(loadConfig({}, { EVIEVERSE_CONFIG: '/nonexistent.json' }).reposts.signingKeys).toEqual([]);
+    expect(loadConfig({}, BASE_ENV).reposts.signingKeys).toEqual([]);
     expect(load('')).toEqual([]);
     expect(load(first)).toEqual([first]);
     expect(load(`${first}, ${second}`)).toEqual([first, second]);
     expect(load(`${first}\n${second}\n`)).toEqual([first, second]);
-    expect(loadConfig({ reposts: { signingKeys: [second, first] } }, { EVIEVERSE_CONFIG: '/nonexistent.json' }).reposts.signingKeys).toEqual([second, first]);
+    expect(loadConfig({ reposts: { signingKeys: [second, first] } }, BASE_ENV).reposts.signingKeys).toEqual([second, first]);
     let said = '';
     try {
       load(`${first},not-a-key-but-a-secret`);
@@ -59,7 +81,8 @@ describe('attestations', () => {
     expect(attestation).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{86}$/);
     const read = readAttestation(attestation)!;
     expect(read.payload).toEqual({ v: 1, kid: key.id, issuedAt: 1_700_000_000_000, ...POST });
-    expect(AttestedPost.parse(read.payload)).toEqual({ v: 1, kid: key.id, issuedAt: 1_700_000_000_000, ...POST });
+    expect(read.said).toEqual({ v: 1, kid: key.id, issuedAt: 1_700_000_000_000, ...POST });
+    expect(read.issues).toBeUndefined();
     expect(signedBy(key, read)).toBe(true);
     expect(signedBy(other, read)).toBe(false);
     // The key a server publishes is enough to check with, and its id is the key's own, whatever it was published as.
@@ -74,8 +97,12 @@ describe('attestations', () => {
     expect(signedBy(key, readAttestation(`${payload}.${attest(key, { ...POST, aiGenerated: true }, 1_700_000_000_000).split('.')[1]}`)!)).toBe(false);
     expect(signedBy(key, readAttestation(`${payload}.${'A'.repeat(86)}`)!)).toBe(false);
     // What the key signed for something else is no attestation: the payload's bytes alone, without what says they are one.
-    const bare = sign(null, Buffer.from(payload), key.privateKey).toString('base64url');
+    // Signed here with the key the same bytes make elsewhere, which is the one the server signs with.
+    const privateKey = createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), seed(1)]), format: 'der', type: 'pkcs8' });
+    const bare = sign(null, Buffer.from(payload), privateKey).toString('base64url');
     expect(signedBy(key, readAttestation(`${payload}.${bare}`)!)).toBe(false);
+    const whole = sign(null, Buffer.from(`evieverse-repost-attestation-v1.${payload}`), privateKey).toString('base64url');
+    expect(whole).toBe(signature);
     // A key that isn't one signed nothing, and nothing is thrown for it.
     expect(signedBy({ id: key.id, publicKey: 'not a key' }, read)).toBe(false);
     const rsa = generateKeyPairSync('rsa', { modulusLength: 2048 }).publicKey.export({ format: 'jwk' }).n!;
@@ -94,29 +121,56 @@ describe('attestations', () => {
   });
 
   it('says a post only by an address that is one post, on its own server', () => {
-    const said = (o: Record<string, unknown>) => AttestedPost.safeParse({ v: 1, kid: key.id, issuedAt: 0, ...POST, ...o });
-    expect(said({}).success).toBe(true);
+    const said = (o: Record<string, unknown>) => readAttestation(written({ v: 1, kid: key.id, issuedAt: 0, ...POST, ...o }))!;
+    expect(said({}).said).toEqual({ v: 1, kid: key.id, issuedAt: 0, ...POST });
     // One address for a post, however it was written.
-    expect(said({ url: `HTTPS://Other.Example/content/${ID.toUpperCase()}` }).data!.url).toBe(POST.url);
-    expect(said({ url: `https://other.example/sub/content/${ID}` }).success).toBe(true);
+    expect(said({ url: `HTTPS://Other.Example/content/${ID.toUpperCase()}` }).said!.url).toBe(POST.url);
+    expect(said({ url: `https://other.example/sub/content/${ID}` }).said).toBeDefined();
     for (const url of [`${POST.url}/raw`, `${POST.url}/`, `${POST.url}?a=b`, `${POST.url}#top`, `https://dana:pw@other.example/content/${ID}`, `ftp://other.example/content/${ID}`, `https://other.example/posts/${ID}`, 'nowhere']) {
-      expect(said({ url }).success, url).toBe(false);
+      const read = said({ url });
+      expect(read.said, url).toBeUndefined();
+      // What is wrong is said by where it is, which is what a request that brings it is answered with.
+      expect(read.issues!.map((issue) => issue.path.join('.')), url).toEqual(['url']);
+      expect(read.issues![0]!.message, url).toEqual(expect.any(String));
     }
-    for (const o of [{ v: 2 }, { kid: 'KEY' }, { kid: undefined }, { issuedAt: -1 }, { issuedAt: 1.5 }, { issuedAt: '0' }, { aiGenerated: undefined }, { aiGenerated: 'false' }, { publisher: undefined }, { preview: undefined }]) {
-      expect(said(o).success, JSON.stringify(o)).toBe(false);
+    for (const [o, path] of [
+      [{ v: 2 }, 'v'],
+      [{ kid: 'KEY' }, 'kid'],
+      [{ kid: undefined }, 'kid'],
+      [{ issuedAt: -1 }, 'issuedAt'],
+      [{ issuedAt: 1.5 }, 'issuedAt'],
+      [{ issuedAt: '0' }, 'issuedAt'],
+      [{ aiGenerated: undefined }, 'aiGenerated'],
+      [{ aiGenerated: 'false' }, 'aiGenerated'],
+      [{ publisher: undefined }, 'publisher'],
+      [{ preview: undefined }, 'preview'],
+      [{ preview: { kind: 'text', text: ' ' } }, 'preview.text'],
+    ] as const) {
+      const read = said(o);
+      expect(read.said, JSON.stringify(o)).toBeUndefined();
+      expect(read.issues!.map((issue) => issue.path.join('.')), JSON.stringify(o)).toContain(path);
     }
+    // What a post's address says of where it is: its id, its server, and whether that server is one that is asked for its keys.
+    expect(postOf(POST.url)).toEqual({ id: ID, server: 'https://other.example', asked: true });
+    expect(postOf(`https://other.example/sub/content/${ID}`)).toEqual({ id: ID, server: 'https://other.example/sub', asked: true });
+    expect(postOf(`http://other.example/content/${ID}`)).toMatchObject({ server: 'http://other.example', asked: false });
+    expect(postOf(`https://other.example:8443/content/${ID}`)).toMatchObject({ server: 'https://other.example:8443', asked: false });
+    for (const not of [`${POST.url}/raw`, 'https://other.example', '']) expect(postOf(not), not).toBeNull();
   });
 
   it('signs that there is no post at an address, which reads as that and not as a post', () => {
     const read = readAttestation(attest(key, { url: POST.url, gone: true }, 1_700_000_000_000))!;
     expect(read.payload).toEqual({ v: 1, kid: key.id, issuedAt: 1_700_000_000_000, url: POST.url, gone: true });
     expect([signedBy(key, read), signedBy(other, read)]).toEqual([true, false]);
-    expect([saysGone(read.payload), AttestedGone.safeParse(read.payload).success, AttestedPost.safeParse(read.payload).success]).toEqual([true, true, false]);
+    expect(read.said).toEqual({ v: 1, kid: key.id, issuedAt: 1_700_000_000_000, url: POST.url, gone: true });
     // A post's attestation doesn't say so, and nothing else does: it is said with `true`, of an address that is one post's.
-    const post = readAttestation(attest(key, POST, 0))!.payload;
-    expect([saysGone(post), AttestedGone.safeParse(post).success]).toEqual([false, false]);
-    for (const not of [null, 'gone', [true], { gone: 'true' }, { gone: 1 }, { gone: false }]) expect(saysGone(not), JSON.stringify(not)).toBe(false);
-    expect(AttestedGone.safeParse({ v: 1, kid: key.id, issuedAt: 0, url: `${POST.url}/raw`, gone: true }).success).toBe(false);
+    expect(readAttestation(attest(key, POST, 0))!.said).not.toHaveProperty('gone');
+    for (const gone of ['true', 1, false]) {
+      // Read as a post, then, which it doesn't say all of.
+      expect(readAttestation(written({ v: 1, kid: key.id, issuedAt: 0, url: POST.url, gone }))!.said, JSON.stringify(gone)).toBeUndefined();
+    }
+    for (const not of [null, 'gone', [true]]) expect(readAttestation(written(not))!.said, JSON.stringify(not)).toBeUndefined();
+    expect(readAttestation(written({ v: 1, kid: key.id, issuedAt: 0, url: `${POST.url}/raw`, gone: true }))!.said).toBeUndefined();
   });
 
   it("knows this server's own address, and the address of a post under it", () => {

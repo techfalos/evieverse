@@ -51,6 +51,15 @@ export interface UsersTable {
   /** What the moderator said was the reason, if anything. Only moderators read it. */
   ban_reason: string | null;
   /**
+   * When a server moderator or an admin barred the user from claiming hashtags (PUT /claim-barred/:userId), or null.
+   * It keeps them from claiming (POST /tags/:tag/claim), and from nothing else: the hashtags they moderate stay theirs.
+   */
+  claims_barred_at: number | null;
+  /** Who barred them; null while they aren't barred. It has no foreign key, so it may name a user who is gone. */
+  claims_barred_by: string | null;
+  /** What the moderator said was the reason, if anything. Only moderators read it. */
+  claims_bar_reason: string | null;
+  /**
    * When the account was deleted (DELETE /users/:userId), or null. The row stays until the compactor has deleted
    * the content of the user's that is set for deletion (see purgeAccounts): until then the account is gone as far as
    * anyone is concerned, and its username is still taken.
@@ -132,7 +141,7 @@ export interface ContentTable {
   origin_gone_at: Generated<number | null>;
   /**
    * On a repost of a post on another server: from when the server asks the original's server for
-   * the post's attestation again (src/originSweep.ts). Null on a post written here.
+   * the post's attestation again (compactor/src/sweep.rs). Null on a post written here.
    */
   origin_check_at: Generated<number | null>;
   /**
@@ -154,7 +163,7 @@ export type PendingKind = 'post' | 'post_file' | 'comment_put' | 'comment_remove
 /**
  * A write that committed and that the compactor hasn't applied yet: requests write nothing of a
  * post or a comment to the stores themselves. A run applies a post's rows in the order of `seq`,
- * and deletes each as it does (src/compact/apply.ts).
+ * and deletes each as it does (compactor/src/apply.rs).
  */
 export interface PendingWritesTable {
   content_id: string;
@@ -196,7 +205,7 @@ export interface PendingWritesTable {
 
 /**
  * A video that is yet to be processed: the one a write of a post, or a new comment, came with
- * (src/video). The write's commit adds the row, and the video worker deletes it in the commit
+ * (compactor/src/video). The write's commit adds the row, and the video worker deletes it in the commit
  * that puts the processed file in the write's row of `pending_writes`. Until then the write
  * says in its payload that it waits (`process`), and the compactor leaves it.
  */
@@ -264,7 +273,7 @@ export interface QuarantineAccessTable {
 
 /**
  * A staged file the compactor has applied and has yet to delete: it stays until the links that
- * were given to it have expired (src/compact/apply.ts). Only where the content store signs links.
+ * were given to it have expired (compactor/src/apply.rs). Only where the content store signs links.
  */
 export interface StagedRemovalsTable {
   /** The object under staged/, as the write's row named it. */
@@ -375,11 +384,17 @@ export interface FeedQueueTable {
   created_at: number;
 }
 
-/** Who moderates which hashtag: the users an admin or one of the hashtag's moderators appointed, and those whose claim to the hashtag went through (see TagClaimsTable). Admins and server moderators moderate every hashtag without a row. */
+/** Who moderates which hashtag: the users an admin or one of the hashtag's moderators appointed, and those who claimed the hashtag (src/moderation/claims.ts). Admins and server moderators moderate every hashtag without a row. */
 export interface TagModeratorsTable {
   tag: string;
   user_id: string;
   created_at: number;
+  /**
+   * 1 on the row of a moderator who claimed the hashtag, null on one who was appointed. A unique
+   * index on it and the hashtag gives a hashtag one of them: of two claims made at once, the
+   * second to commit is refused.
+   */
+  claimed: number | null;
   /**
    * When the moderator last did something as one on the hashtag (see recordAction), and when they
    * became its moderator until they have: one who did nothing since for
@@ -387,21 +402,6 @@ export interface TagModeratorsTable {
    * from before the server kept it, until the compactor's next run sets it to its own time.
    */
   acted_at: number | null;
-}
-
-/**
- * A user's claim to moderate a hashtag, while it waits (src/moderation/claims.ts): admins and
- * server moderators can refuse it until `review_until`, after which the compactor makes the user
- * a moderator of the hashtag and deletes the row. A hashtag has one claim at a time.
- */
-export interface TagClaimsTable {
-  tag: string;
-  /** Who claims the hashtag. */
-  user_id: string;
-  /** When the claim was made. */
-  created_at: number;
-  /** Until when the claim can be refused; the compactor's first run after it grants the claim. */
-  review_until: number;
 }
 
 /** One of a hashtag's rules, which its moderators keep and anyone reads (GET /tags/:tag/rules): to a hashtag what ServerRulesTable is to the server. */
@@ -645,7 +645,6 @@ export interface Database {
   repost_removals: RepostRemovalsTable;
   compactor_lease: CompactorLeaseTable;
   tag_moderators: TagModeratorsTable;
-  tag_claims: TagClaimsTable;
   tag_rules: TagRulesTable;
   tag_mutes: TagMutesTable;
   blocked_words: BlockedWordsTable;

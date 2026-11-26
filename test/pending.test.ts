@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { newCommentId } from '../src/comments.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { insertPending, likeKey, payloadOf, writeUnnumbered } from '../src/pending.js';
+import { killedAfter, once, type Calls } from './harness.js';
 import { as, createTestContext, feedItems, multipart, PNG, store, storeText, TARGETS, type TestContext, type User } from './helpers.js';
 
 /** A video's bytes are stored as they came, whatever they are. */
@@ -104,14 +105,8 @@ for (const target of TARGETS) {
           }) as never,
       );
     };
-    /** Has the next call of a store's method do its work and then fail, as a run killed right after it would leave things. */
-    const killAfter = <T extends object, K extends keyof T & string>(of: T, method: K) => {
-      const real = (of[method] as (...args: unknown[]) => Promise<unknown>).bind(of);
-      vi.spyOn(of, method as never).mockImplementationOnce((async (...args: unknown[]) => {
-        await real(...args);
-        throw new Error('killed');
-      }) as never);
-    };
+    /** Has the compactor's next call of a kind to its stores do its work and then fail, as a run killed right after it would leave things. */
+    const killAfter = (call: keyof Calls) => ctx.compactor.watch(call, once(killedAfter()));
 
     it('answers by the writes that wait, and writes nothing to the stores until the compactor runs', async () => {
       ctx = await createTestContext(target, { settle: false });
@@ -186,9 +181,9 @@ for (const target of TARGETS) {
       expect(await staged()).toHaveLength(2);
 
       // The run writes neither post, and deletes both, with what their writes staged.
-      const putMeta = vi.spyOn(ctx.content, 'putMeta');
+      const putMeta = ctx.compactor.watch('content.putMeta');
       expect((await ctx.compactor.runOnce()).deleted.sort()).toEqual([contentId, other].sort());
-      expect(putMeta).not.toHaveBeenCalled();
+      expect(putMeta.calls).toEqual([]);
       expect(await pending()).toEqual([]);
       expect(await staged()).toEqual([]);
       expect([...(await postFiles(contentId)), ...(await postFiles(other))]).toEqual([]);
@@ -221,9 +216,9 @@ for (const target of TARGETS) {
       expect(await pending()).toHaveLength(4);
 
       // The run applies none of them: the comment is as it was until the post goes, and everything under it with it.
-      const written = [vi.spyOn(ctx.comments, 'publish'), vi.spyOn(ctx.comments, 'put'), vi.spyOn(ctx.comments, 'addLike'), vi.spyOn(ctx.comments, 'remove')];
+      const written = (['comments.publish', 'comments.put', 'comments.addLike', 'comments.remove'] as const).map((call) => ctx.compactor.watch(call));
       expect((await ctx.compactor.runOnce()).deleted).toEqual([contentId]);
-      for (const spy of written) expect(spy).not.toHaveBeenCalled();
+      for (const watch of written) expect(watch.calls).toEqual([]);
       expect(await pending()).toEqual([]);
       expect(await staged()).toEqual([]);
       expect(await commentFiles(contentId)).toEqual([]);
@@ -306,8 +301,8 @@ for (const target of TARGETS) {
       expect(await pending()).toEqual(['0 comment_like', '0 comment_put', '1 post']);
 
       // Killed once the post's meta file was written, and once the comment was: the rows are still there.
-      killAfter(ctx.content, 'putMeta');
-      killAfter(ctx.comments, 'put');
+      killAfter('content.putMeta');
+      killAfter('comments.put');
       await ctx.compactor.runOnce();
       expect(await pending()).toEqual(['0 comment_like', '0 comment_put', '1 post']);
       expect(await postFiles(contentId)).toEqual([contentId, `${contentId}.meta.json`]);
@@ -315,7 +310,7 @@ for (const target of TARGETS) {
       expect(await commentFiles(contentId)).toEqual([`${sent.commentId}.json`]);
 
       // The next run applies them again, and is killed once the like was made.
-      killAfter(ctx.comments, 'addLike');
+      killAfter('comments.addLike');
       await ctx.compactor.runOnce();
       expect(await pending()).toEqual(['0 comment_like']);
       await ctx.compactor.runOnce();
@@ -357,7 +352,7 @@ for (const target of TARGETS) {
 
       // A run that is killed once it made carol's like leaves the like in the store and its row where it was. Until a
       // run deletes the row, the count can't be told from one made as likes are, and is given as it is after three.
-      killAfter(ctx.comments, 'addLike');
+      killAfter('comments.addLike');
       await ctx.compactor.runOnce();
       expect(await pending()).toEqual(['0 comment_like']);
       counted.mockClear();
@@ -412,11 +407,11 @@ for (const target of TARGETS) {
       ok(await edit(bob, contentId, sent.commentId, 'First!'), 200);
       expect(await kinds()).toEqual(['comment_like', 'comment_put', 'comment_put', 'comment_put']);
 
-      const [put, publish, addLike] = [vi.spyOn(ctx.comments, 'put'), vi.spyOn(ctx.comments, 'publish'), vi.spyOn(ctx.comments, 'addLike')];
+      const [put, publish, addLike] = [ctx.compactor.watch('comments.put'), ctx.compactor.watch('comments.publish'), ctx.compactor.watch('comments.addLike')];
       expect(await ctx.apply()).toBe(true);
-      expect(put.mock.calls.map(([written]) => written.text)).toEqual(['First!']);
-      expect(publish).not.toHaveBeenCalled();
-      expect(addLike).toHaveBeenCalledTimes(1);
+      expect(put.calls.map(({ comment: written }) => written.text)).toEqual(['First!']);
+      expect(publish.calls).toEqual([]);
+      expect(addLike.calls).toHaveLength(1);
       expect(await pending()).toEqual([]);
       expect(await list(contentId)).toMatchObject({ count: 1, comments: [{ commentId: sent.commentId, text: 'First!', likes: 1 }] });
       expect(await commentFiles(contentId)).toEqual([`${sent.commentId}.json`, `likes/${sent.commentId}/${alice.userId}`]);
@@ -439,11 +434,11 @@ for (const target of TARGETS) {
       ok(await edit(bob, contentId, parent.commentId, 'Buy spam'), 202);
       expect(await kinds()).toEqual(['comment_put', 'comment_put', 'comment_put']);
 
-      const put = vi.spyOn(ctx.comments, 'put');
+      const put = ctx.compactor.watch('comments.put');
       expect(await ctx.apply()).toBe(true);
       expect(await pending()).toEqual([]);
       // What it said while it was published is written nowhere: the write that held it is the one that counts.
-      expect(put.mock.calls.map(([written]) => written.text)).not.toContain('An honest comment');
+      expect(put.calls.map(({ comment: written }) => written.text)).not.toContain('An honest comment');
       // It waits, and what stands in its place keeps its reply where it was.
       expect(await list(contentId)).toMatchObject({ count: 2, comments: [{ commentId: parent.commentId, status: 'pending_review', author: null, text: '', replies: 1 }] });
       expect(await replies(contentId, parent.commentId)).toMatchObject({ count: 1, comments: [{ commentId: reply.commentId, text: 'I agree' }] });
@@ -473,10 +468,10 @@ for (const target of TARGETS) {
       expect(await pending()).toEqual(['0 comment_like', '0 comment_put', '0 comment_put', '0 comment_put', '2 comment_remove']);
 
       // The store takes every comment but A.
-      const put = ctx.comments.put.bind(ctx.comments);
-      vi.spyOn(ctx.comments, 'put').mockImplementation(async (written, opts) => {
-        if (written.commentId === a.commentId) throw new Error('the store is unavailable');
-        return put(written, opts);
+      ctx.compactor.watch('comments.put', {
+        before: ({ comment: written }) => {
+          if (written.commentId === a.commentId) throw new Error('the store is unavailable');
+        },
       });
       expect(await ctx.apply()).toBe(true);
       // B is written, with its like. A's write is left, and with it what can't be applied before it: its reply, and its removal.
@@ -484,7 +479,7 @@ for (const target of TARGETS) {
       expect(await list(contentId)).toMatchObject({ count: 1, comments: [{ commentId: b.commentId, text: 'B', likes: 1 }] });
 
       // The next run applies them as the first would have: A is removed, and its place kept for the reply.
-      vi.restoreAllMocks();
+      ctx.compactor.unwatch();
       expect(await ctx.apply()).toBe(true);
       expect(await pending()).toEqual([]);
       const listed = await list(contentId);
@@ -538,6 +533,7 @@ for (const target of TARGETS) {
       ctx = await createTestContext(target, { settle: false });
       // A store that signs links, good for a quarter of an hour.
       vi.spyOn(ctx.content, 'linkMs').mockReturnValue(900_000);
+      await ctx.compactor.linkMs(900_000);
       const alice = await ctx.register('alice');
       const kept = async () => (await ctx.db.selectFrom('staged_removals').select(['staged_key', 'content_id']).execute()).map((r) => `${r.content_id} ${r.staged_key}`);
 
@@ -617,7 +613,7 @@ for (const target of TARGETS) {
       /** How many likes the comment has to whoever reads it: the ones the store has. */
       const read = async () => ok(await one(null, contentId, commentId), 200).likes;
       const likers = async () => (await commentFiles(contentId)).filter((file) => file.startsWith('likes/')).map((file) => file.split('/')[2]);
-      const [addLike, removeLike] = [vi.spyOn(ctx.comments, 'addLike'), vi.spyOn(ctx.comments, 'removeLike')];
+      const [addLike, removeLike] = [ctx.compactor.watch('comments.addLike'), ctx.compactor.watch('comments.removeLike')];
 
       // A like that waits is taken back by its own row, which then leaves the store as it is; and is given again by it.
       expect(await liked(alice, 201)).toBe(1);
@@ -636,8 +632,8 @@ for (const target of TARGETS) {
       // The run makes the like that is asked for, and nothing of the one that was given and taken back.
       await ctx.compactor.runOnce();
       expect(await pending()).toEqual([]);
-      expect(addLike.mock.calls.map(([, , userId]) => userId)).toEqual([carol.userId]);
-      expect(removeLike).not.toHaveBeenCalled();
+      expect(addLike.calls.map(({ userId }) => userId)).toEqual([carol.userId]);
+      expect(removeLike.calls).toEqual([]);
       expect(await likers()).toEqual([carol.userId]);
       expect(await read()).toBe(1);
 
@@ -651,18 +647,18 @@ for (const target of TARGETS) {
       expect(await liked(carol, 201)).toBe(1);
       expect(await likeRows()).toEqual([`${carol.userId} like 0`]);
       expect(await liked(alice, 201)).toBe(2);
-      addLike.mockClear();
+      addLike.clear();
       await ctx.compactor.runOnce();
       expect(await pending()).toEqual([]);
-      expect(addLike.mock.calls.map(([, , userId]) => userId)).toEqual([alice.userId]);
-      expect(removeLike).not.toHaveBeenCalled();
+      expect(addLike.calls.map(({ userId }) => userId)).toEqual([alice.userId]);
+      expect(removeLike.calls).toEqual([]);
       expect(await likers()).toEqual([alice.userId, carol.userId].sort());
 
       // Taken back for good: the like goes from the store, and from the index of what its user liked.
       expect(await taken(carol, true)).toBe(1);
       await ctx.compactor.runOnce();
       expect(await pending()).toEqual([]);
-      expect(removeLike.mock.calls.map(([, , userId]) => userId)).toEqual([carol.userId]);
+      expect(removeLike.calls.map(({ userId }) => userId)).toEqual([carol.userId]);
       expect(await likers()).toEqual([alice.userId]);
       expect(await read()).toBe(1);
       expect(await ctx.comments.likedBy(carol.userId, null, 10)).toEqual([]);
@@ -671,7 +667,7 @@ for (const target of TARGETS) {
 
       // A run that is killed once it took a like away leaves the row, which the next run applies again, to a store that lacks the like.
       expect(await taken(alice, true)).toBe(0);
-      killAfter(ctx.comments, 'removeLike');
+      killAfter('comments.removeLike');
       await ctx.compactor.runOnce();
       expect(await likeRows()).toEqual([`${alice.userId} unlike -1`]);
       expect(await likers()).toEqual([]);
@@ -691,14 +687,9 @@ for (const target of TARGETS) {
       const { commentId } = ok(await comment(bob, contentId, 'First'));
       await ctx.compactor.runOnce();
       const likers = async () => (await commentFiles(contentId)).filter((file) => file.startsWith('likes/')).map((file) => file.split('/')[2]);
-      /** Has the next call of a comment store's method do its work, and then a request be answered, before the run settles the row. */
-      const then = (method: 'addLike' | 'removeLike', request: () => Promise<unknown>) => {
-        const real = ctx.comments[method].bind(ctx.comments);
-        vi.spyOn(ctx.comments, method).mockImplementationOnce(async (postId, commentId, userId) => {
-          await real(postId, commentId, userId);
-          await request().catch((err) => crossed.push(err));
-        });
-      };
+      /** Has the compactor's next call of a comment store's method do its work, and then a request be answered, before the run settles the row. */
+      const then = (method: 'addLike' | 'removeLike', request: () => Promise<unknown>) =>
+        ctx.compactor.watch(`comments.${method}`, once({ after: () => request().catch((err) => crossed.push(err)) }));
 
       // The like is taken back once the run has made it, and before the run deletes its row: the row stays, and now counts against the store.
       ok(await likeComment(alice, contentId, commentId));
@@ -760,9 +751,9 @@ for (const target of TARGETS) {
       ok(await unlikeComment(alice, contentId, commentId), 200);
       ok(await remove(bob, contentId, commentId), 200);
       expect(await kinds()).toEqual(['comment_like', 'comment_remove', 'comment_remove']);
-      const removeLike = vi.spyOn(ctx.comments, 'removeLike');
+      const removeLike = ctx.compactor.watch('comments.removeLike');
       expect(await ctx.apply()).toBe(true);
-      expect(removeLike).not.toHaveBeenCalled();
+      expect(removeLike.calls).toEqual([]);
       expect(await pending()).toEqual([]);
       expect(await commentFiles(contentId)).toEqual([]);
       expect(await ctx.comments.likedBy(alice.userId, null, 10)).toEqual([]);
@@ -875,22 +866,25 @@ for (const target of TARGETS) {
       // deletes the files of the post's rows: after the run has read which there are.
       const late = newCommentId(ctx.clock.now);
       const file = randomUUID();
-      const removeStaged = ctx.content.removeStaged.bind(ctx.content);
-      vi.spyOn(ctx.content, 'removeStaged').mockImplementationOnce(async (key) => {
-        await writeFile(join(ctx.dir, 'content', 'staged', file), PNG);
-        await ctx.db.transaction().execute((trx) =>
-          insertPending(trx, {
-            contentId,
-            key: late,
-            kind: 'comment_put',
-            commentId: late,
-            payload: { comment: { commentId: late, contentId, userId: bob.userId, text: 'Late', createdAt: ctx.clock.now }, held: false },
-            stagedKey: `staged/${file}`,
-            at: ctx.clock.now,
-          }),
-        );
-        return removeStaged(key);
-      });
+      ctx.compactor.watch(
+        'content.removeStaged',
+        once({
+          before: async () => {
+            await writeFile(join(ctx.dir, 'content', 'staged', file), PNG);
+            await ctx.db.transaction().execute((trx) =>
+              insertPending(trx, {
+                contentId,
+                key: late,
+                kind: 'comment_put',
+                commentId: late,
+                payload: { comment: { commentId: late, contentId, userId: bob.userId, text: 'Late', createdAt: ctx.clock.now }, held: false },
+                stagedKey: `staged/${file}`,
+                at: ctx.clock.now,
+              }),
+            );
+          },
+        }),
+      );
       expect((await ctx.compactor.runOnce()).deleted).toEqual([contentId]);
       expect(await staged()).toEqual([]);
       expect(await pending()).toEqual([]);
@@ -910,12 +904,15 @@ for (const target of TARGETS) {
       let release!: () => void;
       const paused = new Promise<void>((resolve) => (reached = resolve));
       const released = new Promise<void>((resolve) => (release = resolve));
-      const putMeta = ctx.content.putMeta.bind(ctx.content);
-      vi.spyOn(ctx.content, 'putMeta').mockImplementationOnce(async (meta) => {
-        reached();
-        await released;
-        return putMeta(meta);
-      });
+      ctx.compactor.watch(
+        'content.putMeta',
+        once({
+          before: async () => {
+            reached();
+            await released;
+          },
+        }),
+      );
       const stop = ctx.compactor.start();
       await paused;
 

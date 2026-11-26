@@ -1,7 +1,7 @@
 import type { LightMyRequestResponse } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { readAttestation, signingKeys } from '../src/attestation.js';
-import type { TrustPlugin } from '../src/moderation/trust.types.js';
+import type { TestPlugin } from '../src/moderation/trust.types.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { MAX_ALT_CHARS } from '../src/posts.js';
 import { decodeSummary, encodeSummary } from '../src/storage/summaryStore.js';
@@ -152,21 +152,16 @@ for (const target of TARGETS) {
     });
 
     it('gives the alt texts to moderation as text of the post, and attests them to other servers', async () => {
-      const seen: string[][] = [];
-      const wary: TrustPlugin = {
-        name: 'wary',
-        assess: (assessed) => {
-          seen.push(assessed.texts);
-          return assessed.texts.some((text) => text.includes('scam')) ? { set: 0 } : null;
-        },
-      };
+      const wary: TestPlugin = { name: 'wary', record: true, rules: [{ includes: 'scam', set: 0 }] };
+      /** The texts of what the plugin was last shown. */
+      const lastSeen = async () => (await ctx.trust.seen()).at(-1)!.post.texts;
       const seeds = [Buffer.alloc(32, 7).toString('base64')];
       ctx = await createTestContext(target, { trustPlugins: [wary], publicBaseUrl: 'https://api.example.com', reposts: { signingKeys: seeds } });
       const alice = await ctx.register('alice');
       const bob = await ctx.register('bob');
 
       const { contentId } = ok(await image(alice, { text: 'My desk', alt: 'A laptop on a desk' }));
-      expect(seen.at(-1)).toEqual(expect.arrayContaining(['My desk', 'A laptop on a desk']));
+      expect(await lastSeen()).toEqual(expect.arrayContaining(['My desk', 'A laptop on a desk']));
       expect((await image(alice, { alt: 'A scam, in words only a screen reader says' })).statusCode).toBe(422);
 
       const { attestation } = ok(await get(`/content/${contentId}/attestation`), 200);
@@ -180,7 +175,7 @@ for (const target of TARGETS) {
       };
       const sent = ok(await comment({ text: 'Mine looks like this', alt: 'A tidy desk' }, png));
       expect(sent.media).toMatchObject({ kind: 'image', mimeType: 'image/png', alt: 'A tidy desk' });
-      expect(seen.at(-1)).toEqual(expect.arrayContaining(['Mine looks like this', 'A tidy desk']));
+      expect(await lastSeen()).toEqual(expect.arrayContaining(['Mine looks like this', 'A tidy desk']));
       expect(ok(await get(`/content/${post.contentId}/comments`), 200).comments.map((c: { media?: { alt?: string } }) => c.media?.alt)).toEqual(['A tidy desk']);
       expect((await comment({ text: 'Look', alt: 'A scam' }, png)).statusCode).toBe(422);
       expect(refusal(await comment({ text: 'Words alone', alt: 'Of nothing' }))).toEqual(ONLY_IMAGES);

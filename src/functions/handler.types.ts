@@ -1,5 +1,3 @@
-import type { HotStore } from '../storage/index.js';
-
 /** An HTTP request as a function receives it, whatever the platform calls its parts. */
 export interface FunctionRequest {
   method: string;
@@ -24,12 +22,9 @@ export interface FunctionResponse {
 
 /**
  * What a function (`createFunction`), or the step a deployment runs first (`checkSettings`,
- * `migrateDeployment`), can be given in place of the system's clock and the hot store its settings
- * name. Only tests give either.
+ * `migrateDeployment`), can be given in place of the system's clock. Only tests give it.
  */
 export interface FunctionOptions {
   /** Injectable clock (UTC epoch ms). */
   now?: () => number;
-  /** The hot store to use instead of the configured one: functions in one process sharing an in-memory store. */
-  hot?: HotStore;
 }

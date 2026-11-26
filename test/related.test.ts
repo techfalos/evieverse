@@ -215,8 +215,11 @@ for (const target of TARGETS) {
     });
 
     it('relates no hashtags when set to add none', async () => {
+      // A server that is set so, and its compactor with it, which is a process of its own and reads the settings as it starts.
+      await ctx.close();
+      ctx = await createTestContext(target, { feed: { relatedMinPosts: 2, relatedMinPercent: 20, relatedTags: 0 }, trust: { deleteBelow: 0 } });
+      alice = await ctx.register('alice');
       await posts('#dogs #pets', 3);
-      ctx.config.feed.relatedTags = 0;
       await ctx.compact();
       expect(await ctx.relatedTags.get('dogs')).toEqual([]);
       expect((await feed('tags=dogs&addRelated=true')).related).toEqual([]);

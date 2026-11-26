@@ -1,51 +1,112 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { gunzipSync } from 'node:zlib';
 import type { InjectOptions } from 'fastify';
+import { Redis } from 'ioredis';
 import { sql } from 'kysely';
-import pino from 'pino';
 import { expect } from 'vitest';
 import { buildApp } from '../src/app.js';
 import type { AuditRecord } from '../src/audit.types.js';
 import { challengeKey, leadingZeroBits } from '../src/challenge/challenges.js';
 import type { Challenge } from '../src/challenge/challenges.types.js';
-import { applyPending } from '../src/compact/apply.js';
-import { createCompactor } from '../src/compact/compactor.js';
-import { CompactorLease } from '../src/compact/lease.js';
 import { loadConfig, type Config } from '../src/config.js';
 import { createDb, type Db } from '../src/db/index.js';
 import { bootstrap } from '../src/deps.js';
 import type { Languages } from '../src/language.js';
 import type { KeyFetcher } from '../src/originKeys.js';
-import { createOriginSweep } from '../src/originSweep.js';
-import type { OriginSweepOptions } from '../src/originSweep.types.js';
-import { repostsOf } from '../src/reposts.js';
-import type { HotStore } from '../src/storage/index.js';
-import type { TrustPlugin } from '../src/moderation/trust.types.js';
+import { createHotStore, type HotStore } from '../src/storage/index.js';
+import { openTrust } from '../src/moderation/trust.js';
+import type { TestPlugin } from '../src/moderation/trust.types.js';
 import type { CliRelease } from '../src/routes/cli.types.js';
-import { KnownHashes } from '../src/plugins/trust/pdq/list.js';
-import { createVideoWorker } from '../src/video/worker.js';
+import { startHarness, type Fetchers } from './harness.js';
+
+/**
+ * The Redis or Valkey every test runs against, as every server does: TEST_REDIS_URL, or the one
+ * `docker compose up -d redis` starts. Tests share it, each under a key prefix of its own.
+ */
+export const TEST_REDIS_URL = process.env.TEST_REDIS_URL || 'redis://127.0.0.1:6379';
+
+/**
+ * The environment of a test that reads the settings as a server would (`loadConfig({}, BASE_ENV)`):
+ * no config file, and nothing of this machine's but where Redis is, which no server starts without.
+ */
+export const BASE_ENV = { EVIEVERSE_CONFIG: '/nonexistent.json', REDIS_URL: TEST_REDIS_URL };
 
 export interface TestTarget {
   name: string;
   dialect: 'sqlite' | 'postgres' | 'mysql';
+  /**
+   * The database's URL. For SQLite it is `:memory:`, which is for a test that opens the database
+   * itself: a test context has a file of its own instead (see createTestContext), so that a
+   * second process can open it.
+   */
   url: string;
-  /** The RAM tier: the in-process store, or a real Redis-protocol server. */
-  hot: 'memory' | 'redis';
 }
 
 /**
- * SQLite with the in-process store always runs. Set TEST_POSTGRES_URL / TEST_MYSQL_URL for those
- * databases, and TEST_REDIS_URL (e.g. redis://127.0.0.1:6379) to run against a real Redis or Valkey.
+ * SQLite always runs. Set TEST_POSTGRES_URL / TEST_MYSQL_URL for those databases. Each runs
+ * against the Redis at TEST_REDIS_URL.
  */
 export const TARGETS: TestTarget[] = [
-  { name: 'sqlite + memory', dialect: 'sqlite', url: ':memory:', hot: 'memory' },
-  ...(process.env.TEST_REDIS_URL ? [{ name: 'sqlite + redis', dialect: 'sqlite' as const, url: ':memory:', hot: 'redis' as const }] : []),
-  ...(process.env.TEST_POSTGRES_URL ? [{ name: 'postgres', dialect: 'postgres' as const, url: process.env.TEST_POSTGRES_URL, hot: 'memory' as const }] : []),
-  ...(process.env.TEST_MYSQL_URL ? [{ name: 'mysql', dialect: 'mysql' as const, url: process.env.TEST_MYSQL_URL, hot: 'memory' as const }] : []),
+  { name: 'sqlite', dialect: 'sqlite', url: ':memory:' },
+  ...(process.env.TEST_POSTGRES_URL ? [{ name: 'postgres', dialect: 'postgres' as const, url: process.env.TEST_POSTGRES_URL }] : []),
+  ...(process.env.TEST_MYSQL_URL ? [{ name: 'mysql', dialect: 'mysql' as const, url: process.env.TEST_MYSQL_URL }] : []),
 ];
+
+/**
+ * Redis as a test itself reads it, past what the hot store tells: which keys there are under
+ * `keyPrefix`, and how long they have left. Over a connection of its own, which `close` ends.
+ */
+export function redisView(keyPrefix: string) {
+  const redis = new Redis(TEST_REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 2 });
+  return {
+    /** The keys that match `pattern` (a glob, such as `limit:*`), without the prefix, sorted. */
+    async keys(pattern: string): Promise<string[]> {
+      const found: string[] = [];
+      for await (const page of redis.scanStream({ match: `${keyPrefix}${pattern}`, count: 500 }) as AsyncIterable<string[]>) found.push(...page);
+      return [...new Set(found)].map((key) => key.slice(keyPrefix.length)).sort();
+    },
+    /**
+     * How long each key has left, in ms, by Redis's own clock, which is the one keys expire by:
+     * a test's clock moves nothing there. -1: the key never expires. -2: there is no such key.
+     */
+    async ttl(names: string[]): Promise<number[]> {
+      if (!names.length) return [];
+      const p = redis.pipeline();
+      for (const name of names) p.pttl(`${keyPrefix}${name}`);
+      return ((await p.exec()) ?? []).map(([err, left]) => {
+        if (err) throw err;
+        return left as number;
+      });
+    },
+    close() {
+      redis.disconnect();
+    },
+  };
+}
+
+/**
+ * A hot store of a test's own, for one that needs no test context: the tests' Redis, under a key
+ * prefix nothing else has, with `ttl` to read how long its keys have left (see redisView).
+ * `close` deletes what the test left there.
+ */
+export function testHotStore() {
+  const keyPrefix = `test:${randomUUID()}:`;
+  const hot = createHotStore({ url: TEST_REDIS_URL, keyPrefix });
+  const view = redisView(keyPrefix);
+  return {
+    hot,
+    ttl: view.ttl,
+    async close() {
+      await hot.clear();
+      await hot.close();
+      view.close();
+    },
+  };
+}
 
 export const TABLES = [
   'pinned_posts',
@@ -180,10 +241,12 @@ export async function createTestContext(
     supportEmail?: string;
     /** The minimum age GET /rules gives, in years. None, unless given. */
     minimumAge?: number;
+    /** What GET /rules says of content made with generative AI. The server's default, unless given. */
+    genAi?: Config['genAi'];
     corsOrigins?: string | string[];
     compact?: Partial<Config['compact']>;
     /**
-     * Whether the server processes the videos it is sent, and how (src/video). It doesn't,
+     * Whether the server processes the videos it is sent, and how (compactor/src/video). It doesn't,
      * unless asked: the "videos" tests post are a few bytes, which no ffmpeg reads. A test that
      * asks runs the worker itself (see `processVideo`).
      */
@@ -197,8 +260,10 @@ export async function createTestContext(
     trustProxy?: number | boolean | string;
     /** The CLI the server ships. Tests ship none unless they say, whatever was last built. */
     cli?: CliRelease;
-    /** The trust plugins, in place of the server's own (src/plugins/trust). */
-    trustPlugins?: TrustPlugin[];
+    /** Trust plugins the test describes, in place of the server's own (compactor/crates/trust/src/testing.rs). */
+    trustPlugins?: TestPlugin[];
+    /** Trust plugins the test describes, which run after the server's own. */
+    moreTrustPlugins?: TestPlugin[];
     /** The languages the server answers in, in place of its own (the languages folder). */
     languages?: Languages;
     /** Whether the server takes reposts, and the keys it signs its posts' attestations with: none, unless given. */
@@ -206,7 +271,7 @@ export async function createTestContext(
     /** What answers for the other servers this one asks for their keys. Nothing does unless given: a test reaches no other server. */
     keyFetcher?: KeyFetcher;
     /** What answers for the other servers this one asks for the attestations of their posts (see `sweep`). Nothing does unless given. */
-    attestationFetcher?: OriginSweepOptions['fetcher'];
+    attestationFetcher?: Fetchers['attestation'];
     /** Requests to GET /content/:id from one address in a minute. No limit, unless given. */
     contentRateLimitPerMinute?: number;
     /** Requests to GET /users/:userId/posts from one address in a minute. No limit, unless given. */
@@ -218,53 +283,55 @@ export async function createTestContext(
   } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'evieverse-test-'));
-  const config = loadConfig(
-    {
-      logLevel: 'silent',
-      publicBaseUrl: opts.publicBaseUrl ?? '',
-      // Each test gets its own key prefix, so tests can share one Redis.
-      redis: target.hot === 'redis' ? { url: process.env.TEST_REDIS_URL!, keyPrefix: `test:${dir.split('/').pop()}:` } : {},
-      db: { dialect: target.dialect, url: target.url, poolSize: opts.poolSize ?? 4 },
-      storage: {
-        content: opts.content ?? { scheme: 'fs', options: { root: join(dir, 'content') } },
-        summaries: { scheme: 'fs', options: { root: join(dir, 'summaries') } },
-        tmpPath: join(dir, 'tmp'),
-        ...(opts.maxUploadBytes && { maxUploadBytes: opts.maxUploadBytes }),
-        ...(opts.uploadLinksPerMinute !== undefined && { uploadLinksPerMinute: opts.uploadLinksPerMinute }),
-      },
-      ...(opts.audit && { audit: { scheme: 'fs', options: { root: join(dir, 'audit') } } }),
-      feed: { headCacheMs: 0, rateLimitPerMinute: 0, followingRateLimitPerMinute: 0, maxConcurrent: 0, ...opts.feed },
-      contentRateLimitPerMinute: opts.contentRateLimitPerMinute ?? 0,
-      profilePostsRateLimitPerMinute: opts.profilePostsRateLimitPerMinute ?? 0,
-      avatarRateLimitPerMinute: opts.avatarRateLimitPerMinute ?? 0,
-      search: { rateLimitPerMinute: 0, ...opts.search },
-      challenge: { powBits: 8, minSolveMs: 0, ...opts.challenge },
-      tagging: { logRateLimitPerMinute: 0, ...opts.tagging },
-      ...(opts.postTypes && { postTypes: opts.postTypes }),
-      reposts: { attestationRateLimitPerMinute: 0, ...opts.reposts },
-      ...(opts.trust && { trust: opts.trust }),
-      ...(opts.urlhaus && { urlhaus: opts.urlhaus }),
-      ...(opts.pdq && { pdq: opts.pdq }),
-      ...(opts.quarantine && { quarantine: { scheme: 'fs', options: { root: join(dir, 'quarantine') }, ...(opts.quarantine !== true && opts.quarantine) } }),
-      registerRateLimitPerHour: opts.registerRateLimitPerHour ?? 1_000_000,
-      postRateLimitPerMinute: opts.postRateLimitPerMinute ?? 0,
-      ...(opts.maxFollowing && { maxFollowing: opts.maxFollowing }),
-      ...(opts.reportsPerHour !== undefined && { reportsPerHour: opts.reportsPerHour }),
-      ...(opts.inbox && { inbox: opts.inbox }),
-      ...(opts.export && { export: opts.export }),
-      comments: { perMinute: 0, listRateLimitPerMinute: 0, ...opts.comments },
-      ...(opts.monetization && { monetization: opts.monetization }),
-      ...(opts.modified !== undefined && { modified: opts.modified }),
-      ...(opts.sourceUrl !== undefined && { sourceUrl: opts.sourceUrl }),
-      ...(opts.supportEmail !== undefined && { supportEmail: opts.supportEmail }),
-      ...(opts.minimumAge !== undefined && { minimumAge: opts.minimumAge }),
-      ...(opts.corsOrigins && { corsOrigins: opts.corsOrigins }),
-      ...(opts.compact && { compact: opts.compact }),
-      video: { processing: false, ...opts.video },
-      ...(opts.trustProxy !== undefined && { trustProxy: opts.trustProxy }),
+  const keyPrefix = `test:${dir.split('/').pop()}:`;
+  // What the test's settings are, beside the defaults: the server's here, and the compactor's, which reads them from a file.
+  const overrides = {
+    logLevel: 'silent',
+    publicBaseUrl: opts.publicBaseUrl ?? '',
+    // Each test gets its own key prefix, so tests can share one Redis.
+    redis: { url: TEST_REDIS_URL, keyPrefix },
+    // And its own SQLite file, which a second process can open, as the compactor's does.
+    db: { dialect: target.dialect, url: target.dialect === 'sqlite' ? join(dir, 'db.sqlite') : target.url, poolSize: opts.poolSize ?? 4 },
+    storage: {
+      content: opts.content ?? { scheme: 'fs', options: { root: join(dir, 'content') } },
+      summaries: { scheme: 'fs', options: { root: join(dir, 'summaries') } },
+      tmpPath: join(dir, 'tmp'),
+      ...(opts.maxUploadBytes && { maxUploadBytes: opts.maxUploadBytes }),
+      ...(opts.uploadLinksPerMinute !== undefined && { uploadLinksPerMinute: opts.uploadLinksPerMinute }),
     },
-    {},
-  );
+    ...(opts.audit && { audit: { scheme: 'fs', options: { root: join(dir, 'audit') } } }),
+    feed: { headCacheMs: 0, rateLimitPerMinute: 0, followingRateLimitPerMinute: 0, maxConcurrent: 0, ...opts.feed },
+    contentRateLimitPerMinute: opts.contentRateLimitPerMinute ?? 0,
+    profilePostsRateLimitPerMinute: opts.profilePostsRateLimitPerMinute ?? 0,
+    avatarRateLimitPerMinute: opts.avatarRateLimitPerMinute ?? 0,
+    search: { rateLimitPerMinute: 0, ...opts.search },
+    challenge: { powBits: 8, minSolveMs: 0, ...opts.challenge },
+    tagging: { logRateLimitPerMinute: 0, ...opts.tagging },
+    ...(opts.postTypes && { postTypes: opts.postTypes }),
+    reposts: { attestationRateLimitPerMinute: 0, ...opts.reposts },
+    ...(opts.trust && { trust: opts.trust }),
+    ...(opts.urlhaus && { urlhaus: opts.urlhaus }),
+    ...(opts.pdq && { pdq: opts.pdq }),
+    ...(opts.quarantine && { quarantine: { scheme: 'fs', options: { root: join(dir, 'quarantine') }, ...(opts.quarantine !== true && opts.quarantine) } }),
+    registerRateLimitPerHour: opts.registerRateLimitPerHour ?? 1_000_000,
+    postRateLimitPerMinute: opts.postRateLimitPerMinute ?? 0,
+    ...(opts.maxFollowing && { maxFollowing: opts.maxFollowing }),
+    ...(opts.reportsPerHour !== undefined && { reportsPerHour: opts.reportsPerHour }),
+    ...(opts.inbox && { inbox: opts.inbox }),
+    ...(opts.export && { export: opts.export }),
+    comments: { perMinute: 0, listRateLimitPerMinute: 0, ...opts.comments },
+    ...(opts.monetization && { monetization: opts.monetization }),
+    ...(opts.modified !== undefined && { modified: opts.modified }),
+    ...(opts.sourceUrl !== undefined && { sourceUrl: opts.sourceUrl }),
+    ...(opts.supportEmail !== undefined && { supportEmail: opts.supportEmail }),
+    ...(opts.minimumAge !== undefined && { minimumAge: opts.minimumAge }),
+    ...(opts.genAi !== undefined && { genAi: opts.genAi }),
+    ...(opts.corsOrigins && { corsOrigins: opts.corsOrigins }),
+    ...(opts.compact && { compact: opts.compact }),
+    video: { processing: false, ...opts.video },
+    ...(opts.trustProxy !== undefined && { trustProxy: opts.trustProxy }),
+  };
+  const config = loadConfig(overrides, {});
   if (target.dialect !== 'sqlite') {
     const db = await createDb(config.db);
     await resetDatabase(db, target.dialect);
@@ -275,26 +342,22 @@ export async function createTestContext(
   const { close, ...deps } = await bootstrap(config, () => clock.now);
   const unreached = async (address: string) => Promise.reject(new Error(`a test asked ${address}, and no test reaches another server`));
   const keyFetcher = opts.keyFetcher ?? unreached;
+  // The trust plugins the app scores with, and the compactor's process too: the server's own, or the ones the test describes.
+  const plugins = { testPlugins: opts.trustPlugins ?? opts.moreTrustPlugins, onlyTestPlugins: opts.trustPlugins !== undefined };
+  const trust = openTrust(config, undefined, plugins);
   const app = await buildApp(deps, {
     logger: false,
     cli: opts.cli ?? null,
-    trustPlugins: opts.trustPlugins,
+    trust,
     languages: opts.languages,
     keyFetcher,
   });
 
-  const compactor = createCompactor(deps);
-  // What asks other servers after the posts this one holds reposts of, as the compactor's process runs it: here a test runs each look itself.
-  const originSweep = await createOriginSweep(deps, pino({ level: 'silent' }), {
-    fetcher: opts.attestationFetcher ?? unreached,
-    keyFetcher,
-    trustPlugins: opts.trustPlugins,
-    pauseMs: 0,
-  });
+  // The compactor: the Rust binary, as a process of this test's own, which takes what the test asks of it and tells
+  // the time by the test's clock (see test/harness.ts). The schema is there by now: `bootstrap` brought it up to date.
+  // What it would ask other servers (their keys, the attestations of their posts), it asks the test.
+  const compactor = await startHarness(dir, overrides, clock, { fetchers: { keys: keyFetcher, attestation: opts.attestationFetcher }, plugins });
   const graceMs = config.compact.graceSeconds * 1000;
-  // What processes the videos users send, as the compactor's process runs it: here a test runs each job itself.
-  // With a list of its own where it checks videos against one (the pdq plugin's), read as this test's clock and settings have it.
-  const videoWorker = createVideoWorker(deps, pino({ level: 'silent' }), new KnownHashes());
 
   // One at a time, in the order they were asked for, as a compactor's runs are.
   let applying: Promise<unknown> = Promise.resolve();
@@ -304,16 +367,7 @@ export async function createTestContext(
    * lease, as a run is. False, with nothing applied, if a run holds it.
    */
   const apply = (): Promise<boolean> => {
-    const run = applying.then(async () => {
-      const lease = new CompactorLease(deps.db, config.compact.leaseSeconds * 1000, () => clock.now);
-      if (!(await lease.acquire())) return false;
-      try {
-        await applyPending({ ...deps, lease, places: (id) => repostsOf(deps.db, id) });
-        return true;
-      } finally {
-        await lease.release();
-      }
-    });
+    const run = applying.then(() => compactor.apply());
     applying = run.catch(() => {});
     return run;
   };
@@ -336,6 +390,26 @@ export async function createTestContext(
     return solved;
   }
 
+  // Redis as the test itself reads it: which of its keys there are, and how long they have left.
+  const view = redisView(keyPrefix);
+  const { keys, ttl } = view;
+  /**
+   * Has keys expire now, as they do when their time is up, and returns how long each had left,
+   * by its name: how a test gets past a window that Redis keeps the time of, and learns what the
+   * window was. The keys are the ones named, or the ones that match a pattern (see `keys`). Each
+   * must be there and be a key that expires: one that doesn't is ended by no amount of time, and
+   * the test is told so.
+   */
+  async function lapse(which: string | string[]): Promise<Record<string, number>> {
+    const names = typeof which === 'string' ? await keys(which) : which;
+    const left = await ttl(names);
+    const lasting = names.filter((_, i) => left[i]! < 0);
+    if (lasting.length) throw new Error(`these keys are missing or never expire, so no time would end them: ${lasting.join(', ')}`);
+    await deps.hot.expire(names, 1);
+    while ((await deps.hot.exists(names)).some(Boolean)) await sleep(2);
+    return Object.fromEntries(names.map((name, i) => [name, left[i]!]));
+  }
+
   /**
    * POST /register as a person sends it: again with the challenge solved, when the request is
    * answered with one. Returns the last response, whatever it is.
@@ -351,24 +425,31 @@ export async function createTestContext(
     clock,
     dir,
     ...deps,
+    /** The server's trust plugins: `trust.seen()` is what the ones that record were shown. */
+    trust,
+    /**
+     * The compactor, which is a process of its own: `runOnce` makes a pass, `start` has it make pass after pass, and
+     * `watch` shows the test the calls it makes to its stores, which the test's own `hot`, `content` and `comments`
+     * (the server's) are not.
+     */
     compactor,
     apply,
     /**
-     * One look of the server's own asking after reposts' originals (src/originSweep.ts): asks
-     * `attestationFetcher` about every entry that is due, and applies what that committed.
-     * Returns how many entries were due.
+     * One look of the server's own asking after reposts' originals (compactor/src/sweep.rs):
+     * asks `attestationFetcher` about every entry that is due, and applies what that
+     * committed. Returns how many entries were due.
      */
     async sweep() {
-      const due = await originSweep.sweep();
+      const due = await compactor.sweep();
       if (opts.settle !== false) await apply();
       return due;
     },
     /**
-     * Has the video worker take the oldest video that waits and process it (src/video/worker.ts),
-     * and applies what that committed. False if no video waited.
+     * Has the video worker take the oldest video that waits and process it
+     * (compactor/src/video/worker.rs), and applies what that committed. False if no video waited.
      */
     async processVideo() {
-      const took = await videoWorker.runOnce();
+      const took = await compactor.video();
       if (took && opts.settle !== false) await apply();
       return took;
     },
@@ -382,6 +463,9 @@ export async function createTestContext(
       return compactor.runOnce();
     },
     solve,
+    keys,
+    ttl,
+    lapse,
     registration,
     /** Registers a user, solving the challenge the server asks for. */
     async register(username: string) {
@@ -391,7 +475,10 @@ export async function createTestContext(
     },
     async close() {
       await app.close();
+      await trust.close();
+      await compactor.close();
       await deps.hot.clear();
+      view.close();
       await close();
       await rm(dir, { recursive: true, force: true });
     },

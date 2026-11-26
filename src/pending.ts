@@ -44,7 +44,8 @@ import type { CommentStore, ContentMeta, ContentStore } from './storage/index.js
  * - A reply to a comment whose removal has committed is refused, and one that committed before
  *   it keeps the comment's place, as a placeholder. For that to hold of a reply that is under
  *   way as the removal is applied, the compactor waits for the replies under way before it
- *   decides what a removal leaves (see replying, awaitReplies).
+ *   decides what a removal leaves (see replying, and `await_replies` in
+ *   compactor/crates/core/src/pending.rs).
  *
  * What a request reads of a post or a comment that it is about to write, or that it shows its
  * author, is the newest pending write, and the stores only where there is none (effectiveMeta,
@@ -58,7 +59,7 @@ export type PendingReader = Pick<Db, 'selectFrom'>;
 export const UNNUMBERED = 0;
 
 /**
- * The first key of the PostgreSQL advisory locks that replying and awaitReplies take, which
+ * The first key of the PostgreSQL advisory locks that replying and the compactor's `await_replies` take, which
  * keeps them apart from any other advisory lock taken in the database. The second is a hash of
  * the post's id: two posts that share one wait for each other's replies, for a moment and for
  * nothing, and nothing else comes of it.
@@ -115,7 +116,7 @@ export async function insertPending(trx: Transaction<Database>, write: PendingWr
 
 /**
  * Says that the transaction commits a reply to a comment of the post, until it ends: what the
- * compactor waits for before it decides what a removal leaves (see awaitReplies). To be called
+ * compactor waits for before it decides what a removal leaves (`await_replies` in compactor/crates/core/src/pending.rs). To be called
  * before the reply reads the comment it replies to.
  *
  * It is a lock that every reply shares: replies neither wait for each other nor for any other
@@ -128,22 +129,6 @@ export async function insertPending(trx: Transaction<Database>, write: PendingWr
 export async function replying(trx: Transaction<Database>, dialect: DbDialect, contentId: string): Promise<void> {
   if (dialect === 'postgres') await sql`select pg_advisory_xact_lock_shared(${REPLY_LOCK}::int4, hashtext(${contentId}::text))`.execute(trx);
   else if (dialect === 'mysql') await trx.selectFrom('content').select('id').where('id', '=', contentId).forShare().execute();
-}
-
-/**
- * Waits for the replies to the post's comments that are under way to commit or fail (see
- * replying), and lets the ones that begin meanwhile through once they have. The compactor's,
- * before it applies the removals it has read of a post's comments. From then on, every reply to
- * one of those comments either has committed, and is among the post's pending writes for
- * hasReplies to find, or reads the comment after its removal committed, and is refused. So no
- * reply is left under a comment of which nothing is.
- */
-export async function awaitReplies(db: Db, dialect: DbDialect, contentId: string): Promise<void> {
-  if (dialect === 'sqlite') return;
-  await db.transaction().execute(async (trx) => {
-    if (dialect === 'postgres') await sql`select pg_advisory_xact_lock(${REPLY_LOCK}::int4, hashtext(${contentId}::text))`.execute(trx);
-    else await trx.selectFrom('content').select('id').where('id', '=', contentId).forUpdate().execute();
-  });
 }
 
 /**
@@ -234,17 +219,6 @@ export async function pendingImage(db: PendingReader, contentId: string, seq: nu
     .where('kind', '=', 'post_file')
     .executeTakeFirst();
   return row?.staged_key ?? null;
-}
-
-/**
- * The most images a write of the post that hasn't been applied gives it: 1 if there is none,
- * and for a post that is no image post of several. A run that stopped while it applied such a
- * write may have left that many files where the post's images are kept, whatever the post's
- * meta file says, so this is what a post's deletion counts with (see Compactor).
- */
-export async function pendingImages(db: PendingReader, contentId: string): Promise<number> {
-  const rows = await db.selectFrom('pending_writes').select('payload').where('content_id', '=', contentId).where('kind', '=', 'post').execute();
-  return Math.max(1, ...rows.map((row) => payloadOf<PostPayload>(row.payload).meta.images?.length ?? 1));
 }
 
 /**

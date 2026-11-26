@@ -10,8 +10,8 @@ export const perMinute = (max: number) => ({ rateLimit: max > 0 ? { max, timeWin
 
 /**
  * Where @fastify/rate-limit counts requests: in the hot store rather than in each process, so a
- * limit holds across every node and function instance (in memory when there is no Redis, which is a
- * single node anyway). A route's counters are its own; each lasts one time window from its first request.
+ * limit holds across every node and function instance. A route's counters are its own; each lasts
+ * one time window from its first request.
  */
 export function rateLimitStore(hot: HotStore): FastifyRateLimitStoreCtor {
   return class HotRateLimitStore implements FastifyRateLimitStore {

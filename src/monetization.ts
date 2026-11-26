@@ -1,4 +1,4 @@
-import type { AdKind, MonetizationTable } from './db/schema.js';
+import type { AdKind } from './db/schema.js';
 import type { AdRecord, PublishedAd } from './monetization.types.js';
 
 /**
@@ -36,22 +36,8 @@ export const MAX_OPEN_ADS = 100;
  */
 export const AD_POSITIONS: readonly number[] = [3, 10, 17];
 
-type AdRow = Pick<MonetizationTable, 'id' | 'kind' | 'text' | 'image_alt' | 'url' | 'tags' | 'starts_at' | 'ends_at'>;
-
 /** The hashtags a row is targeted at, as a list; null for one that appears all the time. */
 export const adTags = (tags: string | null): string[] | null => (tags === null ? null : tags.split(' ').filter(Boolean));
-
-/** An ad's row as it is published. */
-export const publishedAd = (row: AdRow): PublishedAd => ({
-  adId: row.id,
-  kind: row.kind,
-  ...(row.text !== null && { text: row.text }),
-  ...(row.kind === 'image' && row.image_alt !== null && { imageAlt: row.image_alt }),
-  ...(row.url !== null && { url: row.url }),
-  tags: adTags(row.tags),
-  startsAt: row.starts_at,
-  endsAt: row.ends_at,
-});
 
 /** Where its schedule has an ad at `at`: yet to start, being shown, or over. */
 export function adStatus(ad: { startsAt: number; endsAt: number | null }, at: number): 'scheduled' | 'live' | 'ended' {

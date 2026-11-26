@@ -1,0 +1,178 @@
+{
+  "day": {
+    "entries": [
+      {
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "createdAt": 1793966398766,
+        "likes": 0,
+        "aiGenerated": false,
+        "moderated": false,
+        "repost": false
+      },
+      {
+        "contentId": "0198c0de-1111-4000-8000-000000000002",
+        "createdAt": 1793962800000,
+        "likes": 7,
+        "aiGenerated": true,
+        "moderated": false,
+        "repost": false
+      },
+      {
+        "contentId": "0198c0de-1111-4000-8000-000000000003",
+        "createdAt": 1793962800999,
+        "likes": 7,
+        "aiGenerated": false,
+        "moderated": true,
+        "repost": true
+      },
+      {
+        "contentId": "0198c0de-0000-4000-8000-0000000000a1",
+        "createdAt": 0,
+        "likes": 5000000000,
+        "aiGenerated": true,
+        "moderated": true,
+        "repost": true
+      },
+      {
+        "contentId": "0198c0de-0000-4000-8000-0000000000a2",
+        "createdAt": -5000,
+        "likes": 1,
+        "aiGenerated": false,
+        "moderated": false,
+        "repost": false
+      }
+    ],
+    "hex": "0198c0de111140008000000000000001000000006aedc13e000198c0de111140008000000000000002000000076aedb330010198c0de111140008000000000000003000000076aedb330060198c0de0000400080000000000000a1ffffffff00000000070198c0de0000400080000000000000a2000000010000000000",
+    "unpacked": [
+      {
+        "contentId": "0198c0de-1111-4000-8000-000000000001",
+        "likes": 0,
+        "createdAt": 1793966398000,
+        "aiGenerated": false,
+        "moderated": false,
+        "repost": false
+      },
+      {
+        "contentId": "0198c0de-1111-4000-8000-000000000002",
+        "likes": 7,
+        "createdAt": 1793962800000,
+        "aiGenerated": true,
+        "moderated": false,
+        "repost": false
+      },
+      {
+        "contentId": "0198c0de-1111-4000-8000-000000000003",
+        "likes": 7,
+        "createdAt": 1793962800000,
+        "aiGenerated": false,
+        "moderated": true,
+        "repost": true
+      },
+      {
+        "contentId": "0198c0de-0000-4000-8000-0000000000a1",
+        "likes": 4294967295,
+        "createdAt": 0,
+        "aiGenerated": true,
+        "moderated": true,
+        "repost": true
+      },
+      {
+        "contentId": "0198c0de-0000-4000-8000-0000000000a2",
+        "likes": 1,
+        "createdAt": 0,
+        "aiGenerated": false,
+        "moderated": false,
+        "repost": false
+      }
+    ],
+    "withBytesLeftOver": 5
+  },
+  "order": {
+    "byRecords": [
+      "0198c0de-0000-4000-8000-0000000000a1",
+      "0198c0de-1111-4000-8000-000000000003",
+      "0198c0de-1111-4000-8000-000000000002",
+      "0198c0de-0000-4000-8000-0000000000a2",
+      "0198c0de-1111-4000-8000-000000000001"
+    ],
+    "byRecent": [
+      "0198c0de-1111-4000-8000-000000000001",
+      "0198c0de-1111-4000-8000-000000000002",
+      "0198c0de-1111-4000-8000-000000000003",
+      "0198c0de-0000-4000-8000-0000000000a1",
+      "0198c0de-0000-4000-8000-0000000000a2"
+    ]
+  },
+  "quotas": [
+    {
+      "ageDays": 0,
+      "max": 400,
+      "min": 40,
+      "quota": 400
+    },
+    {
+      "ageDays": 1,
+      "max": 400,
+      "min": 40,
+      "quota": 200
+    },
+    {
+      "ageDays": 3,
+      "max": 400,
+      "min": 40,
+      "quota": 50
+    },
+    {
+      "ageDays": 4,
+      "max": 400,
+      "min": 40,
+      "quota": 40
+    },
+    {
+      "ageDays": 9,
+      "max": 400,
+      "min": 40,
+      "quota": 40
+    },
+    {
+      "ageDays": 89,
+      "max": 400,
+      "min": 40,
+      "quota": 40
+    },
+    {
+      "ageDays": -2,
+      "max": 400,
+      "min": 40,
+      "quota": 400
+    },
+    {
+      "ageDays": 2,
+      "max": 1001,
+      "min": 1,
+      "quota": 250
+    },
+    {
+      "ageDays": 1,
+      "max": 5,
+      "min": 40,
+      "quota": 40
+    }
+  ],
+  "keys": {
+    "tag": "news",
+    "userId": "0198c0de-0000-4000-8000-0000000000a1",
+    "authorIndex": "@0198c0de-0000-4000-8000-0000000000a1",
+    "indexAuthor": [
+      "0198c0de-0000-4000-8000-0000000000a1",
+      null
+    ],
+    "headKey": "head:news",
+    "authorHeadKey": "head:@0198c0de-0000-4000-8000-0000000000a1",
+    "manifestKey": "man:news:1794052800000-0a1b2c3d",
+    "dayKey": "day:news:20763-1794052800000-99887766"
+  },
+  "head": "{\"v\":5,\"manifest\":\"1794052800000-0a1b2c3d\",\"compactedAt\":1793966400000}",
+  "emptyHead": "{\"v\":5,\"manifest\":null,\"compactedAt\":0}",
+  "manifest": "{\"v\":5,\"tag\":\"news\",\"id\":\"1794052800000-0a1b2c3d\",\"createdAt\":1793966400000,\"days\":[{\"day\":20763,\"gen\":\"20763-1794052800000-99887766\",\"quota\":400,\"count\":3},{\"day\":20762,\"gen\":\"20762-1794000000000-00112233\",\"quota\":200,\"count\":200}]}"
+}

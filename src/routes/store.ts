@@ -128,7 +128,7 @@ async function sameBody(post: Post, meta: ContentMeta): Promise<boolean> {
 }
 
 /** Writing posts (POST /store): a new post, or with `contentId`, an update of one of the publisher's own. */
-export function storeRoutes(app: FastifyInstance, { db, config, content, hot, writer, trustPlugins, now = Date.now }: RouteDeps) {
+export function storeRoutes(app: FastifyInstance, { db, config, content, hot, writer, trust, now = Date.now }: RouteDeps) {
   const cut = previewCutter(config.feed);
 
   // In server tagging mode, the only hashtags a post can have.
@@ -209,7 +209,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
    * refused is sent again with the same uploadId.
    *
    * A video is not published as it was sent, where the server processes videos (`video.processing`,
-   * src/video): it is staged as it came, and the answer says `processing: true`. The video
+   * compactor/src/video): it is staged as it came, and the answer says `processing: true`. The video
    * worker then makes of it an MP4 that plays anywhere, without its metadata, with a poster and
    * an adaptive stream, and the post is published, in feeds and with its bytes, once that is
    * done: until then it is read by its id as written, with `processing`, and its bytes are not
@@ -343,7 +343,7 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
       // its readers read it, without its formatting ("sp**am**" says spam), with where its links lead.
       // What the content says now is held to the rules of every hashtag it has, those reposts gave it too.
       const moderated = await moderatePost(
-        { db, config, trustPlugins, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } },
+        { trust, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } },
         {
           userId: user.id,
           contentId: existing?.row.id,

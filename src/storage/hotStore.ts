@@ -51,7 +51,7 @@ else
 end
 return 1`;
 
-/** An expiry as both stores set it: a whole number of ms, rounded up, and 1 at the least, so nothing is set to expire at once or in the past. */
+/** An expiry as the store sets it: a whole number of ms, rounded up, and 1 at the least, so nothing is set to expire at once or in the past. */
 const ttl = (ms: number) => Math.max(1, Math.ceil(ms));
 
 /** A range's lower bound as ZRANGEBYLEX takes it: `after`, which is not part of the range, or `-` for none. */
@@ -199,150 +199,10 @@ class RedisHotStore implements HotStore {
   }
 }
 
-/** An ordered set's members. */
-class LexSet {
-  readonly members = new Set<string>();
-}
-
-type Value = Buffer | LexSet;
-/** Whether what a key of MemoryHotStore holds is an ordered set, and not bytes: what its lex* methods ask before they read one. */
-const isLexSet = (v: Value): v is LexSet => v instanceof LexSet;
-
-/** In-process stand-in for Redis (development, tests, single-node setups). Expiry follows the injected clock. */
-export class MemoryHotStore implements HotStore {
-  private readonly map = new Map<string, { v: Value; exp: number | null }>();
-
-  constructor(private readonly now: () => number = Date.now) {}
-
-  private live(key: string) {
-    const e = this.map.get(key);
-    if (e && e.exp !== null && e.exp <= this.now()) {
-      this.map.delete(key);
-      return undefined;
-    }
-    return e;
-  }
-
-  private value<T extends Value>(key: string, is: (v: Value) => v is T): T | undefined {
-    const e = this.live(key);
-    if (e && !is(e.v)) throw new Error(`WRONGTYPE ${key}`);
-    return e?.v as T | undefined;
-  }
-
-  async get(key: string) {
-    return this.value(key, Buffer.isBuffer) ?? null;
-  }
-
-  async mget(keys: string[]) {
-    return keys.map((key) => this.value(key, Buffer.isBuffer) ?? null);
-  }
-
-  private put(key: string, value: Buffer | string, ttlMs?: number) {
-    this.map.set(key, { v: Buffer.from(value), exp: ttlMs === undefined ? null : this.now() + ttl(ttlMs) });
-  }
-
-  async set(key: string, value: Buffer | string, ttlMs?: number) {
-    this.put(key, value, ttlMs);
-  }
-
-  async setMany(entries: HotEntry[]) {
-    for (const { key, value, ttlMs } of entries) this.put(key, value, ttlMs);
-  }
-
-  async setIfAbsent(key: string, value: Buffer, ttlMs: number) {
-    if (!this.live(key)) await this.set(key, value, ttlMs);
-  }
-
-  async take(key: string) {
-    const v = this.value(key, Buffer.isBuffer) ?? null;
-    this.map.delete(key);
-    return v;
-  }
-
-  async del(keys: string[]) {
-    for (const key of keys) this.map.delete(key);
-  }
-
-  async expire(keys: string[], ttlMs: number) {
-    for (const key of keys) {
-      const e = this.live(key);
-      if (e) e.exp = this.now() + ttl(ttlMs);
-    }
-  }
-
-  async persist(keys: string[]) {
-    return keys.map((key) => {
-      const e = this.live(key);
-      if (e) e.exp = null;
-      return e !== undefined;
-    });
-  }
-
-  async exists(keys: string[]) {
-    return keys.map((key) => this.live(key) !== undefined);
-  }
-
-  async incr(key: string, ttlMs: number) {
-    const count = Number(this.value(key, Buffer.isBuffer) ?? 0) + 1;
-    const exp = this.live(key)?.exp ?? this.now() + ttl(ttlMs);
-    this.map.set(key, { v: Buffer.from(String(count)), exp });
-    return { count, ttlMs: exp - this.now() };
-  }
-
-  async bump(key: string, by = 1) {
-    const e = this.live(key);
-    if (!e) return null;
-    if (!Buffer.isBuffer(e.v)) throw new Error(`WRONGTYPE ${key}`);
-    const count = Number(e.v) + by;
-    e.v = Buffer.from(String(count));
-    return count;
-  }
-
-  async swap(key: string, expected: string | null, next: string | null, ttlMs?: number) {
-    if ((this.value(key, Buffer.isBuffer)?.toString('utf8') ?? null) !== expected) return false;
-    if (next === null) this.map.delete(key);
-    else await this.set(key, next, ttlMs);
-    return true;
-  }
-
-  async lexAdd(key: string, members: string[], ttlMs: number) {
-    if (!members.length) return;
-    let set = this.value(key, isLexSet);
-    if (!set) this.map.set(key, { v: (set = new LexSet()), exp: this.now() + ttl(ttlMs) });
-    for (const member of members) set.members.add(member);
-  }
-
-  async lexRange(key: string, { after, before, limit, reverse }: LexRange & { limit: number; reverse?: boolean }) {
-    const within = [...(this.value(key, isLexSet)?.members ?? [])].filter((m) => (after === undefined || m > after) && (before === undefined || m < before)).sort();
-    return (reverse ? within.reverse() : within).slice(0, limit);
-  }
-
-  async lexCount(key: string, range: LexRange = {}) {
-    return (await this.lexRange(key, { ...range, limit: Infinity })).length;
-  }
-
-  async lexHas(key: string, member: string) {
-    return this.value(key, isLexSet)?.members.has(member) ?? false;
-  }
-
-  async lexRem(key: string, members: string[]) {
-    const set = this.value(key, isLexSet);
-    for (const member of members) set?.members.delete(member);
-    if (set && !set.members.size) this.map.delete(key);
-  }
-
-  async clear() {
-    this.map.clear();
-  }
-
-  async close() {}
-}
-
 /**
  * The hot store the settings ask for (`redis` of the configuration): the Redis-protocol server at
- * `url`, every key under `keyPrefix`, or with no `url`, a store in this process, whose expiry
- * follows `now` and which has no use for the prefix.
+ * `url`, every key under `keyPrefix`, over a connection of the caller's own, which `close()` ends.
  */
-export function createHotStore(cfg: { url?: string; keyPrefix: string }, now: () => number = Date.now): HotStore {
-  return cfg.url ? new RedisHotStore(cfg.url, cfg.keyPrefix) : new MemoryHotStore(now);
+export function createHotStore(cfg: { url: string; keyPrefix: string }): HotStore {
+  return new RedisHotStore(cfg.url, cfg.keyPrefix);
 }

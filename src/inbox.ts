@@ -27,6 +27,11 @@ const EXCERPT_CHARS = 200;
  * The notices, each with the message that words it (the languages folder). A notice is stored as its kind
  * and what it is about, never as words: it is said in its reader's language when the inbox is read.
  *
+ *   post_held          the post's trust score sent it to the moderation queue, where it waits for a
+ *                      server moderator or an admin: a new post, or one that was published until
+ *                      this write of it. Left by the write that put it there (contentWriter's
+ *                      write in src/write.ts, and the origin sweep's in compactor/src/write.rs),
+ *                      and not by one of a post that waits there already
  *   post_accepted      a server moderator or an admin accepted the post from the moderation queue
  *   post_rejected      ...or rejected it there, which deletes it
  *   post_deleted       an admin deleted the post
@@ -43,11 +48,11 @@ const EXCERPT_CHARS = 200;
  *   user_unbanned      ...or ended the ban
  *   csam_match_refused the pdq trust plugin found an image that matches its list of hashes of known
  *                      child sexual abuse material, and the post or comment was refused. Left for
- *                      every admin, by the plugin (src/plugins/trust/pdq/report.ts): see DETAILED
+ *                      every admin, by the plugin (compactor/crates/trust/src/plugins/pdq/report.rs): see DETAILED
  *   csam_match_held    ...or was stored, and waits in the moderation queue, on a server that deletes
  *                      nothing on arrival
  *   csam_video_refused the video worker found a video of which a picture matches that list
- *                      (src/plugins/trust/pdq/video.ts), and the video was refused. Left for every
+ *                      (compactor/crates/trust/src/plugins/pdq/video.rs), and the video was refused. Left for every
  *                      admin, as the two above are
  *   video_refused      the post's video matched, so the post was deleted: what its publisher is
  *                      told, which doesn't say why (as a refused image's sender isn't told)
@@ -58,18 +63,22 @@ const EXCERPT_CHARS = 200;
  *                      it as the row's sender: see MENTIONS
  *   comment_mention    ...or a comment does, which the row names too (`comment_id`), with its author
  *                      as the sender
- *   tag_claimed        a user claimed the hashtag, to moderate it. Left for every admin and server
- *                      moderator (src/moderation/claims.ts), who can refuse the claim while it
- *                      waits: see DETAILED
- *   tag_claim_granted  the user's claim to the hashtag went through: they moderate it now
- *   tag_claim_refused  ...or an admin or a server moderator refused it
+ *   claims_barred      a server moderator or an admin barred the user from claiming hashtags
+ *   claims_unbarred    ...or let them claim hashtags again
+ *   tag_claimed        a user claimed the hashtag, and moderates it now. Left for every admin and
+ *                      server moderator (src/moderation/claims.ts), who can end that: see DETAILED
+ *   tag_claim_granted  the user's claim to the hashtag went through. Left by no server any more: a
+ *                      claim used to wait for an admin or a server moderator to refuse it, and
+ *                      this is what words the notices of then that inboxes still hold
+ *   tag_claim_refused  ...or it was refused, of which the same goes
  *   tag_moderator_added    an admin, or a moderator of the hashtag, made the user a moderator of it
- *   tag_moderator_removed  ...or ended their time as one
+ *   tag_moderator_removed  ...or one of them, or a server moderator, ended their time as one
  *   tag_moderator_lapsed   the user's time as a moderator of the hashtag ended by itself: they did
  *                          nothing as one for TAG_MODERATOR_INACTIVE_DAYS. Left by the compactor
  *                          (src/moderation/activity.ts)
  */
 export const NOTICES = {
+  post_held: 'notice.post_held',
   post_accepted: 'notice.post_accepted',
   post_rejected: 'notice.post_rejected',
   post_deleted: 'notice.post_deleted',
@@ -89,6 +98,8 @@ export const NOTICES = {
   comment_video_refused: 'notice.comment_video_refused',
   user_banned: 'notice.user_banned',
   user_unbanned: 'notice.user_unbanned',
+  claims_barred: 'notice.claims_barred',
+  claims_unbarred: 'notice.claims_unbarred',
   csam_match_refused: 'notice.csam_match_refused',
   csam_match_held: 'notice.csam_match_held',
   csam_video_refused: 'notice.csam_video_refused',
@@ -111,7 +122,7 @@ export const MESSAGE = 'message';
  * The notices that quote no post, and are of something that happened: their `body` is the facts
  * of it as JSON, each a text or a number. A response gives them as the notice's `details`, in
  * place of an excerpt, and the notice's message says them by their names ({username}, {at}).
- * The notice of a claim to a hashtag is one: who claims it, and until when the claim can be refused.
+ * The notice of a claim to a hashtag is one: who claimed it ({userId}, {username}).
  */
 const DETAILED: ReadonlySet<string> = new Set<NoticeKind>(['csam_match_refused', 'csam_match_held', 'csam_video_refused', 'tag_claimed']);
 

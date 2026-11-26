@@ -50,7 +50,7 @@ variable "request_timeout" {
 }
 
 variable "trust_proxy" {
-  description = "How many proxies in front of a service add to X-Forwarded-For (the gateway, then Cloud Run's front end). The client address that the limits by address count, and that the audit log and the request log record, is read that many entries from the end. 2 is what a live deployment showed: `remoteAddress` in a service's request log is the client's own address, whatever X-Forwarded-For the client sent. See docs/DEPLOY.md."
+  description = "How many proxies in front of a service add to X-Forwarded-For (the gateway, then Cloud Run's front end). The client address that the limits by address count, and that the audit log and the request log record, is read that many entries from the end. 2 is what a live deployment showed: `remoteAddress` in a service's request log is the client's own address, whatever X-Forwarded-For the client sent. See docs/IAC.md."
   type        = number
   default     = 2
 }
@@ -79,7 +79,7 @@ variable "redis_tier" {
 }
 
 variable "redis_memory_gb" {
-  description = "Memorystore capacity. Size it for the feed index (~30 bytes per indexed post) plus 8 days of compressed summaries; see docs/DEPLOY.md."
+  description = "Memorystore capacity. Size it for the feed index (~30 bytes per indexed post) plus 8 days of compressed summaries; see docs/IAC.md."
   type        = number
   default     = 1
 }
@@ -120,7 +120,7 @@ variable "secrets" {
 }
 
 variable "deletion_protection" {
-  description = "Protect the database from `terraform destroy`, and keep the content and audit log buckets from being deleted while they hold objects."
+  description = "Protect the database from `terraform destroy`, and keep the content and audit log buckets from being deleted while they hold objects. A destroy goes by what the last apply recorded, not by the value it is given: to take the deployment down, run `terraform apply -var deletion_protection=false` first, then `terraform destroy`. Passing it to `terraform destroy` alone changes nothing."
   type        = bool
   default     = true
 }

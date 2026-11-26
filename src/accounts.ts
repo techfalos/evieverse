@@ -14,7 +14,7 @@ import { msg } from './language.js';
  *
  *   1. closeAccount, which the request does. The user is marked deleted (`users.deleted_at`) and
  *      is gone from then on: their keys are revoked, no lookup finds them, they hold no role, and
- *      their follows, blocks, mutes, reports, moderation of hashtags and claims to hashtags are
+ *      their follows, blocks, mutes, reports and moderation of hashtags are
  *      removed. Their content
  *      is set for deletion, so it is 404 at once, and gone from feeds once the compactor has run.
  *   2. purgeAccounts, which deletes the row once none of their content is left, and what still
@@ -88,8 +88,6 @@ function retire(db: Db, userId: string, keeperId: string | null, at: number): Pr
     await trx.deleteFrom('user_blocks').where((eb) => eb.or([eb('user_id', '=', userId), eb('blocked_id', '=', userId)])).execute();
     await trx.deleteFrom('tag_mutes').where('user_id', '=', userId).execute();
     await trx.deleteFrom('tag_moderators').where('user_id', '=', userId).execute();
-    // And the claim to a hashtag that waits, which would make them a moderator of it.
-    await trx.deleteFrom('tag_claims').where('user_id', '=', userId).execute();
     await trx.deleteFrom('reports').where('user_id', '=', userId).execute();
     await trx.deleteFrom('comment_reports').where('user_id', '=', userId).execute();
     // The messages the user sent stay with their recipients, as one from an account that is gone.

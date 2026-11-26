@@ -1,0 +1,1390 @@
+{
+ "note": "Made by the TypeScript implementation (src/moderation/words.ts and src/plugins/trust) before the Rust one replaced it: the Rust tests are held to it.",
+ "found": [
+  [
+   "https://example.com/a.exe",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "https://example.com"
+     ],
+     "tail": "/a.exe"
+    }
+   ]
+  ],
+  [
+   "see HTTP://Example.COM:8080/x?y=1#z now",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "HTTP://Example.COM:8080"
+     ],
+     "tail": "/x?y=1#z"
+    }
+   ]
+  ],
+  [
+   "see https://example.com.",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "https://example.com"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "see https://example.com./a",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "https://example.com."
+     ],
+     "tail": "/a"
+    }
+   ]
+  ],
+  [
+   "<a href=\"http://example.com/a\">x</a>",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://example.com"
+     ],
+     "tail": "/a"
+    }
+   ]
+  ],
+  [
+   "http://user:pw@example.com/a",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://user:pw@example.com"
+     ],
+     "tail": "/a"
+    }
+   ]
+  ],
+  [
+   "http://user@/a",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://user"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "http://[2001:db8::1]:80/a",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://[2001:db8::1]:80"
+     ],
+     "tail": "/a"
+    }
+   ]
+  ],
+  [
+   "http://1.2.3.4/a http://0x7f.1/b",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://1.2.3.4"
+     ],
+     "tail": "/a"
+    },
+    {
+     "schemed": true,
+     "origins": [
+      "http://0x7f.1"
+     ],
+     "tail": "/b"
+    }
+   ]
+  ],
+  [
+   "http://例え.テスト/a",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://例え.テスト"
+     ],
+     "tail": "/a"
+    }
+   ]
+  ],
+  [
+   "http:// nothing, https:/one, ftp://example.org/a",
+   []
+  ],
+  [
+   "https://r.example/?to=http://bad.example/a.exe",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "https://r.example"
+     ],
+     "tail": "/?to=http://bad.example/a.exe"
+    },
+    {
+     "schemed": true,
+     "origins": [
+      "http://bad.example"
+     ],
+     "tail": "/a.exe"
+    }
+   ]
+  ],
+  [
+   "go to example.com/a.exe now",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://example.com",
+      "https://example.com"
+     ],
+     "tail": "/a.exe"
+    }
+   ]
+  ],
+  [
+   "Example.co.uk:8080/x",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://Example.co.uk:8080",
+      "https://Example.co.uk:8080"
+     ],
+     "tail": "/x"
+    }
+   ]
+  ],
+  [
+   "at 10.0.0.1/a and 1.2.3",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://10.0.0.1",
+      "https://10.0.0.1"
+     ],
+     "tail": "/a"
+    }
+   ]
+  ],
+  [
+   "me@example.com",
+   []
+  ],
+  [
+   "a sentence.Another one",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://sentence.Another",
+      "https://sentence.Another"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "file.x and v1.2",
+   []
+  ],
+  [
+   "example.com_",
+   []
+  ],
+  [
+   "(example.com)",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://example.com",
+      "https://example.com"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "[a](bad.example/a.exe)[b](x",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://bad.example",
+      "https://bad.example"
+     ],
+     "tail": "/a.exe)[b](x"
+    }
+   ]
+  ],
+  [
+   "get it at bad.example/a.exe.",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://bad.example",
+      "https://bad.example"
+     ],
+     "tail": "/a.exe."
+    }
+   ]
+  ],
+  [
+   "**bold.example**",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://bold.example",
+      "https://bold.example"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "x https://a.example-_%/p",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "https://a.example-_%"
+     ],
+     "tail": "/p"
+    }
+   ]
+  ],
+  [
+   "httpſ://long-s.example/a HTTPS://UP.example",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "httpſ://long-s.example"
+     ],
+     "tail": "/a"
+    },
+    {
+     "schemed": true,
+     "origins": [
+      "HTTPS://UP.example"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "https://exa mple.com",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "https://exa"
+     ],
+     "tail": ""
+    },
+    {
+     "schemed": false,
+     "origins": [
+      "http://mple.com",
+      "https://mple.com"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "http://a.example:99999/x http://b.example:123456",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://a.example:99999"
+     ],
+     "tail": "/x"
+    },
+    {
+     "schemed": true,
+     "origins": [
+      "http://b.example:12345"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "http://a.example:/x",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://a.example"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "http://[::1] http://[zz] http://[1:2",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://[::1]"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "http://-._%/x",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://-._%"
+     ],
+     "tail": "/x"
+    }
+   ]
+  ],
+  [
+   "hxxp://bad.example/a https://https://x.example",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "https://https"
+     ],
+     "tail": ""
+    },
+    {
+     "schemed": true,
+     "origins": [
+      "https://x.example"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "bad。example／a ｅｘａｍｐｌｅ．ｃｏｍ/a",
+   []
+  ],
+  [
+   "a.b.c.d.e.f.example/x?y#z end",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://a.b.c.d.e.f.example",
+      "https://a.b.c.d.e.f.example"
+     ],
+     "tail": "/x?y#z"
+    }
+   ]
+  ],
+  [
+   "report.final.pdf",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://report.final.pdf",
+      "https://report.final.pdf"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "192.168.1.1:8080",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://192.168.1.1:8080",
+      "https://192.168.1.1:8080"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "1.2.3.4.5",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://1.2.3.4",
+      "https://1.2.3.4"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "www.example.com:80/a\\b\"c",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://www.example.com:80",
+      "https://www.example.com:80"
+     ],
+     "tail": "/a\\b"
+    }
+   ]
+  ],
+  [
+   "x.example/a`b x.example/a<b",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://x.example",
+      "https://x.example"
+     ],
+     "tail": "/a"
+    },
+    {
+     "schemed": false,
+     "origins": [
+      "http://x.example",
+      "https://x.example"
+     ],
+     "tail": "/a"
+    }
+   ]
+  ],
+  [
+   "http://a.example/pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp end",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://a.example"
+     ],
+     "tail": "/pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+    }
+   ]
+  ],
+  [
+   "http://uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu@a.example/",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "http://hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh/x",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "tel:+1.555.0100 v2.0.1-beta.example",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://v2.0.1-beta.example",
+      "https://v2.0.1-beta.example"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "ＡＢ.example/ａ 例え.テスト",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://ＡＢ.example",
+      "https://ＡＢ.example"
+     ],
+     "tail": "/ａ"
+    },
+    {
+     "schemed": false,
+     "origins": [
+      "http://例え.テスト",
+      "https://例え.テスト"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "http://a.example/x y http://b.example/x　y",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://a.example"
+     ],
+     "tail": "/x"
+    },
+    {
+     "schemed": true,
+     "origins": [
+      "http://b.example"
+     ],
+     "tail": "/x"
+    }
+   ]
+  ],
+  [
+   "a.example/😀/b 😀.example",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://a.example",
+      "https://a.example"
+     ],
+     "tail": "/😀/b"
+    }
+   ]
+  ],
+  [
+   "mailto:me@example.com?x=y.example",
+   [
+    {
+     "schemed": false,
+     "origins": [
+      "http://y.example",
+      "https://y.example"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "http://user@host@a.example/",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://user@host"
+     ],
+     "tail": ""
+    }
+   ]
+  ],
+  [
+   "http://a.example#frag http://b.example?q",
+   [
+    {
+     "schemed": true,
+     "origins": [
+      "http://a.example"
+     ],
+     "tail": "#frag"
+    },
+    {
+     "schemed": true,
+     "origins": [
+      "http://b.example"
+     ],
+     "tail": "?q"
+    }
+   ]
+  ],
+  [
+   "",
+   []
+  ],
+  [
+   "no link at all",
+   []
+  ]
+ ],
+ "addresses": [
+  [
+   "HTTPS://Example.COM.:443/a/../b%20c?q=1#f",
+   {
+    "host": "example.com",
+    "path": "example.com/b%20c",
+    "full": "example.com/b%20c?q=1"
+   }
+  ],
+  [
+   "http://example.com:8080",
+   {
+    "host": "example.com:8080",
+    "path": "example.com:8080/",
+    "full": "example.com:8080/"
+   }
+  ],
+  [
+   "http://example.com/?",
+   {
+    "host": "example.com",
+    "path": "example.com/",
+    "full": "example.com/"
+   }
+  ],
+  [
+   "http://0x7f.1/",
+   {
+    "host": "127.0.0.1",
+    "path": "127.0.0.1/",
+    "full": "127.0.0.1/"
+   }
+  ],
+  [
+   "http://例え.テスト/",
+   {
+    "host": "xn--r8jz45g.xn--zckzah",
+    "path": "xn--r8jz45g.xn--zckzah/",
+    "full": "xn--r8jz45g.xn--zckzah/"
+   }
+  ],
+  [
+   "http://example。com/",
+   {
+    "host": "example.com",
+    "path": "example.com/",
+    "full": "example.com/"
+   }
+  ],
+  [
+   "ftp://example.com/",
+   null
+  ],
+  [
+   "http://",
+   null
+  ],
+  [
+   "not a url",
+   null
+  ],
+  [
+   "http://user:pw@example.com:80/a b?c d#e",
+   {
+    "host": "example.com",
+    "path": "example.com/a%20b",
+    "full": "example.com/a%20b?c%20d"
+   }
+  ],
+  [
+   "https://example.com:443/",
+   {
+    "host": "example.com",
+    "path": "example.com/",
+    "full": "example.com/"
+   }
+  ],
+  [
+   "https://example.com:80/",
+   {
+    "host": "example.com:80",
+    "path": "example.com:80/",
+    "full": "example.com:80/"
+   }
+  ],
+  [
+   "http://EXAMPLE.com/%7Euser/%2e%2E/x",
+   {
+    "host": "example.com",
+    "path": "example.com/x",
+    "full": "example.com/x"
+   }
+  ],
+  [
+   "http://example.com/a\\b",
+   {
+    "host": "example.com",
+    "path": "example.com/a/b",
+    "full": "example.com/a/b"
+   }
+  ],
+  [
+   "http://[2001:DB8::1]:8080/x",
+   {
+    "host": "[2001:db8::1]:8080",
+    "path": "[2001:db8::1]:8080/x",
+    "full": "[2001:db8::1]:8080/x"
+   }
+  ],
+  [
+   "http://[::ffff:1.2.3.4]/",
+   {
+    "host": "[::ffff:102:304]",
+    "path": "[::ffff:102:304]/",
+    "full": "[::ffff:102:304]/"
+   }
+  ],
+  [
+   "http://1.2.3/",
+   {
+    "host": "1.2.0.3",
+    "path": "1.2.0.3/",
+    "full": "1.2.0.3/"
+   }
+  ],
+  [
+   "http://256.1.1.1/",
+   null
+  ],
+  [
+   "http://example.com./",
+   {
+    "host": "example.com",
+    "path": "example.com/",
+    "full": "example.com/"
+   }
+  ],
+  [
+   "http://example.com../",
+   {
+    "host": "example.com",
+    "path": "example.com/",
+    "full": "example.com/"
+   }
+  ],
+  [
+   "http://./",
+   null
+  ],
+  [
+   "http://a..b/",
+   {
+    "host": "a..b",
+    "path": "a..b/",
+    "full": "a..b/"
+   }
+  ],
+  [
+   "http://xn--r8jz45g.xn--zckzah/",
+   {
+    "host": "xn--r8jz45g.xn--zckzah",
+    "path": "xn--r8jz45g.xn--zckzah/",
+    "full": "xn--r8jz45g.xn--zckzah/"
+   }
+  ],
+  [
+   "http://ex%61mple.com/",
+   {
+    "host": "example.com",
+    "path": "example.com/",
+    "full": "example.com/"
+   }
+  ],
+  [
+   "http://example.com/é?ü=ß#ö",
+   {
+    "host": "example.com",
+    "path": "example.com/%C3%A9",
+    "full": "example.com/%C3%A9?%C3%BC=%C3%9F"
+   }
+  ],
+  [
+   "http://example.com/a?b?c",
+   {
+    "host": "example.com",
+    "path": "example.com/a",
+    "full": "example.com/a?b?c"
+   }
+  ],
+  [
+   "http://example.com/'\"<>`{}|^",
+   {
+    "host": "example.com",
+    "path": "example.com/'%22%3C%3E%60%7B%7D|^",
+    "full": "example.com/'%22%3C%3E%60%7B%7D|^"
+   }
+  ],
+  [
+   "http://example.com:0/",
+   {
+    "host": "example.com:0",
+    "path": "example.com:0/",
+    "full": "example.com:0/"
+   }
+  ],
+  [
+   "http://example.com:65536/",
+   null
+  ],
+  [
+   "HTTP://BAD.EXAMPLE/A.EXE",
+   {
+    "host": "bad.example",
+    "path": "bad.example/A.EXE",
+    "full": "bad.example/A.EXE"
+   }
+  ],
+  [
+   "http://bad.example/a.exe/../b",
+   {
+    "host": "bad.example",
+    "path": "bad.example/b",
+    "full": "bad.example/b"
+   }
+  ],
+  [
+   "http://faß.example/",
+   {
+    "host": "xn--fa-hia.example",
+    "path": "xn--fa-hia.example/",
+    "full": "xn--fa-hia.example/"
+   }
+  ],
+  [
+   "http://ａ.example/",
+   {
+    "host": "a.example",
+    "path": "a.example/",
+    "full": "a.example/"
+   }
+  ],
+  [
+   "http://a_b.example/",
+   {
+    "host": "a_b.example",
+    "path": "a_b.example/",
+    "full": "a_b.example/"
+   }
+  ],
+  [
+   "http://-a.example/",
+   {
+    "host": "-a.example",
+    "path": "-a.example/",
+    "full": "-a.example/"
+   }
+  ],
+  [
+   "http://a%2fb.example/",
+   null
+  ],
+  [
+   "http:///x",
+   {
+    "host": "x",
+    "path": "x/",
+    "full": "x/"
+   }
+  ],
+  [
+   "http:/example.com/x",
+   {
+    "host": "example.com",
+    "path": "example.com/x",
+    "full": "example.com/x"
+   }
+  ],
+  [
+   "http:example.com/x",
+   {
+    "host": "example.com",
+    "path": "example.com/x",
+    "full": "example.com/x"
+   }
+  ],
+  [
+   "https://exa mple.com/",
+   null
+  ]
+ ],
+ "tails": [
+  [
+   "/a",
+   [
+    "/a"
+   ],
+   [
+    "/a"
+   ]
+  ],
+  [
+   "/a).",
+   [
+    "/a).",
+    "/a)",
+    "/a"
+   ],
+   [
+    "/a)."
+   ]
+  ],
+  [
+   "/a)[b](c",
+   [
+    "/a)[b](c",
+    "/a",
+    "/a)",
+    "/a)[b"
+   ],
+   [
+    "/a)[b](c"
+   ]
+  ],
+  [
+   "",
+   [
+    ""
+   ],
+   [
+    ""
+   ]
+  ],
+  [
+   "!!!!!!!!!!!!!!!!!!!!",
+   [
+    "!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!",
+    "",
+    "!",
+    "!!",
+    "!!!",
+    "!!!!",
+    "!!!!!",
+    "!!!!!!",
+    "!!!!!!!",
+    "!!!!!!!!",
+    "!!!!!!!!!",
+    "!!!!!!!!!!",
+    "!!!!!!!!!!!"
+   ],
+   [
+    "!!!!!!!!!!!!!!!!!!!!"
+   ]
+  ],
+  [
+   "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+   [
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "",
+    "!",
+    "!!",
+    "!!!",
+    "!!!!",
+    "!!!!!",
+    "!!!!!!",
+    "!!!!!!!",
+    "!!!!!!!!",
+    "!!!!!!!!!",
+    "!!!!!!!!!!",
+    "!!!!!!!!!!!",
+    "!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+   ],
+   [
+    "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+   ]
+  ],
+  [
+   "/a.exe/../b",
+   [
+    "/a.exe/../b"
+   ],
+   [
+    "/a.exe/../b",
+    "/a.exe"
+   ]
+  ],
+  [
+   "/a/%2E./b\\..?x",
+   [
+    "/a/%2E./b\\..?x",
+    "/a/%2E./b"
+   ],
+   [
+    "/a/%2E./b\\..?x",
+    "/a",
+    "/a/%2E./b"
+   ]
+  ],
+  [
+   "/a/..b/...//..",
+   [
+    "/a/..b/...//..",
+    "/a/..b/...//.",
+    "/a/..b/...//"
+   ],
+   [
+    "/a/..b/...//..",
+    "/a/..b/.../"
+   ]
+  ],
+  [
+   "/../../../../../../x",
+   [
+    "/../../../../../../x"
+   ],
+   [
+    "/../../../../../../x",
+    "",
+    "/..",
+    "/../..",
+    "/../../.."
+   ]
+  ],
+  [
+   "/a/..",
+   [
+    "/a/..",
+    "/a/.",
+    "/a/"
+   ],
+   [
+    "/a/..",
+    "/a"
+   ]
+  ],
+  [
+   "/..;/x",
+   [
+    "/..;/x",
+    "/.."
+   ],
+   [
+    "/..;/x"
+   ]
+  ],
+  [
+   "/%2e%2e/%2E%2e/x",
+   [
+    "/%2e%2e/%2E%2e/x"
+   ],
+   [
+    "/%2e%2e/%2E%2e/x",
+    "",
+    "/%2e%2e"
+   ]
+  ],
+  [
+   "/x'y|z,w;v!u*t",
+   [
+    "/x'y|z,w;v!u*t",
+    "/x",
+    "/x'y",
+    "/x'y|z",
+    "/x'y|z,w",
+    "/x'y|z,w;v",
+    "/x'y|z,w;v!u"
+   ],
+   [
+    "/x'y|z,w;v!u*t"
+   ]
+  ],
+  [
+   "/é).",
+   [
+    "/é).",
+    "/é)",
+    "/é"
+   ],
+   [
+    "/é)."
+   ]
+  ]
+ ],
+ "lines": [
+  [
+   "http://bad.example/a.exe",
+   "http://bad.example/a.exe"
+  ],
+  [
+   "  HTTPS://bad.example/a  \r",
+   "HTTPS://bad.example/a"
+  ],
+  [
+   "# a comment with http://bad.example/",
+   null
+  ],
+  [
+   "",
+   null
+  ],
+  [
+   "id,dateadded,url",
+   null
+  ],
+  [
+   "\"1\",\"2026-01-01 00:00:00\",\"http://bad.example/a,b \"\"c\"\".exe\",\"online\"",
+   "http://bad.example/a,b \"c\".exe"
+  ],
+  [
+   "1,2026-01-01,http://bad.example/a.exe,online",
+   "http://bad.example/a.exe"
+  ],
+  [
+   "x \"http://q.example/a\"\"",
+   "http://q.example/a\""
+  ],
+  [
+   "\"http://q.example/a\"b",
+   "http://q.example/a"
+  ],
+  [
+   "ftp://x http://y.example/z,w",
+   "http://y.example/z"
+  ]
+ ],
+ "listed": [
+  "http://bad.example/a.exe",
+  "https://other.example/dir/",
+  "http://front.example/",
+  "http://q.example/x?id=1",
+  "http://port.example:8080/p",
+  "http://例え.テスト/x",
+  "http://bad.example/long/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+ ],
+ "checks": [
+  [
+   "get http://bad.example/a.exe",
+   true
+  ],
+  [
+   "get it at bad.example/a.exe.",
+   true
+  ],
+  [
+   "[it](https://BAD.example:80/a.exe)",
+   false
+  ],
+  [
+   "[it](http://BAD.example:80/a.exe)",
+   true
+  ],
+  [
+   "[a](bad.example/a.exe)[b](x",
+   true
+  ],
+  [
+   "http://bad.example/a.exe?x=1",
+   true
+  ],
+  [
+   "[a](bad.example/a.exe)b",
+   true
+  ],
+  [
+   "bad.example/a.exe/more",
+   true
+  ],
+  [
+   "bad.example/a.exe/../b",
+   true
+  ],
+  [
+   "http://r.example/?to=http://bad.example/a.exe",
+   true
+  ],
+  [
+   "http://bad.example/b.exe",
+   false
+  ],
+  [
+   "http://bad.example/a.ex",
+   false
+  ],
+  [
+   "https://other.example/dir/",
+   true
+  ],
+  [
+   "https://other.example/dir/file",
+   false
+  ],
+  [
+   "https://other.example/dir",
+   false
+  ],
+  [
+   "front.example",
+   true
+  ],
+  [
+   "front.example/page",
+   false
+  ],
+  [
+   "front.example.",
+   true
+  ],
+  [
+   "http://q.example/x?id=1",
+   true
+  ],
+  [
+   "http://q.example/x?id=2",
+   false
+  ],
+  [
+   "http://q.example/x?id=10",
+   true
+  ],
+  [
+   "http://q.example/x",
+   false
+  ],
+  [
+   "nothing.example/a.exe and no link at all",
+   false
+  ],
+  [
+   "port.example:8080/p",
+   true
+  ],
+  [
+   "port.example/p",
+   false
+  ],
+  [
+   "http://port.example:8080/p#f",
+   true
+  ],
+  [
+   "例え.テスト/x",
+   true
+  ],
+  [
+   "xn--r8jz45g.xn--zckzah/x",
+   true
+  ],
+  [
+   "BAD.EXAMPLE/a.exe",
+   true
+  ],
+  [
+   "bad.example/A.EXE",
+   false
+  ],
+  [
+   "bad。example/a.exe",
+   false
+  ],
+  [
+   "bad.example/a.exe%20",
+   true
+  ],
+  [
+   "bad.example/./a.exe",
+   true
+  ],
+  [
+   "bad.example//a.exe",
+   false
+  ],
+  [
+   "bad.example\\a.exe",
+   true
+  ],
+  [
+   "bad.example/x/../a.exe",
+   true
+  ],
+  [
+   "bad.example/a.exe/..",
+   true
+  ],
+  [
+   "bad.example/long/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+   true
+  ],
+  [
+   "bad.example/long/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzmore",
+   false
+  ],
+  [
+   "user@bad.example/a.exe",
+   false
+  ],
+  [
+   "http://user@bad.example/a.exe",
+   true
+  ],
+  [
+   "bad.example/a.exe\"quoted",
+   true
+  ],
+  [
+   "bad.example/a.exe).",
+   true
+  ],
+  [
+   "see bad.example/a.exe, and more",
+   true
+  ],
+  [
+   "",
+   false
+  ]
+ ]
+}

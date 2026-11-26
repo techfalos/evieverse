@@ -3,8 +3,8 @@ import type { Transaction } from 'kysely';
 import type { CommentCounts, CommentRecord } from './comments.types.js';
 import type { Database } from './db/schema.js';
 import type { AppDeps } from './deps.types.js';
-import { effectiveComment, insertPending, payloadOf, writePending } from './pending.js';
-import type { CommentPutPayload, EffectiveComment } from './pending.types.js';
+import { effectiveComment, insertPending, writePending } from './pending.js';
+import type { EffectiveComment } from './pending.types.js';
 import type { Comment, Publisher } from './storage/index.js';
 import { iso } from './time.js';
 
@@ -155,59 +155,6 @@ export function hideBlocked(records: CommentRecord[], blocked: ReadonlySet<strin
     const { mentions, ...place } = record;
     return { ...place, author: null, text: '', aiGenerated: false, media: null, likes: 0, editedAt: null, status: 'blocked' };
   });
-}
-
-type RemovalDeps = Pick<AppDeps, 'db' | 'comments'>;
-
-/**
- * Whether anything replies to a comment: a published comment, or the placeholder of one, or a
- * reply that waits in the moderation queue. One that waits is in no index, so those are found by
- * the post's rows in the queue, which are few. Not to be called inside a transaction: it reads
- * the database on its own.
- *
- * It reads the comment store, so it is the compactor's to ask, as it applies a removal: the
- * post's comments that were written before the removal are in the store by then, or still among
- * the post's pending writes, if one of theirs couldn't be applied or committed since the run
- * read them. A new reply takes no lock on its post, so one that read the comment before its
- * removal committed may commit after it: the run has waited for those (see awaitReplies), and
- * they are among the pending writes too. None begins later, as a comment takes no reply once its
- * removal has committed. A write that committed after the removal may also be of a reply the
- * comment had: an edit of one, or a held one that a moderator accepted, which is then out of the
- * queue and not published yet. So the post's pending writes are looked at as well.
- *
- * `without` is a comment whose own pending writes don't count: one that is being removed, and so
- * replies to nothing any more, though its rows are still there.
- */
-export async function hasReplies({ db, comments }: RemovalDeps, postId: string, commentId: string, without?: string): Promise<boolean> {
-  if ((await comments.count(postId, commentId)) > 0) return true;
-  // The queue's rows before the pending writes: accepting a reply, or an edit of one, moves it from the one to the other in one commit, and so it is found in one of the two.
-  const queued = await db.selectFrom('comment_queue').select('comment_id').where('content_id', '=', postId).where('comment_id', '!=', commentId).execute();
-  const writes = await db.selectFrom('pending_writes').select('payload').where('content_id', '=', postId).where('kind', '=', 'comment_put').execute();
-  const replies = (write: (typeof writes)[number]) => {
-    const { comment } = payloadOf<CommentPutPayload>(write.payload);
-    return comment.parentId === commentId && comment.commentId !== without;
-  };
-  if (writes.some(replies)) return true;
-  for (const { comment_id: id } of queued) {
-    if (id !== without && (await comments.getHeld(postId, id))?.parentId === commentId) return true;
-  }
-  return false;
-}
-
-/**
- * Removes the placeholder of a deleted comment that nothing replies to any more, and then that of
- * the comment it replied to, and so on up. The compactor's, after it removed a comment altogether:
- * that may have been the last reply to a deleted comment, whose placeholder then stands for nothing.
- * `without` is the comment that was removed (see hasReplies).
- */
-export async function prune(deps: RemovalDeps, postId: string, parentId: string | undefined, without?: string): Promise<void> {
-  const { comments } = deps;
-  while (parentId !== undefined) {
-    const parent: Comment | null = await comments.find(postId, parentId);
-    if (parent?.gone !== 'deleted' || (await hasReplies(deps, postId, parentId, without))) return;
-    await comments.remove(postId, parentId, { comment: parent });
-    parentId = parent.parentId;
-  }
 }
 
 /**

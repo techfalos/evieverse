@@ -8,6 +8,7 @@ import { authorIndex, DAY_ENTRY_BYTES, dayKey, headKey, manifestKey, unpackDay }
 import type { DayRef, Head, Manifest } from '../src/tagfeed/layout.types.js';
 import { TagFeedReader } from '../src/tagfeed/reader.js';
 import { DAY, HOUR, utcDay } from '../src/time.js';
+import { failing, once } from './harness.js';
 import { createTestContext, queued, requests, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
 
 for (const target of TARGETS) {
@@ -116,20 +117,19 @@ for (const target of TARGETS) {
       let release!: () => void;
       const paused = new Promise<void>((r) => (reached = r));
       const released = new Promise<void>((r) => (release = r));
-      const setMany = ctx.hot.setMany.bind(ctx.hot);
       let done = false;
-      vi.spyOn(ctx.hot, 'setMany').mockImplementation(async (entries) => {
-        if (!done && entries.some((e) => matches(e.key))) {
+      ctx.compactor.watch('hot.setMany', {
+        before: async ({ keys }) => {
+          if (done || !keys.some(matches)) return;
           done = true;
           reached();
           await released;
-        }
-        return setMany(entries);
+        },
       });
       return { paused, release };
     };
-    /** The index keys the compactor wrote, of those a spy on `setMany` saw. */
-    const keysSet = (spy: { mock: { calls: [{ key: string }[]][] } }) => spy.mock.calls.flatMap(([entries]) => entries.map((e) => e.key));
+    /** The index keys the compactor wrote, of those a watch on its `setMany` saw. */
+    const keysSet = (watch: { calls: { keys: string[] }[] }) => watch.calls.flatMap(({ keys }) => keys);
 
     it('puts queued posts in feeds on the next run: a packed, sorted day index named by a manifest, and the head swapped to it', async () => {
       ctx = await createTestContext(target);
@@ -145,7 +145,7 @@ for (const target of TARGETS) {
       expect(await queue()).toEqual(ids.flatMap((id) => rowsOf(alice, id, 'news')).sort());
 
       // The next run takes them all, with nothing to wait for, and swaps each head once.
-      const set = vi.spyOn(ctx.hot, 'setMany');
+      const set = ctx.compactor.watch('hot.setMany');
       expect((await ctx.compactor.runOnce()).tags).toEqual([own(alice), 'news'].sort());
       expect(keysSet(set).filter((key) => key === headKey('news'))).toHaveLength(1);
       expect(await queue()).toEqual([]);
@@ -185,15 +185,13 @@ for (const target of TARGETS) {
       const superseded = [manifestKey('news', oldHead.manifest!), ...oldManifest.days.map((d) => dayKey('news', d.gen))];
       const live = [manifestKey('news', newHead.manifest!), ...current.days.map((d) => dayKey('news', d.gen))];
       expect(await ctx.hot.exists(superseded)).toEqual([true, true]);
-      // Kept a minute past the time a node caches a head (none, in tests). Redis expires keys by its
-      // own clock, so only the in-process store can be moved past it.
-      if (target.hot === 'memory') {
-        ctx.clock.now += 59_000;
-        expect(await ctx.hot.exists(superseded)).toEqual([true, true]);
-        await ctx.compact(60_000);
-        expect(await ctx.hot.exists(superseded)).toEqual([false, false]);
-        expect(await ctx.hot.exists(live)).toEqual([true, true]);
+      // Kept a minute past the time a node caches a head (none, in tests), by Redis's own clock,
+      // which is the one keys expire by: what a head names never expires.
+      for (const left of await ctx.ttl(superseded)) {
+        expect(left).toBeGreaterThan(50_000);
+        expect(left).toBeLessThanOrEqual(60_000);
       }
+      expect(await ctx.ttl(live)).toEqual([-1, -1]);
       expect(allIds((await getFeed('tags=news')).json()).sort()).toEqual([a, b].sort());
     });
 
@@ -550,7 +548,7 @@ for (const target of TARGETS) {
 
       // Only the text changed: the entry is the same, so the day keeps its index and the hashtag its head.
       expect((await update(alice, id, 'v2 #news')).statusCode).toBe(200);
-      const set = vi.spyOn(ctx.hot, 'setMany');
+      const set = ctx.compactor.watch('hot.setMany');
       expect((await ctx.compactor.runOnce()).tags).toEqual([own(alice), 'news'].sort());
       expect(keysSet(set)).toEqual([]);
       expect(await readHead('news')).toEqual(head);
@@ -597,7 +595,7 @@ for (const target of TARGETS) {
 
       ctx.clock.now += 1000;
       expect((await update(alice, id, 'v2 #news #tech')).statusCode).toBe(200);
-      vi.spyOn(ctx.content, 'putBytes').mockRejectedValueOnce(new Error('store unavailable'));
+      ctx.compactor.watch('content.putBytes', once(failing('store unavailable')));
       await ctx.compactor.runOnce();
       // The update committed: it is what the post is to whoever reads it by its id.
       expect((await ctx.app.inject({ method: 'GET', url: `/content/${id}` })).json()).toMatchObject({ preview: { kind: 'text', text: 'v2 #news #tech' }, tags: ['news', 'tech'] });
@@ -659,9 +657,9 @@ for (const target of TARGETS) {
       expect(await ctx.content.getMeta(id)).toMatchObject({ text: 'v1 #news' });
 
       // The compactor writes the last one, and nothing of the other.
-      const putMeta = vi.spyOn(ctx.content, 'putMeta');
+      const putMeta = ctx.compactor.watch('content.putMeta');
       await ctx.compactor.runOnce();
-      expect(putMeta.mock.calls.map(([meta]) => meta.text)).toEqual(['first #news #sports']);
+      expect(putMeta.calls.map(({ meta }) => meta.text)).toEqual(['first #news #sports']);
       expect(await raw()).toBe('first #news #sports');
       expect(await shown('news')).toEqual([[id, 'first #news #sports']]);
       expect(await shown('sports')).toEqual([[id, 'first #news #sports']]);
@@ -676,8 +674,11 @@ for (const target of TARGETS) {
       ctx = await createTestContext(target, { settle: false });
       const alice = await ctx.register('alice');
       const { contentId, createdAt } = await post(alice, 'kept #news');
-      const set = ctx.hot.set.bind(ctx.hot);
-      const failing = vi.spyOn(ctx.hot, 'set').mockImplementation((key, ...rest) => (key.startsWith('sum:') ? Promise.reject(new Error('redis unavailable')) : set(key, ...rest)));
+      const refused = ctx.compactor.watch('hot.set', {
+        before: ({ key }) => {
+          if (key.startsWith('sum:')) throw new Error('redis unavailable');
+        },
+      });
       await ctx.compactor.runOnce();
       // The post is there, and read by its id. It is in no feed, and its write and its rows wait.
       expect((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}/raw` })).body).toBe('kept #news');
@@ -686,7 +687,7 @@ for (const target of TARGETS) {
       expect(await queue()).toEqual(rowsOf(alice, contentId, 'news').sort());
       expect(await pending()).toEqual([1]);
 
-      failing.mockRestore();
+      refused.stop();
       await ctx.compactor.runOnce();
       expect(await shown('news')).toEqual([[contentId, 'kept #news']]);
       expect(await storedFiles(contentId)).toEqual([contentId, `${contentId}.meta.json`]);
@@ -703,8 +704,7 @@ for (const target of TARGETS) {
 
       const second = await store(alice, 'second #news');
       // One of the post's two indexes can't be published: part of it was evicted before its head was swapped.
-      const persist = ctx.hot.persist.bind(ctx.hot);
-      vi.spyOn(ctx.hot, 'persist').mockImplementationOnce(async (keys) => (await persist(keys)).map((kept, i) => kept && i > 0));
+      ctx.compactor.watch('hot.persist', once({ before: ({ keys }) => keys.map((_, i) => i > 0) }));
       expect((await ctx.compactor.runOnce()).tags).toEqual([own(alice), 'news'].sort());
       const left = await queue();
       expect(left).toHaveLength(1);
@@ -729,25 +729,25 @@ for (const target of TARGETS) {
       // Each publisher's own index, #news, and three hashtags that are new.
       const second: string[] = [];
       for (const [i, user] of users.entries()) second.push(await store(user, `second #news #topic${i % 3}`));
-      const mget = vi.spyOn(ctx.hot, 'mget');
-      const set = vi.spyOn(ctx.hot, 'set');
-      const setMany = vi.spyOn(ctx.hot, 'setMany');
-      const persist = vi.spyOn(ctx.hot, 'persist');
-      const expire = vi.spyOn(ctx.hot, 'expire');
-      const exists = vi.spyOn(ctx.hot, 'exists');
+      const mget = ctx.compactor.watch('hot.mget');
+      const set = ctx.compactor.watch('hot.set');
+      const setMany = ctx.compactor.watch('hot.setMany');
+      const persist = ctx.compactor.watch('hot.persist');
+      const expire = ctx.compactor.watch('hot.expire');
+      const exists = ctx.compactor.watch('hot.exists');
       expect((await ctx.compactor.runOnce()).tags).toHaveLength(users.length + 4);
 
       // The heads, the manifests they name, and the day indexes to rebuild.
-      expect(mget.mock.calls.map(([keys]) => keys.length)).toEqual([16, 13, 13]);
+      expect(mget.calls.map(({ keys }) => keys.length)).toEqual([16, 13, 13]);
       // The new day indexes and manifests, made to last together, and then the heads.
-      expect(setMany.mock.calls.map(([entries]) => entries.length)).toEqual([32, 16]);
+      expect(setMany.calls.map(({ keys }) => keys.length)).toEqual([32, 16]);
       expect(keysSet(setMany).slice(32).sort()).toEqual([...users.map(own), 'news', 'topic0', 'topic1', 'topic2'].map(headKey).sort());
-      expect(persist.mock.calls.map(([keys]) => keys.length)).toEqual([32]);
+      expect(persist.calls.map(({ keys }) => keys.length)).toEqual([32]);
       // What the 13 indexes that were there no longer use: a day index and a manifest each.
-      expect(expire.mock.calls.map(([keys]) => keys.length)).toEqual([26]);
+      expect(expire.calls.map(({ keys }) => keys.length)).toEqual([26]);
       // The summaries of the posts rebuilt, asked about once each however many indexes a post is in.
-      expect(exists.mock.calls.map(([keys]) => keys.length)).toEqual([12]);
-      expect(set.mock.calls.filter(([key]) => /^(head|man|day):/.test(key))).toEqual([]);
+      expect(exists.calls.map(({ keys }) => keys.length)).toEqual([12]);
+      expect(set.calls.filter(({ key }) => /^(head|man|day):/.test(key))).toEqual([]);
 
       expect((await indexIds('news')).sort()).toEqual([...first, ...second].sort());
       for (const [i, user] of users.entries()) expect((await indexIds(own(user))).sort()).toEqual([first[i], second[i]].sort());
@@ -790,8 +790,14 @@ for (const target of TARGETS) {
       const today = await at(0, 'today #news');
       await ctx.compact();
 
-      // Redis dropped the old summary 8 days after its post was created.
-      if (target.hot === 'memory') expect(await ctx.hot.exists([old, week, today].map(summaryKey))).toEqual([false, true, true]);
+      // Redis keeps each summary for the 8 days after its post was created, by its own clock: the
+      // posts were new when it took them, and the old one's time is up since.
+      for (const left of await ctx.ttl([old, week, today].map(summaryKey))) {
+        expect(left).toBeGreaterThan(8 * DAY - HOUR);
+        expect(left).toBeLessThanOrEqual(8 * DAY);
+      }
+      await ctx.lapse(summaryKey(old));
+      expect(await ctx.hot.exists([old, week, today].map(summaryKey))).toEqual([false, true, true]);
       // The recent posts need nothing from the object store; the old one is read from it.
       for (const r of [week, today]) await rm(join(ctx.dir, 'summaries', summaryObjectKey(r)));
       const mget = vi.spyOn(ctx.hot, 'mget');
@@ -811,10 +817,10 @@ for (const target of TARGETS) {
 
       expect((await items('news')).map((i) => i.preview.text)).toEqual(['lost #news']);
       expect(await ctx.hot.exists([summaryKey(lost)])).toEqual([true]);
-      if (target.hot === 'memory') {
-        ctx.clock.now = lost.createdAt + 8 * DAY;
-        expect(await ctx.hot.exists([summaryKey(lost)])).toEqual([false]);
-      }
+      // For what is left of the post's 8 days, half a day of which has passed.
+      const [left] = await ctx.ttl([summaryKey(lost)]);
+      expect(left).toBeGreaterThan(7.5 * DAY - HOUR);
+      expect(left).toBeLessThanOrEqual(7.5 * DAY);
 
       // Gone from both tiers (erased after the feed was planned): the record is left out.
       await ctx.summaries.remove([lost]);
@@ -942,7 +948,8 @@ for (const target of TARGETS) {
       const newer = await store(alice, 'newer #news');
       await ctx.compact();
       await ctx.compact(2 * 60_000);
-      if (target.hot === 'memory') expect(await ctx.hot.exists(read)).toEqual([false, false]);
+      await ctx.lapse(read);
+      expect(await ctx.hot.exists(read)).toEqual([false, false]);
 
       // The session's window is still the one its first page had.
       const seen = await restOf('tags=news', first);
@@ -1066,16 +1073,14 @@ for (const target of TARGETS) {
 
       // The run dies as it is about to swap the head of #news: nothing after that point happens, not even tidying up.
       await store(alice, 'second #news');
-      const setMany = ctx.hot.setMany.bind(ctx.hot);
       const written: string[] = [];
-      vi.spyOn(ctx.hot, 'setMany').mockImplementation(async (entries) => {
-        written.push(...entries.map((e) => e.key).filter((key) => key.startsWith('day:news:') || key.startsWith('man:news:')));
-        return setMany(entries);
+      ctx.compactor.watch('hot.setMany', {
+        before: ({ keys }) => void written.push(...keys.filter((key) => key.startsWith('day:news:') || key.startsWith('man:news:'))),
       });
-      vi.spyOn(ctx.hot, 'persist').mockRejectedValue(new Error('killed'));
-      vi.spyOn(ctx.hot, 'del').mockRejectedValue(new Error('killed'));
+      ctx.compactor.watch('hot.persist', failing('killed'));
+      ctx.compactor.watch('hot.del', failing('killed'));
       await ctx.compact();
-      vi.restoreAllMocks();
+      ctx.compactor.unwatch();
       expect(written).toHaveLength(2);
       expect(await ctx.hot.exists(written)).toEqual([true, true]);
 
@@ -1085,10 +1090,11 @@ for (const target of TARGETS) {
       const current = [dayKey('news', (await readManifest('news')).days[0]!.gen), manifestKey('news', (await readHead('news')).manifest!)];
 
       // What the killed run wrote expires, like what the last run replaced; what a head names never does.
-      // (Only the in-process store keeps the test's time.)
-      if (target.hot === 'memory') ctx.clock.now += 2 * HOUR;
-      const gone = target.hot !== 'memory';
-      expect(await ctx.hot.exists([...written, ...published, ...current])).toEqual([gone, gone, gone, gone, true, true]);
+      for (const left of await ctx.ttl([...written, ...published])) expect(left).toBeGreaterThan(0);
+      for (const left of await ctx.ttl(published)) expect(left).toBeLessThanOrEqual(60_000);
+      expect(await ctx.ttl(current)).toEqual([-1, -1]);
+      await ctx.lapse([...written, ...published]);
+      expect(await ctx.hot.exists([...written, ...published, ...current])).toEqual([false, false, false, false, true, true]);
     });
   });
 }

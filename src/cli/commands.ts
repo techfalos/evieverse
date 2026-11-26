@@ -36,6 +36,13 @@ const NOT_GIVEN: Record<string, string> = {
   blocked_word: 'the post has a word it blocks',
 };
 
+/** What a server says of content made with generative AI, in words, by the setting GET /rules names (`genAi`). */
+const GEN_AI: Record<string, string> = {
+  disclosure_optional: 'allowed, and saying that content was made with it is optional',
+  disclosure_required: 'allowed, as long as content made with it says so',
+  not_allowed: 'not allowed',
+};
+
 /**
  * The sections of `help`, in the order it shows them: the role whose commands each one lists, and
  * its title, which names the hashtags `me` moderates if the server said who the key's user is.
@@ -63,11 +70,11 @@ function table(rows: string[][]): string {
   return rows.map((row) => row.map((cell, i) => (i === row.length - 1 ? cell : cell.padEnd(widths[i]!))).join('  ')).join('\n');
 }
 
-/** An admin can do all the others can, so only that is said of one. A ban is said after the roles. */
+/** An admin can do all the others can, so only that is said of one. A ban is said after the roles, and so is being barred from claiming hashtags. */
 function roles(me: WhoAmI): string {
   const held = [me.moderator && 'a server moderator', me.moderates.length > 0 && `moderator of ${hashtags(me.moderates)}`].filter(Boolean);
   const role = me.admin ? 'an admin' : held.length ? held.join(', and ') : 'no moderation role';
-  return me.banned ? `${role}; banned, so you can't post, comment, like or send messages` : role;
+  return [role, me.banned && "banned, so you can't post, comment, like or send messages", me.claimsBarred && 'barred from claiming hashtags'].filter(Boolean).join('; ');
 }
 
 /** A post as the feed and the moderation queue give it, as far as the CLI shows it. */
@@ -201,22 +208,6 @@ interface RuleRecord {
   ruleId: string;
   position: number;
   text: string;
-}
-
-/** A claim to moderate a hashtag that waits, as the server gives it: who made it, when, and when it is granted unless an admin or a server moderator refuses it before. */
-interface ClaimRecord {
-  tag: string;
-  userId: string;
-  username: string;
-  claimedAt: string;
-  reviewUntil: string;
-}
-
-/** What ending a hashtag's claim answers: whether there was one, and whose. */
-interface ClaimEnded {
-  tag: string;
-  wasClaimed: boolean;
-  userId?: string;
 }
 
 /** What a server says of the code it runs, beside its rules: its operator's statement. */
@@ -681,33 +672,22 @@ export const COMMANDS: Command[] = [
     request: ({ positionals: [contentId, commentId] }) => ({ method: 'DELETE', path: path`/content/${contentId!}/comments/${commentId!}` }),
     text: (d) => `Deleted comment ${d.commentId}.`,
   }),
-  endpoint<{ tag: string; moderators: { userId: string; username: string; since: string }[]; claim?: ClaimRecord }>({
+  endpoint<{ tag: string; moderators: { userId: string; username: string; since: string }[] }>({
     name: 'moderators list',
     positionals: ['tag'],
     role: 'anyone',
-    summary: "Lists a hashtag's moderators, and the claim to it that waits, if there is one.",
+    summary: "Lists a hashtag's moderators.",
     request: ({ positionals: [tag] }) => ({ method: 'GET', path: path`/tags/${tag!}/moderators` }),
-    text: (d) =>
-      (d.moderators.length ? table(d.moderators.map((m) => [m.userId, m.username, `since ${m.since}`])) : `#${d.tag} has no moderators.`) +
-      (d.claim ? `\n${d.claim.username} (${d.claim.userId}) claimed it, and becomes its moderator at ${d.claim.reviewUntil} unless the claim is refused.` : ''),
+    text: (d) => (d.moderators.length ? table(d.moderators.map((m) => [m.userId, m.username, `since ${m.since}`])) : `#${d.tag} has no moderators.`),
   }),
-  endpoint<ClaimRecord & { alreadyClaimed: boolean }>({
+  endpoint<{ tag: string; userId: string; username: string; since: string; alreadyModerator: boolean }>({
     name: 'claims add',
     positionals: ['tag'],
     role: 'anyone',
     summary:
-      'Claims a hashtag that has no moderator, to moderate it. The admins and server moderators are told, and can refuse the claim while it waits; if none does, you become its moderator. Only where publishers choose the hashtags of their posts.',
+      'Claims a hashtag that has no moderator: you moderate it from then on. The admins and server moderators are told, and can end it at any time. Only where publishers choose the hashtags of their posts.',
     request: ({ positionals: [tag] }) => ({ method: 'POST', path: path`/tags/${tag!}/claim` }),
-    text: (d) =>
-      `${d.alreadyClaimed ? `You had already claimed #${d.tag}` : `You claimed #${d.tag}`}: you become its moderator at ${d.reviewUntil}, unless an admin or a server moderator refuses the claim before then.`,
-  }),
-  endpoint<ClaimEnded>({
-    name: 'claims withdraw',
-    positionals: ['tag'],
-    role: 'anyone',
-    summary: 'Withdraws your claim to a hashtag.',
-    request: ({ positionals: [tag] }) => ({ method: 'DELETE', path: path`/tags/${tag!}/claim` }),
-    text: (d) => (d.wasClaimed ? `Withdrew your claim to #${d.tag}.` : `Nobody's claim to #${d.tag} is waiting.`),
+    text: (d) => (d.alreadyModerator ? `You already moderated #${d.tag}, since ${d.since}.` : `You claimed #${d.tag}: you are now its moderator.`),
   }),
   endpoint<{ tag: string; rules: RuleRecord[] }>({
     name: 'tag-rules list',
@@ -717,11 +697,11 @@ export const COMMANDS: Command[] = [
     request: ({ positionals: [tag] }) => ({ method: 'GET', path: path`/tags/${tag!}/rules` }),
     text: (d) => (d.rules.length ? table(d.rules.map((r) => [String(r.position), r.ruleId, r.text.replace(/\s+/g, ' ').trim()])) : `#${d.tag} has no rules.`),
   }),
-  endpoint<{ modificationDisclosure: ModificationDisclosure; supportEmail: string; minimumAge: number | string; rules: RuleRecord[] }>({
+  endpoint<{ modificationDisclosure: ModificationDisclosure; supportEmail: string; minimumAge: number | string; genAi: string; rules: RuleRecord[] }>({
     name: 'rules list',
     role: 'anyone',
     summary:
-      "Lists the server's rules, in their order, its minimum age, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is.",
+      "Lists the server's rules, in their order, its minimum age, whether it allows content made with generative AI, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is.",
     request: () => ({ method: 'GET', path: '/rules' }),
     text: (d) =>
       [
@@ -729,6 +709,9 @@ export const COMMANDS: Command[] = [
         '',
         // A number of years, or the server's own words for having none.
         `Minimum age: ${d.minimumAge}`,
+        '',
+        // In words, or as the server names it where the setting is one this CLI has no words for.
+        `Generative AI: ${GEN_AI[d.genAi] ?? d.genAi}`,
         '',
         `Support: ${d.supportEmail}`,
         '',
@@ -1024,14 +1007,6 @@ export const COMMANDS: Command[] = [
     request: ({ positionals: [tag, userId] }) => ({ method: 'PUT', path: path`/tags/${tag!}/moderators/${userId!}` }),
     text: (d) => (d.alreadyModerator ? `${d.userId} already moderated #${d.tag}.` : `${d.userId} now moderates #${d.tag}.`),
   }),
-  endpoint<{ tag: string; userId: string; wasModerator: boolean }>({
-    name: 'moderators remove',
-    positionals: ['tag', 'userId'],
-    role: 'admin',
-    summary: "Ends a user's moderation of a hashtag.",
-    request: ({ positionals: [tag, userId] }) => ({ method: 'DELETE', path: path`/tags/${tag!}/moderators/${userId!}` }),
-    text: (d) => (d.wasModerator ? `${d.userId} no longer moderates #${d.tag}.` : `${d.userId} didn't moderate #${d.tag}.`),
-  }),
   endpoint<RuleRecord>({
     name: 'rules add',
     positionals: ['text'],
@@ -1065,24 +1040,48 @@ export const COMMANDS: Command[] = [
     request: ({ positionals: [ruleId] }) => ({ method: 'DELETE', path: path`/rules/${ruleId!}` }),
     text: (d) => (d.wasThere ? `Removed rule ${d.ruleId}.` : `${d.ruleId} isn't one of the server's rules.`),
   }),
-  endpoint<{ claims: ClaimRecord[]; nextCursor: string | null }>({
-    name: 'claims list',
+  endpoint<{ tag: string; userId: string; wasModerator: boolean }>({
+    name: 'moderators remove',
+    positionals: ['tag', 'userId'],
+    role: 'serverModerator',
+    summary: "Ends a user's moderation of a hashtag, at any time, whether they were appointed to it or claimed it. The user is told.",
+    request: ({ positionals: [tag, userId] }) => ({ method: 'DELETE', path: path`/tags/${tag!}/moderators/${userId!}` }),
+    text: (d) => (d.wasModerator ? `${d.userId} no longer moderates #${d.tag}.` : `${d.userId} didn't moderate #${d.tag}.`),
+  }),
+  endpoint<{ barred: { userId: string; username: string; barredAt: string; reason: string | null; barredBy: { userId: string; username: string } | null }[]; nextCursor: string | null }>({
+    name: 'claim-bars list',
     options: PAGE_OPTIONS,
     flags: PAGE_FLAGS,
     role: 'serverModerator',
-    summary: 'Lists the claims to hashtags that wait, longest waiting first: who claims each, and when they become its moderator unless the claim is refused.',
-    request: (args) => ({ method: 'GET', path: `/moderation/tag-claims${pageQuery(args)}` }),
+    summary: 'Lists the users who are barred from claiming hashtags, most recently barred first: who barred each, when, and why.',
+    request: (args) => ({ method: 'GET', path: `/claim-barred${pageQuery(args)}` }),
     text: (d) =>
-      (d.claims.length ? table(d.claims.map((c) => [`#${c.tag}`, c.userId, c.username, `claimed ${c.claimedAt}`, `granted ${c.reviewUntil}`])) : 'No claim to a hashtag is waiting.') +
-      more(d.nextCursor),
+      (d.barred.length
+        ? table(d.barred.map((b) => [b.userId, b.username, `since ${b.barredAt}`, `by ${b.barredBy?.username ?? '(an account that is gone)'}`, (b.reason ?? '(no reason given)').replace(/\s+/g, ' ')]))
+        : 'Nobody is barred from claiming hashtags.') + more(d.nextCursor),
   }),
-  endpoint<ClaimEnded>({
-    name: 'claims refuse',
-    positionals: ['tag'],
+  endpoint<{ userId: string; username: string; alreadyBarred: boolean }>({
+    name: 'claim-bars add',
+    positionals: ['userId'],
+    options: { reason: { type: 'string' } },
+    flags: '[--reason <text>]',
     role: 'serverModerator',
-    summary: "Refuses the claim to a hashtag that waits: its user doesn't become the hashtag's moderator, and is told.",
-    request: ({ positionals: [tag] }) => ({ method: 'DELETE', path: path`/tags/${tag!}/claim` }),
-    text: (d) => (d.wasClaimed ? `Refused the claim of ${d.userId} to #${d.tag}.` : `Nobody's claim to #${d.tag} is waiting.`),
+    summary:
+      'Bars a user from claiming hashtags: their claims are refused, and nothing else is. They are told. The hashtags they moderate stay theirs: end those with moderators remove. With --reason, what moderators can read of why.',
+    request: ({ positionals: [userId], values }) => ({
+      method: 'PUT',
+      path: path`/claim-barred/${userId!}`,
+      ...(typeof values.reason === 'string' && { body: { reason: values.reason } }),
+    }),
+    text: (d) => (d.alreadyBarred ? `${d.username} (${d.userId}) was already barred from claiming hashtags.` : `${d.username} (${d.userId}) is barred from claiming hashtags.`),
+  }),
+  endpoint<{ userId: string; wasBarred: boolean }>({
+    name: 'claim-bars remove',
+    positionals: ['userId'],
+    role: 'serverModerator',
+    summary: 'Lets a user claim hashtags again. The user is told.',
+    request: ({ positionals: [userId] }) => ({ method: 'DELETE', path: path`/claim-barred/${userId!}` }),
+    text: (d) => (d.wasBarred ? `${d.userId} can claim hashtags again.` : `${d.userId} wasn't barred from claiming hashtags.`),
   }),
   endpoint<{ banned: { userId: string; username: string; bannedAt: string; reason: string | null; bannedBy: { userId: string; username: string } | null }[]; nextCursor: string | null }>({
     name: 'bans list',
