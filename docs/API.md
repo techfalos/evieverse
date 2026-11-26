@@ -348,7 +348,7 @@ It takes:
 - `cursor`: the previous page's `nextCursor`. It's `null` on the last page.
 
 What it returns:
-- `posts` is the page. Each post is a record as a [feed](#get-feed) gives one, with all of its likes, its `views` and its `dislikes` as they are now, and without `moderated`, which is a hashtag's. Being listed here isn't a [view](#views) of a post. Its `publisher` also has `avatarUrl`, if the user has an avatar.
+- `posts` is the page. Each post is a record as a [feed](#get-feed) gives one, with all of its likes, its `views` and its `dislikes` as they are now, and without `moderated` and `listedUnder`, which are a hashtag feed's. Being listed here isn't a [view](#views) of a post. Its `publisher` also has `avatarUrl`, if the user has an avatar.
 - `pinned` is the posts the user [pinned](#pinned-posts), the one pinned last first, as records like the others, and `[]` if they pinned none. Only the first page has it. A pinned post keeps its place among `posts` too.
 - Only what anyone can read is listed: no post set for deletion, none that waits in the [moderation queue](#the-moderation-queue), and no repost of a post on another server that is [gone there](#refreshing-a-repost).
 - The user's own posts, not what they [reposted](#post-repost), which are other users' posts.
@@ -1604,13 +1604,13 @@ curl "localhost:3000/feed?tags=news,mumbai&hours=24"
 - `hours`: the feed's window. The feed is of the posts created in the past this many hours, and of no others. One of `1`, `2`, `4`, `8`, `12`, `24` (1 day, the default), `48` (2 days), `72` (3 days), `168` (7 days), `336` (14 days), `504` (21 days), `720` (30 days), `1440` (60 days) or `2160` (90 days). Any other value gets `400`.
 - `limit`: the most posts in the page, up to `FEED_MAX_PAGE_SIZE` (default 100). Left out, `FEED_PAGE_SIZE` (default 50).
 - `algorithm`: `popular` (the default), `chronological` or `engaged`.
-  - `popular` returns the window's most liked content first: the latest and greatest, for showcasing a tag. Each hashtag's posts are in the order of their likes, and nothing else.
+  - `popular` returns the window's most liked content first, whatever its hashtag: the latest and greatest, for showcasing tags. The page is one list of the hashtags together, in the order of their likes, and nothing else.
   - `chronological` returns the window's newest content first, whatever its likes or its hashtag.
-  - `engaged` returns the `popular` feed with posts that the likes alone wouldn't put there ([below](#engaged-feeds)): new posts with no likes yet among the liked ones (fresh slots), and the posts that match what its reader has liked and viewed, first and among the rest. The client says what that is, in `engagement`.
-- `engagement`: optional, and read only by the first page of an `engaged` feed: how many posts the reader has liked and viewed, by hashtag and by publisher, as a JSON object ([below](#engaged-feeds)). The server doesn't keep it. Left out, or with nothing counted, an `engaged` feed is the `popular` one with fresh slots.
+  - `engaged` returns the feed made for its reader ([below](#engaged-feeds)). The hashtags take turns, each giving its most liked posts, with posts that the likes alone wouldn't put there: new posts with no likes yet among the liked ones (fresh slots), and the posts that match what its reader has liked and viewed, first and among the rest. The client says what that is, in `engagement`.
+- `engagement`: optional, and read only by the first page of an `engaged` feed: how many posts the reader has liked and viewed, by hashtag and by publisher, as a JSON object ([below](#engaged-feeds)). The server doesn't keep it. Left out, or with nothing counted, an `engaged` feed is each hashtag's most liked posts in turn, with fresh slots.
 - `format`: optional. `rss` returns the page as an RSS 2.0 document ([below](#feeds-as-rss)). Left out or `json`, it's the JSON this section describes. Any other value gets `400`.
 - `addRelated`: optional. `true` also returns posts under the hashtags [related](#related-hashtags) to the ones asked for: those that tend to be on the same posts. Left out or `false`, the feed is of the hashtags asked for alone.
-- `aiGenerated`: optional. `true` returns only content its publisher declared created with AI, `false` only content declared not created with AI. Left out, the feed returns both. Everything below then applies to the matching content alone, so the page, the turns between tags and an `engaged` feed's fresh slots are all spent on it.
+- `aiGenerated`: optional. `true` returns only content its publisher declared created with AI, `false` only content declared not created with AI. Left out, the feed returns both. Everything below then applies to the matching content alone, so the page, and an `engaged` feed's turns between tags and fresh slots, are all spent on it.
 - `moderated`: optional. `false` returns only the posts no moderator of their hashtag has approved, which is [that hashtag's queue](#a-hashtags-queue); `true` only those one has. Left out, the feed returns both. It filters as `aiGenerated` does, and the two combine.
 - `cursor`: optional, taken from the previous page's `nextCursor`.
 
@@ -1619,13 +1619,13 @@ How the feed is assembled:
 1. Window: the feed is of the posts created in the past `hours`, taken as one span of time. A post's place depends on its likes, or on when it was created, and never on which day that was. A page the window can't fill is left short: the feed doesn't reach back past its window.
 2. Page size: a page holds at most `limit` posts (50 by default).
 3. Order: each tag's posts are ordered by likes (most first), then recency.
-4. Turns: the requested tags take turns, so each gets an equal share of the page. A tag that runs out lets the others continue. Content carrying several requested tags appears once.
+4. One list: the next post comes from whichever requested tag's next post is the most liked. So the page is the most liked `limit` posts of the hashtags together, and the next page carries on from there. No tag has a share of the page: one whose posts are liked less than the others' gives none until those are used up. Content carrying several requested tags appears once.
 
-That is all of a `popular` feed: each hashtag's list is its most liked posts first, down to the last, and a post with fewer likes never comes before one with more. Under a hashtag a [repost](#post-repost) gave a post, the likes that count are the ones since the repost, which is what the record's `likes` says.
+That is all of a `popular` feed: its hashtags' most liked posts first, down to the last, and a post with fewer likes never comes before one with more, whatever their hashtags. Under a hashtag a [repost](#post-repost) gave a post, the likes that count are the ones since the repost, which is what the record's `likes` says.
 
-**Chronological** feeds work the same way, in order of time instead of likes. Each tag's posts are ordered newest first (step 3), and instead of the tags taking turns (step 4), the next post comes from whichever hashtag's is the newest. So the page is the newest `limit` posts of the hashtags together, and the next page carries on from there.
+**Chronological** feeds work the same way, in order of time instead of likes. Each tag's posts are ordered newest first (step 3), and the next post comes from whichever hashtag's is the newest (step 4). So the page is the newest `limit` posts of the hashtags together, and the next page carries on from there.
 
-**Engaged** feeds are `popular` feeds with posts that the likes alone wouldn't put there ([below](#engaged-feeds)): new posts with no likes yet take the 2nd pick per tag and every 4th after it (fresh slots), and, for the posts that match the reader's `engagement`, the first page starts with the newest of them, and every 3rd pick per tag after that is one of them. Every other pick is the `popular` feed's.
+**Engaged** feeds fill the page another way (step 4), and with posts that the likes alone wouldn't put there ([below](#engaged-feeds)). The requested tags take turns, each giving its most liked post, so each gets an equal share of the page; a tag that runs out lets the others continue. New posts with no likes yet take the 2nd pick per tag and every 4th after it (fresh slots), and, for the posts that match the reader's `engagement`, the first page starts with the newest of them, and every 3rd pick per tag after that is one of them. Every other pick is the tag's next most liked post. So an `engaged` feed of several hashtags isn't in the order of likes: each hashtag's posts are, among themselves.
 
 Whichever the algorithm, the feed is of the posts the hashtag's index keeps. For a busy hashtag that's each day's most liked posts, fewer the older the day ([APP.md](APP.md#retention-and-quotas)).
 
@@ -1635,15 +1635,15 @@ The response shape is:
 { window: { from, to }, count, truncated, nextCursor,
   related: [ "<tag>", ... ],        // only with addRelated=true
   ads: [ ad, ... ],                 // only where the instance shows ads in feeds
-  tags: { "<tag>": [ record, ... ] } }
+  records: [ record, ... ] }
 ```
 
 - `window` is the span of time the feed is of: `hours` back from when its first page was asked for.
 - `count` is the number of records in the page, and `truncated` whether the window holds more: `nextCursor` then gets the next page.
-- `tags` holds each hashtag's records, in the feed's order: most liked first in a `popular` feed, newest first in a `chronological` one, and in the order they were picked in an `engaged` one. A hashtag with no record in the page is left out. To show a `popular` or an `engaged` page as one list, take a record from each hashtag's list in turn; to show a `chronological` one, merge the lists by `createdAt`.
+- `records` holds the page's records as one list, in the feed's order, whatever their hashtags: most liked first in a `popular` feed, newest first in a `chronological` one, and in the order they were picked in an `engaged` one. The server has ordered the page, so show the list as it is: there's nothing to merge or to sort. Each record names the hashtag it's listed under, in `listedUnder`.
 - `ads` holds the page's [ads](#ads), each `{ adId, label, kind, imageUrl?, imageAlt?, text?, url?, position }`. Show an ad before the page's `position`th post (3, 10 or 17, counted from 1), with its `label` ("Sponsored"). `kind` is `text` or `image`, `imageUrl` an image ad's [image](#get-monetizationadsadidimage), `imageAlt` that image's [alt text](#alt-text) where the ad has one, and `url` the [link](#get-monetizationadsadidclick) to follow. Ads aren't counted in `count`.
 
-Each record is `{ contentId, publisher: { userId, username }, mimeType, aiGenerated, comments, preview, tags, likes, views, dislikes, moderated, createdAt, updatedAt }`:
+Each record is `{ contentId, publisher: { userId, username }, mimeType, aiGenerated, comments, preview, tags, likes, views, dislikes, moderated, listedUnder, createdAt, updatedAt }`:
 - `aiGenerated` is the publisher's declaration of whether the content was created with AI.
 - `likes`, `views` and `dislikes` are the post's three counts, as of the compactor's last run:
   - `likes` is how many users like it ([`POST /like`](#post-like)).
@@ -1651,7 +1651,8 @@ Each record is `{ contentId, publisher: { userId, username }, mimeType, aiGenera
   - `dislikes` is how many users dislike it ([`POST /dislike`](#post-dislike)), from 0, on an instance that has dislikes on. On one that has them off, which is what an instance is unless its operator says otherwise, it's `null` on every record. That's how a client knows whether to show dislikes at all: `null` means show none, and `0` is a post nobody dislikes.
   - No feed is ordered by views or by dislikes, whichever its algorithm. They're there to be shown.
 - `comments` is whether the post takes [comments](#comments). A record doesn't say how many it has: [`GET /content/:contentId/comments`](#reading-comments) does.
-- `moderated` is whether a moderator of the hashtag the record is listed under has [approved](#a-hashtags-queue) it there. It's per hashtag, so the same post can be `true` under one and `false` under another.
+- `listedUnder` is the hashtag the record is listed under, of those the feed reads: the ones asked for and, with `addRelated`, the ones it added. A post under several of them is in the page once, under one of them.
+- `moderated` is whether a moderator of that hashtag has [approved](#a-hashtags-queue) the post there. It's per hashtag, so the same post can be `true` under one and `false` under another.
 - `preview` follows the post's type, as [previews](#previews) lists.
 - `mentions` is there on a record whose `preview.text` [mentions](#mentions) users: `[{ userId, username }]`, the ones that part of the text names. The preview is cut so that a mention is in it whole or not at all.
 - `publisher` is the user's credit: their id, and the username they registered with, which can't be changed. A feed's credit doesn't have the user's [avatar](#the-avatar): `GET /users/<userId>/avatar` is where it's read.
@@ -1659,7 +1660,7 @@ Each record is `{ contentId, publisher: { userId, username }, mimeType, aiGenera
 
 **Pagination:** the cursor says where the feed has got to: the last record it returned under each hashtag, with the end of the window, the algorithm, the related hashtags the first page added, the `aiGenerated` and `moderated` filters and the session's seed. In an `engaged` feed it also carries where the feed has got to among each hashtag's fresh posts, and what the first page made of the `engagement`. The next page reads the hashtags' indexes as they are by then, and carries on after those records. So:
 - Every page is of the first page's window. Posts newer than the first page show when the reader starts over.
-- A post isn't returned twice, and what was deleted, held or taken out of a hashtag since the page before is left out, without anything else shifting. There are four exceptions, which a client that shows one list can settle by dropping a `contentId` it already has: a post returned in a fresh slot of an `engaged` feed and liked afterwards, a post returned in a `popular` or an `engaged` feed that then lost likes ([`DELETE /like`](#delete-like)) and so moved back in the order, a post returned in an `engaged` feed because it matched, which then lost the hashtag it matched by, and, in a `popular` or an `engaged` feed of several hashtags, a post that lost the hashtag it was returned under and still carries another.
+- A post isn't returned twice, and what was deleted, held or taken out of a hashtag since the page before is left out, without anything else shifting. There are four exceptions, which a client can settle by dropping a `contentId` it already has: a post returned in a fresh slot of an `engaged` feed and liked afterwards, a post returned in a `popular` or an `engaged` feed that then lost likes ([`DELETE /like`](#delete-like)) and so moved back in the order, a post returned in an `engaged` feed because it matched, which then lost the hashtag it matched by, and, in an `engaged` feed of several hashtags, a post that lost the hashtag it was returned under and still carries another (in a `popular` or a `chronological` one, only where a [repost](#post-repost) gave it one of the two).
 - What the compactor has applied since the page before shows: new counts of likes, views and dislikes, and what moderators approved or removed.
 - A session can miss a post that came to be ahead of where it had got to: one liked past that point between two pages of a `popular` or an `engaged` feed, or one that reached the index late. It's there when the reader starts over.
 - Later pages must ask for the same `tags`, `hours`, `algorithm`, `addRelated`, `aiGenerated` and `moderated`, otherwise `400`. They needn't send `engagement` or the same `format`: the cursor carries the first, and the second is only how the page is written.
@@ -1694,7 +1695,7 @@ One past its limit gets `429`, with when to try again in a `Retry-After` header,
 
 ### Related hashtags
 
-With `addRelated=true`, the feed is planned over the hashtags asked for and then the ones related to them, as if all had been asked for: they take turns with the others in a `popular` or an `engaged` feed, a post under several of them is returned once, and their records are listed under their own names in `tags`. The response names the hashtags it added in `related`, most related first (an empty list if there are none yet).
+With `addRelated=true`, the feed is planned over the hashtags asked for and then the ones related to them, as if all had been asked for: they're more places for a `popular` feed's most liked posts and a `chronological` feed's newest to come from, and they take turns with the others in an `engaged` feed. A post under several of them is returned once, and a record listed under one of them names it in `listedUnder`. The response names the hashtags it added in `related`, most related first (an empty list if there are none yet).
 
 A hashtag is related to another when it tends to be on the same posts. Every post stored counts once for each of its hashtags and once for each pair of them, and the counts build up from there. `#pets` is related to `#dogs` once at least `FEED_RELATED_MIN_POSTS` posts (default 5) carry both, and those are at least `FEED_RELATED_MIN_PERCENT` (default 20) percent of the posts that carry `#dogs`. It's one-sided: a small hashtag can be related to a big one that most of its posts also carry, without the big one being related to it.
 
@@ -1704,7 +1705,11 @@ A hashtag is related to another when it tends to be on the same posts. Every pos
 
 ### Engaged feeds
 
-With `algorithm=engaged`, the feed is the `popular` one with posts that the likes alone wouldn't put there. A `popular` feed is a sort, and has none of them. An `engaged` feed is made for its reader, and has two kinds.
+With `algorithm=engaged`, the feed is made for its reader. A `popular` feed is a sort: one list of its hashtags' posts, in the order of their likes. An `engaged` feed differs in two ways.
+
+**The hashtags take turns.** Each gives its most liked post in turn, so each gets an equal share of the page, and a hashtag whose posts are liked less than another's still has its part of it. One that runs out lets the others continue. A feed of one hashtag has no turns to take.
+
+**Posts that the likes alone wouldn't put there.** A `popular` feed has none of them. An `engaged` feed has two kinds.
 
 **Fresh slots.** So that new posts on busy tags aren't buried under liked ones (and can earn likes at all), the 2nd pick per tag, and then every `FEED_FRESH_EVERY`th (default 4), is new content with at most `FEED_FRESH_MAX_LIKES` likes (default 0). It's sampled from that tag's `FEED_FRESH_POOL` newest such records in the window (default 200), in an order that goes by a seed chosen per feed session, so different viewers see different new posts. A fresh slot is skipped once the likes order has already reached unliked content. `FEED_FRESH_EVERY=0` turns this off. Every `engaged` feed has them, whatever it's told of its reader, and no other feed does.
 
@@ -1728,7 +1733,7 @@ curl -G "localhost:3000/feed" \
 
 - A hashtag is written as a feed's `tags` are (letters, digits, `_`; a leading `#` is fine, and so is any case), a user is their `userId`, and a count is a whole number, zero or more. Fields other than these four are ignored.
 - Anything else gets `400`, with what was wrong in `details`: an `engagement` that isn't JSON or isn't an object, a hashtag or a user id that isn't one, a count that is negative or not a whole number.
-- With no `engagement`, an empty one (`{}`), or one whose counts are all zero, the feed is the `popular` feed with fresh slots, and nothing more. So is one where nothing in the window matches. With `FEED_FRESH_EVERY=0` as well, it's the `popular` feed, post for post.
+- With no `engagement`, an empty one (`{}`), or one whose counts are all zero, the feed is each hashtag's most liked posts in turn, with fresh slots, and nothing more. So is one where nothing in the window matches. With `FEED_FRESH_EVERY=0` as well, a feed of one hashtag is the `popular` feed, post for post.
 - Only an `engaged` feed reads it: `popular` and `chronological` feeds ignore the parameter.
 
 What the feed does with it:
@@ -1740,7 +1745,7 @@ What the feed does with it:
 
 The feed is still of the `tags` asked for and of its window, with `addRelated`, `aiGenerated` and `moderated` as in any feed. Matching brings a post forward in the feed, and adds none to it: a post under `#cats` alone isn't in a feed of `#news`, however much the reader views `#cats`.
 
-The response has the shape of a `popular` feed's, and is shown the same way: each hashtag's list is in the order it was picked, and a client that shows one list takes a record from each in turn. A hashtag's list isn't in the order of its likes, and a client shouldn't sort it into one.
+The response has the shape of a `popular` feed's, and is shown the same way: `records` is one list, in the order the posts were picked, with the newest posts that match first on the first page. It isn't in the order of likes, and a client shouldn't sort it into one.
 
 **Later pages needn't send `engagement`.** The cursor carries what the first page made of it, and a later page goes by that: an `engagement` sent with a cursor isn't read, so a session keeps the one it began with. To have new counts take effect, start the feed over. The parameter is part of the request's address, so it's in whatever logs addresses, as any parameter is.
 
@@ -1771,7 +1776,7 @@ The response is `application/rss+xml`:
 </rss>
 ```
 
-- One list. RSS has no groups, so the records are items in the order the feed picked them: what a client that merges the hashtags' lists shows, with the first posts of an [`engaged`](#engaged-feeds) feed first.
+- The same list. The records are items in the order the JSON has them in `records`: most liked first, newest first, or as an [`engaged`](#engaged-feeds) feed picked them. An item doesn't say which hashtag it's listed under.
 - The channel is titled with the hashtags the feed reads, the [related](#related-hashtags) ones it added among them. Its `description` and `language` are in the language the request is answered in, which is the one its `Accept-Language` header asks for.
 - The next page. Where the JSON would have `truncated: true`, the channel has `<atom:link rel="next">`: the request's own address with the page's cursor, and without `engagement`, which a later page doesn't need. A page with none after it has no such link. The cursor is the one the JSON gives as `nextCursor`, so it reads the next page in either format.
 - Addresses are absolute where the instance sets `PUBLIC_BASE_URL`. Otherwise they're paths, to resolve against the instance's address, which feed readers mostly can't do: an instance whose feeds are read as RSS should set it.
@@ -1870,7 +1875,7 @@ Whatever is compared is put in lowercase first, and its accents are taken off, i
 
 `type=content` returns the posts that have every word of `q`, newest first, by when they were created: `{ results: [record, ...], nextCursor }`. Each record is shaped as in [`/feed`](#get-feed), with two differences:
 
-- It has no `moderated` and no `repost`. The first is per hashtag, and a search lists a post under none. A post is found once, as itself and at its own time, however often it was reposted.
+- It has no `moderated`, no `listedUnder` and no `repost`. The first two are per hashtag, and a search lists a post under none. A post is found once, as itself and at its own time, however often it was reposted.
 - Its `likes`, `views` and `dislikes` are all the post has now. A feed's are as of the compactor's last run. Being found by a search isn't a [view](#views) of a post.
 
 What a post is found by:
@@ -2473,7 +2478,7 @@ They authenticate as the other write endpoints do. `:tag` is a hashtag as `/feed
 | `PUT /content/:contentId/tags/:tag` | The hashtag's moderators, server moderators, and admins | Approves the content under the hashtag: `201` with `{ contentId, tag, moderated: true, alreadyApproved: false }`, or `200` with `alreadyApproved: true`. |
 | `DELETE /content/:contentId/tags/:tag` | The hashtag's moderators, server moderators, and admins | Removes the hashtag from the content (below). With `{ "mute": true }`, it also mutes the content's publisher on the hashtag. With `{ "reason": "..." }` (1 to 500 characters), it says why, on the post. |
 | `GET /tags/:tag/log` | Anyone | The hashtag's [log](#a-hashtags-log), newest first: `{ tag, log: [{ contentId, publisher, action, tag, by, reason, at, text }], nextCursor }`, with `moderator` on each entry for a caller who moderates the hashtag. Takes `limit` (100 by default, at most 1,000) and `cursor`. |
-| `GET /moderation/queue` | Server moderators, and admins | The posts and comments in the moderation queue, longest waiting first: `{ queue: [...], nextCursor }`. Each has a `kind`. A `"post"` is a feed record (without `moderated`), with `text` (the whole text or caption); a `"comment"` is a [comment](#comments) as its post's list gives it. Both have `trustScore` and `queuedAt`. Takes `limit` (50 by default, at most 100) and `cursor`. |
+| `GET /moderation/queue` | Server moderators, and admins | The posts and comments in the moderation queue, longest waiting first: `{ queue: [...], nextCursor }`. Each has a `kind`. A `"post"` is a feed record (without `moderated` or `listedUnder`), with `text` (the whole text or caption); a `"comment"` is a [comment](#comments) as its post's list gives it. Both have `trustScore` and `queuedAt`. Takes `limit` (50 by default, at most 100) and `cursor`. |
 | `POST /moderation/queue/:contentId/accept` | Server moderators, and admins | Publishes the post: `{ contentId, status: "published", tags }`. |
 | `POST /moderation/queue/:contentId/reject` | Server moderators, and admins | Takes the post down: `202` with `{ contentId, status: "pending_deletion", requestedAt }`. |
 | `POST /moderation/queue/:contentId/comments/:commentId/accept` | Server moderators, and admins | Publishes the comment: `{ contentId, commentId, status: "published" }`. |
