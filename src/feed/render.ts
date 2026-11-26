@@ -1,6 +1,6 @@
 import type { FeedAd } from '../monetization.types.js';
 import type { Publisher, PublisherStore, Summary, SummaryStore } from '../storage/index.js';
-import { toFeedRecord } from '../tagfeed/layout.js';
+import { countsOf, toFeedRecord } from '../tagfeed/layout.js';
 import type { FeedRecord } from '../tagfeed/layout.types.js';
 import type { Candidate } from '../tagfeed/reader.types.js';
 import { iso } from '../time.js';
@@ -66,10 +66,39 @@ function shown(bodies: FeedBodies, c: Candidate, tag: string): Summary | undefin
 }
 
 /**
- * Streams the feed JSON: each hashtag's records, in plan order. A record with no summary to show
- * it with (see `shown`) is left out, and not counted. `tags` are the hashtags the plan was made
- * over, and `related` those of them the feed added to the ones it was asked for; undefined if it
- * wasn't asked to add any.
+ * The record of a pick made under `tag`, shown with the summary `s`: its counts, its flag and its
+ * repost are the index entry's, and it says which hashtag's index that was (`listedUnder`).
+ * `dislikesOn` is whether the server has dislikes on, which is whether the record gives the
+ * entry's count of them or null (see `countsOf`).
+ */
+const recordOf = (bodies: FeedBodies, c: Candidate, s: Summary, tag: string, dislikesOn: boolean): FeedRecord => ({
+  ...toFeedRecord(s, countsOf(c, dislikesOn), bodies.publishers.get(s.userId)!, c.moderated, c.repost ? { at: c.createdAt } : undefined),
+  listedUnder: tag,
+});
+
+/**
+ * A page's records as one list, in the order the plan picked them, which is the feed's order:
+ * what a page is written from, as JSON (`renderFeed`) and as RSS (`renderRss`). A record with no
+ * summary to show it with (see `shown`) is left out. `tags` are the hashtags the plan was made
+ * over, and `dislikesOn` whether the server has dislikes on (see `recordOf`).
+ */
+export function pageRecords(plan: FeedPlan, tags: string[], bodies: FeedBodies, dislikesOn: boolean): FeedRecord[] {
+  /** How many of each tag's picks are behind. */
+  const at = tags.map(() => 0);
+  return plan.order.flatMap((t) => {
+    const c = plan.picks[t]![at[t]!++]!;
+    const s = shown(bodies, c, tags[t]!);
+    return s ? [recordOf(bodies, c, s, tags[t]!, dislikesOn)] : [];
+  });
+}
+
+/**
+ * Streams the feed JSON: the page's records as one list, in the feed's order (see `pageRecords`),
+ * each naming the hashtag it is listed under. A record with no summary to show it with (see
+ * `shown`) is left out, and not counted. `tags` are the hashtags the plan was made over, and
+ * `related` those of them the feed added to the ones it was asked for; undefined if it wasn't
+ * asked to add any. `dislikesOn` is whether the server has dislikes on: each record's `dislikes`
+ * is then its count, and null otherwise (see `recordOf`).
  *
  * `ads` gives the page's ads (src/monetization.ts), for the number of records the page shows: an
  * ad goes before a record of the page, which is only known here. Undefined where the server shows
@@ -79,35 +108,24 @@ export function* renderFeed(
   plan: FeedPlan,
   tags: string[],
   bodies: FeedBodies,
+  dislikesOn: boolean,
   nextCursor: string | null,
   related?: string[],
   ads?: (count: number) => FeedAd[],
 ): Generator<Buffer> {
-  const records = tags.map((tag, t) =>
-    plan.picks[t]!.flatMap((c) => {
-      const s = shown(bodies, c, tag);
-      return s ? [JSON.stringify(toFeedRecord(s, c.likes, bodies.publishers.get(s.userId)!, c.moderated, c.repost ? { at: c.createdAt } : undefined))] : [];
-    }),
-  );
-  const count = records.reduce((n, list) => n + list.length, 0);
+  const records = pageRecords(plan, tags, bodies, dislikesOn);
   yield Buffer.from(
     `${JSON.stringify({
       window: { from: iso(plan.window.from), to: iso(plan.window.to) },
-      count,
+      count: records.length,
       truncated: plan.truncated,
       nextCursor,
       ...(related && { related }),
-      ...(ads && { ads: ads(count) }),
-    }).slice(0, -1)},"tags":{`,
+      ...(ads && { ads: ads(records.length) }),
+    }).slice(0, -1)},"records":[`,
   );
-
-  let firstTag = true;
-  for (let t = 0; t < tags.length; t++) {
-    if (!records[t]!.length) continue;
-    yield Buffer.from(`${firstTag ? '' : ','}${JSON.stringify(tags[t])}:[${records[t]!.join(',')}]`);
-    firstTag = false;
-  }
-  yield Buffer.from('}}');
+  for (const [i, record] of records.entries()) yield Buffer.from(`${i ? ',' : ''}${JSON.stringify(record)}`);
+  yield Buffer.from(']}');
 }
 
 /**
@@ -118,15 +136,18 @@ export function* renderFeed(
  * a post one of them published is left out, as one whose summary is gone is, and so is a post
  * one of them reposted. The first is what a followed user reposted of theirs; the second is
  * there only until the reader's list of follows is written without them.
+ *
+ * `dislikesOn` is whether the server has dislikes on: each record's `dislikes` is then its
+ * entry's count, and null otherwise (see `countsOf`).
  */
-export function followingRecords(picks: FollowingPick[], bodies: FeedBodies, blocked: ReadonlySet<string> = new Set()): FeedRecord[] {
+export function followingRecords(picks: FollowingPick[], bodies: FeedBodies, dislikesOn: boolean, blocked: ReadonlySet<string> = new Set()): FeedRecord[] {
   return picks.flatMap((c) => {
     const s = bodies.summaries.get(refKey(c));
     if (!s || blocked.has(s.userId) || (c.by !== undefined && blocked.has(c.by))) return [];
     return [
       toFeedRecord(
         s,
-        c.likes,
+        countsOf(c, dislikesOn),
         bodies.publishers.get(s.userId)!,
         undefined,
         c.repost ? { at: c.createdAt, by: c.by === undefined ? undefined : bodies.publishers.get(c.by) } : undefined,

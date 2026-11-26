@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { relatedTo } from '../src/feed/related.js';
 import { setAdmin } from '../src/moderation/policy.js';
-import { as, createTestContext, requests, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
+import { as, createTestContext, listedUnder, requests, TARGETS, type Feed, type TestContext, type User } from './helpers.js';
 
 describe('relatedTo', () => {
   it('gives every requested hashtag its most related one before any gets its second', () => {
@@ -52,7 +52,7 @@ for (const target of TARGETS) {
           Number(r.posts),
         ]),
       );
-    const tagsOf = (f: Feed, tag: string) => (f.tags[tag] ?? []).map((i) => i.contentId);
+    const tagsOf = (f: Feed, tag: string) => listedUnder(f, tag).map((i) => i.contentId);
 
     it('counts the posts of each hashtag, and of each pair of hashtags on one post, as they are stored', async () => {
       const [both] = await posts('a dog #dogs #pets', 1);
@@ -130,7 +130,7 @@ for (const target of TARGETS) {
       // #pets is on 3 of the 4 posts of #dogs. A post under both hashtags is returned once.
       const related = await feed('tags=dogs&addRelated=true');
       expect(related.related).toEqual(['pets']);
-      expect(Object.keys(related.tags)).toEqual(['dogs', 'pets']);
+      expect([...new Set(related.records.map((r) => r.listedUnder))].sort()).toEqual(['dogs', 'pets']);
       const all = [...tagsOf(related, 'dogs'), ...tagsOf(related, 'pets')];
       expect([...all].sort()).toEqual([...both, dog, pet, latest].sort());
       expect(tagsOf(related, 'pets')).toEqual(expect.arrayContaining([pet, latest]));

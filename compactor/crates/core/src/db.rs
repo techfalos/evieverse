@@ -340,6 +340,28 @@ impl Dialect {
     }
 }
 
+/// What a PostgreSQL URL says of the connection, read as the API reads it. `sslmode=no-verify`
+/// is a word of the API's driver (node-postgres), which PostgreSQL itself doesn't have: the
+/// connection is encrypted, and the server's certificate isn't checked. Here that is what
+/// `require` means, so it is read as that. Both sides are given the one URL, and a deployment
+/// whose database has a certificate nobody's trust store knows says `no-verify` in it.
+fn postgres_options(url: &str) -> Result<PgConnectOptions> {
+    let ssl_mode = |key: &str| key == "sslmode" || key == "ssl-mode";
+    if let Ok(mut parsed) = url::Url::parse(url) {
+        let pairs: Vec<(String, String)> = parsed.query_pairs().into_owned().collect();
+        if pairs.iter().any(|(key, value)| ssl_mode(key) && value == "no-verify") {
+            parsed.query_pairs_mut().clear().extend_pairs(
+                pairs
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), if ssl_mode(key) && value == "no-verify" { "require" } else { value.as_str() })),
+            );
+            return Ok(PgConnectOptions::from_str(parsed.as_str())?);
+        }
+    }
+    // Anything else is the driver's to read, and to refuse in its own words.
+    Ok(PgConnectOptions::from_str(url)?)
+}
+
 #[derive(Clone)]
 enum Pool {
     Sqlite(sqlx::SqlitePool),
@@ -417,7 +439,7 @@ impl Db {
                 )
             }
             Dialect::Postgres => {
-                let options = PgConnectOptions::from_str(&cfg.url).context("DATABASE_URL is not the URL of a PostgreSQL database")?;
+                let options = postgres_options(&cfg.url).context("DATABASE_URL is not the URL of a PostgreSQL database")?;
                 Pool::Postgres(
                     PgPoolOptions::new()
                         .max_connections(size)
@@ -619,6 +641,30 @@ mod tests {
         );
         assert_eq!(numbered("SELECT '?' , ?"), "SELECT '?' , $1");
         assert_eq!(places(3), "?, ?, ?");
+    }
+
+    #[test]
+    fn reads_a_postgres_url_as_the_api_does() {
+        use sqlx::postgres::PgSslMode;
+
+        // The API's driver's word for "encrypted, the certificate unchecked", which is `require` here.
+        let options = postgres_options("postgres://app:p%40ss@db.internal:6543/evieverse?sslmode=no-verify&application_name=compactor").unwrap();
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::Require));
+        assert_eq!(options.get_host(), "db.internal");
+        assert_eq!(options.get_port(), 6543);
+        assert_eq!(options.get_username(), "app");
+        assert_eq!(options.get_database(), Some("evieverse"));
+        assert_eq!(options.get_application_name(), Some("compactor"));
+
+        // Every other word is the driver's own, and means what it says.
+        let options = postgres_options("postgres://app:secret@db.internal/evieverse?sslmode=verify-full").unwrap();
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::VerifyFull));
+        let options = postgres_options("postgres://app:secret@db.internal/evieverse?sslmode=disable").unwrap();
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::Disable));
+
+        // One it doesn't have is still refused, and the refusal doesn't hold the URL, which has the password in it.
+        let refused = postgres_options("postgres://app:secret@db.internal/evieverse?sslmode=sometimes").unwrap_err();
+        assert!(!format!("{refused:#}").contains("secret"));
     }
 
     #[tokio::test]

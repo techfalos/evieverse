@@ -12,7 +12,7 @@ import type { ColumnType, Generated, Selectable } from 'kysely';
 export interface UsersTable {
   /** UUID; the only user identifier used in relations and lookups. */
   id: string;
-  /** Unique display name; never used as a key. */
+  /** Unique display name; never used as a key. Set when the account is created, and never changed: no request renames a user. */
   username: string;
   /**
    * The username as a search compares it (GET /search): lowercase, without accents, cut to 255
@@ -21,7 +21,11 @@ export interface UsersTable {
    */
   username_folded: ColumnType<string | null, string, string | undefined>;
   created_at: number;
-  /** When the user registered or last changed their username; the compactor re-syncs their credit in Redis. */
+  /**
+   * When the user's username was set, which is when they registered: the compactor re-syncs the
+   * credit in Redis of a user it finds new by this. Later than `created_at` only on an account
+   * that was renamed while a user could change their name, which none can now.
+   */
   updated_at: number;
   /** 1 for the server's admins, else 0: set by an admin (/admins), a deployment (BOOTSTRAP_ADMIN) or the operator (`npm run admin`). */
   admin: Generated<number>;
@@ -123,6 +127,29 @@ export interface ContentTable {
    * that was taken back is gone (see `likes`).
    */
   unliked_at: Generated<number | null>;
+  /**
+   * How many times the content was viewed by a user account: GET /content/:id, sent with a user's
+   * credentials, adds one each time (see countView). Views, not viewers: nothing makes a user's
+   * second view count less than their first, and nothing takes one off.
+   */
+  view_count: Generated<number>;
+  /**
+   * When the content was last viewed so, or null if it never was: how a compactor run finds the
+   * content viewed since the last one, as a view leaves no row.
+   */
+  viewed_at: Generated<number | null>;
+  /**
+   * How many users dislike the content: its rows of `dislikes`, counted as they are added and
+   * taken away (POST and DELETE /dislike). Apart from `like_count`, which a dislike leaves as it
+   * is. Kept whether the server has dislikes on or not (`dislikes` in the configuration), and
+   * shown only while it has.
+   */
+  dislike_count: Generated<number>;
+  /**
+   * When a dislike of the content was last given or taken back, or null if none ever was: how a
+   * compactor run finds the content whose count of them changed since the last one.
+   */
+  disliked_at: Generated<number | null>;
   created_at: number;
   /** Set by DELETE /content/:id; the compactor removes the content from the feed index, then deletes it. */
   delete_requested_at: number | null;
@@ -357,6 +384,18 @@ export interface TagPairsTable {
  * by `content.unliked_at`. Likes of comments aren't here: they are in the content store.
  */
 export interface LikesTable {
+  user_id: string;
+  content_id: string;
+  created_at: number;
+}
+
+/**
+ * A user's dislike of a post: one row per user and post, as a dislike is given once. Taking it
+ * back (DELETE /dislike) deletes the row. `content.dislike_count` is the running total, and the
+ * compactor finds the content whose total changed by `content.disliked_at`. A dislike is apart
+ * from a like: a user may have both of one post, and neither changes the other's count.
+ */
+export interface DislikesTable {
   user_id: string;
   content_id: string;
   created_at: number;
@@ -634,6 +673,7 @@ export interface Database {
   tags: TagsTable;
   tag_pairs: TagPairsTable;
   likes: LikesTable;
+  dislikes: DislikesTable;
   follows: FollowsTable;
   feed_queue: FeedQueueTable;
   pending_writes: PendingWritesTable;

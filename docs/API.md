@@ -22,7 +22,7 @@ Every Evieverse instance serves the same HTTP API.
 | [`POST /register`](#post-register) | Anyone | Creates an account and returns its API key, once a [challenge](#challenges) is solved. An admin's request needs none. |
 | [`GET /challenges/:challengeId/audio`](#get-challengeschallengeidaudio) | Anyone who has the challenge | A [challenge](#challenges)'s characters read out, for people who can't read its image. |
 | [`GET /users/:userId`](#get-usersuserid-and-patch-usersuserid) | Anyone | A user's public profile and roles. |
-| [`PATCH /users/:userId`](#get-usersuserid-and-patch-usersuserid) | The user | Changes the user's username, their language, whether they take part in messages between users, whether they show whom they follow and who follows them, or their profile's bio and links. |
+| [`PATCH /users/:userId`](#get-usersuserid-and-patch-usersuserid) | The user | Changes the user's language, whether they take part in messages between users, whether they show whom they follow and who follows them, or their profile's bio and links. |
 | [`PUT /users/:userId/avatar`](#the-avatar) | The user | Sets the user's avatar, made of the image the request sends. |
 | [`DELETE /users/:userId/avatar`](#the-avatar) | The user | Takes the user's avatar away. |
 | [`GET /users/:userId/avatar`](#the-avatar) | Anyone | A user's avatar. |
@@ -36,7 +36,7 @@ Every Evieverse instance serves the same HTTP API.
 | [`GET /languages`](#get-languages) | Anyone | The languages the instance answers in. |
 | [`POST /store`](#post-store) | Any user | Creates a post, or updates one of the user's own. |
 | [`POST /uploads`](#post-uploads) | Any user | Gives a link for sending a large file straight to the content store. |
-| [`GET /content/:contentId`](#get-contentcontentid) | Anyone | A post: its credit, text, hashtags and likes. |
+| [`GET /content/:contentId`](#get-contentcontentid) | Anyone | A post: its credit, text, hashtags, likes, views and dislikes. Read with a user's credentials, it counts as a view of the post. |
 | [`GET /content/:contentId/raw`](#get-contentcontentid) | Anyone | A post's bytes. |
 | [`GET /content/:contentId/raw/:n`](#get-contentcontentid) | Anyone | Image number `n` of an image post of several images (an album). |
 | [`GET /content/:contentId/video/:videoId/:file`](#videos) | Anyone | A file of a post's processed video: its poster, or a playlist or segment of its adaptive stream. |
@@ -47,6 +47,8 @@ Every Evieverse instance serves the same HTTP API.
 | [`GET /repost/keys`](#attestations) | Anyone | The public keys the instance signs its posts' attestations with. |
 | [`POST /like`](#post-like) | Any user | Likes a post, or a comment on one. |
 | [`DELETE /like`](#delete-like) | Any user | Takes back the user's like of a post, or of a comment on one. |
+| [`POST /dislike`](#post-dislike) | Any user, on an instance that has dislikes on | Dislikes a post. |
+| [`DELETE /dislike`](#delete-dislike) | Any user | Takes back the user's dislike of a post. |
 | [`POST /report`](#post-report) | Any user | Reports a post, or a comment on one, to the server's moderators. |
 | [`GET /content/:contentId/comments`](#reading-comments) | Anyone | The comments on a post, a page at a time. |
 | [`GET /content/:contentId/comments/:commentId/replies`](#reading-comments) | Anyone | The replies to a comment, a page at a time. |
@@ -102,7 +104,7 @@ Every Evieverse instance serves the same HTTP API.
 
 ### Authentication
 
-Write endpoints authenticate with `userId` and `apiKey`, which [`POST /register`](#post-register) returns. Send them in the JSON body or form fields, or as the headers `Authorization: Bearer <apiKey>` and `X-User-Id: <userId>`. A missing or wrong key gets `401`. Reading hashtag feeds, content, profiles and hashtags needs no key, nor does a [search](#search), and neither does a [follow list](#following) or a [following feed](#get-feedfollowing) whose user shows whom they follow. A `GET` has no body, so one that needs a key takes it from the headers.
+Write endpoints authenticate with `userId` and `apiKey`, which [`POST /register`](#post-register) returns. Send them in the JSON body or form fields, or as the headers `Authorization: Bearer <apiKey>` and `X-User-Id: <userId>`. A missing or wrong key gets `401`. Reading hashtag feeds, content, profiles and hashtags needs no key, nor does a [search](#search), and neither does a [follow list](#following) or a [following feed](#get-feedfollowing) whose user shows whom they follow. A `GET` has no body, so one that needs a key takes it from the headers. A post read with a user's credentials in the headers is counted as a [view](#views) of it; read without them, it's the same post, and no view.
 
 ```bash
 curl localhost:3000/whoami -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID"
@@ -219,7 +221,7 @@ No challenge is asked for a post or a comment. What holds them is a limit a minu
 
 The first request is answered with a [challenge](#challenges). The same request sent again with its solution returns `201` with `{ userId, username, language, apiKey, note }`. The key is shown only once, which `note` says. This endpoint is rate limited per IP (`REGISTER_RATE_LIMIT_PER_HOUR`, 10 an hour), and every attempt counts, so registering uses at least two.
 - `userId` (a UUID) is the user's identity everywhere.
-- `username` is a display name of 1 to 64 characters, and must be unique (exact match). A name already in use returns `409`, before any challenge. It's the credit shown on everything the user publishes.
+- `username` is a display name of 1 to 64 characters, and must be unique (exact match). A name already in use returns `409`, before any challenge. It's the credit shown on everything the user publishes, and it's the account's for good: a username [can't be changed](#get-usersuserid-and-patch-usersuserid).
 - `language` is optional: the code of any of the instance's [languages](#get-languages), which [`GET /languages`](#get-languages) lists. The instance answers the user in it from this request on, challenge included. Without it, the user registers in the language the request is answered in: the one its `Accept-Language` header asks for, or the instance's default. A code that isn't one of the instance's returns `400`, with the ones that are. The response's `language` is the one the user got.
 
 **An admin registers users without a challenge.** A request that carries an admin's [credentials](#authentication) returns `201` at once, with the new user's `userId` and `apiKey`, for the admin to pass on:
@@ -257,11 +259,11 @@ The [CLI](CLI.md#for-admins) sends this request as `evieverse register Alice`.
 - `admin` is whether the user is an admin, `moderator` whether they're a server moderator, and `moderates` lists the hashtags they're a moderator of, as [moderation](#moderation) describes.
 - A user's language isn't part of their public profile, and neither are their settings: whether they take messages, and whether they show whom they follow and who follows them.
 
-`PATCH` (authenticated, own profile only) updates `username`, `language`, `messages`, `showFollowing`, `showFollowers`, `bio`, `links`, or any of them at once, and returns `{ userId, username, language, messages, showFollowing, showFollowers, bio, links, avatarUrl }` as they now are. A request with none of them gets `400`.
+`PATCH` (authenticated, own profile only) updates `language`, `messages`, `showFollowing`, `showFollowers`, `bio`, `links`, or any of them at once, and returns `{ userId, username, language, messages, showFollowing, showFollowers, bio, links, avatarUrl }` as they now are. A request with none of them gets `400`.
 - `bio` and `links` are the user's [profile](#a-users-profile), which says what each can be.
 - `messages` is whether the user takes part in [messages between users](#post-messages): `true` (as every account starts) or `false`. With it off, the user is sent no messages and sends none. The server's [notices](#notices) still reach their inbox.
 - `showFollowing` is whether anyone can list whom the user [follows](#following), and `showFollowers` whether anyone can list who follows them: `false` (as every account starts) or `true`, each on its own. The user can list both themselves either way. `showFollowing` also decides whether anyone can read the user's [following feed](#get-feedfollowing), which shows whose posts they follow.
-- `username` must still be unique: `409` if it's taken. Feeds show the new name on all of the user's content at once: they look the credit up in Redis when they render.
+- `username` can't be changed. An account keeps the name it was registered with for as long as it's there, so everything a user published stays credited to the name they published it by. A request that sends another `username` than the user's gets `400`, "a username can't be changed: an account keeps the name it was registered with", and changes nothing, whatever else it sent. The name the user has is no change: a request that sends it, as a client does that sends back what registering returned, does whatever else it asks, and gets `400` as a request with nothing to update if it asks nothing else.
 - `language` is the code of any of the instance's [languages](#get-languages): `400` if it isn't one of them. The instance answers the user in it from this response on.
 - A request that changes several changes them all or none.
 
@@ -346,7 +348,7 @@ It takes:
 - `cursor`: the previous page's `nextCursor`. It's `null` on the last page.
 
 What it returns:
-- `posts` is the page. Each post is a record as a [feed](#get-feed) gives one, with all of its likes, and without `moderated`, which is a hashtag's. Its `publisher` also has `avatarUrl`, if the user has an avatar.
+- `posts` is the page. Each post is a record as a [feed](#get-feed) gives one, with all of its likes, its `views` and its `dislikes` as they are now, and without `moderated`, which is a hashtag's. Being listed here isn't a [view](#views) of a post. Its `publisher` also has `avatarUrl`, if the user has an avatar.
 - `pinned` is the posts the user [pinned](#pinned-posts), the one pinned last first, as records like the others, and `[]` if they pinned none. Only the first page has it. A pinned post keeps its place among `posts` too.
 - Only what anyone can read is listed: no post set for deletion, none that waits in the [moderation queue](#the-moderation-queue), and no repost of a post on another server that is [gone there](#refreshing-a-repost).
 - The user's own posts, not what they [reposted](#post-repost), which are other users' posts.
@@ -393,7 +395,7 @@ curl -X POST localhost:3000/users/$USER_ID/key -H "Authorization: Bearer $KEY" -
 - Anyone else's request for another user's key gets `403`.
 - Of two requests sent at once with the same key, one gets the new key and the other `401`.
 - Whoever holds a key can replace it, so this takes an account back from someone who copied its key only if its owner gets there first. After that, an admin's replacement is the way back.
-- The admin account of a [Terraform deployment](DEPLOY.md#the-admin-account) gets its key from the deployment. A key replaced here lasts: later deploys leave it in place, and the deployment's key stays revoked. The deployment still holds the old key, though, so its `admin_api_key` output no longer works, and its next apply writes that key back to the profile file.
+- The admin account of a [Terraform deployment](IAC.md#the-admin-account) gets its key from the deployment. A key replaced here lasts: later deploys leave it in place, and the deployment's key stays revoked. The deployment still holds the old key, though, so its `admin_api_key` output no longer works, and its next apply writes that key back to the profile file.
 
 The [CLI](CLI.md) does this with `evieverse key rotate`, and saves the new key in its profile. An admin replaces another user's key with `evieverse users rotate-key <userId>`, which prints the new key.
 
@@ -450,11 +452,12 @@ Every record says what it is in `type`. They come in this order, each kind in an
 
 | `type` | What it is | It has |
 | --- | --- | --- |
-| `account` | The account, once. | `userId`, `username`, `createdAt`, `usernameSetAt` (when the user registered, or last changed their name), their [profile](#a-users-profile) (`bio`, `links`, `avatarUrl`, and `pinnedContentIds`: every post they pinned, the one pinned last first, whether or not anyone else can read it now), `language` (`null` for the instance's default), `admin`, `moderator`, `messages`, `showFollowing`, `showFollowers`, `bannedAt` (`null` unless they're banned), and `claimsBarredAt` (`null` unless they're [barred from claiming hashtags](#barring-a-user-from-claiming)). Not why they were banned or barred, nor by whom. |
+| `account` | The account, once. | `userId`, `username`, `createdAt`, `usernameSetAt` (when the user registered, which is when their name was set; later than `createdAt` only on an account that was renamed while a user could change their name, which none can now), their [profile](#a-users-profile) (`bio`, `links`, `avatarUrl`, and `pinnedContentIds`: every post they pinned, the one pinned last first, whether or not anyone else can read it now), `language` (`null` for the instance's default), `admin`, `moderator`, `messages`, `showFollowing`, `showFollowers`, `bannedAt` (`null` unless they're banned), and `claimsBarredAt` (`null` unless they're [barred from claiming hashtags](#barring-a-user-from-claiming)). Not why they were banned or barred, nor by whom. |
 | `apiKey` | Each API key the account has had. Never the key. | `keyId`, `createdAt`, `revokedAt` |
-| `post` | Each of the user's posts, oldest first, as [`GET /content/:contentId`](#get-contentcontentid) gives it to its publisher. Posts that wait in the moderation queue are there, with their `status`; posts set for deletion aren't. | `contentId`, `preview`, `text`, `mentions`, `tags`, `mimeType`, `comments`, `size`, `images`, `likes`, `aiGenerated`, `contentUrl`, `createdAt`, `updatedAt`, and `origin` on a repost of a post on another server |
+| `post` | Each of the user's posts, oldest first, as [`GET /content/:contentId`](#get-contentcontentid) gives it to its publisher. Posts that wait in the moderation queue are there, with their `status`; posts set for deletion aren't. | `contentId`, `preview`, `text`, `mentions`, `tags`, `mimeType`, `comments`, `size`, `images`, `likes`, `views`, `dislikes` (`null` on an instance that has [dislikes](#post-dislike) off), `aiGenerated`, `contentUrl`, `createdAt`, `updatedAt`, and `origin` on a repost of a post on another server |
 | `comment` | Each [comment](#comments) the user wrote, oldest first, with the ones that wait in the moderation queue (`status: "pending_review"`). | `commentId`, `contentId`, `parentId`, `text`, `mentions`, `aiGenerated`, `media`, `createdAt`, `editedAt`. Not its likes or its replies, which are what others did. |
 | `like` | Each post the user liked. | `contentId`, `likedAt` |
+| `dislike` | Each post the user [disliked](#post-dislike). They're listed whether the instance has dislikes on now or not: one given while it had them is kept. | `contentId`, `dislikedAt` |
 | `commentLike` | Each comment the user liked. When isn't kept. | `contentId`, `commentId` |
 | `repost` | Each post the user [reposted](#post-repost), with the hashtags the repost gave it. | `contentId`, `tags`, `repostedAt` |
 | `following` | Each user they [follow](#following). | `userId`, `username`, `followedAt` |
@@ -470,9 +473,10 @@ What to know about it:
 
 - Files aren't in the export. A post's record has its `contentUrl`, an image post's has each of its `images` with its own `url`, and a comment's `media` has its `url`: whoever keeps the export fetches the bytes from there, as any reader does. The account's record has its `avatarUrl`, which answers `404` while the user is banned.
 - It isn't a snapshot. Each page reads what is there when it's asked for, while the account is in use. What is there throughout is in the export exactly once. What is written or deleted meanwhile is in it or not, by where the export had got to.
-- A new post or an edit is in it at once. A comment the user just sent, and a like of a comment, are in it after the [compactor](APP.md#8-the-compactor)'s next run, which is seconds. A like that was [taken back](#delete-like) isn't in it: a post's at once, and a comment's after that run.
+- A new post or an edit is in it at once. A comment the user just sent, and a like of a comment, are in it after the [compactor](APP.md#8-the-compactor)'s next run, which is seconds. A like that was [taken back](#delete-like) isn't in it: a post's at once, and a comment's after that run. Nor is a dislike that was [taken back](#delete-dislike), at once.
+- Which posts the user viewed isn't in it, because it isn't kept: a [view](#views) adds to the post's count, and leaves nothing of who it was. Reading the export is no view of the posts in it.
 - What it leaves out: what moderators hold about the user and don't tell them (why they were banned, what was decided about their reports), what the user did as a moderator or an admin (decisions, blocked words, rules, ads), the operator's logs, counts that are kept for minutes (limits), and a file that was uploaded and never posted.
-- Reading it changes nothing, so it leaves no record in the [audit log](DEPLOY.md#audit-log). The server's own log has a line when an export is started.
+- Reading it changes nothing, so it leaves no record in the [audit log](IAC.md#audit-log). The server's own log has a line when an export is started.
 
 | Status | What happened |
 | --- | --- |
@@ -484,7 +488,7 @@ What to know about it:
 
 ### `GET /whoami`
 
-Authenticated. Returns the account the key belongs to, its language, its roles and its settings: `{ userId, username, language, admin, moderator, moderates, banned, claimsBarred, messages, showFollowing, showFollowers }`, with `admin`, `moderator` and `moderates` as in the profile. `banned` is whether a moderator [banned](#bans) the account, which can't then post, comment, like or send messages. `claimsBarred` is whether a moderator [barred it from claiming hashtags](#barring-a-user-from-claiming). `language` is the code of the language the instance answers the user in, `messages` is whether the user takes part in [messages between users](#post-messages), and `showFollowing` and `showFollowers` are whether they show whom they [follow](#following) and who follows them. The [CLI](CLI.md) checks a key with it when you sign in.
+Authenticated. Returns the account the key belongs to, its language, its roles and its settings: `{ userId, username, language, admin, moderator, moderates, banned, claimsBarred, messages, showFollowing, showFollowers }`, with `admin`, `moderator` and `moderates` as in the profile. `banned` is whether a moderator [banned](#bans) the account, which can't then post, comment, like, dislike or send messages. `claimsBarred` is whether a moderator [barred it from claiming hashtags](#barring-a-user-from-claiming). `language` is the code of the language the instance answers the user in, `messages` is whether the user takes part in [messages between users](#post-messages), and `showFollowing` and `showFollowers` are whether they show whom they [follow](#following) and who follows them. The [CLI](CLI.md) checks a key with it when you sign in.
 
 ### `GET /languages`
 
@@ -698,7 +702,7 @@ curl -X POST localhost:3000/store -H "Authorization: Bearer $KEY" -H "X-User-Id:
 
 ### `POST /uploads`
 
-Gives a link to send an image, video or audio file straight to the content store, for files too large for a request to the server to carry. When the server runs as functions, that's anything over a few megabytes ([DEPLOY.md](DEPLOY.md#uploads)). A [banned](#bans) user is refused a link (`403`), as a link is for posting the file.
+Gives a link to send an image, video or audio file straight to the content store, for files too large for a request to the server to carry. When the server runs as functions, that's anything over a few megabytes ([IAC.md](IAC.md#uploads)). A [banned](#bans) user is refused a link (`403`), as a link is for posting the file.
 
 | field | notes |
 | --- | --- |
@@ -788,7 +792,7 @@ A username can hold any characters, spaces among them, and its user can change i
 - A mention is of a user by the name they have, to the letter, capitals included. Of several names that fit, the longest is the one: `@Ann Lee` is Ann Lee where there's an Ann too. A name that is no user's is text.
 - It's not a mention after a letter or a digit (`mail@alice.example`), in code, in the label of a link, or written `\@`.
 - A text mentions 10 users at most. What it names after the tenth is text. Only the first 50 `@` of a text are looked at.
-- An update or an edit goes on mentioning whom the text mentioned. A name that was a mention in the text being replaced is the same user's in the new one, even if they have changed their name since and someone else has taken it. Any other name is looked up as it is then.
+- An update or an edit goes on mentioning whom the text mentioned. A name that was a mention in the text being replaced is the same user's in the new one, for as long as that user has an account. A username can't be changed, so that's who the name finds anyway; it differs only for a user who was renamed while one could be, and whose old name someone else took since. Any other name is looked up as it is then.
 
 The notice is `post_mention` or `comment_mention`, with who wrote the text as its `from`:
 
@@ -800,7 +804,7 @@ The notice is `post_mention` or `comment_mention`, with who wrote the text as it
 
 ### `GET /content/:contentId`
 
-Returns the publisher credit first: `publisher: { userId, username, avatarUrl }`, with `avatarUrl` where the publisher has an [avatar](#the-avatar), and without it where they have none, or are [banned](#bans). Then come `contentId`, `preview`, `text` (a text post's whole text, or a caption), `mentions` (the users that text [mentions](#mentions), where it mentions any), `tags`, `likes`, `mimeType`, `aiGenerated`, `comments` (whether the post takes [comments](#comments)), `size`, `contentUrl`, `images` (on an image post), `createdAt` and `updatedAt`. A post whose video is still being [processed](#videos) has `processing: true`. Where the instance shows [ads](#ads) on posts, `ad` comes last: one ad to show at the post's end, `{ adId, label, kind, imageUrl?, imageAlt?, text?, url? }`, as in [`GET /feed`](#get-feed). A post with no ad to show has none.
+Returns the publisher credit first: `publisher: { userId, username, avatarUrl }`, with `avatarUrl` where the publisher has an [avatar](#the-avatar), and without it where they have none, or are [banned](#bans). Then come `contentId`, `preview`, `text` (a text post's whole text, or a caption), `mentions` (the users that text [mentions](#mentions), where it mentions any), `tags`, `likes`, `views` (how many times user accounts have read the post: [below](#views)), `dislikes` (how many users [dislike](#post-dislike) it, or `null` on an instance that has dislikes off), `mimeType`, `aiGenerated`, `comments` (whether the post takes [comments](#comments)), `size`, `contentUrl`, `images` (on an image post), `createdAt` and `updatedAt`. A post whose video is still being [processed](#videos) has `processing: true`. Where the instance shows [ads](#ads) on posts, `ad` comes last: one ad to show at the post's end, `{ adId, label, kind, imageUrl?, imageAlt?, text?, url? }`, as in [`GET /feed`](#get-feed). A post with no ad to show has none.
 
 An image post has `images`, its images in the order they're shown: `[{ url, mimeType, size, alt? }]`, each with where its bytes are read, its content type, its size in bytes as stored, and its [alt text](#alt-text) if it has one. A post of one image has one item, whose `url` is `contentUrl`. An [album](#albums) has one for each image: the first at `contentUrl`, and the others at `contentUrl` with their number after it (`/content/<contentId>/raw/2`, and so on). The post's own `mimeType` and `size` are the first image's. No other post has `images`.
 
@@ -848,13 +852,31 @@ A repost of a post on another server is hidden the same way while that server sa
 
 One address can ask for 300 posts a minute (`CONTENT_RATE_LIMIT_PER_MINUTE`), then gets `429` ([below](#limits-on-reads-that-need-no-key)). `/raw` isn't limited.
 
+#### Views
+
+A post's `views` is how many times it has been read by a user account. `GET /content/:contentId` is what counts one: a request that carries a user's credentials in the headers (`Authorization: Bearer <apiKey>` and `X-User-Id`) adds one to the post's count, every time it's made.
+
+```bash
+curl localhost:3000/content/$CONTENT_ID -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID"
+```
+
+- A client counts a view by reading the post this way when its user opens it. There's no other request to send.
+- They're views, not viewers. Who viewed a post isn't kept, so the same user reading it again is another view, and the publisher's own reads count like anyone's. What bounds one client is the limit of 300 posts a minute from an address.
+- A request with no credentials, or with wrong ones, is answered as ever and counts nothing: it isn't refused. So readers without an account, crawlers and link previews aren't views.
+- Nothing else is a view: not `/raw` or an album's images, not the post's comments, and not a feed, a [profile](#get-usersuseridposts) or a [search](#searching-posts) that lists the post.
+- A post that's withheld counts none: one that waits in the moderation queue, or whose original is gone, read by those who can still read it.
+- The response's `views` includes the view the request made. Of two reads made at once, each may give the count without the other's.
+- A view never fails a read. If the count couldn't be written, the post is returned all the same, without that view.
+- Here, in a profile's posts and in search results, `views` is the count as it is now. Feeds show it after the next compactor run, as they do likes. No feed is ordered by views.
+- An [`engaged`](#engaged-feeds) feed's `engagement` is another matter: that's what one reader has viewed, which the client keeps. The instance keeps a post's count, and nothing about its readers.
+
 ### `DELETE /content/:contentId`
 
 Authenticated. Only the original publisher or an [admin](#moderation) can delete content, otherwise `403`. Returns `202` with `{ contentId, status: "pending_deletion", requestedAt }`, and repeating the request returns the same response. When an admin deletes someone else's post, its publisher gets a [notice](#notices) in their inbox.
 
-The content can't be read from then on: `GET /content` and `/raw` return `404`, likes return `404`, and updates (`POST /store` with its `contentId`) return `409`. Its [comments](#comments) go with it: they can't be read, added to, edited, liked or reported from then on.
+The content can't be read from then on: `GET /content` and `/raw` return `404`, likes and dislikes return `404`, and updates (`POST /store` with its `contentId`) return `409`. Its [comments](#comments) go with it: they can't be read, added to, edited, liked or reported from then on.
 
-Nothing is removed at the request. The content is set for deletion, and the compactor's next run (every `COMPACT_INTERVAL_SECONDS`, 5 by default) removes it from every hashtag's index and its publisher's, then deletes its comments, its database row (with its likes), its bytes, its meta file and its summary. Feeds return it until that run, and not after it, including on later pages of a feed session that already started.
+Nothing is removed at the request. The content is set for deletion, and the compactor's next run (every `COMPACT_INTERVAL_SECONDS`, 5 by default) removes it from every hashtag's index and its publisher's, then deletes its comments, its database row (with its likes, its dislikes and its count of views), its bytes, its meta file and its summary. Feeds return it until that run, and not after it, including on later pages of a feed session that already started.
 
 ### `POST /repost`
 
@@ -1115,6 +1137,62 @@ curl -X DELETE "localhost:3000/like?contentId=$CONTENT_ID" -H "Authorization: Be
 ```
 
 It returns `{ contentId, commentId, likes, wasLiked }`. `likes` is the comment's, without this like. Every record of the comment gives the number as well, without the like after the compactor's next run. A comment that was deleted gets `404`, and so does one under a post set for deletion. Where `POST /like` would refuse the comment for another reason (its post is withheld or no longer takes comments, or an edit took the comment back to the moderation queue), a user who has a like there can still take it back, and anyone else gets the `404` that `POST /like` gives.
+
+### `POST /dislike`
+
+```json
+{ "userId": "...", "apiKey": "...", "contentId": "..." }
+```
+
+Authenticated. Dislikes a post, on an instance that has dislikes on. Whether it has is its operator's choice (`DISLIKES`, [CONFIG.md](CONFIG.md#dislikes)), and an instance has them off unless it says otherwise.
+
+**How a client knows.** Every record of a post has `dislikes`, wherever the post is read: in [feeds](#get-feed), in [`GET /content/:contentId`](#get-contentcontentid), in a [profile's posts](#get-usersuseridposts) and in [search results](#searching-posts).
+
+| `dislikes` | What it says |
+| --- | --- |
+| `null` | The instance has dislikes off. Show no count and no way to dislike. It's `null` on every record. |
+| A number, from `0` | The instance has dislikes on, and this many users dislike the post. `0` is a post nobody dislikes. |
+
+With dislikes on, each user can dislike a post once, and the dislike stays until they take it back ([`DELETE /dislike`](#delete-dislike)). Returns `{ contentId, dislikes, alreadyDisliked }`: `201` for a first dislike, and `200` with `alreadyDisliked: true` for a repeated one, which doesn't count twice.
+
+- Dislikes are a count of their own, from 0, and likes are no part of it. A dislike takes no like off, and a user can both like and dislike a post.
+- Nothing is ordered by dislikes: no feed, no search and no list of a user's posts. A `popular` feed goes by likes alone, however disliked a post is.
+- The post has the new count at once ([`GET /content/:contentId`](#get-contentcontentid)). Feeds show it after the next compactor run.
+- Where a [repost](#post-repost) placed the post, that record's `dislikes` are all the post has, not the ones since the repost, which is what its `likes` are.
+- Only posts are disliked, not comments. A request with a `commentId`, which is how [`POST /like`](#post-like) names a comment, gets `400` ("only posts can be disliked, not comments: leave commentId out"), and isn't taken for a dislike of the post.
+- Content set for deletion, or withheld from readers because it waits in the [moderation queue](#the-moderation-queue) or its original is [gone from its own server](#refreshing-a-repost), can't be disliked (`404`).
+- A [banned](#bans) user is refused (`403`). The dislikes they made before the ban stay, until they take them back.
+
+| Status | What happened |
+| --- | --- |
+| `201` | The post is disliked. |
+| `200` | The user already disliked it, and nothing changed. |
+| `400` | The instance has dislikes off ("this server doesn't take dislikes"), which is answered before the key is looked at. Or the request has a `commentId`, or no valid `contentId`. |
+| `401` | The `userId` and `apiKey` are missing or wrong. |
+| `403` | The user is banned. |
+| `404` | There's no such post, or it's set for deletion or withheld. |
+
+### `DELETE /dislike`
+
+```json
+{ "userId": "...", "apiKey": "...", "contentId": "..." }
+```
+
+Authenticated. Takes back the user's dislike of a post. Returns `200` with `{ contentId, dislikes, wasDisliked }`: `dislikes` is the post's count now, and `wasDisliked` is whether there was a dislike to take back. Taking back a dislike that isn't there changes nothing, and is answered the same way, with `wasDisliked: false`. The user can dislike the post again afterwards ([`POST /dislike`](#post-dislike)), which is a new dislike.
+
+As with [`DELETE /like`](#delete-like), a client that sends no body with a `DELETE` names the post in the query instead, with its credentials in the [headers](#authentication):
+
+```sh
+curl -X DELETE "localhost:3000/dislike?contentId=$CONTENT_ID" -H "Authorization: Bearer $KEY" -H "X-User-Id: $USER_ID"
+```
+
+- The post has the new count at once. Feeds show it after the next compactor run.
+- It's answered on an instance that has dislikes off. A dislike given while the instance had them on is still the user's to take back, and the answer's `dislikes` is then `null`, as it is wherever the post is read.
+- Turning dislikes off deletes nothing. The counts and each user's dislikes are kept, and an instance that turns them on again shows them as they are by then.
+- A [banned](#bans) user isn't refused: the dislike is theirs to take back.
+- Content set for deletion gets `404`: its dislikes go with it.
+- Content that's withheld from readers still gives back a dislike to the user who has one there. Anyone else gets `404`, as from `POST /dislike`.
+- A request with a `commentId` gets `400`, as from `POST /dislike`.
 
 ### `POST /report`
 
@@ -1525,11 +1603,14 @@ curl "localhost:3000/feed?tags=news,mumbai&hours=24"
 - `tags`: one or more hashtags (letters, digits, `_`; a leading `#` is fine). Most feeds ask for several.
 - `hours`: the feed's window. The feed is of the posts created in the past this many hours, and of no others. One of `1`, `2`, `4`, `8`, `12`, `24` (1 day, the default), `48` (2 days), `72` (3 days), `168` (7 days), `336` (14 days), `504` (21 days), `720` (30 days), `1440` (60 days) or `2160` (90 days). Any other value gets `400`.
 - `limit`: the most posts in the page, up to `FEED_MAX_PAGE_SIZE` (default 100). Left out, `FEED_PAGE_SIZE` (default 50).
-- `algorithm`: `popular` (the default) or `chronological`.
-  - `popular` returns the window's most liked content first: the latest and greatest, for showcasing a tag.
+- `algorithm`: `popular` (the default), `chronological` or `engaged`.
+  - `popular` returns the window's most liked content first: the latest and greatest, for showcasing a tag. Each hashtag's posts are in the order of their likes, and nothing else.
   - `chronological` returns the window's newest content first, whatever its likes or its hashtag.
+  - `engaged` returns the `popular` feed with posts that the likes alone wouldn't put there ([below](#engaged-feeds)): new posts with no likes yet among the liked ones (fresh slots), and the posts that match what its reader has liked and viewed, first and among the rest. The client says what that is, in `engagement`.
+- `engagement`: optional, and read only by the first page of an `engaged` feed: how many posts the reader has liked and viewed, by hashtag and by publisher, as a JSON object ([below](#engaged-feeds)). The server doesn't keep it. Left out, or with nothing counted, an `engaged` feed is the `popular` one with fresh slots.
+- `format`: optional. `rss` returns the page as an RSS 2.0 document ([below](#feeds-as-rss)). Left out or `json`, it's the JSON this section describes. Any other value gets `400`.
 - `addRelated`: optional. `true` also returns posts under the hashtags [related](#related-hashtags) to the ones asked for: those that tend to be on the same posts. Left out or `false`, the feed is of the hashtags asked for alone.
-- `aiGenerated`: optional. `true` returns only content its publisher declared created with AI, `false` only content declared not created with AI. Left out, the feed returns both. Everything below then applies to the matching content alone, so the page, the turns between tags and the fresh slots are all spent on it.
+- `aiGenerated`: optional. `true` returns only content its publisher declared created with AI, `false` only content declared not created with AI. Left out, the feed returns both. Everything below then applies to the matching content alone, so the page, the turns between tags and an `engaged` feed's fresh slots are all spent on it.
 - `moderated`: optional. `false` returns only the posts no moderator of their hashtag has approved, which is [that hashtag's queue](#a-hashtags-queue); `true` only those one has. Left out, the feed returns both. It filters as `aiGenerated` does, and the two combine.
 - `cursor`: optional, taken from the previous page's `nextCursor`.
 
@@ -1539,11 +1620,14 @@ How the feed is assembled:
 2. Page size: a page holds at most `limit` posts (50 by default).
 3. Order: each tag's posts are ordered by likes (most first), then recency.
 4. Turns: the requested tags take turns, so each gets an equal share of the page. A tag that runs out lets the others continue. Content carrying several requested tags appears once.
-5. Fresh content: so that new posts on busy tags aren't buried under liked ones (and can earn likes at all), the 2nd pick per tag, and then every `FEED_FRESH_EVERY`th (default 4), is new content with at most `FEED_FRESH_MAX_LIKES` likes (default 0). It's sampled from that tag's `FEED_FRESH_POOL` newest such records in the window (default 200), in an order that goes by a seed chosen per feed session, so different viewers see different new posts. A fresh slot is skipped once the likes order has already reached unliked content. `FEED_FRESH_EVERY=0` turns this off.
 
-**Chronological** feeds work the same way, in order of time instead of likes. Each tag's posts are ordered newest first (step 3), and instead of the tags taking turns (step 4), the next post comes from whichever hashtag's is the newest. So the page is the newest `limit` posts of the hashtags together, and the next page carries on from there. There are no fresh slots (step 5), which exist to lift new posts out of a likes order.
+That is all of a `popular` feed: each hashtag's list is its most liked posts first, down to the last, and a post with fewer likes never comes before one with more. Under a hashtag a [repost](#post-repost) gave a post, the likes that count are the ones since the repost, which is what the record's `likes` says.
 
-Either way, the feed is of the posts the hashtag's index keeps. For a busy hashtag that's each day's most liked posts, fewer the older the day ([APP.md](APP.md#retention-and-quotas)).
+**Chronological** feeds work the same way, in order of time instead of likes. Each tag's posts are ordered newest first (step 3), and instead of the tags taking turns (step 4), the next post comes from whichever hashtag's is the newest. So the page is the newest `limit` posts of the hashtags together, and the next page carries on from there.
+
+**Engaged** feeds are `popular` feeds with posts that the likes alone wouldn't put there ([below](#engaged-feeds)): new posts with no likes yet take the 2nd pick per tag and every 4th after it (fresh slots), and, for the posts that match the reader's `engagement`, the first page starts with the newest of them, and every 3rd pick per tag after that is one of them. Every other pick is the `popular` feed's.
+
+Whichever the algorithm, the feed is of the posts the hashtag's index keeps. For a busy hashtag that's each day's most liked posts, fewer the older the day ([APP.md](APP.md#retention-and-quotas)).
 
 The response shape is:
 
@@ -1556,24 +1640,29 @@ The response shape is:
 
 - `window` is the span of time the feed is of: `hours` back from when its first page was asked for.
 - `count` is the number of records in the page, and `truncated` whether the window holds more: `nextCursor` then gets the next page.
-- `tags` holds each hashtag's records, in the feed's order: most liked first in a `popular` feed, newest first in a `chronological` one. A hashtag with no record in the page is left out. To show a `popular` page as one list, take a record from each hashtag's list in turn; to show a `chronological` one, merge the lists by `createdAt`.
+- `tags` holds each hashtag's records, in the feed's order: most liked first in a `popular` feed, newest first in a `chronological` one, and in the order they were picked in an `engaged` one. A hashtag with no record in the page is left out. To show a `popular` or an `engaged` page as one list, take a record from each hashtag's list in turn; to show a `chronological` one, merge the lists by `createdAt`.
 - `ads` holds the page's [ads](#ads), each `{ adId, label, kind, imageUrl?, imageAlt?, text?, url?, position }`. Show an ad before the page's `position`th post (3, 10 or 17, counted from 1), with its `label` ("Sponsored"). `kind` is `text` or `image`, `imageUrl` an image ad's [image](#get-monetizationadsadidimage), `imageAlt` that image's [alt text](#alt-text) where the ad has one, and `url` the [link](#get-monetizationadsadidclick) to follow. Ads aren't counted in `count`.
 
-Each record is `{ contentId, publisher: { userId, username }, mimeType, aiGenerated, comments, preview, tags, likes, moderated, createdAt, updatedAt }`:
+Each record is `{ contentId, publisher: { userId, username }, mimeType, aiGenerated, comments, preview, tags, likes, views, dislikes, moderated, createdAt, updatedAt }`:
 - `aiGenerated` is the publisher's declaration of whether the content was created with AI.
+- `likes`, `views` and `dislikes` are the post's three counts, as of the compactor's last run:
+  - `likes` is how many users like it ([`POST /like`](#post-like)).
+  - `views` is how many times user accounts have read it ([`GET /content/:contentId`](#views)), from 0. Being returned in a feed isn't a view.
+  - `dislikes` is how many users dislike it ([`POST /dislike`](#post-dislike)), from 0, on an instance that has dislikes on. On one that has them off, which is what an instance is unless its operator says otherwise, it's `null` on every record. That's how a client knows whether to show dislikes at all: `null` means show none, and `0` is a post nobody dislikes.
+  - No feed is ordered by views or by dislikes, whichever its algorithm. They're there to be shown.
 - `comments` is whether the post takes [comments](#comments). A record doesn't say how many it has: [`GET /content/:contentId/comments`](#reading-comments) does.
 - `moderated` is whether a moderator of the hashtag the record is listed under has [approved](#a-hashtags-queue) it there. It's per hashtag, so the same post can be `true` under one and `false` under another.
 - `preview` follows the post's type, as [previews](#previews) lists.
 - `mentions` is there on a record whose `preview.text` [mentions](#mentions) users: `[{ userId, username }]`, the ones that part of the text names. The preview is cut so that a mention is in it whole or not at all.
-- `publisher` is the user's current credit, so a renamed user shows under their new name everywhere at once. A feed's credit doesn't have the user's [avatar](#the-avatar): `GET /users/<userId>/avatar` is where it's read.
-- `repost` and `origin` are there only on the records they apply to: `repost` on a record that is there because of a [repost](#post-repost), and `origin` on a repost of a [post on another server](#a-post-on-another-server).
+- `publisher` is the user's credit: their id, and the username they registered with, which can't be changed. A feed's credit doesn't have the user's [avatar](#the-avatar): `GET /users/<userId>/avatar` is where it's read.
+- `repost` and `origin` are there only on the records they apply to: `repost` on a record that is there because of a [repost](#post-repost), and `origin` on a repost of a [post on another server](#a-post-on-another-server). A record a repost put there has the likes since the repost, and all of the post's views and dislikes.
 
-**Pagination:** the cursor says where the feed has got to: the last record it returned under each hashtag, with the end of the window, the algorithm, the related hashtags the first page added, the `aiGenerated` and `moderated` filters and the fresh-content seed. The next page reads the hashtags' indexes as they are by then, and carries on after those records. So:
+**Pagination:** the cursor says where the feed has got to: the last record it returned under each hashtag, with the end of the window, the algorithm, the related hashtags the first page added, the `aiGenerated` and `moderated` filters and the session's seed. In an `engaged` feed it also carries where the feed has got to among each hashtag's fresh posts, and what the first page made of the `engagement`. The next page reads the hashtags' indexes as they are by then, and carries on after those records. So:
 - Every page is of the first page's window. Posts newer than the first page show when the reader starts over.
-- A post isn't returned twice, and what was deleted, held or taken out of a hashtag since the page before is left out, without anything else shifting. There are three exceptions, which a client that shows one list can settle by dropping a `contentId` it already has: a post returned in a fresh slot and liked afterwards, a post returned in a `popular` feed that then lost likes ([`DELETE /like`](#delete-like)) and so moved back in the order, and, in a `popular` feed of several hashtags, a post that lost the hashtag it was returned under and still carries another.
-- What the compactor has applied since the page before shows: new like counts, and what moderators approved or removed.
-- A session can miss a post that came to be ahead of where it had got to: one liked past that point between two pages of a `popular` feed, or one that reached the index late. It's there when the reader starts over.
-- Later pages must ask for the same `tags`, `hours`, `algorithm`, `addRelated`, `aiGenerated` and `moderated`, otherwise `400`.
+- A post isn't returned twice, and what was deleted, held or taken out of a hashtag since the page before is left out, without anything else shifting. There are four exceptions, which a client that shows one list can settle by dropping a `contentId` it already has: a post returned in a fresh slot of an `engaged` feed and liked afterwards, a post returned in a `popular` or an `engaged` feed that then lost likes ([`DELETE /like`](#delete-like)) and so moved back in the order, a post returned in an `engaged` feed because it matched, which then lost the hashtag it matched by, and, in a `popular` or an `engaged` feed of several hashtags, a post that lost the hashtag it was returned under and still carries another.
+- What the compactor has applied since the page before shows: new counts of likes, views and dislikes, and what moderators approved or removed.
+- A session can miss a post that came to be ahead of where it had got to: one liked past that point between two pages of a `popular` or an `engaged` feed, or one that reached the index late. It's there when the reader starts over.
+- Later pages must ask for the same `tags`, `hours`, `algorithm`, `addRelated`, `aiGenerated` and `moderated`, otherwise `400`. They needn't send `engagement` or the same `format`: the cursor carries the first, and the second is only how the page is written.
 - A cursor doesn't expire. One issued by an earlier release of the server gets `410`, and the client should start over; one that isn't valid gets `400`.
 
 **Limits:** a feed needs no key, so it's limited by the address it's asked from, and by how many feeds the instance is answering:
@@ -1605,7 +1694,7 @@ One past its limit gets `429`, with when to try again in a `Retry-After` header,
 
 ### Related hashtags
 
-With `addRelated=true`, the feed is planned over the hashtags asked for and then the ones related to them, as if all had been asked for: they take turns with the others in a `popular` feed, a post under several of them is returned once, and their records are listed under their own names in `tags`. The response names the hashtags it added in `related`, most related first (an empty list if there are none yet).
+With `addRelated=true`, the feed is planned over the hashtags asked for and then the ones related to them, as if all had been asked for: they take turns with the others in a `popular` or an `engaged` feed, a post under several of them is returned once, and their records are listed under their own names in `tags`. The response names the hashtags it added in `related`, most related first (an empty list if there are none yet).
 
 A hashtag is related to another when it tends to be on the same posts. Every post stored counts once for each of its hashtags and once for each pair of them, and the counts build up from there. `#pets` is related to `#dogs` once at least `FEED_RELATED_MIN_POSTS` posts (default 5) carry both, and those are at least `FEED_RELATED_MIN_PERCENT` (default 20) percent of the posts that carry `#dogs`. It's one-sided: a small hashtag can be related to a big one that most of its posts also carry, without the big one being related to it.
 
@@ -1613,7 +1702,97 @@ A hashtag is related to another when it tends to be on the same posts. Every pos
 - The compactor works the related hashtags out from the counts and keeps them in Redis, so a feed with `addRelated` still reads no database. New counts show after its next run, once they're `COMPACT_GRACE_SECONDS` old.
 - An update counts only the hashtags it adds. Counts never go down: a post that is deleted, rejected from the moderation queue or has a hashtag removed stays counted.
 
-### `GET /feed/following`
+### Engaged feeds
+
+With `algorithm=engaged`, the feed is the `popular` one with posts that the likes alone wouldn't put there. A `popular` feed is a sort, and has none of them. An `engaged` feed is made for its reader, and has two kinds.
+
+**Fresh slots.** So that new posts on busy tags aren't buried under liked ones (and can earn likes at all), the 2nd pick per tag, and then every `FEED_FRESH_EVERY`th (default 4), is new content with at most `FEED_FRESH_MAX_LIKES` likes (default 0). It's sampled from that tag's `FEED_FRESH_POOL` newest such records in the window (default 200), in an order that goes by a seed chosen per feed session, so different viewers see different new posts. A fresh slot is skipped once the likes order has already reached unliked content. `FEED_FRESH_EVERY=0` turns this off. Every `engaged` feed has them, whatever it's told of its reader, and no other feed does.
+
+**The reader's posts.** The posts that match what the reader has liked and viewed come first, and more of them come among the rest. The server has no such counts of its own, and a hashtag feed doesn't know who reads it, so the client keeps them and sends them with the request, as `engagement`. The server reads them for that request and stores nothing.
+
+```bash
+curl -G "localhost:3000/feed" \
+  --data-urlencode "tags=news,mumbai" \
+  --data-urlencode "algorithm=engaged" \
+  --data-urlencode 'engagement={"likedByTag":{"cats":12},"viewedByTag":{"cats":40,"dogs":9},"viewedByUser":{"<userId>":25}}'
+```
+
+`engagement` is a JSON object, URL-encoded as any parameter is, of four parts. Each can be left out:
+
+| Field | What it counts |
+| --- | --- |
+| `likedByTag` | The posts the reader has liked, by hashtag: `{ "<tag>": <count>, ... }`. |
+| `likedByUser` | The posts the reader has liked, by the user who published them: `{ "<userId>": <count>, ... }`. |
+| `viewedByTag` | The posts the reader has viewed (opened, not passed in a feed), by hashtag. |
+| `viewedByUser` | The posts the reader has viewed, by the user who published them. |
+
+- A hashtag is written as a feed's `tags` are (letters, digits, `_`; a leading `#` is fine, and so is any case), a user is their `userId`, and a count is a whole number, zero or more. Fields other than these four are ignored.
+- Anything else gets `400`, with what was wrong in `details`: an `engagement` that isn't JSON or isn't an object, a hashtag or a user id that isn't one, a count that is negative or not a whole number.
+- With no `engagement`, an empty one (`{}`), or one whose counts are all zero, the feed is the `popular` feed with fresh slots, and nothing more. So is one where nothing in the window matches. With `FEED_FRESH_EVERY=0` as well, it's the `popular` feed, post for post.
+- Only an `engaged` feed reads it: `popular` and `chronological` feeds ignore the parameter.
+
+What the feed does with it:
+
+1. What counts. Views and likes are added up per hashtag and per user, a like counting for 3 views. The feed goes by the 10 hashtags and the 10 users with the highest counts, each weighted by its share of them. Nothing past those is read, so there's no use in sending a long history.
+2. Which posts match. A post matches when it's under one of those hashtags, or was published by one of those users; the more of them it has, and the higher their counts, the more it matches. A post a user reposted isn't theirs, and doesn't match by them.
+3. The newest first. The first page starts with the 2 newest posts that match, whatever their likes: one hashtag gives both in a feed of one, and in a feed of several each comes from the hashtag whose turn it is.
+4. Among the rest. After that, each hashtag's 3rd pick on a page, and every 3rd after that, is a post that matches: those that match most first, and those that match as much as each other in an order of the session's own. Neither their likes nor their age decides. Where such a pick is also a fresh slot, it's the matching post's. A hashtag with none left picks as it would without them.
+
+The feed is still of the `tags` asked for and of its window, with `addRelated`, `aiGenerated` and `moderated` as in any feed. Matching brings a post forward in the feed, and adds none to it: a post under `#cats` alone isn't in a feed of `#news`, however much the reader views `#cats`.
+
+The response has the shape of a `popular` feed's, and is shown the same way: each hashtag's list is in the order it was picked, and a client that shows one list takes a record from each in turn. A hashtag's list isn't in the order of its likes, and a client shouldn't sort it into one.
+
+**Later pages needn't send `engagement`.** The cursor carries what the first page made of it, and a later page goes by that: an `engagement` sent with a cursor isn't read, so a session keeps the one it began with. To have new counts take effect, start the feed over. The parameter is part of the request's address, so it's in whatever logs addresses, as any parameter is.
+
+How a page is planned, and what the cursor holds, is in [APP.md](APP.md#engaged-feeds).
+
+### Feeds as RSS
+
+With `format=rss`, a page of `GET /feed` is an RSS 2.0 document instead of JSON, for feed readers and whatever else takes one. It's the same page: the same parameters, the same records, the same limits. The following feed has no such parameter.
+
+```bash
+curl "localhost:3000/feed?tags=news,mumbai&format=rss"
+```
+
+The response is `application/rss+xml`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<channel>
+<title>#news, #mumbai</title>
+<link>https://api.example.com/feed?tags=news%2Cmumbai&amp;format=rss</link>
+<description>Posts under #news, #mumbai</description>
+<language>en</language>
+<atom:link rel="self" type="application/rss+xml" href="https://api.example.com/feed?tags=news%2Cmumbai&amp;format=rss"/>
+<atom:link rel="next" type="application/rss+xml" href="https://api.example.com/feed?tags=news%2Cmumbai&amp;format=rss&amp;cursor=…"/>
+<item><title>Monsoon reaches the city</title><link>https://api.example.com/content/<contentId></link><guid isPermaLink="false"><contentId></guid><pubDate>Thu, 26 Nov 2026 11:00:03 GMT</pubDate><dc:creator>alice</dc:creator><category>news</category><category>mumbai</category><description>&lt;p&gt;Monsoon reaches the city&lt;/p&gt;</description></item>
+</channel>
+</rss>
+```
+
+- One list. RSS has no groups, so the records are items in the order the feed picked them: what a client that merges the hashtags' lists shows, with the first posts of an [`engaged`](#engaged-feeds) feed first.
+- The channel is titled with the hashtags the feed reads, the [related](#related-hashtags) ones it added among them. Its `description` and `language` are in the language the request is answered in, which is the one its `Accept-Language` header asks for.
+- The next page. Where the JSON would have `truncated: true`, the channel has `<atom:link rel="next">`: the request's own address with the page's cursor, and without `engagement`, which a later page doesn't need. A page with none after it has no such link. The cursor is the one the JSON gives as `nextCursor`, so it reads the next page in either format.
+- Addresses are absolute where the instance sets `PUBLIC_BASE_URL`. Otherwise they're paths, to resolve against the instance's address, which feed readers mostly can't do: an instance whose feeds are read as RSS should set it.
+
+Each item is a record:
+
+| Element | What it holds |
+| --- | --- |
+| `title` | How the record's `preview.text` starts, without its [formatting](TEXT_EDITORS.md#the-format): at most 100 characters, and then it ends in `…`. A post with no text or caption, and a link post, has none. |
+| `link` | The post's address: `/content/<contentId>`. |
+| `guid` | The post's `contentId`, with `isPermaLink="false"`. |
+| `pubDate` | When the post was placed in the feed: `repost.at` on a record a [repost](#post-repost) put there, `createdAt` otherwise. |
+| `dc:creator` | The publisher's `username`. |
+| `category` | One for each of the post's hashtags. |
+| `description` | The post as HTML, escaped: its `preview.text` as paragraphs, quotes and lists, a [mention](#mentions) as the name it's written with. Then an image post's images, each with its [alt text](#alt-text); a video's poster, where it has one, as a link to the video; a link to an audio file; or a link post's link. |
+| `enclosure` | On an image, a video or audio: the file's address and its `mimeType`. Its `length` is `0`, as a record doesn't say how large the file is. |
+
+- The text is the record's [preview](#previews), not the whole post: `link` leads to the rest.
+- Where the instance shows [ads](#ads) in feeds, the page's ads are items too, each before the record its `position` names. An ad's item is titled with its `label` ("Sponsored"), has its image and text as its `description`, links to the ad's `url` where it has one, and has the `guid` `ad:<adId>`. So an ad that takes several places, or is on several pages, is one item to a feed reader.
+- An error is JSON, as [everywhere](#errors), whatever the `format`.
+
 
 The posts of the users a user [follows](#following), newest first, whatever their hashtags.
 
@@ -1637,7 +1816,7 @@ The response is `{ count, truncated, nextCursor, records: [record, ...] }`, with
 What it shows:
 - Every post of each user followed, up to `FEED_AUTHOR_DAY_MAX_POSTS` (1,000) of them per UTC day: the newest, whatever their likes.
 - A new post after the compactor's next run, as on `/feed`. An updated post shows as it now is after that run too, in its original place.
-- Deletions and like counts after the next compactor run, as on `/feed`.
+- Deletions and the counts of likes, views and dislikes after the next compactor run, as on `/feed`.
 - Nothing of a user its reader [blocks](#blocks), where the request says who reads: with the reader's own credentials in the headers, a post a blocked user published is left out, and so is one a blocked user reposted. Since a block ends the follow, that's a blocked user's post that someone the reader follows reposted. A page can then have fewer records than `limit` with more to come: `truncated` and `nextCursor` say whether there are.
 
 **Pagination:** the cursor names the last post the page returned, and the next page starts just after it. So pages never repeat a post, or skip one that was there when the previous page was read, even while new posts arrive and the compactor runs. Posts newer than the first page show when the reader starts over. A cursor doesn't expire. One that isn't valid, including a cursor from `/feed`, gets `400`.
@@ -1683,7 +1862,7 @@ Whatever is compared is put in lowercase first, and its accents are taken off, i
 
 - It's the start of the name that's matched, not a part of it: `lice` doesn't find Alice. Each character of `q` stands for itself, a space inside it too, and none is a wildcard.
 - Users come in the order of their names as they're compared, and those whose names compare the same (José and jose) in the order of their ids.
-- A user who changes their name is found by the new one at once, and no more by the old.
+- A user is found by the name they registered with, from the moment they register: a username can't be changed.
 - A user whose account is [deleted](#delete-usersuserid) isn't found, from the moment it's deleted. A [banned](#bans) user still has their account, and is.
 - A `q` with nothing in it to compare, such as an accent on its own, gets `400`.
 
@@ -1692,7 +1871,7 @@ Whatever is compared is put in lowercase first, and its accents are taken off, i
 `type=content` returns the posts that have every word of `q`, newest first, by when they were created: `{ results: [record, ...], nextCursor }`. Each record is shaped as in [`/feed`](#get-feed), with two differences:
 
 - It has no `moderated` and no `repost`. The first is per hashtag, and a search lists a post under none. A post is found once, as itself and at its own time, however often it was reposted.
-- Its `likes` are all the post has now. A feed's are as of the compactor's last run.
+- Its `likes`, `views` and `dislikes` are all the post has now. A feed's are as of the compactor's last run. Being found by a search isn't a [view](#views) of a post.
 
 What a post is found by:
 
@@ -1714,7 +1893,7 @@ What it finds, and when:
 
 - Only posts anyone can read. Not one that's set for deletion or held in the [moderation queue](#the-moderation-queue), an entry whose original is [gone from its own server](#refreshing-a-repost), or a post of an account that's deleted. Those stop being found at once.
 - A new post is found once it's in feeds: after the compactor's next run, which is seconds. The same goes for what an update changed, for a hashtag a repost added, and for one a moderator removed: until that run the post is found by what it was.
-- A post from before the instance had search is found once its operator has indexed the posts that were there ([DEPLOY.md](DEPLOY.md#upgrading-to-search)).
+- A post from before the instance had search is found once its operator has indexed the posts that were there ([IAC.md](IAC.md#upgrading-to-search)).
 - [Blocks](#blocks) leave nothing out. A search takes no credentials, so it's the same for everyone.
 
 **Pagination:** the cursor names the last user or post of the page, and the next page starts just after it, so pages don't repeat one. A cursor doesn't expire. One that isn't valid gets `400`, and so does a cursor of one `type` sent with the other.
@@ -1912,7 +2091,7 @@ There are three queues to decide on. The first two hold [comments](#comments) as
 
 Admins and moderators can do all of it with the [CLI](CLI.md) the server ships, which signs in with their own API key.
 
-**The first admin** comes from whoever runs the server, since making an admin over the API takes one. The [Terraform modules](DEPLOY.md#the-admin-account) create an admin account with every deployment, and anywhere else the operator makes one from the command line ([APP.md](APP.md#moderation)). From then on, admins make more over the API (`PUT /admins/:userId`), and the API never leaves the server without one: revoking the only admin gets `409`.
+**The first admin** comes from whoever runs the server, since making an admin over the API takes one. The [Terraform modules](IAC.md#the-admin-account) create an admin account with every deployment, a server in Docker creates one the first time it starts ([DOCKER.md](DOCKER.md#the-first-admin)), and anywhere else the operator makes one from the command line ([APP.md](APP.md#moderation)). From then on, admins make more over the API (`PUT /admins/:userId`), and the API never leaves the server without one: revoking the only admin gets `409`.
 
 **Tag moderators** moderate one or more hashtags: an admin or one of the hashtag's moderators appointed them to it, or they [claimed it](#claiming-a-hashtag) when it had none ([below](#a-hashtags-moderators)). For each of those, they can:
 - keep the hashtag's list of blocked words;
@@ -2012,15 +2191,16 @@ curl -X PUT localhost:3000/claim-barred/$THEIR_ID -H "Authorization: Bearer $KEY
 
 ### Bans
 
-A server moderator or an admin bans an account with `PUT /banned/:userId`, and ends the ban with `DELETE /banned/:userId`. A banned user keeps their account, their key and their posts, and can still read everything, but is refused (`403`, "your account is banned") by whatever writes a post, a comment, a like or a message:
+A server moderator or an admin bans an account with `PUT /banned/:userId`, and ends the ban with `DELETE /banned/:userId`. A banned user keeps their account, their key and their posts, and can still read everything, but is refused (`403`, "your account is banned") by whatever writes a post, a comment, a like, a dislike or a message:
 - `POST /store`, for a new post and for an update of one of their own;
 - `POST /content/:contentId/comments`, and `PATCH /content/:contentId/comments/:commentId` for an edit of one of their own;
 - `POST /like`, of a post or of a comment. The likes they made before the ban stay, and are still theirs to take back (`DELETE /like`);
+- `POST /dislike`, on an instance that has [dislikes](#post-dislike) on. The dislikes they made before the ban stay too, and are theirs to take back (`DELETE /dislike`);
 - `POST /messages`;
 - `POST /uploads`, since a link is for posting the file;
 - `PATCH /users/:userId` with a `bio` or `links`, and `PUT /users/:userId/avatar`: a banned user puts nothing on their [profile](#a-users-profile). The `403` says so: "your account is banned: you can take your bio, your links and your avatar away, and can't set them".
 
-That is all a ban stops. A banned user can still read their inbox, receive messages, delete their own posts and comments, take back their likes, change their settings and key, take their bio, links and avatar away, pin and unpin posts, report posts, follow users, and [delete their account](#delete-usersuserid). A ban doesn't take down what was posted before it: a moderator deletes that as they would any content.
+That is all a ban stops. A banned user can still read their inbox, receive messages, delete their own posts and comments, take back their likes and dislikes, change their settings and key, take their bio, links and avatar away, pin and unpin posts, report posts, follow users, and [delete their account](#delete-usersuserid). A ban doesn't take down what was posted before it: a moderator deletes that as they would any content.
 
 **A ban hides the user's profile.** While it lasts, nobody is shown what the user put on it:
 - [`GET /users/:userId`](#get-usersuserid-and-patch-usersuserid) says `banned: true`, and gives no bio, no links, no avatar and no pinned post. The name, the roles and `createdAt` are as before;
@@ -2086,7 +2266,7 @@ A server that deletes nothing on arrival (`TRUST_SCORE_DELETE_BELOW=0`) refuses 
 
 ### The moderation queue
 
-A post whose trust score is between the two thresholds is stored, but not published: `POST /store` answers `202` with `status: "pending_review"`, and the post is in no feed, not even its publisher's followers'. Only its publisher, server moderators and admins can read it ([`GET /content/:contentId`](#get-contentcontentid)), and nobody can like it.
+A post whose trust score is between the two thresholds is stored, but not published: `POST /store` answers `202` with `status: "pending_review"`, and the post is in no feed, not even its publisher's followers'. Only its publisher, server moderators and admins can read it ([`GET /content/:contentId`](#get-contentcontentid)), which counts no [view](#views), and nobody can like or dislike it.
 
 Server moderators and admins read the queue with `GET /moderation/queue`, longest waiting first, and decide on each post:
 - Accept (`POST /moderation/queue/:contentId/accept`) publishes it, under its hashtags and to its publisher's followers, as posted when it was sent: its `createdAt` doesn't change. It can be read at once, and is in feeds after the compactor's next run, like any post. It then waits in each of its hashtags' queues like any published post.
@@ -2198,7 +2378,7 @@ The server has a list of blocked words, which its admins keep, and so has each h
 - Each text is checked on its own, so `^` and `$` are the start and the end of the post's text, the URL, the filename or one hashtag. `.` doesn't match a line break.
 - A pattern is stored as it was written, slashes included. That's how it's listed, and how it's removed.
 - Limits: a pattern has at most 100 characters, slashes included, and can't match empty text, which would match every post. A list holds at most 100 patterns among its entries.
-- Time: a list's patterns get 100 ms to check a post. If they take longer, the post is treated as containing one of the list's blocked words, and the server's log names the pattern that ran out of time. Patterns that repeat a repetition, such as `(a+)+`, are the ones that do: write them another way.
+- Time: a list's patterns get 100 ms to check a post. If they take longer, the post is treated as containing one of the list's blocked words, and the server's log names the pattern that ran out of time. Patterns that repeat a repetition, such as `(a+)+`, are the ones that do: write them another way. A long list can use the time up on a very long post with no pattern at fault: each pattern takes about a millisecond to read a text of 40,000 characters, which is the longest a post has, so a list near the 100 patterns it may hold reaches the 100 ms there, and that post counts as a match. On a post of ordinary length, 100 patterns take under a millisecond together.
 
 ### The quarantine
 
@@ -2312,7 +2492,7 @@ An item of either queue looks like this, a post and then a comment (of the moder
 { "queue": [
   { "kind": "post", "contentId": "...", "publisher": { "userId": "...", "username": "alice" },
     "mimeType": "text/plain", "aiGenerated": false, "comments": true,
-    "preview": { "kind": "text", "text": "Free things inside #news" }, "tags": ["news"], "likes": 0,
+    "preview": { "kind": "text", "text": "Free things inside #news" }, "tags": ["news"], "likes": 0, "views": 0, "dislikes": null,
     "createdAt": "2026-11-10T14:02:00.000Z", "updatedAt": "2026-11-10T14:02:00.000Z",
     "text": "Free things inside #news", "trustScore": 40, "queuedAt": "2026-11-10T14:02:00.000Z" },
   { "kind": "comment", "commentId": "...", "contentId": "...", "author": { "userId": "...", "username": "bob" },

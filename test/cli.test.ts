@@ -167,9 +167,9 @@ for (const target of TARGETS) {
       // An account the operator set up registered in no language, so it is answered in the server's default.
       expect(ok(await whoami(first.user))).toEqual({ userId: first.admin.userId, username: 'operator', language: 'en', admin: true, moderator: false, moderates: [], messages: true, showFollowing: false, showFollowers: false, banned: false, claimsBarred: false });
 
-      // Every later deploy runs it again, and changes nothing: not a profile renamed since, either.
-      ok(await ctx.app.inject({ method: 'PATCH', url: `/users/${first.admin.userId}`, headers: as(first.user), payload: { username: 'root' } }));
-      expect(await bootstrapAdmin(ctx.db, env)).toEqual({ userId: first.admin.userId, username: 'root', created: false, keyChanged: false, keyReplaced: false });
+      // Every later deploy runs it again, and changes nothing: not the account's name, either, whatever a deploy names it since.
+      expect(await bootstrapAdmin(ctx.db, env)).toEqual({ userId: first.admin.userId, username: 'operator', created: false, keyChanged: false, keyReplaced: false });
+      expect(await bootstrapAdmin(ctx.db, { BOOTSTRAP_ADMIN: JSON.stringify({ ...first.admin, username: 'root' }) })).toEqual({ userId: first.admin.userId, username: 'operator', created: false, keyChanged: false, keyReplaced: false });
       expect(await keys()).toEqual({ [first.admin.keyHash]: null });
 
       // A new key for the same account replaces the old one, and makes it an admin again if it stopped being one.
@@ -177,13 +177,13 @@ for (const target of TARGETS) {
       ctx.clock.now += 1000;
       const second = terraformAdmin();
       const rotated = { ...second.admin, userId: first.admin.userId };
-      expect(await ensureAdmin(ctx.db, rotated, ctx.clock.now)).toEqual({ userId: first.admin.userId, username: 'root', created: false, keyChanged: true, keyReplaced: false });
+      expect(await ensureAdmin(ctx.db, rotated, ctx.clock.now)).toEqual({ userId: first.admin.userId, username: 'operator', created: false, keyChanged: true, keyReplaced: false });
       expect(await keys()).toEqual({ [first.admin.keyHash]: ctx.clock.now, [rotated.keyHash]: null });
       expect((await whoami(first.user)).statusCode).toBe(401);
-      expect(ok(await whoami({ userId: first.admin.userId, apiKey: second.user.apiKey }))).toMatchObject({ username: 'root', admin: true });
+      expect(ok(await whoami({ userId: first.admin.userId, apiKey: second.user.apiKey }))).toMatchObject({ username: 'operator', admin: true });
 
       // The key it had before is not brought back by a deploy that names it again.
-      expect(await bootstrapAdmin(ctx.db, env)).toEqual({ userId: first.admin.userId, username: 'root', created: false, keyChanged: false, keyReplaced: true });
+      expect(await bootstrapAdmin(ctx.db, env)).toEqual({ userId: first.admin.userId, username: 'operator', created: false, keyChanged: false, keyReplaced: true });
       expect(await keys()).toEqual({ [first.admin.keyHash]: ctx.clock.now, [rotated.keyHash]: null });
 
       // The account's name is someone else's: nothing is created.
@@ -191,7 +191,7 @@ for (const target of TARGETS) {
       const taken = terraformAdmin('alice');
       await expect(ensureAdmin(ctx.db, taken.admin)).rejects.toThrow(`the username "alice" belongs to user ${alice.userId}`);
       expect((await whoami(taken.user)).statusCode).toBe(401);
-      expect(await admins()).toEqual(['root']);
+      expect(await admins()).toEqual(['operator']);
     });
 
     it("keeps a key that replaced the deployment's through the API, whichever deploys follow, until the deployment issues a new one", async () => {
@@ -277,8 +277,10 @@ for (const target of TARGETS) {
       expect(await start(path)).toBeNull();
       expect(await admins()).toEqual([]);
 
+      // The name is free once that user's account is gone, which is the only way it is: they can't take another.
+      expect((await ctx.app.inject({ method: 'PATCH', url: `/users/${made.userId}`, headers: as(made), payload: { username: 'retired' } })).statusCode).toBe(400);
+      ok(await req(made, 'DELETE', `/users/${made.userId}`));
       // Without the profile's own port or address, the profile names the server on localhost.
-      ok(await ctx.app.inject({ method: 'PATCH', url: `/users/${made.userId}`, headers: as(made), payload: { username: 'retired' } }));
       const local = (await setUpFirstAdmin({ db: ctx.db, config: { firstAdminProfile: path, publicBaseUrl: '', port: 8080 } }, log))!;
       expect(await readProfile(home, 'evieverse')).toMatchObject({ server: 'http://localhost:8080', userId: local.userId });
       expect(await admins()).toEqual(['admin']);

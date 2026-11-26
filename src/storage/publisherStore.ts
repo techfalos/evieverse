@@ -5,9 +5,9 @@ import type { Publisher } from './publisherStore.types.js';
 const publisherKey = (userId: string) => `pub:${userId}`;
 
 /**
- * Publisher credits in Redis: each user's username, one key per user and no expiry, so feeds show a
- * changed name at once. Written on register, profile change and store; the compactor re-syncs
- * changed users, and --rebuild every user.
+ * Publisher credits in Redis: each user's username, one key per user and no expiry, so a feed
+ * credits a post without reading the database. Written on register and store; the compactor
+ * re-syncs new users, and --rebuild every user.
  */
 export class PublisherStore {
   private readonly cache = new Map<string, { at: number; p: Publisher | null }>();

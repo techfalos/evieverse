@@ -7,7 +7,7 @@ import { resetDatabase, TARGETS } from './helpers.js';
 
 describe('SQL migrations', () => {
   it('has the portable schema migrations, in order', () => {
-    expect(Object.keys(sqlMigrations())).toEqual(['0001_initial', '0002_pending_writes', '0003_staged_removals', '0004_unnumbered_writes', '0005_origin_gone', '0006_export_indexes', '0007_media', '0008_mention_notices', '0009_search', '0010_unlikes', '0011_tag_moderation', '0012_profiles', '0013_repost_removals', '0014_tag_log', '0015_moderator_activity', '0016_quarantine', '0017_claims_at_once']);
+    expect(Object.keys(sqlMigrations())).toEqual(['0001_initial', '0002_pending_writes', '0003_staged_removals', '0004_unnumbered_writes', '0005_origin_gone', '0006_export_indexes', '0007_media', '0008_mention_notices', '0009_search', '0010_unlikes', '0011_tag_moderation', '0012_profiles', '0013_repost_removals', '0014_tag_log', '0015_moderator_activity', '0016_quarantine', '0017_claims_at_once', '0018_views_dislikes']);
   });
 
   it('splits scripts into statements, ignoring comment lines', () => {
@@ -27,6 +27,7 @@ describe('SQL migrations', () => {
         'comment_reports',
         'compactor_lease',
         'content',
+        'dislikes',
         'feed_queue',
         'follows',
         'inbox',
@@ -85,7 +86,8 @@ describe('SQL migrations', () => {
       expect(await columns('user_blocks')).toEqual(['blocked_id', 'created_at', 'user_id']);
       expect(await columns('pinned_posts')).toEqual(['content_id', 'created_at', 'user_id']);
       expect(await columns('server_rules')).toEqual(['body', 'created_at', 'id', 'sort_order', 'updated_at']);
-      expect(await columns('content')).toEqual(['ai_generated', 'created_at', 'delete_requested_at', 'id', 'like_count', 'origin_check_at', 'origin_gone_at', 'origin_hash', 'seq', 'unliked_at', 'user_id']);
+      expect(await columns('content')).toEqual(['ai_generated', 'created_at', 'delete_requested_at', 'dislike_count', 'disliked_at', 'id', 'like_count', 'origin_check_at', 'origin_gone_at', 'origin_hash', 'seq', 'unliked_at', 'user_id', 'view_count', 'viewed_at']);
+      expect(await columns('dislikes')).toEqual(['content_id', 'created_at', 'user_id']);
       expect(await columns('pending_writes')).toEqual(['comment_id', 'content_id', 'created_at', 'kind', 'net', 'payload', 'seq', 'staged_key', 'write_key']);
       expect(await columns('staged_removals')).toEqual(['content_id', 'remove_at', 'staged_key']);
       expect(await columns('reposts')).toEqual(['content_id', 'created_at', 'likes_before', 'tag', 'user_id']);
@@ -143,6 +145,13 @@ describe('SQL migrations', () => {
       await expect(sql`INSERT INTO repost_removals (id, content_id, tag, reposted_at, created_at) VALUES ('r3', 'missing', 'news', 5, 6)`.execute(db)).rejects.toThrow(/FOREIGN KEY/);
       // A post's writes are numbered from the post's own count, which starts at nothing, and go with the post.
       expect(await db.selectFrom('content').select(['id', 'seq']).orderBy('id').execute()).toEqual(['c1', 'c2', 'c3'].map((id) => ({ id, seq: 0 })));
+      // A post starts with no views and no dislikes, and was never viewed or disliked.
+      expect(await db.selectFrom('content').select(['view_count', 'viewed_at', 'dislike_count', 'disliked_at']).where('id', '=', 'c1').execute()).toEqual([{ view_count: 0, viewed_at: null, dislike_count: 0, disliked_at: null }]);
+      // A user dislikes a post once, and may like it too. A dislike goes with its post, and with its user.
+      await sql`INSERT INTO dislikes (user_id, content_id, created_at) VALUES ('u1', 'c1', 5), ('u3', 'c1', 5), ('u3', 'c2', 5)`.execute(db);
+      await sql`INSERT INTO likes (user_id, content_id, created_at) VALUES ('u1', 'c1', 5)`.execute(db);
+      await expect(sql`INSERT INTO dislikes (user_id, content_id, created_at) VALUES ('u1', 'c1', 6)`.execute(db)).rejects.toThrow(/UNIQUE/);
+      await expect(sql`INSERT INTO dislikes (user_id, content_id, created_at) VALUES ('u1', 'missing', 6)`.execute(db)).rejects.toThrow(/FOREIGN KEY/);
       await sql`INSERT INTO pending_writes (content_id, seq, kind, payload, created_at) VALUES ('c1', 1, 'post', '{"meta":{"tags":["news"]}}', 5), ('c2', 1, 'post', '{}', 5)`.execute(db);
       await sql`INSERT INTO pending_writes (content_id, seq, kind, comment_id, staged_key, created_at) VALUES ('c1', 2, 'comment_remove', 'm1', NULL, 6)`.execute(db);
       await expect(sql`INSERT INTO pending_writes (content_id, seq, kind, created_at) VALUES ('c1', 2, 'post', 7)`.execute(db)).rejects.toThrow(/UNIQUE/);
@@ -156,7 +165,9 @@ describe('SQL migrations', () => {
       await sql`DELETE FROM content WHERE id = 'c2'`.execute(db);
       expect(await db.selectFrom('staged_removals').selectAll().execute()).toEqual([{ staged_key: 'staged/w1', content_id: 'c2', remove_at: 9 }]);
       expect(await db.selectFrom('repost_removals').select('id').execute()).toEqual([]);
+      expect(await db.selectFrom('dislikes').select(['user_id', 'content_id']).orderBy('user_id').execute()).toEqual([{ user_id: 'u1', content_id: 'c1' }, { user_id: 'u3', content_id: 'c1' }]);
       await sql`DELETE FROM users WHERE id = 'u3'`.execute(db);
+      expect(await db.selectFrom('dislikes').select(['user_id', 'content_id']).execute()).toEqual([{ user_id: 'u1', content_id: 'c1' }]);
       expect(await db.selectFrom('reposts').selectAll().execute()).toEqual([{ content_id: 'c1', tag: 'news', user_id: null, likes_before: 2, created_at: 5 }]);
       expect(await db.selectFrom('pending_writes').select(['content_id', 'seq', 'kind', 'comment_id']).orderBy('seq').execute()).toEqual([
         { content_id: 'c1', seq: 1, kind: 'post', comment_id: null },
@@ -168,6 +179,7 @@ describe('SQL migrations', () => {
       expect((await db.selectFrom('reposts').select('tag').execute()).length).toBe(0);
       expect((await db.selectFrom('pending_writes').select('seq').execute()).length).toBe(0);
       expect((await db.selectFrom('pinned_posts').select('content_id').execute()).length).toBe(0);
+      expect((await db.selectFrom('dislikes').select('content_id').execute()).length).toBe(0);
     } finally {
       await db.destroy();
     }

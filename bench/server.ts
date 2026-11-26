@@ -82,8 +82,10 @@ export async function startServer({
     registerRateLimitPerHour: 1_000_000,
     postRateLimitPerMinute: 0,
     // The load is one address, and at its largest more connections than a server answers feeds for at a time.
-    feed: { rateLimitPerMinute: 0, maxConcurrent: 0 },
-    comments: { perMinute: 0 },
+    // So are the limits by address on the other reads it measures: the following feed, a post, and a post's comments.
+    feed: { rateLimitPerMinute: 0, followingRateLimitPerMinute: 0, maxConcurrent: 0 },
+    contentRateLimitPerMinute: 0,
+    comments: { perMinute: 0, listRateLimitPerMinute: 0 },
   };
   // Neither the environment nor a config file changes what is measured: all the environment says is where Redis is.
   const config = loadConfig(settings, { EVIEVERSE_CONFIG: join(dir, 'no-config.json'), REDIS_URL: process.env.REDIS_URL });

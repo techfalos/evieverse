@@ -19,7 +19,8 @@
     "user.api_key_note": "Store this apiKey now; it cannot be retrieved again.",
     "user.not_found": "user not found",
     "user.update_own_only": "you can only update your own profile",
-    "user.nothing_to_update": "nothing to update: provide username, language, messages, showFollowing, showFollowers, bio or links",
+    "user.nothing_to_update": "nothing to update: provide language, messages, showFollowing, showFollowers, bio or links",
+    "user.username_fixed": "a username can't be changed: an account keeps the name it was registered with",
     "user.key_own_only": "you can only replace your own API key, unless you're an admin",
     "user.api_key_replaced_note": "Store this apiKey now; it cannot be retrieved again. The key it replaces no longer works.",
     "user.api_key_passed_on_note": "Pass this apiKey on to the user now; it cannot be retrieved again. Every key they had no longer works.",
@@ -51,6 +52,9 @@
     "content.type_changed": "an update must have the same content type as the original ({original}), got {mimeType}",
     "content.not_tagged": "the content isn't tagged #{tag}",
     "content.is_repost": "a repost of a post on another server can't be updated: it is a link to the original. Delete it, or repost the original to give it other hashtags",
+
+    "dislike.off": "this server doesn't take dislikes",
+    "dislike.posts_only": "only posts can be disliked, not comments: leave commentId out",
 
     "repost.off": "this server doesn't take reposts",
     "repost.remote_off": "this server doesn't take reposts of posts on other servers",
@@ -240,6 +244,8 @@
     "feed.too_many_tags": "at most {max} tags are allowed",
     "feed.cursor_mismatch": "cursor does not match the requested tags/hours/algorithm/addRelated/aiGenerated/moderated",
     "feed.busy": "the server is answering as many feeds as it can at once; try again in 1 second",
+    "feed.engagement_invalid": "engagement must be a JSON object of likedByTag, likedByUser, viewedByTag and viewedByUser: each a count of posts by hashtag, or by user id",
+    "feed.rss_description": "Posts under {tags}",
 
     "search.no_words": "q has nothing to search for: give at least one word, hashtag, or the start of a username",
 

@@ -191,6 +191,8 @@ for (const target of TARGETS) {
           comments: true,
           size: Buffer.byteLength('Flooding downtown #news'),
           likes: 0,
+          views: 0,
+          dislikes: null,
           aiGenerated: false,
           contentUrl: `/content/${first}/raw`,
           createdAt: firstAt,
@@ -206,13 +208,16 @@ for (const target of TARGETS) {
           comments: false,
           size: Buffer.byteLength('Made with a model #art'),
           likes: 0,
+          views: 0,
+          dislikes: null,
           aiGenerated: true,
           contentUrl: `/content/${second}/raw`,
           createdAt: secondAt,
           updatedAt: secondAt,
         },
       ]);
-      for (const { type: _type, ...fields } of ofType(records, 'post')) expect(ok(await req(alice, 'GET', `/content/${fields.contentId as string}`))).toMatchObject(fields);
+      // Read with no credentials, which counts no view: a read with hers would be one more than the export has.
+      for (const { type: _type, ...fields } of ofType(records, 'post')) expect(ok(await req(null, 'GET', `/content/${fields.contentId as string}`))).toMatchObject(fields);
 
       // Her comment, as the comment itself reads, without what others made of it.
       expect(ofType(records, 'comment')).toEqual([
@@ -397,11 +402,14 @@ for (const target of TARGETS) {
         [held, 'To be held #news', ['news'], 'pending_review'],
         [waiting, 'Just written #news', ['news'], undefined],
       ]);
-      for (const { type: _type, ...fields } of posts) expect(ok(await req(alice, 'GET', `/content/${fields.contentId as string}`))).toMatchObject(fields);
+      // Her read of a post that is published is a view of it, which the export read before it didn't have: one that waits counts none.
+      const viewed = (r: ExportRecord): ExportRecord => ({ ...r, views: r.status ? 0 : 1 });
+      expect(posts.map((r) => [r.views, r.dislikes])).toEqual(posts.map(() => [0, null]));
+      for (const { type: _type, ...fields } of posts.map(viewed)) expect(ok(await req(alice, 'GET', `/content/${fields.contentId as string}`))).toMatchObject(fields);
 
-      // And the same once the compactor has applied them.
+      // And the same once the compactor has applied them, with the views those reads were.
       await ctx.apply();
-      expect(ofType(await everything(alice), 'post')).toEqual(posts);
+      expect(ofType(await everything(alice), 'post')).toEqual(posts.map(viewed));
     });
 
     it('holds the comments a user wrote and the ones they liked, by the index the comment store keeps of them', async () => {

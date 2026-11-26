@@ -22,7 +22,7 @@ A client reads the formatting wherever one of these texts comes back:
 | Field | Where | What it holds |
 | --- | --- | --- |
 | `text` | [`GET /content/:contentId`](API.md#get-contentcontentid) | The whole text or caption, as written. A text post's bytes (`contentUrl`) are the same text. |
-| `preview.text` | Feeds, `GET /content/:contentId`, and the response of `POST /store` | The start of the text or caption, itself a formatted text ([below](#previews)). |
+| `preview.text` | Feeds, `GET /content/:contentId`, and the response of `POST /store` | The start of the text or caption, itself a formatted text ([API.md](API.md#previews)). |
 | `text` | A [comment](API.md#comments), in every list of them | The comment's text, as written. |
 | `bio` | [`GET /users/:userId`](API.md#get-usersuserid-and-patch-usersuserid) | The bio, as written. `null` for a user who has none. |
 
@@ -73,7 +73,7 @@ Markdown that pairs its marks in the usual way reads the same here. The rest of 
 
 A text mentions a user with `@` and their username: `Thanks @alice`. The user gets a notice once the text is published, and the mention is shown as a link to their profile ([API.md](API.md#mentions)).
 
-The text alone doesn't say which of its `@` are mentions. A username can hold any characters, spaces among them, so `@Ann Lee and Bob` could name `Ann`, `Ann Lee` or `Ann Lee and Bob`, and whose a name is can change after the text is written. So the server finds whom a text mentions when it's written, and returns them beside it: `mentions`, a list of `{ userId, username }`, each user with the name the text has them by. A client reads the text with that list:
+The text alone doesn't say which of its `@` are mentions. A username can hold any characters, spaces among them, so `@Ann Lee and Bob` could name `Ann`, `Ann Lee` or `Ann Lee and Bob`, and whose a name is can change after the text is written: a username can't be changed, but it's anyone's to register once its user's account is gone. So the server finds whom a text mentions when it's written, and returns them beside it: `mentions`, a list of `{ userId, username }`, each user with the name the text has them by. A client reads the text with that list:
 
 - An `@` followed by one of the list's names is a mention of that user. The name is as the list has it, to the letter, capitals included.
 - The `@` doesn't follow a letter or a digit, so `mail@alice.example` mentions nobody.
@@ -84,7 +84,7 @@ The text alone doesn't say which of its `@` are mentions. A username can hold an
 - `\@` is an `@` that mentions nobody.
 - A text read without its `mentions` has none: every `@` is the character. A name that isn't in the list isn't a mention, even if a user has it by now. That's how a bio is read, which mentions nobody and notifies nobody.
 
-A mention is shown as `@` and the name, and links to the profile of its `userId` ([`GET /users/:userId`](API.md#get-usersuserid-and-patch-usersuserid)): by the id, since the user may have changed their name since.
+A mention is shown as `@` and the name, and links to the profile of its `userId` ([`GET /users/:userId`](API.md#get-usersuserid-and-patch-usersuserid)): by the id, which is the user's alone, where the name is someone else's to register once their account is gone.
 
 A text mentions 10 users at most, and the server looks at the first 50 `@` of a text: what a text names past those is text.
 

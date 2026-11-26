@@ -43,7 +43,7 @@ EVIEVERSE_PROFILE=staging evieverse whoami               # the same
 evieverse profiles                                       # the profiles on this machine
 ```
 
-A deployment made with the [Terraform modules](DEPLOY.md#the-admin-account) writes its admin's profile itself, so that machine does not nee to `login`. The profile is named after the deployment, `evieverse` by default.
+A deployment made with the [Terraform modules](IAC.md#the-admin-account) writes its admin's profile itself, so that machine does not need to `login`. The profile is named after the deployment, `evieverse` by default. A server in Docker writes its first admin's profile to its volume the first time it starts: copied to `~/.evieverse/profiles/<name>.json` on this machine, it is the profile `<name>`, signed in ([DOCKER.md](DOCKER.md#the-first-admin)).
 
 ## Commands
 
@@ -155,7 +155,7 @@ Both queue and reports contain posts and comments. Each line starts with `post` 
 | `reports accept <contentId> [--comment <commentId>]`                                 | Accepts a reported post, or with `--comment`, a reported comment on it: it stays as it is, and leaves the report queue.                          |
 | `reports delete <contentId> [--comment <commentId>]`                                 | Deletes a reported post, or with `--comment`, a reported comment on it.                                                                          |
 | `bans list [--limit <n>] [--cursor <cursor>]`                                        | The [banned](API.md#bans) users, most recently banned first: who banned each, when, and why.                                                     |
-| `bans add <userId> [--reason <text>]`                                                | Bans a user: they can't post, comment, like or send messages, and can still read. They're told. Not an admin or a server moderator.              |
+| `bans add <userId> [--reason <text>]`                                                | Bans a user: they can't post, comment, like, dislike or send messages, and can still read. They're told. Not an admin or a server moderator.              |
 | `bans remove <userId>`                                                               | Ends a ban. The user is told.                                                                                                                    |
 | `moderators remove <tag> <userId>`                                                   | Ends a user's moderation of a hashtag, at any time, whether they were appointed to it or [claimed it](API.md#claiming-a-hashtag). The user is told. From one of the hashtag's own moderators, the server takes it for those who became a moderator after them, and for themselves ([API.md](API.md#a-hashtags-moderators)), though `help` lists the command for server moderators. |
 | `claim-bars list [--limit <n>] [--cursor <cursor>]`                                  | The users who are [barred from claiming hashtags](API.md#barring-a-user-from-claiming), most recently barred first: who barred each, when, and why. |

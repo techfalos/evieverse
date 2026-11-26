@@ -6,6 +6,8 @@ import type { TagFeedReader } from '../tagfeed/reader.js';
 export interface FeedDeps {
   config: Config;
   feedReader: TagFeedReader;
+  /** Reads publishers' own indexes, which an engaged feed reads to learn which posts are by the users its reader has liked and viewed. */
+  authorReader: TagFeedReader;
   summaries: SummaryStore;
   publishers: PublisherStore;
   relatedTags: RelatedTagStore;

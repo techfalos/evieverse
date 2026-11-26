@@ -61,6 +61,9 @@ services:
       # The keys the server signs its posts with for reposts on other servers (`openssl rand -base64 32`).
       # None unless set: its posts are then reposted only here.
       REPOSTS_SIGNING_KEYS: ${REPOSTS_SIGNING_KEYS:-}
+      # Dislikes of posts (POST /dislike), a count of their own beside a post's likes. Off unless set to true:
+      # `dislikes` is then null wherever a post is read, and a client shows none.
+      DISLIKES: ${DISLIKES:-false}
       # The modification disclosure, which GET /rules gives beside the rules: true if this instance runs a
       # modified version of Evieverse, which then needs the address its source code can be obtained from.
       EVIEVERSE_MODIFIED: ${EVIEVERSE_MODIFIED:-false}

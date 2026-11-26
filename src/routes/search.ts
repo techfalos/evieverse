@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { sql } from 'kysely';
 import { z } from 'zod';
-import { summaryOf } from '../content.js';
+import { rowCounts, summaryOf } from '../content.js';
 import type { AppDeps } from '../deps.types.js';
 import { badRequest } from '../http/errors.js';
 import { decodeCursorJson, encodeCursorJson, invalidCursor } from '../http/listCursor.js';
@@ -128,7 +128,8 @@ export function searchRoutes(app: FastifyInstance, { db, config, content, summar
 
   /**
    * The posts that have every word of `q`, newest first: `results`, each as a feed gives a post
-   * (see toFeedRecord), with all of its likes, and `nextCursor` if there are more. A word of `q`
+   * (see toFeedRecord), with its counts as the database has them now (see rowCounts), all of its
+   * likes among them, and `nextCursor` if there are more. A word of `q`
    * is one of a post's if it is among the post's keywords, which are the most frequent words of
    * its text or caption, or is one of its hashtags (see keywordsOf and queryTerms): whole words,
    * whatever their case and accents.
@@ -160,7 +161,7 @@ export function searchRoutes(app: FastifyInstance, { db, config, content, summar
       .innerJoin('content', 'content.id', 'hit.content_id')
       .innerJoin('users', 'users.id', 'content.user_id')
       .leftJoin('moderation_queue', 'moderation_queue.content_id', 'content.id')
-      .select(['content.id', 'content.user_id', 'content.created_at', 'content.ai_generated', 'content.like_count', 'users.username'])
+      .select(['content.id', 'content.user_id', 'content.created_at', 'content.ai_generated', 'content.like_count', 'content.view_count', 'content.dislike_count', 'users.username'])
       .where('hit.term', '=', lead)
       .where('content.delete_requested_at', 'is', null)
       .where('content.origin_gone_at', 'is', null)
@@ -191,7 +192,7 @@ export function searchRoutes(app: FastifyInstance, { db, config, content, summar
     const results: FeedRecord[] = rows.flatMap((row, i) => {
       const summary = shown[i];
       // Neither a summary nor a meta file: deleted since the rows were read.
-      return summary ? [toFeedRecord(summary, row.like_count, { userId: row.user_id, username: row.username })] : [];
+      return summary ? [toFeedRecord(summary, rowCounts(row, config.dislikes), { userId: row.user_id, username: row.username })] : [];
     });
     return { results, nextCursor: found.length > limit && last ? encodeCursorJson([Number(last.created_at), last.id]) : null };
   }

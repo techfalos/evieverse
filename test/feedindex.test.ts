@@ -4,7 +4,7 @@ import { brotliDecompressSync } from 'node:zlib';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { summaryKey, summaryObjectKey } from '../src/storage/summaryStore.js';
 import type { SummaryRef } from '../src/storage/summaryStore.types.js';
-import { authorIndex, DAY_ENTRY_BYTES, dayKey, headKey, manifestKey, unpackDay } from '../src/tagfeed/layout.js';
+import { authorIndex, DAY_ENTRY_BYTES, dayKey, headKey, LAYOUT_VERSION, manifestKey, packDay, unpackDay } from '../src/tagfeed/layout.js';
 import type { DayRef, Head, Manifest } from '../src/tagfeed/layout.types.js';
 import { TagFeedReader } from '../src/tagfeed/reader.js';
 import { DAY, HOUR, utcDay } from '../src/time.js';
@@ -28,7 +28,7 @@ for (const target of TARGETS) {
     };
     const getFeed = async (query: string) => ctx.app.inject({ method: 'GET', url: `/feed?${query}` });
     const own = (user: User) => authorIndex(user.userId);
-    const allIds = (f: Feed) => Object.values(f.tags).flatMap((l) => l.map((i) => i.contentId));
+    const allIds = (f: Feed) => f.records.map((i) => i.contentId);
     const readJson = async <T>(key: string) => JSON.parse((await ctx.hot.get(key))!.toString()) as T;
     const readHead = (tag: string) => readJson<Head>(headKey(tag));
     const readManifest = async (tag: string) => readJson<Manifest>(manifestKey(tag, (await readHead(tag)).manifest!));
@@ -149,7 +149,7 @@ for (const target of TARGETS) {
       expect((await ctx.compactor.runOnce()).tags).toEqual([own(alice), 'news'].sort());
       expect(keysSet(set).filter((key) => key === headKey('news'))).toHaveLength(1);
       expect(await queue()).toEqual([]);
-      expect(await readHead('news')).toMatchObject({ v: 5, manifest: expect.any(String) });
+      expect(await readHead('news')).toMatchObject({ v: LAYOUT_VERSION, manifest: expect.any(String) });
       const manifest = await readManifest('news');
       expect(manifest.days).toHaveLength(1);
       const [day] = manifest.days;
@@ -862,10 +862,10 @@ for (const target of TARGETS) {
       const late = await store(bob, 'late #news');
       await ctx.compactor.runOnce();
       // Of the past 14 days, which holds all three; most liked first, then newest.
-      const records = async (tag: string) => ((await getFeed(`tags=${tag}&hours=336`)).json() as Feed).tags;
+      const records = async (tag: string) => ((await getFeed(`tags=${tag}&hours=336`)).json() as Feed).records;
       const news = await records('news');
       const sports = await records('sports');
-      expect(news.news!.map((i) => i.contentId)).toEqual([old, late, recent]);
+      expect(news.map((i) => i.contentId)).toEqual([old, late, recent]);
 
       // Redis loses everything, and the object store loses these summaries too.
       await ctx.hot.clear();
@@ -1007,7 +1007,7 @@ for (const target of TARGETS) {
     });
 
     it('never repeats a post in a feed session as likes reorder the index between its pages, and misses one they take ahead of it', async () => {
-      ctx = await createTestContext(target, { feed: { pageSize: 4, freshEvery: 0 } });
+      ctx = await createTestContext(target, { feed: { pageSize: 4 } });
       const [alice, bob, carol] = [await ctx.register('alice'), await ctx.register('bob'), await ctx.register('carol')];
       const ids: string[] = [];
       for (let i = 0; i < 12; i++) {
@@ -1030,7 +1030,7 @@ for (const target of TARGETS) {
       expect(seen).toEqual([ids[11], ids[10], ids[9], ids[8], ids[7], ids[0], ids[5], ids[4], ids[3], ids[2], ids[1]]);
     });
 
-    it('injects new unliked content between liked content read from a day index', async () => {
+    it('injects new unliked content between liked content read from a day index, in an engaged feed and no other', async () => {
       ctx = await createTestContext(target);
       const alice = await ctx.register('alice');
       const bob = await ctx.register('bob');
@@ -1047,21 +1047,69 @@ for (const target of TARGETS) {
       }
       await ctx.compact();
 
-      const full = (await getFeed('tags=news')).json() as Feed;
+      const full = (await getFeed('tags=news&algorithm=engaged')).json() as Feed;
       expect(allIds(full).sort()).toEqual([...liked, ...fresh].sort());
       ctx.config.feed.pageSize = 4;
 
       // The page is assembled out of index order (liked, fresh, liked, ...) and must still be valid JSON.
-      const res = await getFeed('tags=news');
+      const res = await getFeed('tags=news&algorithm=engaged');
       expect(res.statusCode, res.body).toBe(200);
-      const page = (res.json() as Feed).tags.news!.map((r) => r.contentId);
+      const page = (res.json() as Feed).records.map((r) => r.contentId);
       expect(page).toHaveLength(4);
       expect(liked).toContain(page[0]);
       expect(fresh).toContain(page[1]);
 
+      // A popular feed has none, whatever the setting: its first page is of the liked posts alone.
+      const popular = (await getFeed('tags=news')).json() as Feed;
+      expect(allIds(popular).every((id) => liked.includes(id))).toBe(true);
+      // Nor has an engaged one with them turned off.
       ctx.config.feed.freshEvery = 0;
-      const plain = (await getFeed('tags=news')).json() as Feed;
-      expect(allIds(plain).every((id) => liked.includes(id))).toBe(true);
+      const plain = (await getFeed('tags=news&algorithm=engaged')).json() as Feed;
+      expect(allIds(plain)).toEqual(allIds(popular));
+    });
+
+    it('reads an index of version 5 as it is, with no views and no dislikes, and writes all of its days again the next time its hashtag is compacted', async () => {
+      ctx = await createTestContext(target, { dislikes: true });
+      const [alice, bob, carol] = [await ctx.register('alice'), await ctx.register('bob'), await ctx.register('carol')];
+      ctx.clock.now -= 2 * DAY;
+      const old = await store(alice, 'old #news');
+      await like(bob, old);
+      ctx.clock.now += 2 * DAY;
+      const recent = await store(alice, 'recent #news');
+      for (const id of [old, recent]) expect((await api.read(id, bob)).statusCode).toBe(200);
+      expect((await api.dislike(bob, recent)).statusCode).toBe(201);
+      await ctx.compact();
+      const counts = async () => ((await getFeed('tags=news&hours=168')).json() as Feed).records.map((r) => [r.contentId, r.likes, r.views, r.dislikes]);
+      expect(await counts()).toEqual([[old, 1, 1, 0], [recent, 0, 1, 1]]);
+
+      // The index as the compactor of the release before wrote it: 25 bytes an entry, under a manifest and a head of version 5.
+      const manifest = await readManifest('news');
+      expect(manifest.days).toHaveLength(2);
+      const days: DayRef[] = [];
+      for (const d of manifest.days) {
+        const entries = await dayIndex('news', d);
+        const packed = packDay(entries);
+        days.push({ ...d, gen: `${d.gen}-v5` });
+        await ctx.hot.set(dayKey('news', `${d.gen}-v5`), Buffer.concat(entries.map((_, i) => packed.subarray(i * DAY_ENTRY_BYTES, i * DAY_ENTRY_BYTES + 25))));
+      }
+      const v5: Manifest = { ...manifest, v: 5, id: `${manifest.id}-v5`, days };
+      await ctx.hot.set(manifestKey('news', v5.id), JSON.stringify(v5));
+      await ctx.hot.set(headKey('news'), JSON.stringify({ ...(await readHead('news')), v: 5, manifest: v5.id }));
+
+      // Read as it is: the posts, in their order, with their likes, and none of the counts it doesn't have.
+      expect(await counts()).toEqual([[old, 1, 0, 0], [recent, 0, 0, 0]]);
+
+      // A run that has nothing to do under the hashtag leaves its index. The next that has, for one post of one day, writes every day of it again.
+      ctx.clock.now += 1000;
+      expect((await ctx.compactor.runOnce()).tags).toEqual([]);
+      expect((await readManifest('news')).v).toBe(5);
+      await like(carol, recent);
+      expect((await ctx.compact()).tags).toEqual([own(alice), 'news'].sort());
+      const rebuilt = await readManifest('news');
+      expect([(await readHead('news')).v, rebuilt.v]).toEqual([LAYOUT_VERSION, LAYOUT_VERSION]);
+      expect(rebuilt.days.map((d) => d.day)).toEqual(manifest.days.map((d) => d.day));
+      for (const d of rebuilt.days) expect((await ctx.hot.get(dayKey('news', d.gen)))!.length).toBe(d.count * DAY_ENTRY_BYTES);
+      expect(await counts()).toEqual([[recent, 1, 1, 1], [old, 1, 1, 0]]);
     });
 
     it('leaves nothing for good of a run killed before it swapped a head', async () => {

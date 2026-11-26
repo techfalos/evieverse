@@ -58,6 +58,9 @@ opendal = { version = "0.59.5", features = [
 rand = "0.10.4"
 redis = { version = "1.8.3", features = ["tokio-comp", "connection-manager", "script", "tokio-rustls-comp"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2", "json", "stream"] }
+# The TLS of redis and reqwest above and of sqlx below, named here for the one thing none of
+# them does: giving the process a provider (see hot.rs).
+rustls = { version = "0.23.46", default-features = false, features = ["aws-lc-rs", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.11.2"

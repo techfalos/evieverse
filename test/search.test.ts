@@ -108,10 +108,10 @@ for (const target of TARGETS) {
       expect(paged.map((page) => page.length)).toEqual([2, 2, 1]);
       expect(paged.flat()).toEqual(await names('al'));
 
-      // By the new name once they are renamed, and by none once their account is closed.
-      ok(await req(registered.bob!, 'PATCH', `/users/${registered.bob!.userId}`, { username: 'Élodie' }));
-      expect(await names('bob')).toEqual([]);
-      expect(await names('elo')).toEqual(['Élodie']);
+      // By the name they registered with, which no request changes, and by none once their account is closed.
+      expect((await req(registered.bob!, 'PATCH', `/users/${registered.bob!.userId}`, { username: 'Élodie' })).statusCode).toBe(400);
+      expect(await names('bob')).toEqual(['bob']);
+      expect(await names('elo')).toEqual([]);
       ok(await req(registered.alicia!, 'DELETE', `/users/${registered.alicia!.userId}`));
       expect(await names('alic')).toEqual(['Alice']);
     });

@@ -1,6 +1,19 @@
 import type { Mention } from '../mentions.types.js';
 import type { Origin, Preview, Publisher } from '../storage/index.js';
 
+/** A post's counts, as a response gives them (see `countsOf`). */
+export interface Counts {
+  /** How many users like the post. */
+  likes: number;
+  /** How many times the post was viewed by a user account (see `countView`). */
+  views: number;
+  /**
+   * How many users dislike the post, from 0, on a server that has dislikes on; null on one that
+   * has them off, where a client shows no dislikes at all.
+   */
+  dislikes: number | null;
+}
+
 /** A feed record, in exactly the shape the feed returns. */
 export interface FeedRecord {
   contentId: string;
@@ -19,6 +32,17 @@ export interface FeedRecord {
   tags: string[];
   likes: number;
   /**
+   * How many times the post was viewed by a user account, as the index it was read from has it:
+   * the compactor's last run. The post's whole count, on a repost's record too.
+   */
+  views: number;
+  /**
+   * How many users dislike the post, likewise, on a server that has dislikes on: 0 for a post
+   * nobody dislikes. Null on a server that has them off, which is how a client knows not to show
+   * dislikes at all.
+   */
+  dislikes: number | null;
+  /**
    * Whether a moderator of the hashtag the record is listed under has approved it there. Only on
    * the records of a hashtag's feed: moderation is per hashtag.
    */
@@ -29,8 +53,9 @@ export interface FeedRecord {
   /**
    * On a record a repost put where it was read: under a hashtag the repost gave the post, or in a
    * following feed, by someone the user follows. `at` is when, which is where the feed orders the
-   * record, and `likes` are those since. `by` is who reposted it, in a following feed, where the
-   * record is read from their own index; a hashtag's feed doesn't say.
+   * record, and `likes` are those since (`views` and `dislikes` are the post's whole counts). `by`
+   * is who reposted it, in a following feed, where the record is read from their own index; a
+   * hashtag's feed doesn't say.
    */
   repost?: { at: string; by?: Publisher };
   /**
@@ -38,6 +63,12 @@ export interface FeedRecord {
    * published it there. `publisher` is who reposted it here.
    */
   origin?: Origin;
+  /**
+   * The hashtag the record is listed under, of those the feed reads: the one whose index it was
+   * picked from, which is whose `moderated` it has. Only on the records of a hashtag's feed. A
+   * post under several of the feed's hashtags is listed once, under one of them.
+   */
+  listedUnder?: string;
 }
 
 /** The repost that put a record where it was read: when, and by whom if the index it was read from says. */
@@ -56,6 +87,10 @@ export interface IndexEntry {
   createdAt: number;
   /** The content's likes; for a repost's entry, those since the repost. */
   likes: number;
+  /** How many times the content was viewed by a user account (`content.view_count`): all of them, on a repost's entry too. 0 in an index of version 5. */
+  views: number;
+  /** How many users dislike the content (`content.dislike_count`), whether the server shows dislikes or not: all of them, on a repost's entry too. 0 in an index of version 5. */
+  dislikes: number;
   /** Declared by the publisher at /store. */
   aiGenerated: boolean;
   /**
@@ -77,7 +112,8 @@ export interface IndexEntry {
  * Readers start from it.
  */
 export interface Head {
-  v: 5;
+  /** The version of the layout the compactor that wrote it writes (`LAYOUT_VERSION`). Readers go by the manifest's. */
+  v: number;
   /** The manifest readers should use; null until the tag's first compaction. */
   manifest: string | null;
   compactedAt: number;
@@ -99,7 +135,11 @@ export interface DayRef {
  * when that run started), and the tag's head names the one to read.
  */
 export interface Manifest {
-  v: 5;
+  /**
+   * The version of the layout every day index it names is of, which says how long their entries
+   * are (`dayEntryBytes`): 6, or 5 for one written before entries had views and dislikes.
+   */
+  v: number;
   tag: string;
   id: string;
   createdAt: number;

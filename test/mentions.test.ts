@@ -119,7 +119,7 @@ for (const target of TARGETS) {
       expect(await notices(carol)).toEqual([{ ...notice, from: null, text: 'You were mentioned in a post.' }]);
     });
 
-    it('tells whom an update of a post newly mentions, and goes on mentioning a user who has changed their name', async () => {
+    it('tells whom an update of a post newly mentions, and goes on mentioning a user who was renamed while one could be', async () => {
       ctx = await createTestContext(target);
       const alice = await named('alice');
       const bob = await named('bob');
@@ -127,8 +127,11 @@ for (const target of TARGETS) {
       const { contentId } = ok(await store(alice, 'Thanks @bob #news'), 201);
       expect(await notices(bob)).toHaveLength(1);
 
-      // Bob takes another name, and someone else takes his: the post still mentions the user it did.
-      ok(await req(bob, 'PATCH', `/users/${bob.userId}`, { username: 'robert' }));
+      // No request renames a user, so nobody takes a name from one who has an account. A database
+      // that is older than that may hold one who was renamed, and whose name someone else took
+      // since, which is written here as it was then: the post still mentions the user it did.
+      expect((await req(bob, 'PATCH', `/users/${bob.userId}`, { username: 'robert' })).statusCode).toBe(400);
+      await ctx.db.updateTable('users').set({ username: 'robert', username_folded: 'robert' }).where('id', '=', bob.userId).execute();
       const other = await named('bob');
       tick();
       const updated = ok(await store(alice, 'Thanks @bob and @carol #news', { contentId }), 200);

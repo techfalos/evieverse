@@ -16,7 +16,12 @@ import { MAX_BIO_CHARS, MAX_PROFILE_LINKS, pinnedPosts, profileOf, shownProfile,
 import { foldUsername } from '../search/keywords.js';
 import { iso } from '../time.js';
 
-/** A username as a request gives it, for a new user or a rename: 1 to 64 characters once trimmed. Whether it is taken is the database's to say. */
+/**
+ * A username as a request gives it, for a new user: 1 to 64 characters once trimmed. Whether it
+ * is taken is the database's to say. It is set once, by whatever creates the account, and is the
+ * account's from then on: nothing changes it, so what a user published stays under the name they
+ * published it by.
+ */
 const Username = z.string().trim().min(1).max(64);
 /** The code of one of the server's languages (GET /languages), in any case. */
 const LanguageCode = z.string().trim().min(1).max(35);
@@ -32,6 +37,12 @@ const RegisterBody = Credentials.extend({
 
 /** What PATCH /users/:userId can change of the caller's own profile. A field left out is left as it is. */
 const UpdateBody = Credentials.extend({
+  /**
+   * Not one of them: a username can't be changed (see Username). It is named here so that a
+   * request which sends another name than the user's is refused and told why, where a field this
+   * doesn't name is dropped unread. The name they have changes nothing, and is what a client sends
+   * that sends back what it was given of the account.
+   */
   username: Username.optional(),
   language: LanguageCode.optional(),
   /** Whether the user takes part in messages between users (see routes/inbox.ts). */
@@ -73,7 +84,7 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   const { db, config, publishers, challenges, trust, now = Date.now } = deps;
   const { languages } = app;
 
-  /** Feeds read credits from Redis; the compactor re-syncs changed users if this write fails. */
+  /** Feeds read credits from Redis; the compactor re-syncs new users if this write fails. */
   const putPublisher = (p: { userId: string; username: string }) =>
     publishers.put(p).catch((err) => app.log.warn({ err, userId: p.userId }, 'could not write the publisher credit to Redis'));
 
@@ -191,11 +202,17 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   });
 
   /**
-   * Updates the caller's own profile: their username, their language, whether they take part in
-   * messages between users, whether they show whom they follow, whether they show who follows
-   * them, their bio, their links, or any of them at once. Feeds show the new name at once: they
-   * read it from Redis. The new language is the one the server answers the user in from this
-   * response on. Only the name is part of their credit, so nothing else changes `updated_at`.
+   * Updates the caller's own profile: their language, whether they take part in messages between
+   * users, whether they show whom they follow, whether they show who follows them, their bio,
+   * their links, or any of them at once. The new language is the one the server answers the user
+   * in from this response on.
+   *
+   * Not their username, which is the one the account was registered with for as long as there is
+   * an account: a request that sends another `username` than theirs is refused (400), all of it,
+   * whatever else it sends. A user who could take another name could leave what they published
+   * under a name nobody knows them by. The name they have is no change, and no field either: a
+   * request with it and nothing else has nothing to update. So nothing here is part of their
+   * credit, and nothing changes `updated_at`.
    *
    * A bio and links (src/profile.ts) are read by anyone, so they go through the trust plugins
    * first, as a post does (see moderateProfile): the request is refused (422), all of it, if they
@@ -211,7 +228,8 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const body = UpdateBody.parse(req.body ?? {});
     const user = await authenticate(db, req, body);
     if (user.id !== userId) throw forbidden(msg('user.update_own_only'));
-    if ([body.username, body.language, body.messages, body.showFollowing, body.showFollowers, body.bio, body.links].every((value) => value === undefined)) {
+    if (body.username !== undefined && body.username !== user.username) throw badRequest(msg('user.username_fixed'));
+    if ([body.language, body.messages, body.showFollowing, body.showFollowers, body.bio, body.links].every((value) => value === undefined)) {
       throw badRequest(msg('user.nothing_to_update'));
     }
     // What the request makes of each, where it names it: null for a bio or links that are taken away.
@@ -221,16 +239,12 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       if (user.banned) throw forbidden(msg('user.banned_profile'));
       await moderateProfile({ trust, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } }, { userId, bio, links });
     }
-    const username = body.username ?? user.username;
     const language = body.language === undefined ? user.language : chosen(body.language);
     const messages = body.messages ?? user.messages;
     const showFollowing = body.showFollowing ?? user.showFollowing;
     const showFollowers = body.showFollowers ?? user.showFollowers;
-    const renamed = username !== user.username;
-    // One statement, so a request that changes several things changes them all or, its username taken, none.
+    // One statement, so a request that changes several things changes them all or none.
     const changes = {
-      // With the name as a search compares it (GET /search), which is found by the new one from here on.
-      ...(renamed && { username, username_folded: foldUsername(username), updated_at: now() }),
       ...(body.language !== undefined && { language }),
       ...(body.messages !== undefined && { messages: messages ? 1 : 0 }),
       ...(body.showFollowing !== undefined && { show_following: showFollowing ? 1 : 0 }),
@@ -238,14 +252,13 @@ export function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       ...(bio !== undefined && { bio }),
       ...(links !== undefined && { links: storedLinks(links) }),
     };
-    if (Object.keys(changes).length > 0) await db.updateTable('users').set(changes).where('id', '=', userId).execute().catch(usernameTaken);
-    if (renamed) await putPublisher({ userId, username });
+    await db.updateTable('users').set(changes).where('id', '=', userId).execute();
     req.language = language;
     // The profile as the row now has it: what this request set of it, and what it left as it was.
     const profile = await db.selectFrom('users').select(['id', 'bio', 'links', 'avatar_id']).where('id', '=', userId).where('deleted_at', 'is', null).executeTakeFirst();
     // Deleted while this request was under way.
     if (!profile) throw notFound(msg('user.not_found'));
-    return { userId, username, language, messages, showFollowing, showFollowers, ...profileOf(profile, config.publicBaseUrl) };
+    return { userId, username: user.username, language, messages, showFollowing, showFollowers, ...profileOf(profile, config.publicBaseUrl) };
   });
 
   /**

@@ -5,7 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { SummaryStore, type HotStore, type Summary } from '../src/storage/index.js';
 import { decodeSummary, encodeSummary, summaryKey } from '../src/storage/summaryStore.js';
-import { DAY_ENTRY_BYTES, packDay, unpackDay } from '../src/tagfeed/layout.js';
+import { DAY_ENTRY_BYTES, dayEntryBytes, LAYOUT_VERSION, packDay, unpackDay } from '../src/tagfeed/layout.js';
 import type { IndexEntry } from '../src/tagfeed/layout.types.js';
 import { DAY } from '../src/time.js';
 import { testHotStore } from './helpers.js';
@@ -140,30 +140,47 @@ describe('summary text', () => {
 });
 
 describe('day index entries', () => {
-  it('packs each entry into 25 bytes, keeping whole seconds of the creation time', () => {
+  it('packs each entry into 33 bytes, keeping whole seconds of the creation time', () => {
     const entries: IndexEntry[] = [
-      { contentId: ID, createdAt: NOW + 999, likes: 4_000_000_000, aiGenerated: true, moderated: false, repost: false },
-      { contentId: '00000000-0000-4000-8000-000000000001', createdAt: NOW, likes: 0, aiGenerated: false, moderated: false, repost: false },
-      { contentId: '00000000-0000-4000-8000-000000000002', createdAt: NOW, likes: 1, aiGenerated: false, moderated: true, repost: false },
-      { contentId: '00000000-0000-4000-8000-000000000003', createdAt: NOW, likes: 2, aiGenerated: true, moderated: true, repost: false },
-      { contentId: '00000000-0000-4000-8000-000000000004', createdAt: NOW, likes: 3, aiGenerated: false, moderated: false, repost: true },
-      { contentId: '00000000-0000-4000-8000-000000000005', createdAt: NOW, likes: 4, aiGenerated: true, moderated: true, repost: true },
+      { contentId: ID, createdAt: NOW + 999, likes: 4_000_000_000, views: 4_100_000_000, dislikes: 4_200_000_000, aiGenerated: true, moderated: false, repost: false },
+      { contentId: '00000000-0000-4000-8000-000000000001', createdAt: NOW, likes: 0, views: 0, dislikes: 0, aiGenerated: false, moderated: false, repost: false },
+      { contentId: '00000000-0000-4000-8000-000000000002', createdAt: NOW, likes: 1, views: 10, dislikes: 0, aiGenerated: false, moderated: true, repost: false },
+      { contentId: '00000000-0000-4000-8000-000000000003', createdAt: NOW, likes: 2, views: 0, dislikes: 5, aiGenerated: true, moderated: true, repost: false },
+      { contentId: '00000000-0000-4000-8000-000000000004', createdAt: NOW, likes: 3, views: 300, dislikes: 30, aiGenerated: false, moderated: false, repost: true },
+      { contentId: '00000000-0000-4000-8000-000000000005', createdAt: NOW, likes: 4, views: 1, dislikes: 1, aiGenerated: true, moderated: true, repost: true },
     ];
     const buf = packDay(entries);
-    expect(DAY_ENTRY_BYTES).toBe(25);
+    expect(DAY_ENTRY_BYTES).toBe(33);
+    expect(dayEntryBytes(LAYOUT_VERSION)).toBe(DAY_ENTRY_BYTES);
     expect(buf.length).toBe(6 * DAY_ENTRY_BYTES);
     expect(unpackDay(buf)).toEqual([{ ...entries[0]!, createdAt: NOW }, ...entries.slice(1)]);
-    // The flags are the entry's last byte: 1 for AI-generated, 2 for moderated, 4 for an entry a repost made.
-    expect(entries.map((_, i) => buf[(i + 1) * DAY_ENTRY_BYTES - 1])).toEqual([1, 0, 2, 3, 4, 7]);
+    // The flags are the entry's 25th byte: 1 for AI-generated, 2 for moderated, 4 for an entry a repost made.
+    expect(entries.map((_, i) => buf[i * DAY_ENTRY_BYTES + 24])).toEqual([1, 0, 2, 3, 4, 7]);
+    // Then its views and its dislikes, four bytes each.
+    expect(entries.map((_, i) => [buf.readUInt32BE(i * DAY_ENTRY_BYTES + 25), buf.readUInt32BE(i * DAY_ENTRY_BYTES + 29)])).toEqual(entries.map((e) => [e.views, e.dislikes]));
   });
 
-  it('clamps likes to 32 bits, and refuses ids that are not UUIDs', () => {
+  it('reads an index of version 5, whose entries are 25 bytes, as having no views and no dislikes', () => {
+    const entries: IndexEntry[] = [
+      { contentId: ID, createdAt: NOW, likes: 9, views: 70, dislikes: 3, aiGenerated: true, moderated: false, repost: true },
+      { contentId: '00000000-0000-4000-8000-000000000001', createdAt: NOW - 5000, likes: 0, views: 1, dislikes: 0, aiGenerated: false, moderated: true, repost: false },
+    ];
+    const buf = packDay(entries);
+    expect(dayEntryBytes(5)).toBe(25);
+    // What version 5 held of an entry is the start of what this one holds.
+    const v5 = Buffer.concat(entries.map((_, i) => buf.subarray(i * DAY_ENTRY_BYTES, i * DAY_ENTRY_BYTES + 25)));
+    expect(unpackDay(v5, 5)).toEqual(entries.map((e) => ({ ...e, views: 0, dislikes: 0 })));
+    // Read as this version's, the bytes are other entries: the version is the manifest's to say.
+    expect(unpackDay(v5)).not.toEqual(unpackDay(v5, 5));
+  });
+
+  it('clamps likes, views and dislikes to 32 bits, and refuses ids that are not UUIDs', () => {
     const flags = { moderated: false, repost: false };
-    const [e] = unpackDay(packDay([{ contentId: ID, createdAt: NOW, likes: 2 ** 40, aiGenerated: true, ...flags }]));
-    expect(e).toMatchObject({ likes: 0xffffffff, aiGenerated: true });
-    const [none] = unpackDay(packDay([{ contentId: ID, createdAt: NOW, likes: -5, aiGenerated: false, ...flags }]));
-    expect(none).toMatchObject({ likes: 0, aiGenerated: false });
-    expect(() => packDay([{ contentId: 'c-1', createdAt: NOW, likes: 0, aiGenerated: false, ...flags }])).toThrow(/UUID/);
+    const [e] = unpackDay(packDay([{ contentId: ID, createdAt: NOW, likes: 2 ** 40, views: 2 ** 41, dislikes: 2 ** 42, aiGenerated: true, ...flags }]));
+    expect(e).toMatchObject({ likes: 0xffffffff, views: 0xffffffff, dislikes: 0xffffffff, aiGenerated: true });
+    const [none] = unpackDay(packDay([{ contentId: ID, createdAt: NOW, likes: -5, views: -1, dislikes: -2, aiGenerated: false, ...flags }]));
+    expect(none).toMatchObject({ likes: 0, views: 0, dislikes: 0, aiGenerated: false });
+    expect(() => packDay([{ contentId: 'c-1', createdAt: NOW, likes: 0, views: 0, dislikes: 0, aiGenerated: false, ...flags }])).toThrow(/UUID/);
   });
 });
 

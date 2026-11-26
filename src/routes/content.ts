@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { attest, signingKeys } from '../attestation.js';
 import { authenticate } from '../auth/apiKey.js';
-import { contentNotFound, creditOf, imageNotFound, imagesOf, loadPublished, loadReadable, ORIGIN_GONE, PENDING_REVIEW, PROCESSING, publisherOf, readerOf, requireMeta, requirePost, takesComments, videoProcessing } from '../content.js';
+import { contentNotFound, countView, creditOf, imageNotFound, imagesOf, loadPublished, loadReadable, ORIGIN_GONE, PENDING_REVIEW, PROCESSING, publisherOf, readerOf, requireMeta, rowCounts, requirePost, takesComments, videoProcessing } from '../content.js';
 import { setForDeletion } from '../deletion.js';
 import type { AppDeps } from '../deps.types.js';
 import { badRequest, forbidden, HttpError, notFound } from '../http/errors.js';
@@ -124,6 +124,20 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
   }
 
   /**
+   * Counts this request as a view of the post (see countView), and says whether it was counted. A
+   * count that can't be written is logged, and the post is read all the same, without it.
+   */
+  async function viewedBy(req: FastifyRequest, contentId: string): Promise<boolean> {
+    try {
+      await countView(db, contentId, now());
+      return true;
+    } catch (err) {
+      req.log.error({ err }, 'could not count the view; the post goes out without it');
+      return false;
+    }
+  }
+
+  /**
    * retrieve_content: the publisher's credit first (their userId and username, and where their
    * avatar is read, `avatarUrl`, if they have one: see creditOf), then the preview, the
    * whole text or caption, and hashtags. `status: "pending_review"` on content that waits in the
@@ -137,6 +151,17 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
    * `reposts`, on a post that was reposted (src/reposts.ts): each repost, oldest first, with who
    * made it, the hashtags it gave the post that the post still has from it, and when. `likes` is
    * the post's one count, all of them, whichever feed a like came from.
+   *
+   * `views` is how many times the post was read here by a user account, this time included: a
+   * request that carries a user's credentials, in its headers, counts as one view of a published
+   * post, every time it is made (see countView). One that carries none, or wrong ones, is
+   * answered as ever and counts nothing, and neither does a read of content that is withheld
+   * (it waits in the moderation queue, or its original is gone). Nothing else counts: not the
+   * post's bytes (/raw), its comments, or its place in a feed.
+   *
+   * `dislikes` is how many users dislike the post (POST /dislike), on a server that has dislikes
+   * on, 0 for a post nobody dislikes; null on one that has them off, which is how a client knows
+   * to show none (see rowCounts).
    *
    * `moderation`, on a post a hashtag's moderator decided about (src/moderation/tagDecisions.ts):
    * the post's record of it, oldest first. Each says what was done (`tag_removed`, or
@@ -178,11 +203,14 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
   app.get('/content/:contentId', { config: perMinute(config.contentRateLimitPerMinute) }, async (req) => {
     const { contentId } = Params.parse(req.params);
     const row = await loadReadable(db, req, contentId);
-    // The row says whose the content is and how liked; what it is, is in the meta file beside its bytes.
+    // The row says whose the content is and how liked, viewed and disliked; what it is, is in the meta file beside its bytes.
     const [{ meta, processing }, reposts, actions] = await Promise.all([requirePost({ db, content }, contentId), repostsMade(contentId), tagActions(db, contentId)]);
     const ad = row.queued || row.gone ? undefined : await postAd(req, meta.tags);
-    // Only a post that has a record asks who reads it: who decided is for those who moderate the hashtag it was decided under.
-    const named = actions.length > 0 ? await moderatedAmong(db, await readerOf(db, req), [...new Set(actions.map((action) => action.tag))]) : null;
+    // Who reads it, where the request says: a request that carries no credentials asks the database nothing for this.
+    const reader = await readerOf(db, req);
+    // Who decided is for those who moderate the hashtag it was decided under, of a post that has a record.
+    const named = actions.length > 0 ? await moderatedAmong(db, reader, [...new Set(actions.map((action) => action.tag))]) : null;
+    const viewed = reader !== null && !row.queued && !row.gone && (await viewedBy(req, row.id));
     return {
       publisher: creditOf(row, config.publicBaseUrl),
       contentId: row.id,
@@ -193,7 +221,8 @@ export function contentRoutes(app: FastifyInstance, { db, config, content, ads, 
       ...(meta.text !== undefined && { text: meta.text }),
       ...(meta.mentions?.length && { mentions: meta.mentions }),
       tags: meta.tags,
-      likes: row.like_count,
+      // The row was read before this view was counted.
+      ...rowCounts({ ...row, view_count: Number(row.view_count) + (viewed ? 1 : 0) }, config.dislikes),
       mimeType: meta.mimeType,
       aiGenerated: row.ai_generated === 1,
       comments: takesComments(meta),

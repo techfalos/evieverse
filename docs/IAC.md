@@ -29,6 +29,7 @@ Summaries share the content bucket, under `summaries/`, and so do comments, unde
 
 - Terraform 1.5 or newer.
 - Docker for AWS and GCP (the image is built locally and pushed). Azure builds remotely with `az acr build`, so Docker isn't needed there.
+- No Rust on your machine: the compactor and the trust plugins are Rust, and the image's build compiles them inside the image. That makes the first build take several minutes. The image is built for `linux/amd64`, so on a machine with another kind of CPU (an Apple Silicon Mac) Docker emulates that build, which is slower still.
 - The cloud's CLI: `aws configure` / `gcloud auth login && gcloud auth application-default login`  or  `az login`. Terraform also uses `gcloud` and `az` to run the database migrations.
 
 To skip the build, set `image` to an image you've already pushed. On AWS it must be in an ECR repository of the same account and region.
@@ -141,7 +142,7 @@ Deployments with the same `name` that are applied from one machine write the sam
 
 | Variable                | Default |                                                                                                                                                                               |
 | ----------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `admin_username`        | `admin` | The account's username when it's created. It fails the apply if another user has it. To rename the account later, use `PATCH /users/:userId`: changing this variable doesn't. |
+| `admin_username`        | `admin` | The account's username when it's created. It fails the apply if another user has it. It's the account's name for good: a username can't be changed, and changing this variable later renames nothing. |
 | `install_admin_profile` | `true`  | Write the profile file. Set it to `false` where applies run unattended (CI), and read the key with `terraform output -raw admin_api_key`.                                     |
 | `admin_profile_name`    | `""`    | The profile's name, and so its file's. Empty: the same as `name`. A name is 1 to 64 letters, digits, `.`, `_` and `-`, the first a letter or a digit.                         |
 
@@ -216,13 +217,13 @@ What the apply does depends on what you changed:
 | You changed                                   | The apply                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `environment` or `secrets`                    | Checks the new settings, and only then updates every function and the compactor with them. If the server refuses one, the apply stops there with the old settings still in use ([below](#when-a-setting-is-refused)). It doesn't rebuild the image, and the migrations have nothing to do. Running instances are replaced by ones with the new settings: a new Lambda configuration, a new Cloud Run revision, a new Container Apps revision. The compactor stops, finishing its pass where it can, and starts again, so there's a moment with none, which the next pass makes up. |
-| A language, a plugin, or any file under `src` | Rebuilds the image and pushes it, checks the settings with the new image and runs the migrations, and only then updates the functions and the compactor. If either fails, the apply stops there with the old functions still serving.                                                                                                                                                                                                  |
+| A language, a plugin, or any file under `src` or `compactor` | Rebuilds the image and pushes it, checks the settings with the new image and runs the migrations, and only then updates the functions and the compactor. If either fails, the apply stops there with the old functions still serving.                                                                                                                                                                                                  |
 | `image`                                       | The same, with the image you name instead of one it builds.                                                                                                                                                                                                                                                                                                                                                                             |
 
 
 Things to know:
 
-- Some settings are set by the module, and `environment` replaces them. The modules set `DB_DIALECT`, `CONTENT_SCHEME`, `CONTENT_OPTIONS`, `PUBLIC_BASE_URL`, `COMPACT_IN_PROCESS` and, per cloud, `STORAGE_TMP_PATH` and `MAX_UPLOAD_BYTES` ([the limits](#uploads)). A value in `environment` takes their place, and the apply checks only that the server starts with it, not that it suits the deployment: `DB_DIALECT=mysql`, against the PostgreSQL the module made, passes the check and breaks the instance.
+- Some settings are set by the module, and `environment` replaces them. The modules set `DB_DIALECT`, `CONTENT_SCHEME`, `CONTENT_OPTIONS`, `PUBLIC_BASE_URL` and, per cloud, `STORAGE_TMP_PATH` and `MAX_UPLOAD_BYTES` ([the limits](#uploads)). A value in `environment` takes their place, and the apply checks only that the server starts with it, not that it suits the deployment: `DB_DIALECT=mysql`, against the PostgreSQL the module made, passes the check and breaks the instance.
 - `TRUST_PROXY` differs by cloud. On GCP and Azure it follows the module's `trust_proxy` variable (2), and an `environment` value replaces that. On AWS it's fixed at `1` for the functions, and an `environment` value is ignored by them. Change it on GCP and Azure with the variable ([Client addresses](#client-addresses)).
 - `DB_POOL_SIZE` on GCP and Azure is the module's `db_pool_size` variable, which an `environment` value overrides. Keep to the connection arithmetic in [Scaling and the database](#scaling-and-the-database).
 - `secrets` on AWS are read by version. They're kept in Secrets Manager, not in a function's configuration. A function reads them as an instance starts, and the compactor's task is given them as it starts, each by the version the apply wrote, not the current one. So a changed secret is a new function configuration and a new task definition, which wait for the settings check like any other change, and the compactor restarts with the new value by itself.
@@ -240,7 +241,7 @@ To check a change took effect, ask the instance. `curl "$(terraform output -raw 
 Updating a function doesn't start it, so a setting the server refuses wouldn't show until requests failed. The apply checks first instead. Before it updates anything, it runs one step (the migrate function on AWS, the migrate job on GCP and Azure) with the settings the functions are about to get, which starts each route group as its function would. If the server doesn't start with them, the step fails and the apply stops:
 
 - Nothing was changed. The functions and the compactor keep the settings they had, and go on serving.
-- The step's log says which setting, and why, for example "the functions would not start with these settings, so nothing was changed: TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't a folder of…". The step is named after the deployment, `<name>-migrate`: on AWS its log group is `/aws/lambda/<name>-migrate`, and on GCP and Azure it's the job's log.
+- The step's log says which setting, and why, for example "the functions would not start with these settings, so nothing was changed: TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't one of the trust plugins this server was built with…". The step is named after the deployment, `<name>-migrate`: on AWS its log group is `/aws/lambda/<name>-migrate`, and on GCP and Azure it's the job's log.
 - Fix the value and apply again. The step runs again on every apply until it passes.
 
 What the check catches is what stops the server from starting: a value in the wrong format, a name that isn't one (a plugin in `TRUST_OPTIONAL_PLUGINS`, a `CONTENT_SCHEME`, a `DEFAULT_LANGUAGE` with no file), and settings that need each other (`TAGGING_MODE=server` without `TAGGING_SERVER_TAGS`, `urlhaus` without `URLHAUS_AUTH_KEY`, `pdq` without `PDQ_HASH_LIST`). The last two of these fail sooner, in the plan. What it doesn't catch is a value the server starts with but that is wrong: a bucket that doesn't exist, or a key a service refuses, shows when it's used.
@@ -320,30 +321,31 @@ What that leaves, until the reindex has run:
 
 - A post from before the upgrade is found by no search, unless it has been written out again since.
 - A name with an accent is found only by the letters before it. The migration can put a name in lowercase, and can't take its accents off: `jos` finds José, and `jose` and `josé` don't.
-- An account registered or renamed between the migration and the functions' update, which is a few minutes, was written by the version before. It has no name to be found by.
+- An account registered between the migration and the functions' update, which is a few minutes, was written by the version before. It has no name to be found by.
 
-The reindex is `node dist/search/reindex.js`, run in the deployment's image with its settings. It reads every post's meta file from the bucket and every user, writes what's missing, and ends. It needs the database and the bucket, and no Redis. The modules keep no task of its own for it. On AWS and GCP, start the [rebuild](#redis)'s task or job with this command in place of its own. On Azure, run it in the compactor's container, which has the same image and settings:
+The reindex is `compactor reindex`, run in the deployment's image with the compactor's settings. It reads every post's meta file from the bucket and every user, writes what's missing, and ends. It opens what the compactor opens, so it needs every setting the compactor does, `REDIS_URL` among them, though what it reads and writes is the database and the bucket. It doesn't bring the database up to date: the apply has. The modules keep no task of its own for it. On AWS and GCP, start the [rebuild](#redis)'s task or job, which has those settings, with this command in place of its own. On Azure, run it in the compactor's container:
 
 ```sh
 # AWS: what `terraform output -raw rebuild_command` prints, with --overrides added
 aws ecs run-task --cluster evieverse --task-definition evieverse-rebuild --launch-type FARGATE \
   --network-configuration 'awsvpcConfiguration={subnets=[subnet-...],securityGroups=[sg-...],assignPublicIp=DISABLED}' \
-  --overrides '{"containerOverrides":[{"name":"compactor","command":["node","dist/search/reindex.js"]}]}'
+  --overrides '{"containerOverrides":[{"name":"compactor","command":["compactor","reindex"]}]}'
 
 # GCP: the rebuild job, with other arguments
-gcloud run jobs execute evieverse-rebuild --region us-central1 --wait --args=dist/search/reindex.js
+gcloud run jobs execute evieverse-rebuild --region us-central1 --wait --args=reindex
 
 # Azure: a shell in the compactor's container (`terraform output compactor` names it), then the command in it
 az containerapp exec --resource-group evieverse-rg --name evieverse-compactor --command sh
-node dist/search/reindex.js
+compactor reindex
 ```
 
 - It runs beside the functions and the compactor. It takes the compactor's lease for each 500 posts and leaves it free for as long between them, so passes go on while it works, about half as often: posts are published a little later meanwhile.
-- Its log says where it is (`1500 posts read...`), and ends with `Reindex complete:` and how many posts it indexed and usernames it changed. On Azure, keep the session open until then.
+- Its log says where it is (`1500 posts read...`), and ends with `Reindex complete:` and how many posts it indexed, how many still wait for the compactor, which indexes those itself, and how many usernames it changed. On Azure, keep the session open until then.
 - It can be run again, at any time. What's right already is read and left as it is, so one that was stopped is started again from the beginning.
 - Run it again after changing `SEARCH_MAX_KEYWORDS` (100, through `environment`), the most words a post is found by. The compactor applies a new value to the posts it writes out from then on, and the reindex to the rest.
-- Where you run the server yourself, it's `npm run reindex` from the built source, or `node dist/search/reindex.js` in a container, with the server's settings.
+- Where you run the server yourself, it's `npm run reindex` from the built source, or `compactor reindex` in a container, with the compactor's settings.
 - A new deployment needs none of this: it has no post or name from before.
+- A deployment whose compactor was the JavaScript one runs it once more, after [the upgrade to the Rust compactor](#upgrading-to-the-rust-compactor).
 
 What search costs from then on:
 
@@ -364,6 +366,73 @@ A user can take back a like of a post or of a comment ([`DELETE /like`](API.md#d
 - Where you run it yourself, migrate, then start the compactor on the new version, and then the API nodes. In that order no taking back is committed before there's a compactor that can apply it.
 
 This upgrade wasn't applied to a live deployment either. The migration and the likes taken back are covered by the server's tests, on SQLite, and the tests of likes were run on PostgreSQL and MySQL as well.
+
+## Upgrading to the Rust compactor
+
+The compactor is now a program of its own, written in Rust (`compactor/`), and so are the trust plugins, which the functions load as an addon and the compactor has built in. The compactor could once run inside a long-running server, and no longer can: every instance runs one beside the API. The first `apply` of a version that has them needs nothing set, and leaves one thing to do by hand: the reindex, run once after the apply.
+
+What the apply does:
+
+- It builds the image again, which now compiles the Rust code, so this build takes several minutes longer than the ones before it ([Prerequisites](#prerequisites)).
+- It replaces the compactor's container with one whose command is `compactor`, where it was `node dist/compact/main.js`, and gives the [rebuild](#redis)'s task or job the command `compactor --once --rebuild`. `terraform output -raw rebuild_command` starts it as before.
+- The settings check of its [first step](#deploy) now loads the addon: a plugin named in `TRUST_OPTIONAL_PLUGINS` that the image wasn't built with fails the step, as a misspelt name did before. The upgrade has no migration of its own.
+- The modules no longer set `COMPACT_IN_PROCESS`, which nothing reads any more. Take it out of `environment` if you set it there.
+- The functions and the compactor change together, as with any new image. What is in the database, the bucket and Redis keeps its format: the compactor reads and writes what the version before did, so no [rebuild](#redis) is needed.
+
+What that leaves:
+
+- Run the reindex once, as [above](#upgrading-to-search): `compactor reindex`. The compactor used to cut a text into words with Node's `Intl.Segmenter`, and now does with ICU4X, whose rules differ in places, most of all for languages written without spaces. Until the reindex has run, a post indexed before may not be found by all of its words. Posts written out from then on are indexed the new way without it.
+- Blocked patterns are run by another engine (QuickJS), in the functions. They are written as before, and each list still has 100 ms for one post, past which the post counts as a match. That time is used up sooner than it was: measured on one machine, a pattern took about 1 ms over a post of 40,000 characters, the longest there is, so a list of 100 patterns over such a post reaches the 100 ms. A hashtag or a server with many patterns may see very long posts held or refused that weren't before. Shorter posts are far from it: 100 patterns over a short post took under 1 ms.
+- The `pdq` plugin decodes images with another library. It reads a picture's pixels as they are stored, without applying a colour profile the file carries, so a hash may differ in a few of its bits from the one the version before made of the same file, which is what `PDQ_MAX_DISTANCE` allows for.
+- An image of your own (`image`) has to have the compactor at `compactor` on its `PATH` and the addon at `/app/native/evieverse.node`, as the `Dockerfile` puts them.
+
+Where you run it yourself:
+
+- Stop the API nodes and the compactor, and start them on the new version: the API with `node dist/server.js`, and the compactor with `compactor` (`npm run compact` from source, after `npm run build:native`). A node that was started with `COMPACT_IN_PROCESS=true` has no compactor inside it any more: without one beside it, posts are accepted and never published.
+- `REDIS_URL` is required, for the API and for the compactor. A single node that ran without it, on the store in its own memory, needs a Redis or Valkey now ([Redis](#redis)).
+- Then run `compactor reindex` once (`npm run reindex` from source).
+
+This upgrade wasn't applied to a live deployment either. The three modules pass `terraform validate`, and the image was built and started in Docker on one machine. The compactor, the plugins and the reindex are covered by the server's tests, which run against the Rust program, on SQLite. The timings of patterns were measured on one machine, and the note on hashes is read from the code: the two decoders weren't compared on a set of images.
+
+## Upgrading to views and dislikes
+
+Every post now has a count of its views, and, on an instance that turns them on, of its dislikes ([API.md](API.md#views), [`POST /dislike`](API.md#post-dislike)). Both are in feed records, so the feed index in Redis has a new layout. The first `apply` of a version that has them needs nothing set, and nothing done by hand afterwards. What it does:
+
+- It runs migration `0018_views_dislikes`, in its [first step](#deploy): four columns on `content` (`view_count`, `viewed_at`, `dislike_count`, `disliked_at`), an index on each of the two times, and a table, `dislikes`. The posts that are there start with 0 views and 0 dislikes.
+- The gateways get no new route. `POST /dislike` and `DELETE /dislike` are in the `api` [group](#route-groups), which is sent every path that has no route of its own. Views are counted by `GET /content/:id`, which the `content` group already answers.
+- The feed index is upgraded as it's used. An entry of the index goes from 25 to 33 bytes. The new functions read an index of either layout, and the new compactor writes a hashtag's whole index in the new one the first time anything happens under that hashtag. Until then the hashtag's feeds are as before, with `views: 0` on every record. No [rebuild](#redis) is needed, and running one upgrades every hashtag at once.
+- Dislikes stay off. To turn them on, set `DISLIKES = "true"` in `environment` ([CONFIG.md](CONFIG.md#dislikes)), with this apply or a later one. With them off, every post's `dislikes` is `null`, which is what tells clients to show none.
+
+**The functions have to be of the new version before the compactor is.** A function of the version before can't read an index the new compactor wrote: it takes the 33-byte entries for 25-byte ones, so under a hashtag that was compacted meanwhile its feed has the day's first post, and is missing the others or has them wrong. The apply updates the functions and the compactor together, after the migrations, in no order. So between the two updates, which is a few minutes at most, a feed that an old function instance answers can be short of posts under the hashtags that were posted to, liked or viewed in that time, and a following feed short of the posts of the users who posted then. Nothing is stored wrong, and it ends when the last old instance is gone: the same feed asked for again is whole. To keep it small, apply when the server is quiet. To have no such moment, update the functions first, and everything else with a second apply:
+
+```sh
+# AWS
+terraform apply -target=aws_lambda_function.fn [the same -var flags]
+# GCP
+terraform apply -target=google_cloud_run_v2_service.group [the same -var flags]
+# Azure
+terraform apply -target=azurerm_container_app.group [the same -var flags]
+
+# then, on any of them
+terraform apply [the same -var flags]
+```
+
+The first builds the image, runs the migrations and updates the functions, which they depend on. The compactor of the version before goes on meanwhile: it keeps writing the old layout, which the new functions read, and it shows no views until it's replaced.
+
+The other way round is harmless, and so is the migrated database to the version before:
+
+- New functions beside the old compactor: views and dislikes are counted in the database, and feeds show them once the new compactor has run. `GET /content/:id` shows them at once.
+- The version before runs on the migrated database. It writes none of the new columns, and a post it stores starts at 0 of each.
+- Going back to the version before, once the new compactor has run, needs a [rebuild](#redis) by the old compactor, which writes the index in the old layout again. The counts stay in the database for the next upgrade.
+
+What to expect afterwards:
+
+- Redis holds about a third more for the index: 33 bytes per indexed post per hashtag where it was 25 ([Redis](#redis)).
+- A read of a post with a user's credentials is now a write to the database too: one `UPDATE` of the post's row for each view. Reads without credentials write nothing.
+- The compactor has more to do on an instance whose posts are read a lot. A pass writes again the index entries of every post that was viewed since the pass before, once per post however many views that was. Its log's `lagMs` shows whether passes keep up ([APP.md](APP.md#12-performance-and-scale)).
+- Where you run it yourself: migrate, then start every API node on the new version, and only then the compactor. The compactor of the new version waits for the migration, and doesn't wait for the API nodes.
+
+This upgrade wasn't applied to a live deployment either, and the two-step apply above wasn't run on one: that the functions and the compactor are updated in no order is read from the modules, where both wait for the migration step and neither waits for the other. The migration, the two layouts and the upgrade of an index from one to the other are covered by the server's tests, on SQLite.
 
 ## Uploads
 
@@ -468,6 +537,7 @@ What waits for it:
 
 - Only the compactor writes posts and comments to the bucket. A request commits its write to the database, and stores a file it came with under `staged/` in the bucket. The next pass writes it out where it's kept (`content/`, `comments/`, `summaries/`), each post and each comment as the newest write of it has it. The staged file is deleted once it's copied, or where the store signs links to its files, once a link given to it can no longer be in use: `CONTENT_SIGNED_URL_SECONDS` (900) and a minute later, by a pass after that. [APP.md](APP.md#what-it-does-each-run) has the details.
 - While it's down, writes are taken and wait. A post, a comment or a like is answered as ever, and a post or a comment can be read by its id. No feed gets a new post or an update, and no list a new comment, until a pass has run. The passes after it's back write out everything that waited.
+- The counts in feeds wait for it too. A like, a view and a dislike are counted in the database by the request, which is what `GET /content/:id` shows at once. A feed's records have a post's likes, views and dislikes as of the last pass.
 - A staged file is kept for a week. Every module's bucket deletes what's under `staged/` after 7 days, which clears the files of requests that failed after storing one. A file that waited that long for the compactor goes too, so don't leave the compactor stopped for a week: a post whose file is gone can't be written out until it's next updated, a comment whose file is gone is published with its text alone, or removed if the file was all there was to it, and [APP.md](APP.md#11-consistency-failure-and-recovery) says what that leaves.
 
 Its size is `compactor_cpu` and `compactor_memory` (half a CPU and 1 GB on AWS and Azure, one CPU and 1 GiB on GCP). It runs all the time, so unlike the functions it costs the same with or without traffic: about $18 a month on AWS at the default size, from Fargate's list prices in `us-east-1`. `terraform output compactor` names it, for finding its logs (on AWS, the log group too).
@@ -527,9 +597,9 @@ Measured for this change, with the limits of each measurement:
 
 Every module sets the eviction policy to `volatile-lru`. Only keys with a TTL (hot summaries, comments, challenges and superseded index keys) are ever evicted, so a full Redis costs object-store reads, never the index.
 
-Size it for about 25 bytes per indexed post per hashtag (10,000 busy hashtags take about 1.1 GB) plus about 0.4 KB per post of the last 8 days (about 0.3 GB at 100,000 posts a day). Comments are kept for a day (`COMMENTS_HOT_HOURS`), and a million a day need about 0.5 GB. The defaults have about 1 GB; raise `redis_node_type`, `redis_memory_gb` or `redis_sku` as you grow. [APP.md](APP.md#12-performance-and-scale) has the details.
+Size it for about 33 bytes per indexed post per hashtag (10,000 busy hashtags take about 1.5 GB) plus about 0.4 KB per post of the last 8 days (about 0.3 GB at 100,000 posts a day). Comments are kept for a day (`COMMENTS_HOT_HOURS`), and a million a day need about 0.5 GB. The defaults have about 1 GB; raise `redis_node_type`, `redis_memory_gb` or `redis_sku` as you grow. [APP.md](APP.md#12-performance-and-scale) has the details.
 
-If Redis loses its data, run the compactor once with `--rebuild`. It rebuilds the feed index, the hot summaries and the publisher credits from the database and the content bucket. Comments need no rebuild: each post's are read from the bucket again the first time they're asked for. A rebuild reads every post, so it's a container task or job of its own rather than a pass of the running compactor. Each module keeps one for it, and prints the command that starts it:
+If Redis loses its data, run the compactor once with `--rebuild` (`compactor --once --rebuild`). It rebuilds the feed index, the hot summaries and the publisher credits from the database and the content bucket. Comments need no rebuild: each post's are read from the bucket again the first time they're asked for. A rebuild reads every post, so it's a container task or job of its own rather than a pass of the running compactor. Each module keeps one for it, and prints the command that starts it:
 
 ```sh
 terraform output -raw rebuild_command   # then run what it prints
@@ -583,7 +653,9 @@ It runs beside the compactor. If the compactor is mid-pass, the rebuild waits fo
 
 ## Setting it up yourself
 
-Without these modules, the server runs on any of each cloud's services below, as long-running API nodes with one compactor (`node dist/server.js`, `node dist/compact/main.js`), or as functions (`node dist/functions/http.js` for containers that scale with traffic, `node dist/functions/lambda.js` on Lambda, with `FUNCTION_GROUP` naming the group). The rules that apply on every cloud, and the ones functions add, are in [APP.md](APP.md#13-deployment-topology).
+Without these modules, the server runs on any of each cloud's services below, as long-running API nodes with one compactor (`node dist/server.js`, and `compactor`, the program the image has on its `PATH`), or as functions (`node dist/functions/http.js` for containers that scale with traffic, `node dist/functions/lambda.js` on Lambda, with `FUNCTION_GROUP` naming the group). The rules that apply on every cloud, and the ones functions add, are in [APP.md](APP.md#13-deployment-topology).
+
+Every setup has all three: the API, one compactor, and a Redis or Valkey that both reach (`REDIS_URL`), since the compactor writes the feed index the API reads. The compactor also needs ffmpeg, which the image has, unless `VIDEO_PROCESSING=false`.
 
 With functions, run the step the modules run before you update them, with the settings they're about to get: `node dist/functions/migrate.js` as a job, or the Lambda entry point with `FUNCTION_GROUP=migrate`. It checks that the functions start with those settings, and then migrates the database. Nothing else tells you about a setting the server refuses until requests fail, since updating a function doesn't start it.
 
@@ -597,7 +669,7 @@ For the instance's posts to be reposted on other servers, give it a signing key 
 | Content and summaries | S3: `CONTENT_SCHEME=s3`, `CONTENT_OPTIONS='{"bucket":"tu-content","region":"us-east-1"}'`                                                  |                                     |
 | Redis                 | **ElastiCache for Valkey or Redis OSS**, cluster mode disabled, with a replica: `REDIS_URL=rediss://:<auth token>@<primary endpoint>:6379` | Valkey or Redis on EC2              |
 | API                   | EC2 Auto Scaling or ECS Fargate behind an ALB                                                                                              | EKS                                 |
-| Compactor             | An ECS service of one task running `node dist/compact/main.js`                                                                             | The same on EC2 or EKS, as one copy |
+| Compactor             | An ECS service of one task running `compactor`                                                                             | The same on EC2 or EKS, as one copy |
 | Database              | RDS PostgreSQL or MySQL                                                                                                                    | Aurora                              |
 
 
@@ -611,7 +683,7 @@ ElastiCache Serverless and MemoryDB only run in cluster mode, so they aren't sup
 | Content and summaries | Cloud Storage: `CONTENT_SCHEME=gcs`, `CONTENT_OPTIONS='{"bucket":"tu-content","credential_path":"/secrets/gcs.json"}'` |                                                         |
 | Redis                 | **Memorystore for Redis**, Standard tier, with AUTH: `REDIS_URL=redis://:<auth string>@<host>:6379`                    | Valkey or Redis on Compute Engine                       |
 | API                   | Cloud Run with direct VPC egress, a Managed Instance Group, or GKE, behind a Cloud Load Balancer                       |                                                         |
-| Compactor             | A Cloud Run worker pool of one instance running `node dist/compact/main.js`                                            | A GKE Deployment of one replica, or a Compute Engine VM |
+| Compactor             | A Cloud Run worker pool of one instance running `compactor`                                            | A GKE Deployment of one replica, or a Compute Engine VM |
 | Database              | Cloud SQL for PostgreSQL or MySQL                                                                                      | AlloyDB                                                 |
 
 
@@ -625,7 +697,7 @@ Memorystore for Redis Cluster runs in cluster mode, so it isn't supported.
 | Content and summaries | Blob Storage: `CONTENT_SCHEME=azblob`, `CONTENT_OPTIONS='{"container":"content","endpoint":"https://acct.blob.core.windows.net","account_name":"acct","account_key":"..."}'` |                                           |
 | Redis                 | **Azure Managed Redis** with the Enterprise cluster policy: `REDIS_URL=rediss://:<access key>@<host>:10000`                                                                  | Azure Cache for Redis, without clustering |
 | API                   | VM Scale Sets, AKS, or Container Apps behind Front Door or an Application Gateway                                                                                            |                                           |
-| Compactor             | A Container App of one replica, with no ingress, running `node dist/compact/main.js`                                                                                         | An AKS Deployment of one replica          |
+| Compactor             | A Container App of one replica, with no ingress, running `compactor`                                                                                         | An AKS Deployment of one replica          |
 | Database              | Azure Database for PostgreSQL or MySQL Flexible Server                                                                                                                       |                                           |
 
 

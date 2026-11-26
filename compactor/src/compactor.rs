@@ -74,8 +74,10 @@ impl Stopper {
 /// floor, kept for `tagRetentionDays`. Each run rebuilds only the (tag, day) indexes that
 /// changed: those of the content in the feed queue (`feed_queue`), where every write that
 /// commits leaves a row for each index it changes the content's place in, new likes
-/// (re-admitting liked content that was trimmed earlier), what tag moderators decided, and
-/// content set for deletion; days whose quota shrank are re-trimmed. It then writes a new
+/// (re-admitting liked content that was trimmed earlier), new views and dislikes (whose
+/// counts the entries carry), what tag moderators decided, and content set for deletion;
+/// days whose quota shrank are re-trimmed, and every day of a tag whose index is of an
+/// earlier version of the layout is written again as this one's. It then writes a new
 /// manifest and swaps the head, once per tag however many writes the run took. Tags are
 /// compacted many at a time (see `compact_batch`): what a run costs in round trips goes by
 /// its batches, not by its tags, so a run that took a post from each of a thousand publishers

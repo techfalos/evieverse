@@ -37,7 +37,7 @@ export function ensureAdmin(db: Db, admin: BootstrapAdmin, now = Date.now()): Pr
     if (!user) {
       const holder = await trx.selectFrom('users').select('id').where('username', '=', admin.username).executeTakeFirst();
       if (holder) throw new Error(`the admin account can't be created: the username "${admin.username}" belongs to user ${holder.id}; choose another`);
-      // updated_at makes the compactor write the publisher credit to Redis, as it does for a changed profile.
+      // updated_at makes the compactor write the publisher credit to Redis, as it does for a user who registered.
       await trx
         .insertInto('users')
         .values({ id: userId, username: admin.username, username_folded: foldUsername(admin.username), created_at: now, updated_at: now, admin: 1 })

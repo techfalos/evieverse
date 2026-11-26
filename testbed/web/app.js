@@ -11,8 +11,8 @@ const HOURS = [1, 2, 4, 8, 12, 24, 48, 72, 168, 336, 504, 720, 1440, 2160];
 
 const ALGORITHMS = {
   popular:
-    "algorithm=popular puts the window's most liked posts first, giving each hashtag a share of the page. " +
-    "Each tag's 2nd pick and every 4th after it is a fresh post with no likes yet.",
+    "algorithm=popular puts the window's most liked posts first, whatever their hashtag. " +
+    'The page is one list in the order of their likes, and nothing else.',
   chronological: "algorithm=chronological puts the window's newest posts first, whatever their likes or their hashtag.",
 };
 
@@ -394,7 +394,7 @@ async function loadFeed({ more = false } = {}) {
   state.pages.push({ ...res, tags });
   state.cursor = res.data.nextCursor;
   renderStats();
-  renderPage(res.data, tags, state.pages.length, algorithm);
+  renderPage(res.data, tags, state.pages.length);
   $('#raw pre').textContent = JSON.stringify(res.data, null, 2);
   $('#more').hidden = !state.cursor;
   revealHighlight();
@@ -412,7 +412,7 @@ function renderStats() {
   );
 }
 
-function renderPage(data, asked, page, algorithm) {
+function renderPage(data, asked, page) {
   const frag = document.createDocumentFragment();
   if (page > 1) frag.append(h('div', { class: 'page-break' }, `page ${page}`));
   if (!data.count) {
@@ -423,18 +423,11 @@ function renderPage(data, asked, page, algorithm) {
   const related = new Set(data.related ?? []);
   const tags = [...asked, ...related];
   const label = (t) => `#${t}${related.has(t) ? ' (related)' : ''}`;
-  const lists = tags.map((t) => data.tags[t] ?? []);
-  let picks = [];
-  if (algorithm === 'chronological') {
-    // Each tag's list is newest first; merged by the time each post was placed there, they are the feed's order.
-    picks = lists.flatMap((l, j) => l.map((rec) => ({ rec, via: tags[j] }))).sort((a, b) => Date.parse(placedAt(b.rec)) - Date.parse(placedAt(a.rec)));
-  } else {
-    // Each tag's list is its most liked first, and the planner gives tags equal turns; interleaving shows that order.
-    for (let k = 0; k < Math.max(...lists.map((l) => l.length)); k++) {
-      lists.forEach((l, j) => l[k] && picks.push({ rec: l[k], via: tags[j] }));
-    }
-  }
-  if (picks.length) {
+  // The page's records are one list, in the feed's order: they are shown as they come. Each names the hashtag it is listed under.
+  const records = data.records;
+  /** How many of the page's records are listed under each hashtag. */
+  const listed = tags.map((t) => records.filter((rec) => rec.listedUnder === t).length);
+  if (records.length) {
     frag.append(
       h(
         'section',
@@ -444,9 +437,9 @@ function renderPage(data, asked, page, algorithm) {
           {},
           h('strong', {}, `${data.count} post${data.count === 1 ? '' : 's'}`),
           h('span', {}, `window ${when(data.window.from)} → ${when(data.window.to)}`),
-          h('span', { class: 'chips' }, tags.map((t, j) => (lists[j].length ? h('span', { class: 'chip' }, `${label(t)} ${lists[j].length}`) : null))),
+          h('span', { class: 'chips' }, tags.map((t, j) => (listed[j] ? h('span', { class: 'chip' }, `${label(t)} ${listed[j]}`) : null))),
         ),
-        picks.map(({ rec, via }) => card(rec, label(via))),
+        records.map((rec) => card(rec, label(rec.listedUnder))),
       ),
     );
   }
@@ -490,9 +483,6 @@ function preview(rec) {
       return h('a', { class: 'link-post', href: p.url, target: '_blank', rel: 'noopener noreferrer' }, h('strong', {}, hostOf(p.url)), h('span', { class: 'muted' }, p.url));
   }
 }
-
-/** When a record was placed where the feed read it, which is where the feed orders it: when it was reposted there, or else posted. */
-const placedAt = (rec) => rec.repost?.at ?? rec.createdAt;
 
 /** The original of a repost of a post on another server: where it is, and who published it there. */
 const originLine = (origin) =>

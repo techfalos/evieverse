@@ -109,6 +109,8 @@ for (const target of TARGETS) {
         preview: { kind: 'text', text },
         tags: ['news'],
         likes: 1,
+        views: 0,
+        dislikes: null,
         createdAt: postedAt,
         updatedAt: postedAt,
         text,

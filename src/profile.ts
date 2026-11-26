@@ -151,7 +151,7 @@ export function pinnedPosts(db: Db, userId: string) {
     .selectFrom('pinned_posts')
     .innerJoin('content', 'content.id', 'pinned_posts.content_id')
     .leftJoin('moderation_queue', 'moderation_queue.content_id', 'content.id')
-    .select(['content.id', 'content.user_id', 'content.created_at', 'content.ai_generated', 'content.like_count', 'pinned_posts.created_at as pinned_at'])
+    .select(['content.id', 'content.user_id', 'content.created_at', 'content.ai_generated', 'content.like_count', 'content.view_count', 'content.dislike_count', 'pinned_posts.created_at as pinned_at'])
     .where('pinned_posts.user_id', '=', userId)
     .where('content.delete_requested_at', 'is', null)
     .where('content.origin_gone_at', 'is', null)

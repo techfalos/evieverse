@@ -13,7 +13,7 @@ import { likeKey, payloadBytes, payloadOf, UNNUMBERED } from '../src/pending.js'
 import type { CommentLikePayload, CommentPutPayload, CommentRemovePayload, PostPayload } from '../src/pending.types.js';
 import { CommentStore, ContentStore, createHotStore, SummaryStore, stagedKey, type BytesOwner, type Comment, type ContentMeta, type Summary, type SummaryRef } from '../src/storage/index.js';
 import { decodeSummary, encodeSummary, summaryKey, summaryObjectKey } from '../src/storage/summaryStore.js';
-import { authorIndex, compareRecent, compareRecords, dayKey, dayQuota, headKey, indexAuthor, manifestKey, packDay, unpackDay } from '../src/tagfeed/layout.js';
+import { authorIndex, compareRecent, compareRecords, DAY_ENTRY_BYTES, dayEntryBytes, dayKey, dayQuota, headKey, indexAuthor, LAYOUT_VERSION, manifestKey, packDay, unpackDay } from '../src/tagfeed/layout.js';
 import type { Head, IndexEntry, Manifest } from '../src/tagfeed/layout.types.js';
 import { DAY, HOUR } from '../src/time.js';
 import { TEST_REDIS_URL } from './helpers.js';
@@ -73,16 +73,18 @@ const BASE = 'https://api.example.com';
 describe('the feed index', () => {
   it('is laid out as the fixture has it', () => {
     const entries: IndexEntry[] = [
-      { contentId: P1, createdAt: NOW - 1234, likes: 0, aiGenerated: false, moderated: false, repost: false },
-      { contentId: P2, createdAt: NOW - HOUR, likes: 7, aiGenerated: true, moderated: false, repost: false },
-      { contentId: P3, createdAt: NOW - HOUR + 999, likes: 7, aiGenerated: false, moderated: true, repost: true },
-      { contentId: U1, createdAt: 0, likes: 5_000_000_000, aiGenerated: true, moderated: true, repost: true },
-      { contentId: U2, createdAt: -5000, likes: 1, aiGenerated: false, moderated: false, repost: false },
+      { contentId: P1, createdAt: NOW - 1234, likes: 0, views: 0, dislikes: 0, aiGenerated: false, moderated: false, repost: false },
+      { contentId: P2, createdAt: NOW - HOUR, likes: 7, views: 1234, dislikes: 2, aiGenerated: true, moderated: false, repost: false },
+      { contentId: P3, createdAt: NOW - HOUR + 999, likes: 7, views: 70_000, dislikes: 0, aiGenerated: false, moderated: true, repost: true },
+      { contentId: U1, createdAt: 0, likes: 5_000_000_000, views: 6_000_000_000, dislikes: 7_000_000_000, aiGenerated: true, moderated: true, repost: true },
+      { contentId: U2, createdAt: -5000, likes: 1, views: -3, dislikes: -1, aiGenerated: false, moderated: false, repost: false },
     ];
     const hex = packDay(entries).toString('hex');
-    const head: Head = { v: 5, manifest: '1794052800000-0a1b2c3d', compactedAt: NOW };
+    // The same day as version 5 of the layout held it, before entries had views and dislikes: the start of each entry.
+    const v5Hex = entries.map((_, i) => hex.slice(i * DAY_ENTRY_BYTES * 2, i * DAY_ENTRY_BYTES * 2 + dayEntryBytes(5) * 2)).join('');
+    const head: Head = { v: LAYOUT_VERSION, manifest: '1794052800000-0a1b2c3d', compactedAt: NOW };
     const manifest: Manifest = {
-      v: 5,
+      v: LAYOUT_VERSION,
       tag: 'news',
       id: '1794052800000-0a1b2c3d',
       createdAt: NOW,
@@ -92,7 +94,14 @@ describe('the feed index', () => {
       ],
     };
     golden('layout', {
-      day: { entries, hex, unpacked: unpackDay(Buffer.from(hex, 'hex')), withBytesLeftOver: unpackDay(Buffer.from(`${hex}ffff`, 'hex')).length },
+      day: {
+        entries,
+        entryBytes: dayEntryBytes(LAYOUT_VERSION),
+        hex,
+        unpacked: unpackDay(Buffer.from(hex, 'hex')),
+        withBytesLeftOver: unpackDay(Buffer.from(`${hex}ffff`, 'hex')).length,
+        v5: { entryBytes: dayEntryBytes(5), hex: v5Hex, unpacked: unpackDay(Buffer.from(v5Hex, 'hex'), 5) },
+      },
       order: {
         byRecords: [...entries].sort(compareRecords).map((e) => e.contentId),
         byRecent: [...entries].sort(compareRecent).map((e) => e.contentId),
@@ -120,7 +129,7 @@ describe('the feed index', () => {
       },
       // As they are stored: the text itself.
       head: JSON.stringify(head),
-      emptyHead: JSON.stringify({ v: 5, manifest: null, compactedAt: 0 } satisfies Head),
+      emptyHead: JSON.stringify({ v: LAYOUT_VERSION, manifest: null, compactedAt: 0 } satisfies Head),
       manifest: JSON.stringify(manifest),
     });
   });

@@ -1,4 +1,5 @@
 import type { FastifyRequest } from 'fastify';
+import { sql } from 'kysely';
 import { authenticate } from './auth/apiKey.js';
 import type { AuthUser } from './auth/apiKey.types.js';
 import type { Db } from './db/index.js';
@@ -10,6 +11,8 @@ import { effectiveMeta, pendingPost, type PendingReader } from './pending.js';
 import { altsOf, imageUrl, previewOf } from './posts.js';
 import { shownAvatarUrl } from './profile.js';
 import type { ContentMeta, ContentStore, Publisher, Summary } from './storage/index.js';
+import { countsOf } from './tagfeed/layout.js';
+import type { Counts } from './tagfeed/layout.types.js';
 
 /** A publisher's credit with where their avatar is read, on one who has an avatar to show (see creditOf). */
 export type Credit = Publisher & { avatarUrl?: string };
@@ -133,6 +136,31 @@ export function readerOf(db: Db, req: FastifyRequest): Promise<AuthUser | null> 
     throw err;
   });
 }
+
+/**
+ * Counts a view of a post by a user account: one more on its `view_count`, each time. Views, not
+ * viewers: a user who reads a post again is counted again, and so is its publisher. The post is
+ * marked as viewed (`viewed_at`), which is how the compactor's next run finds it and writes its
+ * entries in the feed indexes with the count as it now is: until then feeds show the count they
+ * had. Content set for deletion counts nothing more.
+ */
+export async function countView(db: Db, contentId: string, at: number): Promise<void> {
+  await db
+    .updateTable('content')
+    .set({ view_count: sql`view_count + 1`, viewed_at: at })
+    .where('id', '=', contentId)
+    .where('delete_requested_at', 'is', null)
+    .execute();
+}
+
+/**
+ * A post's counts as a response gives them, from its row: what is read from the database gives
+ * them as they are now, where a feed gives them as the compactor last wrote them. `dislikesOn` is
+ * whether the server has dislikes on, which is whether `dislikes` is the row's count or null (see
+ * countsOf).
+ */
+export const rowCounts = (row: { like_count: number; view_count: number; dislike_count: number }, dislikesOn: boolean): Counts =>
+  countsOf({ likes: row.like_count, views: Number(row.view_count), dislikes: row.dislike_count }, dislikesOn);
 
 /**
  * Whether the caller may read something that waits in the moderation queue: who sent it (`ownerId`),

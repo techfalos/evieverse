@@ -198,12 +198,13 @@ for (const target of TARGETS) {
       expect(ok(await req(bob, 'GET', '/whoami'))).toMatchObject({ banned: true });
     });
 
-    it('keeps a banned user banned through a change of name, and still takes their name', async () => {
+    it('keeps a banned user under their name, which is no more theirs to change than anyone\'s, and still taken', async () => {
       const { mod, alice } = await setup();
       ok(await ban(mod, alice), 201);
-      ok(await req(alice, 'PATCH', `/users/${alice.userId}`, { username: 'alicia' }));
-      expect((await banned(mod)).banned.map((b) => b.username)).toEqual(['alicia']);
-      expect((await req(null, 'POST', '/register', { username: 'alicia' })).statusCode).toBe(409);
+      expect(await refused(req(alice, 'PATCH', `/users/${alice.userId}`, { username: 'alicia' }))).toEqual([400, "a username can't be changed: an account keeps the name it was registered with"]);
+      expect((await banned(mod)).banned.map((b) => b.username)).toEqual(['alice']);
+      expect((await req(null, 'POST', '/register', { username: 'alice' })).statusCode).toBe(409);
+      expect((await req(null, 'POST', '/register', { username: 'alicia' })).statusCode).not.toBe(409);
     });
   });
 }

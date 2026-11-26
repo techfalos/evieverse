@@ -242,10 +242,10 @@ for (const target of TARGETS) {
       const f = await feed(dave);
       expect(ids(f)).toEqual([a2, b1, a1]);
       expect(f).toMatchObject({ count: 3, truncated: false, nextCursor: null });
-      // The same records as hashtag feeds return, but for `moderated`, which is a post's standing under one hashtag.
+      // The same records as hashtag feeds return, but for the hashtag one is listed under there and `moderated`, which is its standing under it.
       const news = (await ctx.app.inject({ method: 'GET', url: '/feed?tags=news' })).json();
-      const { moderated, ...record } = news.tags.news.find((r: FeedItem) => r.contentId === a1);
-      expect(moderated).toBe(false);
+      const { moderated, listedUnder, ...record } = news.records.find((r: FeedItem) => r.contentId === a1);
+      expect([moderated, listedUnder]).toEqual([false, 'news']);
       expect(f.records[2]).toEqual(record);
       expect(f.records[1]).toMatchObject({ publisher: { userId: bob.userId, username: 'bob' }, tags: ['sports'], aiGenerated: true });
       expect(ids(await feed(dave, '&aiGenerated=true'))).toEqual([b1]);
@@ -280,7 +280,7 @@ for (const target of TARGETS) {
       await ctx.compact();
 
       const news = (await ctx.app.inject({ method: 'GET', url: '/feed?tags=news' })).json();
-      expect(news.tags.news.map((r: FeedItem) => r.contentId).sort()).toEqual(posts.slice(0, 2).sort());
+      expect(news.records.map((r: FeedItem) => r.contentId).sort()).toEqual(posts.slice(0, 2).sort());
       // FEED_AUTHOR_DAY_MAX_POSTS keeps the newest 4.
       const f = await feed(bob);
       expect(ids(f)).toEqual([...posts].reverse().slice(0, 4));

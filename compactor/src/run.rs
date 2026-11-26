@@ -137,7 +137,7 @@ struct Marked {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct State {
-    /// Likes and profile changes before this instant have been applied.
+    /// Likes, views, dislikes and profile changes before this instant have been applied.
     #[serde(default)]
     through: i64,
     /// Hashtag counts (`tag_pairs`) made before this instant are in the related hashtags
@@ -361,6 +361,7 @@ impl<'a> Run<'a> {
             self.mark_everything().await?;
         }
         self.mark_new_likes(state.through).await?;
+        self.mark_new_counts(state.through).await?;
         self.sync_changed_publishers(state.through).await?;
         self.sync_changed_following(state.through).await?;
         let related_through = self.sync_related_tags(state.related_through.unwrap_or(0), opts.all || opts.rebuild).await?;
@@ -672,8 +673,36 @@ impl<'a> Run<'a> {
         Ok(())
     }
 
-    /// Rewrites the Redis credit of users who registered or changed their username in [since,
-    /// the run's start). The request already wrote it; this repairs a write that failed.
+    /// (tag, day) of content viewed in [since, the run's start) by a user account (GET
+    /// /content/:id), and of content a dislike of which was given or taken back then (POST and
+    /// DELETE /dislike): the days are written again with the counts as they now are. Neither
+    /// leaves a row to find the content by, so the content says when it last happened
+    /// (`viewed_at`, `disliked_at`), as it says when it last lost a like.
+    ///
+    /// Nothing is re-admitted: views and dislikes order no index, so a day holds the content
+    /// or not as before. A day that holds none of it comes out as it is, and is kept.
+    async fn mark_new_counts(&self, since: i64) -> Result<()> {
+        let db = &self.deps.db;
+        let (until, oldest) = (self.run_start, self.oldest());
+        for stamp in ["viewed_at", "disliked_at"] {
+            let counted = db
+                .fetch(
+                    &format!(
+                        "SELECT content.id AS id, content.user_id AS user_id, content.created_at AS created_at FROM content \
+                         WHERE content.{stamp} >= ? AND content.{stamp} < ? AND content.delete_requested_at IS NULL AND {}",
+                        Self::WITHIN_RETENTION
+                    ),
+                    params![since, until, oldest, oldest],
+                )
+                .await?;
+            self.mark_content(&Self::marked(&counted)?, false).await?;
+        }
+        Ok(())
+    }
+
+    /// Rewrites the Redis credit of users who registered in [since, the run's start), which is
+    /// when a username is set: none is changed after. The request already wrote it; this
+    /// repairs a write that failed.
     async fn sync_changed_publishers(&self, since: i64) -> Result<()> {
         let users = self
             .deps

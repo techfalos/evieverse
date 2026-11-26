@@ -66,10 +66,18 @@ fn the_feed_index_is_laid_out_as_the_fixture_has_it() {
     let entries: Vec<IndexEntry> = part(&fixture["day"]["entries"]);
     let packed = layout::pack_day(&entries).unwrap();
     assert_eq!(hex::encode(&packed), text(&fixture["day"]["hex"]));
-    assert_eq!(written(&layout::unpack_day(&packed)), fixture["day"]["unpacked"]);
+    assert_eq!(written(&layout::unpack_day(&packed, layout::LAYOUT_VERSION)), fixture["day"]["unpacked"]);
     let mut longer = packed.clone();
     longer.extend_from_slice(&[0xff, 0xff]);
-    assert_eq!(json!(layout::unpack_day(&longer).len()), fixture["day"]["withBytesLeftOver"]);
+    assert_eq!(
+        json!(layout::unpack_day(&longer, layout::LAYOUT_VERSION).len()),
+        fixture["day"]["withBytesLeftOver"]
+    );
+    // An index of version 5, written before entries had views and dislikes, is read as having none.
+    let v5 = hex::decode(text(&fixture["day"]["v5"]["hex"])).unwrap();
+    assert_eq!(written(&layout::unpack_day(&v5, 5)), fixture["day"]["v5"]["unpacked"]);
+    assert_eq!(json!(layout::day_entry_bytes(5)), fixture["day"]["v5"]["entryBytes"]);
+    assert_eq!(json!(layout::day_entry_bytes(layout::LAYOUT_VERSION)), fixture["day"]["entryBytes"]);
 
     let ids = |order: fn(&IndexEntry, &IndexEntry) -> std::cmp::Ordering| {
         let mut sorted = entries.clone();

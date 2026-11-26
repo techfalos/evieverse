@@ -82,6 +82,7 @@ const ENV_MAP: Record<string, string> = {
   REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE: 'reposts.attestationRateLimitPerMinute',
   REPOSTS_REFRESH_HOURS: 'reposts.refreshHours',
   REPOSTS_GONE_DAYS: 'reposts.goneDays',
+  DISLIKES: 'dislikes',
   CONTENT_RATE_LIMIT_PER_MINUTE: 'contentRateLimitPerMinute',
   PROFILE_POSTS_RATE_LIMIT_PER_MINUTE: 'profilePostsRateLimitPerMinute',
   AVATAR_RATE_LIMIT_PER_MINUTE: 'avatarRateLimitPerMinute',
@@ -567,6 +568,17 @@ const ConfigSchema = z.object({
   }),
 
   /**
+   * Whether posts can be disliked (POST and DELETE /dislike). A post's dislikes are a count of
+   * their own, from 0, beside its likes, which they leave as they are, and they order no feed.
+   * Off, which is what a server is unless it says otherwise: POST /dislike is refused, and
+   * `dislikes` is null wherever a post is read (feeds, GET /content/:id, profiles, searches), which
+   * is how a client knows not to show dislikes at all. On: it is the post's count there, 0 for a
+   * post nobody dislikes. The counts are kept either way, so turning it off hides them, and
+   * turning it on again shows them as they were.
+   */
+  dislikes: bool(false),
+
+  /**
    * Requests to GET /content/:id from one address in a minute, past which they are refused (0: no
    * limit). It needs no key and reads the database and the content store for each. Counted as
    * feeds are (`feed.rateLimitPerMinute`).
@@ -625,7 +637,7 @@ const ConfigSchema = z.object({
     authorDayMaxPosts: int(1000),
     /** How far back a following feed reaches, and the longest a tag's index is kept. A hashtag feed is of the window it asks for. */
     maxLookbackDays: z.coerce.number().int().min(7).default(90),
-    /** In a popular feed, one in this many picks per tag is new low-like content (0 disables). */
+    /** In an engaged feed, one in this many picks per tag is new low-like content (0 disables). A popular feed has none: it is in the order of its likes. */
     freshEvery: z.coerce.number().int().min(0).default(4),
     /** Records with at most this many likes count as fresh. */
     freshMaxLikes: z.coerce.number().int().min(0).default(0),
@@ -646,7 +658,7 @@ const ConfigSchema = z.object({
      * node shows what the compactor published up to this long after it did.
      */
     headCacheMs: z.coerce.number().int().min(0).default(1000),
-    /** Tags whose manifest and day indexes (immutable; 25 bytes per post) each node keeps in memory. */
+    /** Tags whose manifest and day indexes (immutable; 33 bytes per post) each node keeps in memory. */
     indexCacheSize: int(500),
     /** The same for publishers' own indexes, which following feeds read: one per user followed. */
     authorIndexCacheSize: int(5000),

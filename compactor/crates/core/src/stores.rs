@@ -15,9 +15,9 @@ const ADS_KEY: &str = "ads";
 /// The version of what the ads' key holds: readers take another for no ads.
 const ADS_VERSION: u32 = 1;
 
-/// Publisher credits: each user's username, one key per user and no expiry, so feeds show a
-/// changed name at once. The compactor writes those of the users who changed, and with
-/// `--rebuild` every user's.
+/// Publisher credits: each user's username, one key per user and no expiry, so a feed credits
+/// a post without reading the database. The compactor writes those of the users who are new,
+/// and with `--rebuild` every user's.
 #[derive(Clone)]
 pub struct PublisherStore {
     hot: HotStore,

@@ -9,7 +9,7 @@ import { isUniqueViolation, type Db } from '../db/index.js';
 import { foldUsername } from '../search/keywords.js';
 import type { FirstAdmin } from './firstAdmin.types.js';
 
-/** The name of the admin account a server creates the first time it starts. Its owner can change it since (PATCH /users/:userId). */
+/** The name of the admin account a server creates the first time it starts, which the account keeps: a username can't be changed. */
 export const FIRST_ADMIN_USERNAME = 'admin';
 
 /**
@@ -33,7 +33,7 @@ export async function createFirstAdmin(db: Db, keep: (admin: FirstAdmin) => Prom
       const holder = await trx.selectFrom('users').select('id').where('username', '=', FIRST_ADMIN_USERNAME).executeTakeFirst();
       if (holder) return { takenBy: holder.id };
       const userId = randomUUID();
-      // updated_at makes the compactor write the publisher credit to Redis, as it does for a changed profile.
+      // updated_at makes the compactor write the publisher credit to Redis, as it does for a user who registered.
       await trx
         .insertInto('users')
         .values({ id: userId, username: FIRST_ADMIN_USERNAME, username_folded: foldUsername(FIRST_ADMIN_USERNAME), created_at: now, updated_at: now, admin: 1 })

@@ -1,6 +1,6 @@
 import type { HotStore } from '../storage/index.js';
 import { Lru, TtlCache } from '../util.js';
-import { dayKey, manifestKey, unpackDay } from './layout.js';
+import { dayKey, LAYOUT_VERSION, manifestKey, unpackDay } from './layout.js';
 import type { DayRef, Head, IndexEntry, Manifest } from './layout.types.js';
 import { readHead, readJson } from './read.js';
 import type { Candidate, OpenTag, TagView } from './reader.types.js';
@@ -43,8 +43,12 @@ export class TagFeedReader {
     return m;
   }
 
-  /** Each day's entries, in index order; null for a day whose index has expired. One MGET for the uncached days. */
-  private dayEntries(tag: string, refs: DayRef[]): Promise<(Candidate[] | null)[]> {
+  /**
+   * Each day's entries, in index order; null for a day whose index has expired. One MGET for the
+   * uncached days. `v` is the version of the layout the days are of, which their manifest says: a
+   * day index is of one version for good, as its key is written once.
+   */
+  private dayEntries(tag: string, refs: DayRef[], v: number): Promise<(Candidate[] | null)[]> {
     const keys = refs.map((d) => dayKey(tag, d.gen));
     const cached = keys.map((k) => this.days.get(k));
     const missing = keys.filter((_, i) => !cached[i]);
@@ -56,8 +60,8 @@ export class TagFeedReader {
         const j = next++;
         const p = loaded.then((bufs) =>
           bufs[j]
-            ? unpackDay(bufs[j]!).map(
-                ({ contentId, createdAt, likes, aiGenerated, moderated, repost }: IndexEntry): Candidate => ({ contentId, createdAt, likes, aiGenerated, moderated, repost }),
+            ? unpackDay(bufs[j]!, v).map(
+                ({ contentId, createdAt, likes, views, dislikes, aiGenerated, moderated, repost }: IndexEntry): Candidate => ({ contentId, createdAt, likes, views, dislikes, aiGenerated, moderated, repost }),
               )
             : null,
         );
@@ -79,12 +83,12 @@ export class TagFeedReader {
     const id = (await this.head(tag)).manifest;
     const manifest = id ? await this.manifest(tag, id) : null;
     if (id && !manifest) throw new Error(`manifest ${id} of #${tag} is missing`);
-    return { tag, days: manifest?.days ?? [] };
+    return { tag, v: manifest?.v ?? LAYOUT_VERSION, days: manifest?.days ?? [] };
   }
 
   /** The entries of some of an open tag's day indexes, in index order. */
   async loadDays(open: OpenTag, refs: DayRef[]): Promise<Candidate[]> {
-    const days = await this.dayEntries(open.tag, refs);
+    const days = await this.dayEntries(open.tag, refs, open.v);
     if (days.includes(null)) throw new Error(`a day index of #${open.tag} is missing`);
     return days.flatMap((entries) => entries!);
   }

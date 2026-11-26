@@ -169,17 +169,17 @@ for (const target of TARGETS) {
       expect(reposted!.repost).not.toHaveProperty('by');
       // Under its own, it is where it was: two days old, out of a day's feed, with all its likes.
       expect(await feedOf('news')).toEqual([]);
-      const [own] = (await feed('tags=news&hours=72')).tags.news!;
+      const [own] = (await feed('tags=news&hours=72')).records;
       expect(own).toMatchObject({ contentId, likes: 1, tags: ['news', 'weather'] });
       expect(own).not.toHaveProperty('repost');
       // A feed of both returns it once.
-      expect(Object.values((await feed('tags=news,weather&hours=72')).tags).flat().map((r) => r.contentId)).toEqual([contentId]);
+      expect((await feed('tags=news,weather&hours=72')).records.map((r) => r.contentId)).toEqual([contentId]);
 
       // A like is the post's, wherever it was read: the repost's entry counts the ones since.
       ok(await like(dave!, contentId), 201);
       await ctx.compact();
       expect((await feedOf('weather'))[0]).toMatchObject({ likes: 1, repost: { at: iso(repostedAt) } });
-      expect((await feed('tags=news&hours=72')).tags.news![0]).toMatchObject({ likes: 2 });
+      expect((await feed('tags=news&hours=72')).records[0]).toMatchObject({ likes: 2 });
       expect((await content(contentId)).likes).toBe(2);
 
       // A like from before the repost that is taken back was never the entry's: the post loses it, and the entry's count stays.
@@ -187,13 +187,13 @@ for (const target of TARGETS) {
       expect(await places(contentId)).toEqual([`${authorIndex(bob!.userId)} bob 0`, 'weather bob 0']);
       await ctx.compact();
       expect((await feedOf('weather'))[0]).toMatchObject({ likes: 1, repost: { at: iso(repostedAt) } });
-      expect((await feed('tags=news&hours=72')).tags.news![0]).toMatchObject({ likes: 1 });
+      expect((await feed('tags=news&hours=72')).records[0]).toMatchObject({ likes: 1 });
       // One from since the repost is the entry's to lose, with the post.
       expect(ok(await unlike(dave!, contentId))).toEqual({ contentId, likes: 0, wasLiked: true });
       expect(await places(contentId)).toEqual([`${authorIndex(bob!.userId)} bob 0`, 'weather bob 0']);
       await ctx.compact();
       expect((await feedOf('weather'))[0]).toMatchObject({ likes: 0, repost: { at: iso(repostedAt) } });
-      expect((await feed('tags=news&hours=72')).tags.news![0]).toMatchObject({ likes: 0 });
+      expect((await feed('tags=news&hours=72')).records[0]).toMatchObject({ likes: 0 });
       expect((await content(contentId)).likes).toBe(0);
 
       // Its summary is kept under the day it was posted and the day it was reposted, which is where each entry looks for it.
@@ -429,7 +429,7 @@ for (const target of TARGETS) {
       expect(ids(await following(dave!))).toEqual([contentId]);
 
       // The hashtag is its moderators' to approve, or to take off the post, as any hashtag of it is. Not the publisher's.
-      expect((await feed('tags=local&moderated=false')).tags.local).toHaveLength(1);
+      expect((await feed('tags=local&moderated=false')).records).toHaveLength(1);
       ok(await req(root, 'PUT', `/content/${contentId}/tags/local`), 201);
       await ctx.compact();
       expect((await feedOf('local'))[0]).toMatchObject({ moderated: true, repost: expect.anything() });
@@ -539,7 +539,7 @@ for (const target of TARGETS) {
       // The post stays as its publisher and the other repost made it, with its likes.
       expect(await content(contentId)).toMatchObject({ publisher: { userId: alice!.userId, username: 'alice' }, tags: ['news', 'storms'], likes: 1 });
       expect((await feedOf('storms'))[0]).toMatchObject({ contentId, tags: ['news', 'storms'], repost: { at: iso(carolsAt) } });
-      expect((await feed('tags=news&hours=336')).tags.news![0]).toMatchObject({ contentId, tags: ['news', 'storms'], likes: 1 });
+      expect((await feed('tags=news&hours=336')).records[0]).toMatchObject({ contentId, tags: ['news', 'storms'], likes: 1 });
       // Its summary is under the days it is still found by, and the removal is done with.
       expect(await summaryDays(contentId)).toEqual([utcDay(postedAt), utcDay(carolsAt)]);
       expect(await removals()).toEqual([]);
@@ -597,7 +597,7 @@ for (const target of TARGETS) {
       await ctx.compact();
       expect(await content(contentId)).toMatchObject({ tags: ['news'], preview: { text: 'Flooding downtown, again #news' } });
       expect(await feedOf('weather')).toEqual([]);
-      expect((await feed('tags=news')).tags.news![0]).toMatchObject({ contentId, tags: ['news'] });
+      expect((await feed('tags=news')).records[0]).toMatchObject({ contentId, tags: ['news'] });
       expect(await removals()).toEqual([]);
 
       // An update whose request read the post while the repost was there, and that commits once the removal is done with,
@@ -693,7 +693,7 @@ for (const target of TARGETS) {
       await ctx.compact();
       ctx.clock.now += 20 * DAY;
       await ctx.compact();
-      expect((await feed('tags=news&hours=2160')).tags).toEqual({});
+      expect((await feed('tags=news&hours=2160')).records).toEqual([]);
 
       // The post is past retention, and out of its own hashtag's feed. Reposted, it is new under the repost's.
       const repostedAt = ctx.clock.now;
@@ -701,19 +701,19 @@ for (const target of TARGETS) {
       await ctx.compact();
       expect((await feedOf('weather'))[0]).toMatchObject({ contentId, createdAt: iso(postedAt), repost: { at: iso(repostedAt) } });
       expect(ids(await following(erin!))).toEqual([contentId]);
-      expect((await feed('tags=news&hours=2160')).tags).toEqual({});
+      expect((await feed('tags=news&hours=2160')).records).toEqual([]);
 
       // Redis lost everything: --rebuild puts it back where the repost put it, and nowhere else.
       await ctx.hot.clear();
       await ctx.compactor.runOnce({ rebuild: true });
       expect((await feedOf('weather'))[0]).toMatchObject({ contentId, tags: ['news', 'weather'], likes: 0, repost: { at: iso(repostedAt) } });
       expect(ids(await following(erin!))).toEqual([contentId]);
-      expect((await feed('tags=news&hours=2160')).tags).toEqual({});
+      expect((await feed('tags=news&hours=2160')).records).toEqual([]);
 
       // The repost ages out like a post of its day.
       ctx.clock.now += 11 * DAY;
       await ctx.compact();
-      expect((await feed('tags=weather&hours=2160')).tags).toEqual({});
+      expect((await feed('tags=weather&hours=2160')).records).toEqual([]);
       expect(await following(erin!)).toEqual([]);
       expect((await content(contentId)).tags).toEqual(['news', 'weather']);
     });
@@ -1265,7 +1265,7 @@ for (const target of TARGETS) {
       const slow = (n: number) => `https://slow.example/content/${ORIGINAL.slice(0, -1)}${n}`;
       const shown = async (id: string) => (await content(id)).preview.text;
       /** A hashtag's feed of the last week: the entries are older than a day by the time they are asked about. */
-      const week = async (tag: string) => (await feed(`tags=${tag}&hours=168`)).tags[tag] ?? [];
+      const week = async (tag: string) => (await feed(`tags=${tag}&hours=168`)).records;
       const is = (url: string, text: string) => () => ({ status: 200, body: { attestation: attested({ url, preview: { kind: 'text', text } }) } });
       const isGone = (url: string) => () => ({ status: 404, body: { error: 'content not found', gone: gone({ url }) } });
 

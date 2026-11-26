@@ -102,6 +102,18 @@ impl LexRange {
     }
 }
 
+/// Gives the process the cryptography its TLS connections are made with, where it has none yet.
+/// The Redis client names none for a `rediss://` connection, and leaves it to rustls, which
+/// can't choose here: it is built with both of its providers, one for the database's driver and
+/// one for the stores' HTTP client, each of which names its own. With none given, rustls
+/// panics, as the connection is made. This one is rustls' own default.
+fn tls_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        // Refused only when another thread gave one in the meantime, and that one is used.
+        drop(rustls::crypto::aws_lc_rs::default_provider().install_default());
+    }
+}
+
 /// The hot store: the Redis-protocol server at a URL, every key under a prefix. A copy of it
 /// shares the one connection, which carries the commands of concurrent callers together.
 #[derive(Clone)]
@@ -116,6 +128,7 @@ impl HotStore {
     /// Connects to the server at `url` (redis:// or rediss://), to keep every key under
     /// `key_prefix` there.
     pub async fn connect(url: &str, key_prefix: &str) -> Result<Self> {
+        tls_provider();
         let client = redis::Client::open(url).context("REDIS_URL is not the URL of a Redis or Valkey server")?;
         let config = ConnectionManagerConfig::new().set_number_of_retries(RETRIES);
         let redis = ConnectionManager::new_with_config(client, config).await.context("could not connect to Redis")?;
@@ -418,5 +431,24 @@ impl HotStore {
             self.del(batch).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tls_connection_that_names_no_provider_has_one() {
+        tls_provider();
+        // What the Redis client does for a rediss:// URL, before it connects.
+        let config = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        assert!(config.crypto_provider().cipher_suites.iter().any(|suite| suite.tls13().is_some()));
+        // Asked for again, it leaves the one that is there.
+        let first = rustls::crypto::CryptoProvider::get_default().map(Arc::as_ptr);
+        tls_provider();
+        assert_eq!(rustls::crypto::CryptoProvider::get_default().map(Arc::as_ptr), first);
     }
 }

@@ -133,11 +133,12 @@ fn chunks_of(plans: Vec<TagPlan>) -> Vec<Vec<TagPlan>> {
 
 /// A day to rebuild, from its current index: the entries it holds of content that isn't
 /// rechecked, and the content to build an entry for, which is what is rechecked, whether the
-/// day holds it or not, and what is re-admitted, if it doesn't.
-fn open_day(plan: DayPlan, before: Option<Vec<u8>>) -> DayBuild {
+/// day holds it or not, and what is re-admitted, if it doesn't. `v` is the version of the
+/// layout the index is of, which the tag's manifest says.
+fn open_day(plan: DayPlan, before: Option<Vec<u8>>, v: u32) -> DayBuild {
     let mut held: IndexMap<String, IndexEntry> = IndexMap::new();
     if let Some(before) = &before {
-        for entry in unpack_day(before) {
+        for entry in unpack_day(before, v) {
             held.insert(entry.content_id.clone(), entry);
         }
     }
@@ -253,6 +254,11 @@ impl Run<'_> {
 
     /// What to do to a tag: rebuild the days `work` names and those whose quota has shrunk,
     /// carry the others over as they are, and drop those past retention.
+    ///
+    /// A tag whose index is of an earlier version of the layout has every day rebuilt: the
+    /// manifest this run writes says its days are of this version, so it can carry none of
+    /// the others over. That is how an index written before entries had views and dislikes
+    /// comes to have them, the first time anything marks its tag.
     fn plan(&self, tag: &str, work: &TagWork, manifest: Option<Manifest>) -> TagPlan {
         let feed = &self.deps.config.feed;
         let today = utc_day(self.run_start);
@@ -267,9 +273,10 @@ impl Run<'_> {
         };
 
         let existing: IndexMap<i64, &DayRef> = manifest.iter().flat_map(|manifest| &manifest.days).map(|day| (day.day, day)).collect();
+        let outdated = manifest.as_ref().is_some_and(|manifest| manifest.v < LAYOUT_VERSION);
         let mut rebuild: IndexSet<i64> = work.days.clone();
         for day in existing.values() {
-            if work.all || day.quota > quota_of(day.day) {
+            if work.all || outdated || day.quota > quota_of(day.day) {
                 rebuild.insert(day.day);
             }
         }
@@ -341,10 +348,11 @@ impl Run<'_> {
                 self.fail(std::slice::from_ref(&plan.tag), &missing);
                 continue;
             }
+            let v = plan.manifest.as_ref().map_or(LAYOUT_VERSION, |manifest| manifest.v);
             let days = std::mem::take(&mut plan.days)
                 .into_iter()
                 .zip(before)
-                .map(|(day, before)| open_day(day, before))
+                .map(|(day, before)| open_day(day, before, v))
                 .collect();
             tags.push(TagBuild {
                 plan,
@@ -570,14 +578,16 @@ impl Run<'_> {
         plan.author.is_none().then_some(own)
     }
 
-    /// The entries a day holds, with current likes, the AI flag and, in a hashtag's index,
-    /// what its moderators decided, from the database: content they approved is flagged as
+    /// The entries a day holds, with current likes, views and dislikes, the AI flag and, in a
+    /// hashtag's index, what its moderators decided, from the database: content they approved is flagged as
     /// moderated, and content they removed the hashtag from is dropped. So is content that is
     /// deleted, set for deletion, past retention, or withheld.
     ///
     /// An entry a repost made counts the likes since the repost, and is dropped if the
     /// repost's place in this index is no more: the reposter's account is gone, or the place
-    /// was given again since, which is another entry.
+    /// was given again since, which is another entry. Its views and dislikes are the
+    /// content's, all of them: only likes order an index, so only they are counted from the
+    /// repost.
     fn refreshed(&self, tag: &str, entries: &[IndexEntry], rows: &HashMap<String, ContentRow>, decided: &Decided) -> Vec<IndexEntry> {
         let oldest = self.oldest();
         let mut out = Vec::with_capacity(entries.len());
@@ -602,6 +612,8 @@ impl Run<'_> {
             };
             out.push(IndexEntry {
                 likes,
+                views: row.view_count,
+                dislikes: row.dislike_count,
                 ai_generated: row.ai_generated,
                 moderated,
                 ..entry.clone()
@@ -635,6 +647,8 @@ impl Run<'_> {
             content_id: row.id.clone(),
             created_at: place.at,
             likes: (row.like_count - place.likes_before).max(0),
+            views: row.view_count,
+            dislikes: row.dislike_count,
             ai_generated: summary.ai_generated,
             moderated,
             repost: place.repost,
@@ -648,6 +662,8 @@ impl Run<'_> {
     /// every day did, when there is nothing to publish.
     fn pack(&self, build: &TagBuild) -> Result<Option<Publication>> {
         let plan = &build.plan;
+        // An index of an earlier version of the layout keeps none of its days: they are all written again (see `plan`).
+        let current = plan.manifest.as_ref().is_none_or(|manifest| manifest.v >= LAYOUT_VERSION);
         let mut days = plan.carried.clone();
         let mut writes: Vec<(String, Vec<u8>)> = Vec::new();
         for day in &build.days {
@@ -658,6 +674,7 @@ impl Run<'_> {
             }
             let packed = pack_day(&kept)?;
             if let (Some(prev), Some(before)) = (prev, &day.before)
+                && current
                 && prev.quota == *quota
                 && packed == *before
             {

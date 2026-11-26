@@ -7,7 +7,7 @@
   - [Local](#local)
   - [Cloud](#cloud)
 
-`[.env.example](../.env.example)` lists the same settings as a file you can copy to `.env`, and `[src/config.ts](../src/config.ts)` is where they are read and checked.
+`[.env.example](../.env.example)` lists the same settings as a file you can copy to `.env`, and `[src/config.ts](../src/config.ts)` is where they are read and checked. The compactor is a program of its own, written in Rust, and reads the same settings from the same places ([`compactor/crates/core/src/config.rs`](../compactor/crates/core/src/config.rs)): `compactor config` prints what it resolved, without the secrets.
 
 ## Configuration settings not described here.
 
@@ -22,7 +22,7 @@ Methods of supplying configuration settings:
 
 Only the first of the three that sets a variable counts, so an environment variable always overrides the file, even where it only repeats the default.
 
-On a deployment made with the [Terraform modules](DEPLOY.md) there may be overlap between variables. See [Deploying a change](#with-the-terraform-modules).
+On a deployment made with the [Terraform modules](IAC.md) there may be overlap between variables. See [Deploying a change](#with-the-terraform-modules).
 
 ## How to write a value
 
@@ -76,7 +76,7 @@ In `evieverse.config.json` the values are real JSON types: a list is an array, a
 }
 ```
 
-In the file, `TRUST_PROXY` (`trustProxy`) is a number, `true` or a string, so a list of addresses is one string: `"trustProxy": "10.0.0.0/8, 127.0.0.1"`. `BOOTSTRAP_ADMIN`, `FUNCTION_GROUP`, `FUNCTION_EDGE_SECRET`, `FUNCTION_SECRETS` and `EVIEVERSE_CONFIG` are environment-only and have no file key.
+In the file, `TRUST_PROXY` (`trustProxy`) is a number, `true` or a string, so a list of addresses is one string: `"trustProxy": "10.0.0.0/8, 127.0.0.1"`. `BOOTSTRAP_ADMIN`, `FUNCTION_GROUP`, `FUNCTION_EDGE_SECRET`, `FUNCTION_SECRETS`, `EVIEVERSE_CONFIG`, `EVIEVERSE_ADDON`, `COMPACTOR_BIN`, `VALKEY_DIR` and `VALKEY_MAXMEMORY` are environment-only and have no file key.
 
 ## A. Settings
 
@@ -99,6 +99,7 @@ In the file, `TRUST_PROXY` (`trustProxy`) is a number, `true` or a string, so a 
 | `SUPPORT_EMAIL`        | `supportEmail`    | text (an email address) | `noreply@yoururl.com`   | The email address people write to for support, which `[GET /rules](API.md#get-rules)` gives to anyone who asks, beside the server's rules. The default is a placeholder: set it to an address that someone reads. The server sends it nothing, and doesn't start if it isn't an email address. Empty: the default.                                                                                                                                                                                            |
 | `MINIMUM_AGE`          | `minimumAge`      | number                  | empty                   | The youngest a person may be to use the server, in whole years from 1 to 120, such as `13`, which [`GET /rules`](API.md#get-rules) gives to anyone who asks, beside the server's rules, as `minimumAge`. It's your own rule: the server asks nobody's age, and holds nobody to it. The server doesn't start if it isn't such a number. Empty or `0`: none, and `GET /rules` says "All Legal Ages Allowed" in its place.                                                                                       |
 | `GEN_AI`               | `genAi`           | choice                  | `disclosure_optional`   | What the server says of content made with generative AI, which [`GET /rules`](API.md#get-rules) gives to anyone who asks, beside the server's rules, as `genAi`: `disclosure_optional` (allowed, and its author may declare it), `disclosure_required` (allowed, and its author has to declare it) or `not_allowed`. The declaration is a post's or a comment's `aiGenerated`. It's your own rule: the server doesn't hold anyone to it yet, and takes a post with the declaration or without it whatever this says. The server doesn't start if it's none of the three. Empty: the default. |
+| `FIRST_ADMIN_PROFILE`  | `firstAdminProfile` | text (a path)         | unset                   | Read by the API only. The first time it starts, on a database with no admin, it creates one, named `admin`, with a new API key, and writes the account's profile for the CLI to this file, key included, for its owner alone to read. Copied to `~/.evieverse/profiles/<name>.json`, the file signs the CLI in as the admin. On a database that has an admin, nothing is created and the file is left as it is. The Docker image sets it to `/app/data/admin-profile.json` ([Docker](DOCKER.md#the-first-admin)). Unset: the server creates no account. |
 | `EVIEVERSE_CONFIG`     |                   | text (a path)           | `evieverse.config.json` | The JSON file of settings. Environment only: a file can't name itself.                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 
@@ -113,7 +114,8 @@ In the file, `TRUST_PROXY` (`trustProxy`) is a number, `true` or a string, so a 
 | `DATABASE_URL`        | `db.url`            | text       | `./data/evieverse.sqlite` | A file path (or `:memory:`) for SQLite, or a connection URL for Postgres or MySQL, such as `postgres://evieverse:evieverse@localhost:5432/evieverse`. |
 | `DB_POOL_SIZE`        | `db.poolSize`       | number     | `10`                      | Connections each process keeps open at most.                                                                                                          |
 | `DB_IDLE_TIMEOUT_MS`  | `db.idleTimeoutMs`  | number     | the driver's              | Close connections idle this long, in milliseconds (Postgres, MySQL).                                                                                  |
-| `DB_MIGRATE_ON_START` | `db.migrateOnStart` | true/false | `true`                    | Bring the schema up to date whenever a process opens the database. `false`: run `npm run migrate` when you deploy.                                    |
+| `DB_MIGRATE_ON_START` | `db.migrateOnStart` | true/false | `true`                    | Bring the schema up to date when the API starts. `false`: run `npm run migrate` when you deploy. The compactor never does: it waits for the schema. |
+| `DB_REQUIRE_VOLUME`   | `db.requireVolume`  | true/false | `false`                   | `true`: don't start on a SQLite database that would be lost with the container it's in, which is one in memory, or a file that isn't on a mounted volume. It's checked on Linux alone, as in a container. The Docker image sets it, so a container without a volume at `/app/data` stops with an error instead of losing the database later. Postgres and MySQL keep their data themselves, and aren't checked. |
 | `BOOTSTRAP_ADMIN`     |                     | JSON       | unset                     | Read only by `npm run migrate` and the migrate step of a deployment, not by the server. See [below](#bootstrap_admin).                                |
 
 
@@ -124,8 +126,8 @@ In the file, `TRUST_PROXY` (`trustProxy`) is a number, `true` or a string, so a 
 
 | Variable           | File key          | Format | Default | What it does                                                                                                                                                                                 |
 | ------------------ | ----------------- | ------ | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `REDIS_URL`        | `redis.url`       | text   | unset   | A `redis://` or `rediss://` URL of any Redis-protocol server, not in cluster mode, with a `volatile-*` eviction policy (`volatile-lru`). Unset: an in-process store, for a single node only. |
-| `REDIS_KEY_PREFIX` | `redis.keyPrefix` | text   | `ev:`   | Put in front of every key, so instances can share a Redis. The default was `tu:` in earlier versions: a deployment that never set it finds an empty index under the new one after upgrading, which a [rebuild](DEPLOY.md#redis) fills, or keeps the index it has by setting `REDIS_KEY_PREFIX=tu:`. |
+| `REDIS_URL`        | `redis.url`       | text   | unset   | Required: neither the API nor the compactor starts without it. A `redis://` or `rediss://` URL of any Redis-protocol server (Redis, Valkey), not in cluster mode, with a `volatile-*` eviction policy (`volatile-lru`). It holds the feed index, which the compactor writes and the API reads, so both are given the same one. The whole-server Docker image sets it to the Valkey it runs itself. |
+| `REDIS_KEY_PREFIX` | `redis.keyPrefix` | text   | `ev:`   | Put in front of every key, so instances can share a Redis. The default was `tu:` in earlier versions: a deployment that never set it finds an empty index under the new one after upgrading, which a [rebuild](IAC.md#redis) fills, or keeps the index it has by setting `REDIS_KEY_PREFIX=tu:`. |
 
 
 
@@ -159,14 +161,14 @@ Every request that adds, updates or deletes something successfully is written to
 | `AUDIT_OPTIONS` | `audit.options` | JSON   | unset   | The scheme's options, such as `{"bucket":"tu-audit","region":"us-east-1"}`. It's where credentials go, so on a deployment it belongs in `secrets`.  |
 
 
-The server only writes records. Moving them to cold storage is the bucket's own lifecycle rule, which the Terraform modules can set up and leave off by default ([DEPLOY.md](DEPLOY.md#audit-log)).
+The server only writes records. Moving them to cold storage is the bucket's own lifecycle rule, which the Terraform modules can set up and leave off by default ([IAC.md](IAC.md#audit-log)).
 
 ### Uploads
 
 
 | Variable                  | File key                       | Format        | Default                               | What it does                                                                                                                                                  |
 | ------------------------- | ------------------------------ | ------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MAX_UPLOAD_BYTES`        | `storage.maxUploadBytes`       | number        | `5368709120` (5 GiB)                  | The largest image, video or audio file accepted. The Terraform modules set it lower where a request's time limit calls for it ([Uploads](DEPLOY.md#uploads)). |
+| `MAX_UPLOAD_BYTES`        | `storage.maxUploadBytes`       | number        | `5368709120` (5 GiB)                  | The largest image, video or audio file accepted. The Terraform modules set it lower where a request's time limit calls for it ([Uploads](IAC.md#uploads)). |
 | `STORAGE_TMP_PATH`        | `storage.tmpPath`              | text (a path) | `evieverse/` in the OS temp directory | Where uploads are kept while they arrive.                                                                                                                     |
 | `UPLOAD_LINKS_PER_MINUTE` | `storage.uploadLinksPerMinute` | number        | `10`                                  | Upload links (`POST /uploads`) one user can ask for in a minute, across all nodes (0: no limit).                                                              |
 
@@ -209,7 +211,7 @@ Which [types of post](API.md#post-store) the server takes: all five by default. 
 The server [processes the videos](API.md#videos) it's sent before it publishes them: a post's video, and the one a comment comes with. The work is done with ffmpeg, by the process that runs the compactor.
 
 - That process needs `ffmpeg` and `ffprobe`, with the `libx264` and `aac` encoders. The Docker image has them. Run from source, install ffmpeg (`brew install ffmpeg`, `apt install ffmpeg`), or set `VIDEO_PROCESSING=false`. A compactor that can't find them doesn't start, and says which is missing.
-- It's CPU work. Give the compactor's process at least 2 CPUs and 2 GB of memory where videos are common ([DEPLOY.md](DEPLOY.md#videos)).
+- It's CPU work. Give the compactor's process at least 2 CPUs and 2 GB of memory where videos are common ([IAC.md](IAC.md#videos)).
 - Every process takes the same `VIDEO_PROCESSING`. The API marks the videos to process, and the compactor's process does the work. With it on in one and off in the other, videos are either never published or published as sent.
 
 | Variable                | File key               | Format        | Default           | What it does |
@@ -231,10 +233,30 @@ The server [processes the videos](API.md#videos) it's sent before it publishes t
 | ---------------------- | --------------------- | ---------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `REPOSTS`              | `reposts.enabled`     | true/false | `true`  | Whether the server takes reposts (`POST /repost`): a user gives a post more hashtags, which puts it in those hashtags' feeds and in the following feeds of their own followers, as a new post there. The post isn't copied. `false`: `POST /repost` and `POST /repost/refresh` are refused (`400`), and what was reposted before stays as it is.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `REPOSTS_REMOTE`       | `reposts.remote`      | true/false | `true`  | Whether it also takes reposts of posts on other servers. Such a repost is stored as a link to the original with the original's summary, as the original's server signed it (its [attestation](API.md#a-post-on-another-server)): the reposter's client sends that, and this server asks the other one, over `https` on port 443, for the public keys it signs with. What the original becomes later is learnt from a later attestation: one the server asks the other for itself (`REPOSTS_REFRESH_HOURS`), or one a client brings sooner (`POST /repost/refresh`). `false`: only posts on this server are reposted, and no refresh is taken from a client (`400`); the server still asks after the reposts of posts on other servers that it has, unless `REPOSTS_REFRESH_HOURS` is 0.                                                                                                                                                                         |
-| `REPOSTS_SIGNING_KEYS` | `reposts.signingKeys` | list       | empty   | The keys this server signs the attestations of its own posts with, which is what lets them be reposted on other servers. Each is 32 random bytes in base64 or hex (`openssl rand -base64 32`). The first signs, and the public half of each is published (`GET /repost/keys`), so to change key, put the new one first and take the old one out later. It needs `PUBLIC_BASE_URL` too, which is where an attestation says a post is: an `https` address with no port, since other servers ask for the keys on port 443 only, and refuse the attestations of a server at any other. Empty: the server signs nothing, and its posts are reposted only here; it still takes reposts from servers that sign. They're credentials, so on a deployment they belong in `secrets`. The Terraform modules make one ([DEPLOY.md](DEPLOY.md#deploy)). |
+| `REPOSTS_SIGNING_KEYS` | `reposts.signingKeys` | list       | empty   | The keys this server signs the attestations of its own posts with, which is what lets them be reposted on other servers. Each is 32 random bytes in base64 or hex (`openssl rand -base64 32`). The first signs, and the public half of each is published (`GET /repost/keys`), so to change key, put the new one first and take the old one out later. It needs `PUBLIC_BASE_URL` too, which is where an attestation says a post is: an `https` address with no port, since other servers ask for the keys on port 443 only, and refuse the attestations of a server at any other. Empty: the server signs nothing, and its posts are reposted only here; it still takes reposts from servers that sign. They're credentials, so on a deployment they belong in `secrets`. The Terraform modules make one ([IAC.md](IAC.md#deploy)). |
 | `REPOSTS_REFRESH_HOURS` | `reposts.refreshHours` | number | `24` | How often, in hours, the server asks the server of each post it holds a repost of for the post's attestation again, which is how a repost follows an edit of its original and is hidden once the original is gone. The process that runs the compactor asks, over `https` on port 443, at most 30 posts a minute, so it needs a way out to the other servers. `0`: never, so a repost changes only when a client brings a later attestation (`POST /repost/refresh`). |
 | `REPOSTS_GONE_DAYS` | `reposts.goneDays` | number | `7` | Days a repost of a post on another server stays hidden after that server said it publishes no post there, before the compactor deletes it. The other server says that of a post it deleted and of one that only waits in its moderation queue, so the repost is kept this long for the post to be attested again, which brings it back with the hashtags reposts gave it. At least 1. |
 | `REPOSTS_ATTESTATION_RATE_LIMIT_PER_MINUTE` | `reposts.attestationRateLimitPerMinute` | number | `60` | Requests to `GET /content/:contentId/attestation` from one address in a minute, past which they get `429` (0: no limit). It needs no key, and signs an answer for any id. Other servers ask it for the posts they hold reposts of, up to 30 times a minute each, so keep it above that. Counted as `FEED_RATE_LIMIT_PER_MINUTE` is. |
+
+
+
+
+### Dislikes
+
+
+Whether posts can be [disliked](API.md#post-dislike). A server has dislikes off unless it says otherwise.
+
+- A post's dislikes are a count of their own, from 0, beside its likes. A dislike takes no like off, and no feed is ordered by dislikes.
+- The setting is also what clients go by. Every record of a post has `dislikes`: `null` on a server that has them off, which tells a client to show none, and the post's count, from `0`, on one that has them on.
+- Turning it off deletes nothing. The counts and each user's dislikes are kept, so turning it on again shows them as they are by then. While it's off, a user can still take back a dislike they gave before (`DELETE /dislike`).
+- Only the API reads it. The compactor writes every post's dislikes to the feed indexes whatever the setting, so a change needs nothing rebuilt: it shows as soon as the API has restarted with it.
+- Every API process takes the same value, or a post's `dislikes` is a number from one and `null` from another.
+
+| Variable   | File key   | Format     | Default | What it does |
+| ---------- | ---------- | ---------- | ------- | ------------ |
+| `DISLIKES` | `dislikes` | true/false | `false` | Whether the server takes dislikes of posts (`POST /dislike`). `true`: `dislikes` is the post's count wherever a post is read (feeds, `GET /content/:contentId`, profiles, searches, the moderation queues, exports), 0 for a post nobody dislikes. `false`: `POST /dislike` is refused (`400`), and `dislikes` is `null` in all of those. |
+
+Views have no setting. Every server counts them: a post's `views` goes up by one each time a user account reads it ([API.md](API.md#views)).
 
 
 
@@ -253,7 +275,7 @@ The server [processes the videos](API.md#videos) it's sent before it publishes t
 | `FEED_MAX_LOOKBACK_DAYS`    | `feed.maxLookbackDays`      | number | `90`    | How far back, in days, a following feed reaches, and the longest a hashtag's index is kept. At least 7. A hashtag feed is of the window it asks for, which this doesn't change. |
 | `FEED_PREVIEW_WORDS`        | `feed.previewWords`         | number | `100`   | Words of a text post or caption copied into each record's preview...                                                                                                            |
 | `FEED_PREVIEW_CHARS`        | `feed.previewChars`         | number | `1000`  | ...and at most this many characters of them, which bounds text written without spaces.                                                                                          |
-| `FEED_FRESH_EVERY`          | `feed.freshEvery`           | number | `4`     | In a popular feed, one in this many picks per hashtag is new, low-like content (0: off).                                                                                        |
+| `FEED_FRESH_EVERY`          | `feed.freshEvery`           | number | `4`     | In an engaged feed, one in this many picks per hashtag is new, low-like content (0: off). A popular feed has none.                                                              |
 | `FEED_FRESH_MAX_LIKES`      | `feed.freshMaxLikes`        | number | `0`     | Records with at most this many likes count as fresh.                                                                                                                            |
 | `FEED_FRESH_POOL`           | `feed.freshPool`            | number | `200`   | Fresh picks are sampled per feed session from this many of the newest eligible records per hashtag in the feed's window.                                                        |
 | `FEED_RELATED_TAGS`         | `feed.relatedTags`          | number | `3`     | A feed asked to add related hashtags adds at most this many for each hashtag asked for, the most related first (0: none).                                                       |
@@ -268,7 +290,7 @@ The server [processes the videos](API.md#videos) it's sent before it publishes t
 
 ### Search
 
-[`GET /search`](API.md#search) finds users by the start of their username, and posts by the words of their text and by their hashtags. It's always on. A server that had posts before it had search indexes them once, with `npm run reindex` ([DEPLOY.md](DEPLOY.md#upgrading-to-search)).
+[`GET /search`](API.md#search) finds users by the start of their username, and posts by the words of their text and by their hashtags. It's always on. A server that had posts before it had search indexes them once, with `npm run reindex` ([IAC.md](IAC.md#upgrading-to-search)), and so does one that had posts before its compactor was the Rust program ([IAC.md](IAC.md#upgrading-to-the-rust-compactor)).
 
 | Variable                       | File key                    | Format | Default | What it does |
 | ------------------------------ | --------------------------- | ------ | ------- | ------------ |
@@ -290,16 +312,26 @@ The compactor needs the same two settings as the API. It publishes the ads to Re
 
 ### Compactor
 
+The compactor is the one writer of what's published, and every instance runs one beside the API: `npm run compact` from source, the command `compactor` in the Docker image, and inside the one container of the whole-server image ([Docker](DOCKER.md)). It can't run inside the API. It reads these settings, and every other one it needs, from the same environment variables and the same JSON file as the API. Unlike the API it never brings the database up to date: it waits until the schema is there.
+
 
 | Variable                   | File key                  | Format     | Default | What it does                                                                                                                                                                                                                                                                                                                                                        |
 | -------------------------- | ------------------------- | ---------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `COMPACT_IN_PROCESS`       | `compact.inProcess`       | true/false | `true`  | Run the compactor inside the API process. Enable it on one node only, or set `false` everywhere and run `npm run compact` as a process of its own, as the Terraform modules do.                                                                                                                                                                                     |
 | `COMPACT_INTERVAL_SECONDS` | `compact.intervalSeconds` | number     | `5`     | A pass starts this long after the previous one started, or as soon as that one ends if it took longer. A pass is what writes posts and comments out, so it's the longest a post or an update waits to be in feeds, and a comment in its post's lists, plus the pass itself.                                                                                         |
 | `COMPACT_GRACE_SECONDS`    | `compact.graceSeconds`    | number     | `30`    | Related-hashtag counts are read once they're this old, which covers clock skew between nodes.                                                                                                                                                                                                                                                                       |
 | `COMPACT_CONCURRENCY`      | `compact.concurrency`     | number     | `4`     | Batches of indexes compacted in parallel. A batch is 200 hashtags' or publishers' indexes, read and written together. It's also how many posts have their writes written out at a time.                                                                                                                                                                             |
 | `COMPACT_COMMENT_WRITES` | `compact.commentWrites` | number | `16` | Writes to comments a pass has under way at once, on whatever posts: a comment's own write, or one like of it. Raise it where passes lag behind many comments and the content store and Redis have room for more at once. |
 | `COMPACT_LEASE_SECONDS`    | `compact.leaseSeconds`    | number     | `60`    | The lifetime of the database lease that keeps two compactors' passes from overlapping. At least 30. A pass renews it for as long as it runs, so a slow write doesn't let it lapse: keep it above the longest the compactor's process may be frozen or cut off from the database. A process that stops without releasing it delays the next pass by up to this long. |
 
+
+Four more are environment-only, and say where things are. None is needed in the Docker image, or after `npm run build:native` from source:
+
+| Variable           | Format        | Default | What it does |
+| ------------------ | ------------- | ------- | ------------ |
+| `COMPACTOR_BIN`    | text (a path) | unset   | The compactor's program, for `npm run compact` and `npm run reindex` to start. Unset: `native/compactor` beside the server's code, as in the image, or else the newest one built under `compactor/target`. |
+| `EVIEVERSE_ADDON`  | text (a path) | unset   | The addon the API loads, which holds the trust plugins. Unset: `native/evieverse.node` beside the server's code, as in the image, or else the newest one built under `compactor/target`. An API that finds none doesn't start, and says how to build it. |
+| `VALKEY_DIR`       | text (a path) | `/app/data/valkey` | In the whole-server Docker image only: where the container's own Valkey keeps its data. |
+| `VALKEY_MAXMEMORY` | text          | `512mb` | In the whole-server Docker image only: the most the container's own Valkey holds, as Valkey writes a size. Past it, it evicts only keys that have a time to live, such as hot summaries. Neither is read where `REDIS_URL` names another Redis. |
 
 
 
@@ -311,10 +343,10 @@ The compactor needs the same two settings as the API. It publishes the ads to Re
 | `CHALLENGE_TTL_SECONDS`         | `challenge.ttlSeconds`        | number | `120`   | How long a challenge can be solved for.                                                                                                                                                                                          |
 | `CHALLENGE_POW_BITS`            | `challenge.powBits`           | number | `18`    | Zero bits the proof of work's SHA-256 must start with, 0 to 32. Each doubles the client's work (0: none).                                                                                                                        |
 | `CHALLENGE_MIN_SOLVE_MS`        | `challenge.minSolveMs`        | number | `2000`  | Answers sent sooner than this after the challenge was issued are refused.                                                                                                                                                        |
-| `REGISTER_RATE_LIMIT_PER_HOUR`  | `registerRateLimitPerHour`    | number | `10`    | Registration requests from one address in an hour, every attempt counted, an admin's included. Shared by all nodes when `REDIS_URL` is set. Behind a load balancer, also set `TRUST_PROXY`, or every client counts as the proxy. |
-| `FEED_RATE_LIMIT_PER_MINUTE`    | `feed.rateLimitPerMinute`     | number | `120`   | Requests to `/feed` from one address in a minute, past which they get `429` (0: no limit). An IPv6 address counts with the rest of its /64. Shared by all nodes when `REDIS_URL` is set. Behind a load balancer, also set `TRUST_PROXY`, or every reader counts as the proxy and they share one limit. |
+| `REGISTER_RATE_LIMIT_PER_HOUR`  | `registerRateLimitPerHour`    | number | `10`    | Registration requests from one address in an hour, every attempt counted, an admin's included. Shared by all nodes. Behind a load balancer, also set `TRUST_PROXY`, or every client counts as the proxy. |
+| `FEED_RATE_LIMIT_PER_MINUTE`    | `feed.rateLimitPerMinute`     | number | `120`   | Requests to `/feed` from one address in a minute, past which they get `429` (0: no limit). An IPv6 address counts with the rest of its /64. Shared by all nodes. Behind a load balancer, also set `TRUST_PROXY`, or every reader counts as the proxy and they share one limit. |
 | `FEED_FOLLOWING_RATE_LIMIT_PER_MINUTE` | `feed.followingRateLimitPerMinute` | number | `60` | The same for `/feed/following`, counted apart (0: no limit). A page of it reads the database and the index of every user followed, which a hashtag feed doesn't. |
-| `CONTENT_RATE_LIMIT_PER_MINUTE` | `contentRateLimitPerMinute` | number | `300` | The same for `GET /content/:contentId`, counted apart (0: no limit). `/raw` isn't limited. |
+| `CONTENT_RATE_LIMIT_PER_MINUTE` | `contentRateLimitPerMinute` | number | `300` | The same for `GET /content/:contentId`, counted apart (0: no limit). `/raw` isn't limited. A read with a user's credentials counts a [view](API.md#views) of the post each time, so this is also the most views one address can add in a minute. |
 | `PROFILE_POSTS_RATE_LIMIT_PER_MINUTE` | `profilePostsRateLimitPerMinute` | number | `120` | The same for `GET /users/:userId/posts`, the list of a user's posts on their profile, counted apart (0: no limit). A page of it reads the database and the summary store, and the content store for posts older than summaries are kept. |
 | `AVATAR_RATE_LIMIT_PER_MINUTE` | `avatarRateLimitPerMinute` | number | `300` | The same for `GET /users/:userId/avatar`, counted apart (0: no limit). Each reads the database and the content store. A reader keeps an avatar for a day by the address a profile or a post gives, so this is what the posts of a minute can ask for. |
 | `COMMENTS_LIST_RATE_LIMIT_PER_MINUTE` | `comments.listRateLimitPerMinute` | number | `120` | The same for each of the two lists of comments (a post's comments, and the replies to a comment), each counted apart (0: no limit). A list of a post whose comments Redis doesn't hold is a listing of the content store. |
@@ -349,7 +381,7 @@ The [trust score](API.md#moderation) of a post or comment runs from 0 to 100. Th
 | -------------------------- | ----------------------- | ------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `TRUST_SCORE_DELETE_BELOW` | `trust.deleteBelow`     | number | `25`    | A post that scores less than this is refused (`422`) and nothing of it is kept. 0: no post is, so posts with a blocked word wait in the moderation queue instead.                  |
 | `TRUST_SCORE_ALLOW_FROM`   | `trust.allowFrom`       | number | `75`    | A post that scores at least this is published. One that scores less, and isn't refused, waits in the moderation queue. 101: every post waits. At least `TRUST_SCORE_DELETE_BELOW`. |
-| `TRUST_OPTIONAL_PLUGINS`   | `trust.optionalPlugins` | list   | empty   | The optional trust plugins the server runs, by the names of their folders in `src/plugins/trust`, separated by commas or spaces (a list of names in the file). The server comes with two, `urlhaus` and `pdq`. Empty: no optional plugin runs. Plugins that aren't optional, such as `blocked_words`, run whatever this says. A name that isn't a folder there stops the server from starting. |
+| `TRUST_OPTIONAL_PLUGINS`   | `trust.optionalPlugins` | list   | empty   | The optional trust plugins the server runs, by the names of their folders in `compactor/crates/trust/src/plugins`, separated by commas or spaces (a list of names in the file). The server comes with two, `urlhaus` and `pdq`. Empty: no optional plugin runs. Plugins that aren't optional, such as `blocked_words`, run whatever this says. A name that isn't one of the plugins the server was built with stops the API from starting, and the compactor, which takes the same value. |
 
 
 ### Links that spread malware
@@ -415,11 +447,11 @@ These are read by the function entry points (`[src/functions](../src/functions)`
 | `FUNCTION_SECRETS`     | JSON   | unset          | On AWS Lambda: the secrets of AWS Secrets Manager whose settings an instance reads as it starts, as a list of `{"id": "<ARN or name>", "version": "<version id>"}`, the version optional. Each secret's value is a JSON object of settings by name; one takes the place of the same setting in the environment, and of one in a secret listed before it. A secret that can't be read stops the instance from starting. Unset: every setting is in the environment. |
 
 
-A function also takes different defaults from a server where the variable isn't set: `DB_MIGRATE_ON_START=false`, `DB_POOL_SIZE=2`, `DB_IDLE_TIMEOUT_MS=10000` and `COMPACT_IN_PROCESS=false`.
+A function also takes different defaults from a server where the variable isn't set: `DB_MIGRATE_ON_START=false`, `DB_POOL_SIZE=2` and `DB_IDLE_TIMEOUT_MS=10000`.
 
 ### `BOOTSTRAP_ADMIN`
 
-Read only by `npm run migrate` and the step a deployment of functions runs first (the migrate function on AWS, the migrate job elsewhere), for deployments that set up their [first admin](API.md#moderation) without a person at a command line. It's JSON, `{ "userId", "username", "keyHash" }`: an account's id and name, and the SHA-256 (in hex) of an API key made in the server's format, `ev_<12 hex characters>_<43 base64url characters>` (`tu_` in earlier versions, which is still taken). After the migrations, that account is created if it doesn't exist, made an admin, and, if the key is new to it, given that key as its only one. Running it again with the same value changes nothing, and with another key replaces the one the account has. A key the account had and replaced since (`[POST /users/:userId/key](API.md#post-usersuseridkey)`) stays revoked. The key itself never reaches the server. The [Terraform modules](DEPLOY.md#the-admin-account) set it, so you won't set it there yourself.
+Read only by `npm run migrate` and the step a deployment of functions runs first (the migrate function on AWS, the migrate job elsewhere), for deployments that set up their [first admin](API.md#moderation) without a person at a command line. It's JSON, `{ "userId", "username", "keyHash" }`: an account's id and name, and the SHA-256 (in hex) of an API key made in the server's format, `ev_<12 hex characters>_<43 base64url characters>` (`tu_` in earlier versions, which is still taken). After the migrations, that account is created if it doesn't exist, made an admin, and, if the key is new to it, given that key as its only one. Running it again with the same value changes nothing, and with another key replaces the one the account has. A key the account had and replaced since (`[POST /users/:userId/key](API.md#post-usersuseridkey)`) stays revoked. The key itself never reaches the server. The [Terraform modules](IAC.md#the-admin-account) set it, so you won't set it there yourself. A server in Docker makes its first admin another way, as it starts, with [`FIRST_ADMIN_PROFILE`](#server).
 
 ```sh
 BOOTSTRAP_ADMIN='{"userId":"<a UUID>","username":"admin","keyHash":"<64 hex>"}' npm run migrate
@@ -432,9 +464,9 @@ BOOTSTRAP_ADMIN='{"userId":"<a UUID>","username":"admin","keyHash":"<64 hex>"}' 
 Two kinds of change are made in files, and are part of the image or the build, so deploying one is deploying new code. [Deploying a change](#b-deploying-a-change) says when each way needs a rebuild:
 
 - Languages: the files of `[languages](../languages)` ([Languages](LANGUAGES.md)).
-- Trust plugins: the folders of `src/plugins/trust` ([Trust plugins](TRUST_PLUGINS.md)). Turning an optional plugin that's already there on or off isn't one of these: that's `TRUST_OPTIONAL_PLUGINS`, an environment variable like any other.
+- Trust plugins: the folders of `compactor/crates/trust/src/plugins`, which are compiled into the API's addon and into the compactor ([Trust plugins](TRUST_PLUGINS.md)). Turning an optional plugin that's already there on or off isn't one of these: that's `TRUST_OPTIONAL_PLUGINS`, an environment variable like any other.
 
-The Terraform modules also have variables of their own, for the infrastructure rather than the server: memory and CPU, database and Redis sizes, how many instances, and the admin account. `variables.tf` in each module ([AWS](../deploy/terraform/aws/variables.tf), [Google Cloud](../deploy/terraform/gcp/variables.tf), [Azure](../deploy/terraform/azure/variables.tf)) lists them, and [DEPLOY.md](DEPLOY.md) explains them.
+The Terraform modules also have variables of their own, for the infrastructure rather than the server: memory and CPU, database and Redis sizes, how many instances, and the admin account. `variables.tf` in each module ([AWS](../deploy/terraform/aws/variables.tf), [Google Cloud](../deploy/terraform/gcp/variables.tf), [Azure](../deploy/terraform/azure/variables.tf)) lists them, and [IAC.md](IAC.md) explains them.
 
 ## B. Deploying a change
 
@@ -442,7 +474,7 @@ Change the setting where it's kept (a `.env` file, a compose file or `terraform.
 
 Whichever you use, a setting is read by each process on its own, so **every process that reads it needs the new value**: the API nodes or functions, and the compactor. The Terraform modules and the compose files give them all the same settings. Where you run them yourself, change them all.
 
-A change to a **language or a plugin** is a change to the code: it needs a rebuild (`npm run build`, `docker compose up --build`, or a Terraform apply, which rebuilds on its own) as well as a restart. A change to a setting never needs a rebuild.
+A change to a **language or a plugin** is a change to the code: it needs a rebuild (`npm run build` for a language, `npm run build:native` for a plugin, `docker compose up --build`, or a Terraform apply, which rebuilds on its own) as well as a restart of the API and the compactor. A change to a setting never needs a rebuild.
 
 ### Local
 
@@ -451,12 +483,13 @@ A change to a **language or a plugin** is a change to the code: it needs a rebui
 #### From source
 
 ```sh
-npm run build                                   # only if you changed a language or a plugin
+npm run build                                   # only if you changed a language
+npm run build:native                            # only if you changed a plugin: it compiles the addon and the compactor, and needs Rust
 node --env-file=.env dist/server.js             # restart the server
-node --env-file=.env dist/compact/main.js       # and the compactor, if you run it as its own process
+node --env-file=.env dist/compactor.js          # and the compactor, which is given the same settings
 ```
 
-With `npm run dev` there's nothing to build: stop it and start it again, which reads the changed `.env` (`tsx watch` restarts when source files change, not when the environment does). A bad value stops the server as it starts, with the name of the setting.
+With `npm run dev` there's nothing to build: stop it and start it again, which reads the changed `.env` (`tsx watch` restarts when source files change, not when the environment does). `npm run dev` is the API alone: the compactor runs beside it, and is restarted the same way. A bad value stops the server as it starts, with the name of the setting, and the compactor likewise.
 
 Where you turned `DB_MIGRATE_ON_START` off, run the migrations first: `node --env-file=.env dist/db/migrate.js`.
 
@@ -481,7 +514,7 @@ sudo systemctl daemon-reload                  # only if you edited the unit file
 sudo systemctl restart evieverse evieverse-compactor
 ```
 
-The unit names are whatever you gave them. With several API nodes, restart them one at a time if you want no gap in service. Keep the compactor to one copy: stop the old one before starting the new, or rely on [its lease](DEPLOY.md#compactor), which makes a second copy's passes wait.
+The unit names are whatever you gave them. With several API nodes, restart them one at a time if you want no gap in service. Keep the compactor to one copy: stop the old one before starting the new, or rely on [its lease](IAC.md#compactor), which makes a second copy's passes wait.
 
 ### Cloud
 
@@ -489,7 +522,7 @@ The unit names are whatever you gave them. With several API nodes, restart them 
 
 #### With the Terraform modules
 
-Settings go in the module's `environment` variable, and credentials in `secrets` ([DEPLOY.md](DEPLOY.md#deploy)). Both are maps of strings, written [as shown above](#how-to-write-a-value), in `terraform.tfvars` (which is git-ignored, and which Terraform reads without being told):
+Settings go in the module's `environment` variable, and credentials in `secrets` ([IAC.md](IAC.md#deploy)). Both are maps of strings, written [as shown above](#how-to-write-a-value), in `terraform.tfvars` (which is git-ignored, and which Terraform reads without being told):
 
 ```hcl
 # deploy/terraform/<cloud>/terraform.tfvars
@@ -534,7 +567,7 @@ What the apply does depends on what you changed:
 | You changed                                   | The apply                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `environment` or `secrets`                    | Checks the new settings, and only then updates every function and the compactor with them. If the server refuses one, the apply stops there with the old settings still in use ([below](#when-a-setting-is-refused)). It doesn't rebuild the image, and the migrations have nothing to do. Running instances are replaced by ones with the new settings: a new Lambda configuration, a new Cloud Run revision, a new Container Apps revision. The compactor stops, finishing its pass where it can, and starts again, so there's a moment with none, which the next pass makes up. |
-| A language, a plugin, or any file under `src` | Rebuilds the image and pushes it, checks the settings with the new image and runs the migrations, and only then updates the functions and the compactor. If either fails, the apply stops there with the old functions still serving.                                                                                                                                                                                                  |
+| A language, a plugin, or any file under `src` or `compactor` | Rebuilds the image and pushes it, checks the settings with the new image and runs the migrations, and only then updates the functions and the compactor. If either fails, the apply stops there with the old functions still serving.                                                                                                                                                                                                  |
 | `image`                                       | The same, with the image you name instead of one it builds.                                                                                                                                                                                                                                                                                                                                                                             |
 
 
@@ -543,29 +576,29 @@ What the apply does depends on what you changed:
 Updating a function doesn't start it, so a setting the server refuses wouldn't show until requests failed. The apply checks first instead. Before it updates anything, it runs one step (the migrate function on AWS, the migrate job on GCP and Azure) with the settings the functions are about to get, which starts each route group as its function would. If the server doesn't start with them, the step fails and the apply stops:
 
 - Nothing was changed. The functions and the compactor keep the settings they had, and go on serving.
-- The step's log says which setting, and why, for example "the functions would not start with these settings, so nothing was changed: TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't a folder of…". The step is named after the deployment, `<name>-migrate`: on AWS its log group is `/aws/lambda/<name>-migrate`, and on GCP and Azure it's the job's log.
+- The step's log says which setting, and why, for example "the functions would not start with these settings, so nothing was changed: TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't one of the trust plugins this server was built with…". The step is named after the deployment, `<name>-migrate`: on AWS its log group is `/aws/lambda/<name>-migrate`, and on GCP and Azure it's the job's log.
 - Fix the value and apply again. The step runs again on every apply until it passes.
 
 What the check catches is what stops the server from starting: a value in the wrong format, a name that isn't one (a plugin in `TRUST_OPTIONAL_PLUGINS`, a `CONTENT_SCHEME`, a `DEFAULT_LANGUAGE` with no file), and settings that need each other (`TAGGING_MODE=server` without `TAGGING_SERVER_TAGS`, `urlhaus` without `URLHAUS_AUTH_KEY`, `pdq` without `PDQ_HASH_LIST`). The last two of these fail sooner, in the plan. What it doesn't catch is a value the server starts with but that is wrong: a bucket that doesn't exist, or a key a service refuses, shows when it's used.
 
 Things to know:
 
-- Some settings are set by the module, and `environment` replaces them. The modules set `DB_DIALECT`, `CONTENT_SCHEME`, `CONTENT_OPTIONS`, `PUBLIC_BASE_URL`, `COMPACT_IN_PROCESS` and, per cloud, `STORAGE_TMP_PATH` and `MAX_UPLOAD_BYTES` ([the limits](DEPLOY.md#uploads)). A value in `environment` takes their place, and the apply checks only that the server starts with it, not that it suits the deployment: `DB_DIALECT=mysql`, against the PostgreSQL the module made, passes the check and breaks the instance.
-- `TRUST_PROXY` differs by cloud. On GCP and Azure it follows the module's `trust_proxy` variable (2), and an `environment` value replaces that. On AWS it's fixed at `1` for the functions, and an `environment` value is ignored by them. Change it on GCP and Azure with the variable ([Client addresses](DEPLOY.md#client-addresses)).
-- `DB_POOL_SIZE` on GCP and Azure is the module's `db_pool_size` variable, which an `environment` value overrides. Keep to the connection arithmetic in [Scaling and the database](DEPLOY.md#scaling-and-the-database).
+- Some settings are set by the module, and `environment` replaces them. The modules set `DB_DIALECT`, `CONTENT_SCHEME`, `CONTENT_OPTIONS`, `PUBLIC_BASE_URL` and, per cloud, `STORAGE_TMP_PATH` and `MAX_UPLOAD_BYTES` ([the limits](IAC.md#uploads)). A value in `environment` takes their place, and the apply checks only that the server starts with it, not that it suits the deployment: `DB_DIALECT=mysql`, against the PostgreSQL the module made, passes the check and breaks the instance.
+- `TRUST_PROXY` differs by cloud. On GCP and Azure it follows the module's `trust_proxy` variable (2), and an `environment` value replaces that. On AWS it's fixed at `1` for the functions, and an `environment` value is ignored by them. Change it on GCP and Azure with the variable ([Client addresses](IAC.md#client-addresses)).
+- `DB_POOL_SIZE` on GCP and Azure is the module's `db_pool_size` variable, which an `environment` value overrides. Keep to the connection arithmetic in [Scaling and the database](IAC.md#scaling-and-the-database).
 - `secrets` on AWS are read by version. They're kept in Secrets Manager, not in a function's configuration. A function reads them as an instance starts, and the compactor's task is given them as it starts, each by the version the apply wrote, not the current one. So a changed secret is a new function configuration and a new task definition, which wait for the settings check like any other change, and the compactor restarts with the new value by itself.
 - `secrets` on GCP are read by version. Each value in `secrets` is a version of a secret in Secret Manager, and the services, the compactor and the jobs read the version the apply wrote, by its number, not the latest. So a changed secret is a new revision, which waits for the settings check like any other change, and the version before it is deleted once the services read the new one.
-- The signing key for reposts is the module's too. Each module makes a key and gives it to the functions as `REPOSTS_SIGNING_KEYS` ([DEPLOY.md](DEPLOY.md#deploy)). To sign with keys of your own, put `REPOSTS_SIGNING_KEYS` in `secrets`; to sign nothing, set it to `""` in `environment`.
-- Changing where data lives doesn't move it. `CONTENT_SCHEME`, `CONTENT_OPTIONS`, `SUMMARY_SCHEME`, `SUMMARY_OPTIONS`, `AUDIT_SCHEME` and `AUDIT_OPTIONS` point the server at another store, which starts empty, and so do `QUARANTINE_SCHEME` and `QUARANTINE_OPTIONS` ([Quarantine](#quarantine)). Likewise, a new `REDIS_KEY_PREFIX` points it at an empty index, which the [rebuild](DEPLOY.md#redis) fills from the database and the content store.
-- `PUBLIC_BASE_URL` for a custom domain goes in `environment` too ([Custom domains](DEPLOY.md#custom-domains)).
-- Leave `BOOTSTRAP_ADMIN`, `FUNCTION_GROUP`, `FUNCTION_EDGE_SECRET`, `AUDIT_SCHEME` and `AUDIT_OPTIONS` out of `environment`. The modules set them, and the admin account has [variables of its own](DEPLOY.md#the-admin-account).
+- The signing key for reposts is the module's too. Each module makes a key and gives it to the functions as `REPOSTS_SIGNING_KEYS` ([IAC.md](IAC.md#deploy)). To sign with keys of your own, put `REPOSTS_SIGNING_KEYS` in `secrets`; to sign nothing, set it to `""` in `environment`.
+- Changing where data lives doesn't move it. `CONTENT_SCHEME`, `CONTENT_OPTIONS`, `SUMMARY_SCHEME`, `SUMMARY_OPTIONS`, `AUDIT_SCHEME` and `AUDIT_OPTIONS` point the server at another store, which starts empty, and so do `QUARANTINE_SCHEME` and `QUARANTINE_OPTIONS` ([Quarantine](#quarantine)). Likewise, a new `REDIS_KEY_PREFIX` points it at an empty index, which the [rebuild](IAC.md#redis) fills from the database and the content store.
+- `PUBLIC_BASE_URL` for a custom domain goes in `environment` too ([Custom domains](IAC.md#custom-domains)).
+- Leave `BOOTSTRAP_ADMIN`, `FUNCTION_GROUP`, `FUNCTION_EDGE_SECRET`, `AUDIT_SCHEME` and `AUDIT_OPTIONS` out of `environment`. The modules set them, and the admin account has [variables of its own](IAC.md#the-admin-account).
 - Keep `terraform.tfvars` and the state where only the people who deploy can read them. The secrets are in the state in plain text.
 
 To check a change took effect, ask the instance. `curl "$(terraform output -raw url)/health"` says it's up, and a setting with a visible effect shows itself: `GET /tagging` lists the hashtags in server mode, and a browser request from an origin shows whether `CORS_ORIGINS` allows it. For one that doesn't, the function's or compactor's log shows the settings it started with. `terraform output compactor` names the compactor, and its log group on AWS.
 
 #### Without the Terraform modules
 
-Where you built the cloud setup yourself ([Setting it up yourself](DEPLOY.md#setting-it-up-yourself)), change the settings where your platform keeps them, so that each API node, function and the compactor starts with them. Most platforms start new instances for a changed setting and retire the old, and the commands below do that:
+Where you built the cloud setup yourself ([Setting it up yourself](IAC.md#setting-it-up-yourself)), change the settings where your platform keeps them, so that each API node, function and the compactor starts with them. Most platforms start new instances for a changed setting and retire the old, and the commands below do that:
 
 
 | Platform                        | What to change                                       | How                                                                                                                                                                                               |
@@ -577,6 +610,6 @@ Where you built the cloud setup yourself ([Setting it up yourself](DEPLOY.md#set
 | **Kubernetes** (GKE, AKS, EKS)  | The ConfigMap or Secret the pods read                | `kubectl apply -f <file>`, then `kubectl rollout restart deployment/<name>`. Pods don't take a changed ConfigMap into their environment until they restart.                                       |
 
 
-A function isn't started by updating it, so a setting the server refuses shows only when requests fail. Check the settings first, as the modules do: run `node dist/functions/migrate.js` (on Lambda, the function whose `FUNCTION_GROUP` is `migrate`) with the settings the functions are about to get, and update them only if it succeeds ([Setting it up yourself](DEPLOY.md#setting-it-up-yourself)).
+A function isn't started by updating it, so a setting the server refuses shows only when requests fail. Check the settings first, as the modules do: run `node dist/functions/migrate.js` (on Lambda, the function whose `FUNCTION_GROUP` is `migrate`) with the settings the functions are about to get, and update them only if it succeeds ([Setting it up yourself](IAC.md#setting-it-up-yourself)).
 
-Keep the compactor to one copy while you do it. Where the platform starts the new one before it stops the old (Cloud Run and Container Apps can), the two overlap for a moment, and [the compactor's lease](DEPLOY.md#compactor) makes a second copy's passes wait, so nothing is corrupted. On ECS, set `deployment_minimum_healthy_percent` to 0 and `deployment_maximum_percent` to 100, as the module does, so the old task stops first.
+Keep the compactor to one copy while you do it. Where the platform starts the new one before it stops the old (Cloud Run and Container Apps can), the two overlap for a moment, and [the compactor's lease](IAC.md#compactor) makes a second copy's passes wait, so nothing is corrupted. On ECS, set `deployment_minimum_healthy_percent` to 0 and `deployment_maximum_percent` to 100, as the module does, so the old task stops first.

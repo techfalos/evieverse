@@ -121,9 +121,6 @@ for (const target of TARGETS) {
       expect((await inbox(alice)).inbox).toEqual([]);
       ok(await send(bob, alice, 'Here!'), 201);
       expect(await texts(alice)).toEqual(['Here!']);
-      // The sender is shown by the name they have now.
-      ok(await req(alice, 'PATCH', `/users/${alice.userId}`, { username: 'alicia' }));
-      expect((await inbox(bob)).inbox[0]!.from).toEqual({ userId: alice.userId, username: 'alicia' });
     });
 
     it('takes a message only from a user with a key, for a user there is, with a text of a size', async () => {
@@ -269,7 +266,7 @@ for (const target of TARGETS) {
       expect(await notices(bob)).toMatchObject([{ kind: 'tag_muted', tag: 'news' }]);
 
       // Changing something else leaves the setting as it is; turning it on again is all it takes.
-      expect(ok(await req(bob, 'PATCH', `/users/${bob.userId}`, { username: 'robert' }))).toMatchObject({ username: 'robert', messages: false });
+      expect(ok(await req(bob, 'PATCH', `/users/${bob.userId}`, { showFollowing: true }))).toMatchObject({ showFollowing: true, messages: false });
       expect(ok(await setMessages(bob, false))).toMatchObject({ messages: false });
       expect(ok(await setMessages(bob, true))).toMatchObject({ messages: true });
       ok(await send(alice, bob, 'after'), 201);

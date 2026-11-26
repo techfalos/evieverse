@@ -122,7 +122,9 @@ for (const target of TARGETS) {
       }
       expect(ok(await update(alice, { links: Array.from({ length: MAX_PROFILE_LINKS }, (_, i) => `https://example.com/${i}`) })).links).toHaveLength(MAX_PROFILE_LINKS);
       // A request that is refused changes nothing, whatever else it named.
-      expect((await update(alice, { username: 'alicia', links: ['nope'] })).statusCode).toBe(400);
+      expect((await update(alice, { bio: 'Shorter.', links: ['nope'] })).statusCode).toBe(400);
+      // Nor does one that names another username, which is nobody's to change.
+      expect(await refused(update(alice, { username: 'alicia', bio: 'Shorter.' }))).toEqual([400, "a username can't be changed: an account keeps the name it was registered with"]);
       expect(await profile(alice.userId)).toMatchObject({ username: 'alice', bio: 'x'.repeat(MAX_BIO_CHARS) });
     });
 
@@ -147,11 +149,12 @@ for (const target of TARGETS) {
       expect(await seen()).toEqual([]);
 
       // A blocked word of the server's, in the bio or in a link, is refused, and nothing of the request is saved.
-      expect(await refused(update(alice, { bio: 'Buy my spam', username: 'alicia' }))).toEqual([422, BLOCKED_WORD]);
+      expect(await refused(update(alice, { bio: 'Buy my spam', messages: true }))).toEqual([422, BLOCKED_WORD]);
       expect(await refused(update(alice, { links: ['https://spam.example/'] }))).toEqual([422, BLOCKED_WORD]);
       // A profile has no queue to wait in: what a post would wait for is refused too.
       expect(await refused(update(alice, { bio: 'FREE things' }))).toEqual([422, NOT_TRUSTED]);
       expect(await profile(alice.userId)).toMatchObject({ username: 'alice', bio: null, links: [] });
+      expect(ok(await req(alice, 'GET', '/whoami'))).toMatchObject({ messages: false });
 
       // An avatar is given to them as a post's image is, with its name: the image as it was sent, not the avatar made of it.
       await seen();
@@ -333,7 +336,7 @@ for (const target of TARGETS) {
       const his = await post(bob, 'His #news');
       await ctx.compact();
       const plain = { userId: alice.userId, username: 'alice' };
-      const fed = async () => (ok(await req(null, 'GET', '/feed?tags=news')).tags.news as FeedItem[]).find((item) => item.contentId === hers)!.publisher;
+      const fed = async () => (ok(await req(null, 'GET', '/feed?tags=news')).records as FeedItem[]).find((item) => item.contentId === hers)!.publisher;
 
       // A user with no avatar is credited by their name alone, as before.
       expect(await creditOf(hers)).toEqual(plain);

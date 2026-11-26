@@ -2,13 +2,17 @@
 //! REDIS_KEY_PREFIX). The same layout as src/tagfeed/layout.ts, which the API reads it by:
 //!
 //! ```text
-//!   head:<tag>        { v: 5, manifest, compactedAt } - the only overwritten index key
+//!   head:<tag>        { v: 6, manifest, compactedAt } - the only overwritten index key
 //!   man:<tag>:<id>    immutable: every UTC day's index key and quota
 //!   day:<tag>:<gen>   immutable: one UTC day's packed index, DAY_ENTRY_BYTES per post, best first
 //! ```
 //!
 //! Only the compactor writes them. Each publisher's own posts have an index of the same layout,
 //! named `author_index(user_id)`, which following feeds read.
+//!
+//! A manifest says which version its day indexes are of (`v`). One written before entries had
+//! views and dislikes is version 5, of shorter entries (`day_entry_bytes`): the API reads it as
+//! it is, and a run that compacts its tag writes all of its days again as this version's.
 
 use std::cmp::Ordering;
 
@@ -17,9 +21,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::time::whole_seconds;
 
-/// contentId (16 bytes) | likes u32 | createdAt seconds u32 | flags u8, big-endian.
-pub const DAY_ENTRY_BYTES: usize = 25;
-/// The most a u32 field of a day index entry holds: likes and creation seconds above it are
+/// contentId (16 bytes) | likes u32 | createdAt seconds u32 | flags u8 | views u32 |
+/// dislikes u32, big-endian.
+pub const DAY_ENTRY_BYTES: usize = 33;
+/// What an entry took in version 5 of the layout, which had neither views nor dislikes: the
+/// first bytes of an entry of this one.
+const DAY_ENTRY_BYTES_V5: usize = 25;
+/// The most a u32 field of a day index entry holds: counts and creation seconds above it are
 /// stored as this.
 const U32_MAX: i64 = 0xffff_ffff;
 
@@ -30,8 +38,9 @@ const MODERATED: u8 = 2;
 /// Flag bit of a day index entry: a repost put the content in the index.
 const REPOST: u8 = 4;
 
-/// The version of the index's layout that heads and manifests say they are of.
-pub const LAYOUT_VERSION: u32 = 5;
+/// The version of the index's layout that the compactor writes, and that heads and manifests
+/// say they are of.
+pub const LAYOUT_VERSION: u32 = 6;
 
 /// The key the compactor keeps its progress under from one run to the next, as JSON.
 pub const COMPACTOR_STATE_KEY: &str = "compactor:state";
@@ -46,6 +55,12 @@ pub struct IndexEntry {
     pub created_at: i64,
     /// The content's likes; for a repost's entry, those since the repost.
     pub likes: i64,
+    /// How many times the content was viewed by a user account (`content.view_count`): all of
+    /// them, on a repost's entry too. 0 in an index of version 5.
+    pub views: i64,
+    /// How many users dislike the content (`content.dislike_count`), whether the server shows
+    /// dislikes or not: all of them, on a repost's entry too. 0 in an index of version 5.
+    pub dislikes: i64,
     /// Declared by the publisher at /store.
     pub ai_generated: bool,
     /// A moderator of this hashtag approved the content under it.
@@ -93,6 +108,8 @@ pub struct DayRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Manifest {
+    /// The version of the layout every day index it names is of, which says how long their
+    /// entries are (`day_entry_bytes`).
     pub v: u32,
     pub tag: String,
     pub id: String,
@@ -170,23 +187,42 @@ pub fn pack_day(entries: &[IndexEntry]) -> Result<Vec<u8>> {
         buf.extend_from_slice(&clamp(e.likes, U32_MAX).to_be_bytes());
         buf.extend_from_slice(&clamp(e.created_at.div_euclid(1000), U32_MAX).to_be_bytes());
         buf.push(if e.ai_generated { AI_GENERATED } else { 0 } | if e.moderated { MODERATED } else { 0 } | if e.repost { REPOST } else { 0 });
+        buf.extend_from_slice(&clamp(e.views, U32_MAX).to_be_bytes());
+        buf.extend_from_slice(&clamp(e.dislikes, U32_MAX).to_be_bytes());
     }
     Ok(buf)
 }
 
+/// How many bytes an entry takes in a day index of version `v` of the layout (a manifest's
+/// `v`).
+pub fn day_entry_bytes(v: u32) -> usize {
+    if v >= LAYOUT_VERSION { DAY_ENTRY_BYTES } else { DAY_ENTRY_BYTES_V5 }
+}
+
+/// The u32 a day index entry holds at `at`, or 0 for an entry too short to hold one there: an
+/// entry of version 5 has neither views nor dislikes.
+fn count_at(entry: &[u8], at: usize) -> i64 {
+    entry
+        .get(at..at + 4)
+        .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+        .map_or(0, |bytes| i64::from(u32::from_be_bytes(bytes)))
+}
+
 /// The entries `pack_day` packed, in the same order, their times in ms again (of whole
-/// seconds). Bytes at the end that don't make a whole entry are ignored.
-pub fn unpack_day(buf: &[u8]) -> Vec<IndexEntry> {
-    buf.as_chunks::<DAY_ENTRY_BYTES>()
-        .0
-        .iter()
+/// seconds). Bytes at the end that don't make a whole entry are ignored. `v` is the version
+/// of the layout the day index is of, which its manifest says: an entry of version 5 has no
+/// views and no dislikes, and reads as having 0 of each.
+pub fn unpack_day(buf: &[u8], v: u32) -> Vec<IndexEntry> {
+    buf.chunks_exact(day_entry_bytes(v))
         .map(|e| {
             let h = hex::encode(&e[..16]);
             let flags = e[24];
             IndexEntry {
                 content_id: format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..]),
-                likes: i64::from(u32::from_be_bytes([e[16], e[17], e[18], e[19]])),
-                created_at: i64::from(u32::from_be_bytes([e[20], e[21], e[22], e[23]])) * 1000,
+                likes: count_at(e, 16),
+                created_at: count_at(e, 20) * 1000,
+                views: count_at(e, 25),
+                dislikes: count_at(e, 29),
                 ai_generated: flags & AI_GENERATED != 0,
                 moderated: flags & MODERATED != 0,
                 repost: flags & REPOST != 0,
@@ -233,6 +269,8 @@ mod tests {
             content_id: "not-a-uuid".into(),
             created_at: 0,
             likes: 0,
+            views: 0,
+            dislikes: 0,
             ai_generated: false,
             moderated: false,
             repost: false,
@@ -242,6 +280,31 @@ mod tests {
 
     #[test]
     fn ignores_bytes_that_make_no_whole_entry() {
-        assert_eq!(unpack_day(&[0; DAY_ENTRY_BYTES + 3]).len(), 1);
+        assert_eq!(unpack_day(&[0; DAY_ENTRY_BYTES + 3], LAYOUT_VERSION).len(), 1);
+    }
+
+    #[test]
+    fn reads_an_index_of_version_5_as_having_no_views_and_no_dislikes() {
+        let entry = IndexEntry {
+            content_id: "0190a1b2-c3d4-7e5f-8a6b-0c1d2e3f4a5b".into(),
+            created_at: 1_700_000_000_000,
+            likes: 7,
+            views: 40,
+            dislikes: 3,
+            ai_generated: true,
+            moderated: false,
+            repost: true,
+        };
+        let packed = pack_day(&[entry.clone(), entry.clone()]).unwrap();
+        assert_eq!(packed.len(), 2 * DAY_ENTRY_BYTES);
+        assert_eq!(unpack_day(&packed, LAYOUT_VERSION), vec![entry.clone(), entry.clone()]);
+        // What version 5 held of an entry is the start of what this one holds.
+        let old = [&packed[..DAY_ENTRY_BYTES_V5], &packed[DAY_ENTRY_BYTES..DAY_ENTRY_BYTES + DAY_ENTRY_BYTES_V5]].concat();
+        let read = IndexEntry {
+            views: 0,
+            dislikes: 0,
+            ..entry
+        };
+        assert_eq!(unpack_day(&old, 5), vec![read.clone(), read]);
     }
 }

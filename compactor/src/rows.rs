@@ -16,8 +16,8 @@ pub const BATCH: usize = 500;
 
 /// The columns of a `ContentRow`, for a select from `content` joined to `moderation_queue`
 /// (see `CONTENT_FROM`).
-pub const CONTENT_COLUMNS: &str = "content.id, content.user_id, content.like_count, content.created_at, content.ai_generated, \
-     content.delete_requested_at, content.origin_gone_at, moderation_queue.content_id AS queued_id";
+pub const CONTENT_COLUMNS: &str = "content.id, content.user_id, content.like_count, content.view_count, content.dislike_count, content.created_at, \
+     content.ai_generated, content.delete_requested_at, content.origin_gone_at, moderation_queue.content_id AS queued_id";
 
 /// What a select of `CONTENT_COLUMNS` reads from.
 pub const CONTENT_FROM: &str = "content LEFT JOIN moderation_queue ON moderation_queue.content_id = content.id";
@@ -28,6 +28,10 @@ pub struct ContentRow {
     pub id: String,
     pub user_id: String,
     pub like_count: i64,
+    /// How many times it was viewed by a user account (GET /content/:id).
+    pub view_count: i64,
+    /// How many users dislike it, whether the server shows dislikes or not.
+    pub dislike_count: i64,
     pub created_at: i64,
     pub ai_generated: bool,
     pub delete_requested_at: Option<i64>,
@@ -45,6 +49,8 @@ impl ContentRow {
             id: row.string("id")?,
             user_id: row.string("user_id")?,
             like_count: row.i64("like_count")?,
+            view_count: row.i64("view_count")?,
+            dislike_count: row.i64("dislike_count")?,
             created_at: row.i64("created_at")?,
             ai_generated: row.flag("ai_generated")?,
             delete_requested_at: row.opt_i64("delete_requested_at")?,

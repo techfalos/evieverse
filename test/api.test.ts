@@ -1,11 +1,12 @@
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { authorIndex } from '../src/tagfeed/layout.js';
 import { DAY, HOUR } from '../src/time.js';
-import { as, BASE_ENV, createTestContext, type Feed, JPEG, multipart, PNG, queued, requests, sha256, TARGETS, type TestContext, type User } from './helpers.js';
+import { as, BASE_ENV, createTestContext, type Feed, JPEG, listedUnder, multipart, PNG, queued, requests, sha256, TARGETS, type TestContext, type User } from './helpers.js';
 
 for (const target of TARGETS) {
   describe(`API (${target.name})`, () => {
@@ -24,7 +25,10 @@ for (const target of TARGETS) {
       return ctx.app.inject({ method: 'POST', url: '/store', payload: mp.payload, headers: mp.headers });
     };
     const getContent = async (contentId: string) => (await ctx.app.inject({ method: 'GET', url: `/content/${contentId}` })).json();
-    const ids = (f: Feed, tag: string) => (f.tags[tag] ?? []).map((i) => i.contentId);
+    /** The posts a page lists under `tag`, in the page's order. */
+    const ids = (f: Feed, tag: string) => listedUnder(f, tag).map((i) => i.contentId);
+    /** A page's posts in its order, and the hashtag each is listed under. */
+    const listed = (f: Feed) => f.records.map((i) => [i.contentId, i.listedUnder]);
 
     it('identifies users by UUID and keeps usernames unique', async () => {
       const a = await ctx.registration({ username: 'alice' });
@@ -48,11 +52,48 @@ for (const target of TARGETS) {
         moderates: [],
       });
 
+    });
+
+    it('keeps a user under the username they registered with: none is changed', async () => {
+      await ctx.register('alice');
       const bob = await ctx.register('bob');
-      const rename = (username: string) => ctx.app.inject({ method: 'PATCH', url: `/users/${bob.userId}`, payload: { ...bob, username } });
-      expect((await rename('alice')).statusCode).toBe(409);
-      expect((await rename('bob')).statusCode).toBe(200);
-      expect((await rename('robert')).json()).toEqual({ userId: bob.userId, username: 'robert', language: 'en', messages: true, showFollowing: false, showFollowers: false, bio: null, links: [], avatarUrl: null });
+      const patch = (payload: Record<string, unknown>) => ctx.app.inject({ method: 'PATCH', url: `/users/${bob.userId}`, payload: { userId: bob.userId, apiKey: bob.apiKey, ...payload } });
+      const FIXED = "a username can't be changed: an account keeps the name it was registered with";
+      const named = async () => (await ctx.db.selectFrom('users').select(['username', 'username_folded', 'language', 'messages']).where('id', '=', bob.userId).executeTakeFirstOrThrow());
+      const before = await named();
+
+      // A name nobody has, one that is taken, and their own in other letters: a request that sends another name than theirs is refused.
+      for (const username of ['robert', 'alice', 'Bob', 'bób']) {
+        const refused = await patch({ username });
+        expect([refused.statusCode, refused.json()], username).toEqual([400, { error: FIXED }]);
+      }
+      // All of it: what else it sends, which is theirs to change, isn't changed.
+      const mixed = await patch({ username: 'robert', language: 'en', messages: false });
+      expect([mixed.statusCode, mixed.json()]).toEqual([400, { error: FIXED }]);
+      // What isn't a username is no more one here than when registering.
+      for (const username of ['', '   ', 'x'.repeat(65), null, 7]) expect((await patch({ username, messages: false })).statusCode, String(username)).toBe(400);
+      expect(await named()).toEqual(before);
+      expect(before).toMatchObject({ username: 'bob', username_folded: 'bob' });
+
+      // The name they have is no change, which is what a client sends that sends back what registering gave it: alone, it is nothing to update.
+      const same = await patch({ username: 'bob' });
+      expect([same.statusCode, same.json().error]).toEqual([400, 'nothing to update: provide language, messages, showFollowing, showFollowers, bio or links']);
+      expect((await patch({ username: ' bob ', showFollowing: true })).json()).toMatchObject({ username: 'bob', showFollowing: true });
+      // All that registering gave them, sent back with a change, as a client that keeps it sends it.
+      expect((await ctx.app.inject({ method: 'PATCH', url: `/users/${bob.userId}`, payload: { ...bob, showFollowers: true } })).json()).toMatchObject({ username: 'bob', showFollowers: true });
+
+      // They are who they were to anyone: by their profile, by their key, by the credit on a post, and to whoever registers.
+      const { contentId } = (await storeText(bob, 'hello #news')).json();
+      expect((await ctx.app.inject({ method: 'GET', url: `/users/${bob.userId}` })).json()).toMatchObject({ username: 'bob' });
+      expect((await ctx.app.inject({ method: 'GET', url: '/whoami', headers: as(bob) })).json()).toMatchObject({ username: 'bob' });
+      expect((await getContent(contentId)).publisher).toMatchObject({ userId: bob.userId, username: 'bob' });
+      await ctx.compact();
+      expect((await feed('tags=news')).records.map((r) => r.publisher)).toEqual([{ userId: bob.userId, username: 'bob' }]);
+      expect((await ctx.app.inject({ method: 'POST', url: '/register', payload: { username: 'robert' } })).statusCode).not.toBe(409);
+      expect((await ctx.app.inject({ method: 'POST', url: '/register', payload: { username: 'bob' } })).statusCode).toBe(409);
+
+      // What is theirs to change answers with the name they have.
+      expect((await patch({ messages: false })).json()).toEqual({ userId: bob.userId, username: 'bob', language: 'en', messages: false, showFollowing: true, showFollowers: true, bio: null, links: [], avatarUrl: null });
     });
 
     it('lets a user post as soon as they register, and only them change their profile', async () => {
@@ -60,10 +101,12 @@ for (const target of TARGETS) {
       expect((await storeText(bob, 'hello #news')).statusCode).toBe(201);
       const other = await ctx.register('mallory');
       const patch = (payload: Record<string, unknown>) => ctx.app.inject({ method: 'PATCH', url: `/users/${bob.userId}`, payload });
+      expect((await patch({ ...other, messages: false })).statusCode).toBe(403);
+      // Whatever they send: someone else is told the profile isn't theirs before they are told what of it can't be changed.
       expect((await patch({ ...other, username: 'robert' })).statusCode).toBe(403);
       const nothing = await patch({ userId: bob.userId, apiKey: bob.apiKey });
-      expect([nothing.statusCode, nothing.json().error]).toEqual([400, 'nothing to update: provide username, language, messages, showFollowing, showFollowers, bio or links']);
-      expect((await ctx.app.inject({ method: 'GET', url: `/users/${bob.userId}` })).json()).toMatchObject({ username: 'bob' });
+      expect([nothing.statusCode, nothing.json().error]).toEqual([400, 'nothing to update: provide language, messages, showFollowing, showFollowers, bio or links']);
+      expect((await ctx.app.inject({ method: 'GET', url: '/whoami', headers: as(bob) })).json()).toMatchObject({ username: 'bob', messages: true });
     });
 
     it('stores content synchronously at content/<id>, its summary once, and one index entry per hashtag', async () => {
@@ -174,7 +217,7 @@ for (const target of TARGETS) {
       expect(await getContent(link)).toMatchObject({ mimeType: 'text/uri-list', preview: lnk.json().preview });
       expect((await ctx.app.inject({ method: 'GET', url: `/content/${link}/raw` })).body).toBe('https://news.example/story?id=1');
 
-      const record = async (tag: string) => (await feed(`tags=${tag}`)).tags[tag]![0]!;
+      const record = async (tag: string) => (await feed(`tags=${tag}`)).records[0]!;
       await ctx.compact();
       expect((await record('pics')).preview).toEqual(img.json().preview);
       expect((await record('music')).preview).toEqual(aud.json().preview);
@@ -234,7 +277,7 @@ for (const target of TARGETS) {
       expect(body).not.toHaveProperty('text');
       expect(body).toMatchObject({ createdAt, updatedAt, size: PNG.length });
       await ctx.compact();
-      expect((await feed('tags=pics')).tags.pics!.map((i) => [i.contentId, i.preview.text, i.createdAt, i.updatedAt])).toEqual([
+      expect((await feed('tags=pics')).records.map((i) => [i.contentId, i.preview.text, i.createdAt, i.updatedAt])).toEqual([
         [contentId, undefined, createdAt, updatedAt],
       ]);
       // One row, and one set of objects: the updates wrote over them.
@@ -301,7 +344,7 @@ for (const target of TARGETS) {
       expect(await queued(ctx)).toEqual([authorIndex(alice.userId), 'austin'].map((tag) => `${contentId} ${tag}`).sort());
       await ctx.compact();
       expect(ids(await feed('tags=austin'), 'austin')).toEqual([contentId]);
-      for (const tag of ['local', 'music']) expect((await feed(`tags=${tag}`)).tags).toEqual({});
+      for (const tag of ['local', 'music']) expect((await feed(`tags=${tag}`)).records).toEqual([]);
 
       // A hashtag that isn't the server's refuses the post, even beside ones that are: nothing is dropped unsaid.
       // All of it before the limit on posts a minute, which would otherwise refuse a post this soon after the last.
@@ -324,9 +367,9 @@ for (const target of TARGETS) {
       expect(moved.statusCode, moved.body).toBe(200);
       expect(moved.json().tags).toEqual(['music', 'local']);
       // Out of the hashtag it left at once, and in the ones it joined after the compactor's next run.
-      expect((await feed('tags=austin')).tags).toEqual({});
+      expect((await feed('tags=austin')).records).toEqual([]);
       await ctx.compact();
-      expect((await feed('tags=austin')).tags).toEqual({});
+      expect((await feed('tags=austin')).records).toEqual([]);
       expect(ids(await feed('tags=local'), 'local')).toEqual([contentId]);
       ctx.clock.now += 60_000;
       const img = await upload({ ...alice, type: 'image', tags: 'local, austin, music' }, { name: 'pixel.png', type: 'image/png', data: PNG });
@@ -468,7 +511,7 @@ for (const target of TARGETS) {
       expect(v2.statusCode, v2.body).toBe(200);
       expect(v2.json()).toMatchObject({ contentId, tags: ['weather'] });
       await ctx.compact();
-      expect((await feed('tags=news')).tags).toEqual({});
+      expect((await feed('tags=news')).records).toEqual([]);
       expect(ids(await feed('tags=weather'), 'weather')).toEqual([contentId]);
     });
 
@@ -495,23 +538,23 @@ for (const target of TARGETS) {
 
       // The index of #news still holds the post's entry, but its summary no longer carries the hashtag, so
       // feeds leave it out until the compactor removes it. It isn't in #sports until then either.
-      expect((await feed('tags=news')).tags).toEqual({});
-      expect((await feed('tags=sports')).tags).toEqual({});
+      expect((await feed('tags=news')).records).toEqual([]);
+      expect((await feed('tags=sports')).records).toEqual([]);
       expect(await queued(ctx)).toEqual([authorIndex(alice.userId), 'news', 'sports'].map((tag) => `${contentId} ${tag}`).sort());
       await ctx.compact();
-      expect((await feed('tags=news')).tags).toEqual({});
+      expect((await feed('tags=news')).records).toEqual([]);
       const sports = await feed('tags=sports');
-      expect(sports.tags.sports!.map((i) => [i.contentId, i.preview.text])).toEqual([[contentId, 'v2 #sports']]);
+      expect(sports.records.map((i) => [i.contentId, i.preview.text])).toEqual([[contentId, 'v2 #sports']]);
       expect(await queued(ctx)).toEqual([]);
 
       // A hashtag given back shows the post again, once the compactor has run.
       ctx.clock.now += 60_000;
       expect((await storeText(alice, 'v3 #sports #news', { contentId })).json()).toMatchObject({ tags: ['sports', 'news'] });
-      expect((await feed('tags=news')).tags).toEqual({});
+      expect((await feed('tags=news')).records).toEqual([]);
       // Where it already was, it shows as it now is.
-      expect((await feed('tags=sports')).tags.sports!.map((i) => i.preview.text)).toEqual(['v3 #sports #news']);
+      expect((await feed('tags=sports')).records.map((i) => i.preview.text)).toEqual(['v3 #sports #news']);
       await ctx.compact();
-      expect((await feed('tags=news')).tags.news!.map((i) => [i.contentId, i.preview.text])).toEqual([[contentId, 'v3 #sports #news']]);
+      expect((await feed('tags=news')).records.map((i) => [i.contentId, i.preview.text])).toEqual([[contentId, 'v3 #sports #news']]);
     });
 
     it('requires updates to keep the original type and content type', async () => {
@@ -530,31 +573,6 @@ for (const target of TARGETS) {
       expect((await getContent(contentId)).text).toBe('more words #news');
     });
 
-    it('shows a changed username on every record at once, without rewriting the index', async () => {
-      const alice = await ctx.register('alice');
-      const compacted = (await storeText(alice, 'old post #news #mumbai')).json().contentId;
-      await ctx.compact();
-      ctx.clock.now += 1000;
-      const fresh = (await storeText(alice, 'new post #news')).json().contentId;
-      await ctx.compact();
-
-      const patch = await ctx.app.inject({
-        method: 'PATCH',
-        url: `/users/${alice.userId}`,
-        payload: { ...alice, username: 'alicia' },
-      });
-      expect(patch.statusCode).toBe(200);
-
-      const publisher = { userId: alice.userId, username: 'alicia' };
-      const news = (await feed('tags=news')).tags.news!;
-      expect(news.map((i) => i.contentId)).toEqual([fresh, compacted]);
-      for (const item of news) expect(item.publisher).toEqual(publisher);
-      expect((await feed('tags=mumbai')).tags.mumbai![0]!.publisher).toEqual(publisher);
-      ctx.clock.now += 1000;
-      expect((await ctx.compact()).tags).toEqual([]);
-      expect((await feed('tags=mumbai')).tags.mumbai![0]!.publisher).toEqual(publisher);
-    });
-
     it('records likes once per user; the compactor writes them into the day indexes', async () => {
       const alice = await ctx.register('alice');
       const bob = await ctx.register('bob');
@@ -570,7 +588,7 @@ for (const target of TARGETS) {
       expect((await ctx.app.inject({ method: 'POST', url: '/like', payload: { userId: bob.userId, apiKey: 'nope', contentId: first } })).statusCode).toBe(401);
 
       // Neither the posts nor their likes are in the feed until the compactor has run.
-      const news = async () => ((await feed('tags=news')).tags.news ?? []).map((i) => [i.contentId, i.likes]);
+      const news = async () => (await feed('tags=news')).records.map((i) => [i.contentId, i.likes]);
       expect(await news()).toEqual([]);
 
       await ctx.compact();
@@ -594,7 +612,7 @@ for (const target of TARGETS) {
       for (const u of [bob, carol]) expect((await like(u, first)).statusCode).toBe(201);
       expect((await like(bob, second)).statusCode).toBe(201);
       await ctx.compact();
-      const news = async () => ((await feed('tags=news')).tags.news ?? []).map((i) => [i.contentId, i.likes]);
+      const news = async () => (await feed('tags=news')).records.map((i) => [i.contentId, i.likes]);
       const taken = async (res: Awaited<ReturnType<typeof unlike>>) => [res.statusCode, res.json()];
       const likesOf = async (contentId: string) => (await ctx.db.selectFrom('likes').select('user_id').where('content_id', '=', contentId).execute()).map((r) => r.user_id).sort();
       expect(await news()).toEqual([[first, 2], [second, 1]]);
@@ -671,7 +689,7 @@ for (const target of TARGETS) {
       expect((await ctx.app.inject({ method: 'GET', url: `/content/${contentId}/raw` })).statusCode).toBe(404);
       expect(ids(await feed('tags=news'), 'news')).toEqual([contentId]);
       expect((await ctx.compactor.runOnce()).deleted).toEqual([contentId]);
-      expect((await feed('tags=news')).tags).toEqual({});
+      expect((await feed('tags=news')).records).toEqual([]);
     });
 
     it('refuses an update when its content is set for deletion while the update is under way, and writes nothing of it', async () => {
@@ -696,12 +714,12 @@ for (const target of TARGETS) {
       expect(await ctx.content.getMeta(contentId)).toMatchObject({ text: 'v1 #news' });
       // The next run deletes the post.
       expect((await ctx.compactor.runOnce()).deleted).toEqual([contentId]);
-      expect((await feed('tags=news')).tags).toEqual({});
+      expect((await feed('tags=news')).records).toEqual([]);
       expect(await ctx.db.selectFrom('content').selectAll().execute()).toEqual([]);
       expect(await ctx.content.getMeta(contentId)).toBeNull();
     });
 
-    it('returns the most liked posts of the window first, an equal share per tag, and none from before it', async () => {
+    it('returns the most liked posts of the window first, as one list whatever their hashtag, and none from before it', async () => {
       const alice = await ctx.register('alice');
       const bob = await ctx.register('bob');
       const carol = await ctx.register('carol');
@@ -717,24 +735,23 @@ for (const target of TARGETS) {
       const threeWeeks = await post('three weeks ago #sports', 21 * DAY);
       await post('unrelated #food', HOUR);
       ctx.clock.now = t0;
-      for (const [fan, contentId] of [[bob, popular], [bob, yesterday], [carol, yesterday]] as const) {
+      // The post under #sports is the most liked of all: 3 likes, then 2 and 1 under #news, and the others none.
+      for (const [fan, contentId] of [[bob, popular], [bob, yesterday], [carol, yesterday], [alice, cricket], [bob, cricket], [carol, cricket]] as const) {
         await ctx.app.inject({ method: 'POST', url: '/like', payload: { ...fan, contentId } });
       }
       await ctx.compact();
-      // Fresh slots, which put an unliked post among the liked ones, have their own tests.
-      ctx.config.feed.freshEvery = 0;
 
       const result = await feed('tags=news,sports&hours=48');
       // The window ends at the request: the compactor's run moved the clock on a little.
       expect(result.window).toEqual({ from: new Date(ctx.clock.now - 2 * DAY).toISOString(), to: new Date(ctx.clock.now).toISOString() });
       expect(result.truncated).toBe(false);
       expect(result.nextCursor).toBeNull();
-      expect(Object.keys(result.tags)).toEqual(['news', 'sports']);
-      // By likes over the whole window: yesterday's post has the most. The post of three weeks ago is outside it.
-      expect(ids(result, 'news')).toEqual([yesterday, popular, quiet]);
-      expect(ids(result, 'sports')).toEqual([cricket]);
+      // One list, by likes over the whole window and over both hashtags: neither has a share of the page, and a post
+      // with fewer likes never comes before one with more. The post of three weeks ago is outside the window.
+      expect(listed(result)).toEqual([[cricket, 'sports'], [yesterday, 'news'], [popular, 'news'], [quiet, 'news']]);
+      expect(result.records.map((i) => i.likes)).toEqual([3, 2, 1, 0]);
       expect(result.count).toBe(4);
-      expect(result.tags.news![1]).toEqual({
+      expect(result.records[2]).toEqual({
         contentId: popular,
         publisher: { userId: alice.userId, username: 'alice' },
         mimeType: 'text/plain',
@@ -743,24 +760,31 @@ for (const target of TARGETS) {
         preview: { kind: 'text', text: 'popular mumbai #news #mumbai' },
         tags: ['news', 'mumbai'],
         likes: 1,
+        // Nobody read it with an account's credentials, and the server has dislikes off.
+        views: 0,
+        dislikes: null,
         moderated: false,
         createdAt: new Date(t0 - 2 * HOUR).toISOString(),
         updatedAt: new Date(t0 - 2 * HOUR).toISOString(),
+        // The hashtag of the feed's that it is listed under: it has another, which the feed wasn't asked for.
+        listedUnder: 'news',
       });
 
-      // The window alone decides which posts a feed is of.
+      // The window alone decides which posts a feed is of. Among those nobody likes, the newest come first.
       const day = await feed('tags=news,sports');
-      expect([ids(day, 'news'), ids(day, 'sports')]).toEqual([[popular, quiet], [cricket]]);
+      expect(listed(day)).toEqual([[cricket, 'sports'], [popular, 'news'], [quiet, 'news']]);
       const month = await feed('tags=news,sports&hours=720');
-      expect([ids(month, 'news'), ids(month, 'sports')]).toEqual([[yesterday, popular, quiet], [cricket, threeWeeks]]);
-      expect(await feed('tags=news,sports&hours=1')).toMatchObject({ count: 0, truncated: false, nextCursor: null, tags: {} });
+      expect(listed(month)).toEqual([[cricket, 'sports'], [yesterday, 'news'], [popular, 'news'], [quiet, 'news'], [threeWeeks, 'sports']]);
+      expect(await feed('tags=news,sports&hours=1')).toMatchObject({ count: 0, truncated: false, nextCursor: null, records: [] });
+      // The order the hashtags are asked for in changes nothing.
+      expect(listed(await feed('tags=sports,news&hours=48'))).toEqual(listed(result));
 
-      // The hashtags take turns at a page, each with its most liked post first.
+      // A page is the most liked of the hashtags together, and the next carries on from there.
       const limited = await feed('tags=news,sports&hours=48&limit=2');
-      expect([ids(limited, 'news'), ids(limited, 'sports')]).toEqual([[yesterday], [cricket]]);
+      expect(listed(limited)).toEqual([[cricket, 'sports'], [yesterday, 'news']]);
       expect(limited).toMatchObject({ count: 2, truncated: true });
       const rest = await feed(`tags=news,sports&hours=48&limit=2&cursor=${limited.nextCursor}`);
-      expect([ids(rest, 'news'), ids(rest, 'sports')]).toEqual([[popular, quiet], []]);
+      expect(listed(rest)).toEqual([[popular, 'news'], [quiet, 'news']]);
       expect(rest).toMatchObject({ count: 2, truncated: false, nextCursor: null });
       for (const limit of [0, 101]) {
         expect((await ctx.app.inject({ method: 'GET', url: `/feed?tags=news&limit=${limit}` })).statusCode).toBe(400);
@@ -790,19 +814,13 @@ for (const target of TARGETS) {
       }
       await ctx.compact();
       const order = (f: Feed) => ids(f, 'news');
-      /** The records as a client shows them: under whichever hashtag, newest first. */
-      const shown = (f: Feed) =>
-        Object.values(f.tags)
-          .flat()
-          .sort((x, y) => (x.createdAt < y.createdAt ? 1 : -1))
-          .map((i) => i.contentId);
+      /** The records as the page has them, which is as a client shows them: under whichever hashtag. */
+      const shown = (f: Feed) => f.records.map((i) => i.contentId);
       const [p0, p1, p2, p3, p4, p5, p6, p7] = posts;
 
-      // Popular, which is what a feed is unless it says: by likes, with an unliked post in the fresh slot.
+      // Popular, which is what a feed is unless it says: by likes and nothing else, the unliked posts last, the newest of them first.
       for (const query of ['tags=news', 'tags=news&algorithm=popular']) {
-        const popular = order(await feed(query));
-        expect(popular).toHaveLength(7);
-        expect(popular.filter((id) => id !== p5 && id !== p7)).toEqual([p0, p1, p2, p3, p4]);
+        expect(order(await feed(query))).toEqual([p0, p1, p2, p3, p4, p7, p5]);
       }
       expect(order(await feed('tags=news&algorithm=chronological'))).toEqual([p7, p5, p4, p3, p2, p1, p0]);
 
@@ -849,7 +867,7 @@ for (const target of TARGETS) {
       // Each window's posts and no others: a page the window can't fill is left short.
       const within = async (hours: number) => {
         const f = await feed(`tags=news&hours=${hours}`);
-        expect([f.count, f.truncated], `hours=${hours}`).toEqual([f.tags.news!.length, false]);
+        expect([f.count, f.truncated], `hours=${hours}`).toEqual([f.records.length, false]);
         return ids(f, 'news');
       };
       const expected: [hours: number, posts: number][] = [
@@ -883,7 +901,7 @@ for (const target of TARGETS) {
       expect((await getContent(human.contentId)).aiGenerated).toBe(false);
       expect(await ctx.content.getMeta(ai.contentId)).toMatchObject({ aiGenerated: true });
 
-      const news = async (filter = '') => (await feed(`tags=news${filter}`)).tags.news ?? [];
+      const news = async (filter = '') => (await feed(`tags=news${filter}`)).records;
       const newsIds = async (filter = '') => (await news(filter)).map((i) => i.contentId);
       await ctx.compact();
       expect((await news()).map((i) => [i.contentId, i.aiGenerated])).toEqual([
@@ -928,6 +946,152 @@ for (const target of TARGETS) {
       expect(ids(await feed(`tags=news&aiGenerated=true&cursor=${first.nextCursor}`), 'news')).toEqual([human.contentId]);
     });
 
+    it("returns an engaged feed: its hashtag's most liked posts, led by the newest posts that match what its reader liked and viewed, with the others that match among the rest", async () => {
+      const alice = await ctx.register('alice');
+      const bob = await ctx.register('bob');
+      const fans: User[] = [];
+      for (let i = 0; i < 5; i++) fans.push(await ctx.register(`fan${i}`));
+      const post = async (user: User, text: string) => {
+        ctx.clock.now += 1000;
+        return (await storeText(user, text)).json().contentId as string;
+      };
+      // Six of alice's posts under #news, the older the more liked: p[i] gets 5 - i likes.
+      const p: string[] = [];
+      for (let i = 0; i < 6; i++) p.push(await post(alice, `post ${i} #news`));
+      for (const [i, contentId] of p.entries()) {
+        for (const fan of fans.slice(0, 5 - i)) await like(fan, contentId);
+      }
+      // Then four nobody has liked: two that are also under #cats, and two of bob's. And one of bob's that isn't under #news.
+      const c0 = await post(alice, 'a cat #news #cats');
+      const b0 = await post(bob, 'from bob #news');
+      const c1 = await post(alice, 'another cat #news #cats');
+      const b1 = await post(bob, 'from bob again #news');
+      await post(bob, 'from bob, elsewhere #sports');
+      await ctx.compact();
+      const [p0, p1, p2, p3, p4, p5] = p;
+      const news = (f: Feed) => ids(f, 'news');
+      const told = (engagement: unknown) => `&engagement=${encodeURIComponent(typeof engagement === 'string' ? engagement : JSON.stringify(engagement))}`;
+      const liked = [p0, p1, p2, p3, p4];
+      const unliked = [b1, c1, b0, c0, p5];
+      const nothings = ['', told({}), told({ likedByTag: {}, viewedByUser: { [bob.userId]: 0 } })];
+
+      // A popular feed is in the order of its likes, and has no fresh slot, whatever the server's settings for them.
+      const popular = await feed('tags=news');
+      expect(news(popular)).toEqual([...liked, ...unliked]);
+      // Told nothing of its reader, an engaged feed of one hashtag is the popular one with fresh slots: its 2nd post is one nobody has liked, and so is its 6th.
+      for (const nothing of nothings) {
+        const untold = news(await feed(`tags=news&algorithm=engaged${nothing}`));
+        expect([unliked.includes(untold[1]!), unliked.includes(untold[5]!)], nothing).toEqual([true, true]);
+        expect(untold.filter((contentId) => liked.includes(contentId)), nothing).toEqual(liked);
+        expect([...untold].sort(), nothing).toEqual([...news(popular)].sort());
+      }
+      // With the fresh slots off, which a session's seed orders, it is the popular feed, post for post. So is everything below.
+      ctx.config.feed.freshEvery = 0;
+      for (const nothing of nothings) expect(news(await feed(`tags=news&algorithm=engaged${nothing}`)), nothing).toEqual(news(popular));
+
+      // The reader views bob's posts, and those under #dogs, which has none, more than those under #cats.
+      const engagement = told({ viewedByUser: { [bob.userId]: 10 }, viewedByTag: { '#Cats': 4, dogs: 30 }, likedByTag: { cats: 2 } });
+      const engaged = await feed(`tags=news&algorithm=engaged${engagement}`);
+      // Its two newest posts that match first, whatever their likes. Then every third is one that matches: bob's before the one under #cats.
+      expect(news(engaged)).toEqual([b1, c1, p0, p1, b0, p2, p3, c0, p4, p5]);
+      expect(Object.keys(engaged)).toEqual(Object.keys(popular));
+      expect(engaged).toMatchObject({ count: 10, truncated: false, nextCursor: null, window: popular.window });
+      // No other algorithm reads it.
+      expect(news(await feed(`tags=news${engagement}`))).toEqual(news(popular));
+
+      // Page by page: the cursor carries the engagement, so later pages needn't send it, and what one sends changes nothing.
+      const first = await feed(`tags=news&algorithm=engaged&limit=4${engagement}`);
+      expect(news(first)).toEqual([b1, c1, p0, p1]);
+      const second = await feed(`tags=news&algorithm=engaged&limit=4&cursor=${first.nextCursor}`);
+      expect(news(second)).toEqual([p2, p3, b0, p4]);
+      const other = told({ viewedByTag: { cats: 500 } });
+      expect(news(await feed(`tags=news&algorithm=engaged&limit=4${other}&cursor=${first.nextCursor}`))).toEqual(news(second));
+      const third = await feed(`tags=news&algorithm=engaged&limit=4&cursor=${second.nextCursor}`);
+      expect(news(third)).toEqual([c0, p5]);
+      expect(third.nextCursor).toBeNull();
+      // Its cursor is an engaged feed's alone.
+      const mismatch = await ctx.app.inject({ method: 'GET', url: `/feed?tags=news&limit=4&cursor=${first.nextCursor}` });
+      expect(mismatch.statusCode).toBe(400);
+
+      // As RSS it is one list, in the order it was picked, and the next page's address has the cursor and no engagement.
+      const rss = await ctx.app.inject({ method: 'GET', url: `/feed?tags=news&algorithm=engaged&limit=4&format=rss${engagement}` });
+      expect(rss.statusCode, rss.body).toBe(200);
+      expect([...rss.body.matchAll(/<guid isPermaLink="false">([^<]*)<\/guid>/g)].map((m) => m[1])).toEqual([b1, c1, p0, p1]);
+      const next = /<atom:link rel="next" type="application\/rss\+xml" href="([^"]*)"\/>/.exec(rss.body)?.[1]?.replace(/&amp;/g, '&');
+      expect(next).toMatch(/^\/feed\?tags=news&algorithm=engaged&limit=4&format=rss&cursor=[\w-]+$/);
+      const nextPage = await ctx.app.inject({ method: 'GET', url: next! });
+      expect([...nextPage.body.matchAll(/<guid isPermaLink="false">([^<]*)<\/guid>/g)].map((m) => m[1])).toEqual([p2, p3, b0, p4]);
+
+      // What isn't an engagement is refused, before anything is read for it.
+      for (const bad of ['likes', '[]', { likedByTag: { 'news/india': 1 } }, { viewedByUser: { bob: 1 } }, { likedByTag: { news: -1 } }]) {
+        const res = await ctx.app.inject({ method: 'GET', url: `/feed?tags=news&algorithm=engaged${told(bad)}` });
+        expect([res.statusCode, res.json().error], JSON.stringify(bad)).toEqual([
+          400,
+          'engagement must be a JSON object of likedByTag, likedByUser, viewedByTag and viewedByUser: each a count of posts by hashtag, or by user id',
+        ]);
+      }
+    });
+
+    it('returns a feed as RSS where it is asked to: the same records as one list, with where the page after it is read', async () => {
+      const alice = await ctx.register('alice');
+      const posts: string[] = [];
+      for (const text of ['**first** #news', 'second #sports', 'third & <last> #news #sports']) {
+        ctx.clock.now += 1000;
+        posts.push((await storeText(alice, text)).json().contentId);
+      }
+      await ctx.compact();
+      ctx.config.publicBaseUrl = 'https://api.example';
+      const [first, second, third] = posts;
+      const guids = (xml: string) => [...xml.matchAll(/<guid isPermaLink="false">([^<]*)<\/guid>/g)].map((m) => m[1]);
+      const get = (url: string, headers: Record<string, string> = {}) => ctx.app.inject({ method: 'GET', url, headers });
+
+      const query = 'tags=news,sports&algorithm=chronological&limit=2';
+      const json = await feed(query);
+      expect([ids(json, 'news'), ids(json, 'sports')]).toEqual([[third], [second]]);
+      // Asked for as JSON, or not asked for as anything, it is what it was.
+      expect((await feed(`${query}&format=json`)).records).toEqual(json.records);
+
+      const page = await get(`/feed?${query}&format=rss`);
+      expect(page.statusCode, page.body).toBe(200);
+      expect(page.headers['content-type']).toBe('application/rss+xml; charset=utf-8');
+      expect(page.body.startsWith('<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0"')).toBe(true);
+      expect(page.body).toContain('<title>#news, #sports</title>');
+      expect(page.body).toContain('<description>Posts under #news, #sports</description>');
+      expect(page.body).toContain('<link>https://api.example/feed?tags=news%2Csports&amp;algorithm=chronological&amp;limit=2&amp;format=rss</link>');
+      // The newest of both hashtags, as one list.
+      expect(guids(page.body)).toEqual([third, second]);
+      expect(page.body).toContain(`<link>https://api.example/content/${third}</link>`);
+      expect(page.body).toContain('<title>third &amp; &lt;last&gt; #news #sports</title>');
+      expect(page.body).toContain('<category>news</category><category>sports</category>');
+      expect(page.body).toContain('<dc:creator>alice</dc:creator>');
+
+      // The page after it is read where the document says, and is the last.
+      const next = /<atom:link rel="next" type="application\/rss\+xml" href="([^"]*)"\/>/.exec(page.body)?.[1]?.replace(/&amp;/g, '&');
+      expect(next?.startsWith('https://api.example/feed?')).toBe(true);
+      const rest = await get(next!.slice('https://api.example'.length));
+      expect(rest.statusCode, rest.body).toBe(200);
+      expect(guids(rest.body)).toEqual([first]);
+      expect(rest.body).toContain('&lt;p&gt;&lt;strong&gt;first&lt;/strong&gt; #news&lt;/p&gt;');
+      expect(rest.body).not.toContain('rel="next"');
+      // The same cursor reads the same page as JSON.
+      const cursor = new URLSearchParams(next!.slice(next!.indexOf('?'))).get('cursor');
+      expect(ids(await feed(`${query}&cursor=${cursor}`), 'news')).toEqual([first]);
+
+      // It goes out compressed, as the JSON does.
+      const compressed = await get(`/feed?${query}&format=rss`, { 'accept-encoding': 'gzip' });
+      expect(compressed.headers['content-encoding']).toBe('gzip');
+      // All but the cursor, which holds a seed of its session's own.
+      const cursorless = (xml: string) => xml.replace(/cursor=[\w-]+/, 'cursor=');
+      expect(cursorless(gunzipSync(compressed.rawPayload).toString('utf8'))).toBe(cursorless(page.body));
+
+      // A feed with no post is a channel with no item, and what a feed isn't written as is refused.
+      const empty = await get('/feed?tags=empty&format=rss');
+      expect([empty.statusCode, guids(empty.body)]).toEqual([200, []]);
+      for (const format of ['atom', 'xml', '']) expect((await get(`/feed?tags=news&format=${format}`)).statusCode, format).toBe(400);
+      // An error is the JSON it always is.
+      expect((await get('/feed?tags=news/india&format=rss')).json()).toMatchObject({ error: 'tags must be one or more hashtags (letters, digits, _)' });
+    });
+
     it('serves hashtag feeds without touching the database', async () => {
       const alice = await ctx.register('alice');
       const a = (await storeText(alice, 'compacted #news')).json().contentId;
@@ -943,6 +1107,13 @@ for (const target of TARGETS) {
         const res = await app.inject({ method: 'GET', url: '/feed?tags=news' });
         expect(res.statusCode, res.body).toBe(200);
         expect(ids(res.json(), 'news')).toEqual([b, a]);
+        // An engaged feed reads its reader's users from their own indexes, which are in Redis too, and RSS is the same page written another way.
+        const engagement = encodeURIComponent(JSON.stringify({ viewedByUser: { [alice.userId]: 3 }, likedByTag: { news: 1 } }));
+        const engaged = await app.inject({ method: 'GET', url: `/feed?tags=news&algorithm=engaged&engagement=${engagement}` });
+        expect(engaged.statusCode, engaged.body).toBe(200);
+        expect(ids(engaged.json(), 'news')).toEqual([b, a]);
+        const rss = await app.inject({ method: 'GET', url: '/feed?tags=news&format=rss' });
+        expect([rss.statusCode, rss.headers['content-type']]).toEqual([200, 'application/rss+xml; charset=utf-8']);
         // The following feed isn't among them: it asks the database who may read it.
         expect((await app.inject({ method: 'GET', url: `/feed/following?userId=${alice.userId}`, headers: as(alice) })).statusCode).toBe(404);
       } finally {

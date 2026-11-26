@@ -1,6 +1,6 @@
 import { sql, type SelectQueryBuilder } from 'kysely';
 import { toCommentRecord } from './comments.js';
-import { imagesOf, ORIGIN_GONE, PENDING_REVIEW, takesComments } from './content.js';
+import { imagesOf, ORIGIN_GONE, PENDING_REVIEW, rowCounts, takesComments } from './content.js';
 import type { AppDeps } from './deps.types.js';
 import type { ExportPage, ExportPageQuery, ExportPosition, ExportRead, ExportRecord } from './export.types.js';
 import { busy } from './http/errors.js';
@@ -145,6 +145,7 @@ const commentAfter = (after: ExportPosition | null) => (after ? String(after[0])
  *   posts           their posts, oldest first, as GET /content/:contentId gives each to its publisher
  *   comments        their comments, oldest first, with the ones that wait in the moderation queue
  *   likes           the posts they liked
+ *   dislikes        the posts they disliked
  *   commentLikes    the comments they liked
  *   reposts         the posts they reposted, with the hashtags each repost gave
  *   following       whom they follow
@@ -203,7 +204,7 @@ function sectionsOf({ db, content, comments, config }: ExportDeps): Section[] {
             userId: r.id,
             username: r.username,
             createdAt: iso(r.created_at),
-            // When they registered, or last changed their username.
+            // When they registered; or, on an account renamed while a user could change their name, when it last was.
             usernameSetAt: iso(r.updated_at),
             // Their profile, whether or not they are banned and nobody else is shown it: their bio as they wrote it, their links, and where their avatar is read, which is a file, and so not in the export.
             ...profileOf(r, config.publicBaseUrl),
@@ -245,7 +246,7 @@ function sectionsOf({ db, content, comments, config }: ExportDeps): Section[] {
           db
             .selectFrom('content')
             .leftJoin('moderation_queue', 'moderation_queue.content_id', 'content.id')
-            .select(['content.id', 'content.ai_generated', 'content.like_count', 'content.created_at', 'content.origin_gone_at', 'moderation_queue.content_id as queued_id'])
+            .select(['content.id', 'content.ai_generated', 'content.like_count', 'content.view_count', 'content.dislike_count', 'content.created_at', 'content.origin_gone_at', 'moderation_queue.content_id as queued_id'])
             .where('content.user_id', '=', userId)
             .where('content.delete_requested_at', 'is', null),
           ['content.created_at', 'content.id'],
@@ -274,7 +275,7 @@ function sectionsOf({ db, content, comments, config }: ExportDeps): Section[] {
                 ...(!meta.origin && { size: meta.size }),
                 ...(imagesOf(meta) && { images: imagesOf(meta) }),
               }),
-              likes: r.like_count,
+              ...rowCounts(r, config.dislikes),
               aiGenerated: r.ai_generated === 1,
               contentUrl: `/content/${r.id}/raw`,
               createdAt: iso(r.created_at),
@@ -314,6 +315,15 @@ function sectionsOf({ db, content, comments, config }: ExportDeps): Section[] {
       async read(userId, after, limit) {
         const rows = await walk(db.selectFrom('likes').select(['content_id', 'created_at']).where('user_id', '=', userId), ['content_id'], after, limit);
         return rows.map((r) => ({ at: [r.content_id], record: { type: 'like', contentId: r.content_id, likedAt: iso(r.created_at) } }));
+      },
+    },
+    {
+      name: 'dislikes',
+      keys: ['string'],
+      // By the primary key, (user_id, content_id). Theirs whether the server has dislikes on now or not: the rows are kept either way.
+      async read(userId, after, limit) {
+        const rows = await walk(db.selectFrom('dislikes').select(['content_id', 'created_at']).where('user_id', '=', userId), ['content_id'], after, limit);
+        return rows.map((r) => ({ at: [r.content_id], record: { type: 'dislike', contentId: r.content_id, dislikedAt: iso(r.created_at) } }));
       },
     },
     {

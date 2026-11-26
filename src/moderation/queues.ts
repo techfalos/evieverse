@@ -1,7 +1,7 @@
 import { sql } from 'kysely';
 import { toCommentRecords } from '../comments.js';
 import type { CommentRecord } from '../comments.types.js';
-import { publisherOf, summaryOf } from '../content.js';
+import { publisherOf, rowCounts, summaryOf } from '../content.js';
 import type { AppDeps } from '../deps.types.js';
 import { effectiveMeta, pendingComment } from '../pending.js';
 import { toFeedRecord } from '../tagfeed/layout.js';
@@ -40,7 +40,7 @@ export async function queueItems(
       ? db
           .selectFrom('content')
           .innerJoin('users', 'users.id', 'content.user_id')
-          .select(['content.id', 'content.user_id', 'users.username', 'content.ai_generated', 'content.like_count', 'content.created_at'])
+          .select(['content.id', 'content.user_id', 'users.username', 'content.ai_generated', 'content.like_count', 'content.view_count', 'content.dislike_count', 'content.created_at'])
           .where('content.id', 'in', postIds)
           .execute()
       : [],
@@ -67,7 +67,7 @@ export async function queueItems(
     if (!post || !meta) return null;
     return {
       kind: 'post' as const,
-      ...toFeedRecord(summaryOf(post, meta, config.publicBaseUrl), post.like_count, publisherOf(post)),
+      ...toFeedRecord(summaryOf(post, meta, config.publicBaseUrl), rowCounts(post, config.dislikes), publisherOf(post)),
       ...(meta.text !== undefined && { text: meta.text }),
       // All of them, as the whole text is read with them: the record's own are those of its preview.
       ...(meta.mentions?.length && { mentions: meta.mentions }),

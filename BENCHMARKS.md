@@ -6,9 +6,9 @@
 
 ## What was measured
 
-- **When:** 2026-11-16 21:03 UTC. 151,311 requests were counted.
-- **Code:** Evieverse 0.1.0, commit `6616a8e` with uncommitted changes to the server.
-- **Server:** one process, in a container that may use 2 CPUs and 2 GB of memory, with no swap (Linux 6.10.14-linuxkit, Node v22.23.5). The most it used over a load was 1.96 CPUs, and the most memory it held at any time was 423 MB. It runs from source, as `npm run dev` runs it, with every setting at its [default](docs/CONFIG.md): SQLite in a file, content and summaries in a directory, the feed index in the process's memory, and the compactor running in the same process. Its files are on a Docker volume, which took 1.14 ms to flush a small file. It logs every request, as a server does, to nowhere. Four settings differ, without which there would be no load to measure: users post and comment as often as they like (`POST_RATE_LIMIT_PER_MINUTE=0`, `COMMENTS_PER_MINUTE=0`), and are never asked to solve a challenge for a post or a comment (`CHALLENGE_POST_WINDOW_SECONDS=0`, `CHALLENGE_COMMENTS_PER_MINUTE=0`).
+- **When:** 2026-11-26 05:40 UTC. 137,127 requests were counted.
+- **Code:** Evieverse 0.1.0, commit `9bfb9e8`.
+- **Server:** the server and its compactor, in one container that may use 2 CPUs and 2 GB of memory, with no swap (Linux 6.10.14-linuxkit, Node v22.23.5). The most the two used over a load was 1.96 CPUs, and the most memory they held was 432 MB. The server runs from source, as `npm run dev` runs it, and the compactor as its own program beside it (`npm run compact`), with every setting at its [default](docs/CONFIG.md): SQLite in a file, content and summaries in a directory, and the feed index in a Valkey server, which has a container of its own whose CPUs and memory are not counted here. Its files are on a Docker volume, which took 2.10 ms to flush a small file. It logs every request, as a server does, to nowhere. Four settings differ, without which there would be no load to measure: users post and comment as often as they like (`POST_RATE_LIMIT_PER_MINUTE=0`, `COMMENTS_PER_MINUTE=0`), and read feeds as often as they ask, however many at once, as the load comes from one address (`FEED_RATE_LIMIT_PER_MINUTE=0`, `FEED_MAX_CONCURRENT=0`).
 - **Data:** 2,000 posts under 39 hashtags by 626 users, spread over the last 30 days with the newest days the fullest, with 8,679 likes and 500 comments. They are the [testbed](testbed)'s made-up posts, and the same on every run.
 - **Load:** 50 HTTP connections from a second container, over Docker's network, opened before a load starts and kept open, each sending its next request as soon as its last is answered, for 10 seconds a load, after 2 seconds of the same requests that aren't counted. Every request says it takes compressed responses (`Accept-Encoding: gzip, deflate, br`), as a browser's does. The connections belong to 4 threads, and their container has 4 CPUs of its own, so sending requests takes none of the server's.
 - **Machine:** Intel(R) Xeon(R) W-2140B CPU @ 3.20GHz, 16 cores, 32 GB of memory, Darwin 24.6.0 (x64). Its load average was 5.9 when the run started, so it had other work to do at the same time. Docker 27.4.0 (Docker Desktop) runs both containers, and has 16 of the machine's CPUs and 7.7 GB of its memory to run them with.
@@ -21,24 +21,24 @@ Times are from sending a request to the end of its response. *p50*, *p90* and *p
 
 | Request | What it is | Requests/s | Mean | p50 | p90 | p99 | Max | CPUs | Memory | Response |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `GET /health` | Reads nothing: what answering a request costs by itself. | 4,239 | 11.8 ms | 10.2 ms | 16.5 ms | 31.6 ms | 236 ms | 1.04 | 219 MB | 11 B |
-| `GET /feed?tags=news` | One hashtag's most liked posts of the past 24 hours, a page of up to 50. | 297 | 164 ms | 151 ms | 214 ms | 350 ms | 429 ms | 1.48 | 252 MB | 5.3 KB |
-| `GET /feed?tags=news,tech,sports&hours=168&algorithm=chronological` | Three hashtags' posts of the past week, newest first, a page of up to 50. | 317 | 157 ms | 151 ms | 191 ms | 223 ms | 238 ms | 1.46 | 253 MB | 6.5 KB |
-| `GET /feed?tags=<hashtag>&hours=720&limit=100` | A hashtag's most liked posts of the past 30 days, a page of up to 100, of each of the 39 hashtags in turn. | 233 | 214 ms | 203 ms | 245 ms | 467 ms | 540 ms | 1.41 | 256 MB | 6.1 KB |
-| `GET /feed/following?userId=<userId>` | The newest posts of the 26 users one user follows, a page of up to 50, read with that user's key. | 240 | 209 ms | 190 ms | 302 ms | 418 ms | 702 ms | 1.37 | 250 MB | 7.1 KB |
-| `GET /content/<contentId>` | A post, of each of the 2,000 in turn. | 918 | 54.4 ms | 52.4 ms | 61.2 ms | 83.2 ms | 173 ms | 1.16 | 249 MB | 570 B |
-| `GET /content/<contentId>/raw` | A picture's file, of each of the 163 pictures in turn. | 695 | 72.0 ms | 70.0 ms | 80.4 ms | 103 ms | 116 ms | 1.40 | 250 MB | 33.5 KB |
-| `GET /content/<contentId>/comments` | The 20 comments on a post, of each of the 25 posts that have comments in turn. | 508 | 98.5 ms | 93.6 ms | 114 ms | 191 ms | 270 ms | 1.29 | 256 MB | 1.7 KB |
-| `GET /tags` | The hashtags posts have used, most recently active first. | 1,795 | 27.8 ms | 26.1 ms | 32.6 ms | 56.6 ms | 128 ms | 1.00 | 256 MB | 561 B |
-| `GET /users/<userId>` | A user's profile, of each of those who post or read in turn. | 2,496 | 20.0 ms | 18.6 ms | 22.9 ms | 39.1 ms | 79.8 ms | 1.00 | 256 MB | 160 B |
+| `GET /health` | Reads nothing: what answering a request costs by itself. | 4,583 | 10.9 ms | 8.87 ms | 17.1 ms | 35.8 ms | 228 ms | 1.05 | 211 MB | 11 B |
+| `GET /feed?tags=news` | One hashtag's most liked posts of the past 24 hours, a page of up to 50. | 266 | 188 ms | 170 ms | 224 ms | 870 ms | 876 ms | 1.64 | 242 MB | 5.3 KB |
+| `GET /feed?tags=news,tech,sports&hours=168&algorithm=chronological` | Three hashtags' posts of the past week, newest first, a page of up to 50. | 292 | 170 ms | 168 ms | 201 ms | 292 ms | 329 ms | 1.63 | 256 MB | 6.5 KB |
+| `GET /feed?tags=<hashtag>&hours=720&limit=100` | A hashtag's most liked posts of the past 30 days, a page of up to 100, of each of the 39 hashtags in turn. | 262 | 191 ms | 190 ms | 242 ms | 288 ms | 334 ms | 1.50 | 261 MB | 6.1 KB |
+| `GET /feed/following?userId=<userId>` | The newest posts of the 26 users one user follows, a page of up to 50, read with that user's key. | 294 | 169 ms | 166 ms | 199 ms | 236 ms | 291 ms | 1.62 | 262 MB | 7.1 KB |
+| `GET /content/<contentId>` | A post, of each of the 2,000 in turn. | 739 | 67.6 ms | 65.3 ms | 78.7 ms | 97.8 ms | 107 ms | 1.15 | 262 MB | 579 B |
+| `GET /content/<contentId>/raw` | A picture's file, of each of the 163 pictures in turn. | 670 | 74.4 ms | 72.4 ms | 87.2 ms | 106 ms | 123 ms | 1.40 | 262 MB | 33.5 KB |
+| `GET /content/<contentId>/comments` | The 20 comments on a post, of each of the 25 posts that have comments in turn. | 504 | 99.2 ms | 96.7 ms | 116 ms | 144 ms | 149 ms | 1.50 | 271 MB | 1.7 KB |
+| `GET /tags` | The hashtags posts have used, most recently active first. | 1,870 | 26.7 ms | 25.6 ms | 30.3 ms | 50.9 ms | 87.7 ms | 1.02 | 270 MB | 559 B |
+| `GET /users/<userId>` | A user's profile, of each of those who post or read in turn. | 1,706 | 29.3 ms | 28.4 ms | 32.7 ms | 57.5 ms | 106 ms | 1.01 | 271 MB | 236 B |
 
 ### Writes
 
 | Request | What it is | Requests/s | Mean | p50 | p90 | p99 | Max | CPUs | Memory | Response |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `POST /store` | A new post: a text of 90 to 200 words mostly, sometimes a link or a picture, under two or three hashtags. | 274 | 182 ms | 153 ms | 371 ms | 506 ms | 591 ms | 1.43 | 257 MB | 541 B |
-| `POST /like` | A user's first like of a post. | 943 | 53.0 ms | 48.6 ms | 63.5 ms | 107 ms | 180 ms | 1.04 | 257 MB | 85 B |
-| `POST /content/<contentId>/comments` | A new comment of a few sentences on a post, on one of 200 posts. | 518 | 96.4 ms | 93.9 ms | 109 ms | 125 ms | 149 ms | 1.37 | 257 MB | 420 B |
+| `POST /store` | A new post: a text of 90 to 200 words mostly, sometimes a link or a picture, under two or three hashtags. | 197 | 254 ms | 233 ms | 351 ms | 666 ms | 731 ms | 1.83 | 277 MB | 541 B |
+| `POST /like` | A user's first like of a post. | 497 | 101 ms | 100 ms | 133 ms | 198 ms | 283 ms | 1.33 | 278 MB | 85 B |
+| `POST /content/<contentId>/comments` | A new comment of a few sentences on a post, on one of 200 posts. | 340 | 147 ms | 139 ms | 188 ms | 292 ms | 321 ms | 1.90 | 298 MB | 440 B |
 
 ### A mix of requests
 
@@ -46,7 +46,7 @@ What is sent, by share of the requests: 60% feeds (of each hashtag in turn: its 
 
 | Requests/s | Mean | p50 | p90 | p99 | Max | CPUs | Memory |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 393 | 127 ms | 123 ms | 179 ms | 257 ms | 642 ms | 1.55 | 269 MB |
+| 280 | 178 ms | 170 ms | 297 ms | 383 ms | 669 ms | 1.96 | 288 MB |
 
 ### More connections
 
@@ -54,18 +54,18 @@ The same mix, with fewer and with more connections sending it. The row of 50 con
 
 | Connections | Requests/s | Mean | p50 | p90 | p99 | Max | CPUs | Memory |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 191 | 5.23 ms | 4.95 ms | 8.34 ms | 23.1 ms | 64.1 ms | 1.96 | 267 MB |
-| 10 | 300 | 33.4 ms | 32.7 ms | 47.5 ms | 81.8 ms | 163 ms | 1.70 | 278 MB |
-| 50 | 393 | 127 ms | 123 ms | 179 ms | 257 ms | 642 ms | 1.55 | 269 MB |
-| 100 | 372 | 267 ms | 262 ms | 368 ms | 593 ms | 1.32 s | 1.43 | 297 MB |
-| 500 | 404 | 1.18 s | 1.18 s | 1.62 s | 1.96 s | 6.21 s | 1.45 | 334 MB |
+| 1 | 220 | 4.53 ms | 4.07 ms | 6.92 ms | 15.4 ms | 59.9 ms | 1.89 | 289 MB |
+| 10 | 269 | 37.1 ms | 34.0 ms | 61.6 ms | 110 ms | 355 ms | 1.96 | 291 MB |
+| 50 | 280 | 178 ms | 170 ms | 297 ms | 383 ms | 669 ms | 1.96 | 288 MB |
+| 100 | 348 | 285 ms | 263 ms | 481 ms | 634 ms | 1.08 s | 1.68 | 299 MB |
+| 500 | 376 | 1.28 s | 1.22 s | 2.07 s | 2.61 s | 4.75 s | 1.52 | 366 MB |
 
 ## Reading the numbers
 
 - **They are those of a server with 2 CPUs and 2 GB of memory, on one machine.** The limits say what the server had, and keep the rest of the machine out of its reach. They don't make this machine's CPUs or its disk another's: compare a run with another on the same machine, not with this file.
-- **They are a single process's,** on SQLite and a local disk. A server answers requests on one thread, and uses others to read and write files and to compress: the *CPUs* column is how much of its CPUs it had a use for. A deployment with several nodes, Postgres or MySQL, Redis and an object store ([DEPLOY.md](docs/DEPLOY.md)) has other limits, which this doesn't measure.
+- **They are one server's, with its compactor beside it,** on SQLite and a local disk. A server answers requests on one thread, and uses others to read and write files and to compress, and its compactor is a process of its own: the *CPUs* column is how much of their CPUs the two had a use for. A deployment with several nodes, Postgres or MySQL, Redis and an object store ([IAC.md](docs/IAC.md)) has other limits, which this doesn't measure.
 - **The network is Docker's.** The requests come from a container on the same machine as the server's, so there is no distance in the times.
 - **Requests a second are the most the server answered,** not a rate it was sent: a connection waits for its answer before it sends again. So more connections get more out of the server only until it is busy, and past that each request waits longer. [More connections](#more-connections) shows where that is for the mix.
 - **The connections were already open.** Each load's connections are opened first, while the server has nothing else to do, so the times above have no connecting in them. A server that is busy takes new connections slowly, so clients that keep their connections open get these numbers, and ones that connect for every request to a busy server don't.
 - **A write is a commit to the database.** A post, a like or a comment is answered once the database has it, and nothing of it is written to the content store by then. A picture is the exception: its file is written there first, to wait for the compactor, and flushed to the disk, which took the time under [What was measured](#what-was-measured). A write whose *CPUs* are close to 2 had every CPU the server may use busy: it was those it waited for.
-- **The compactor writes them out, and its work is in every load.** It runs every few seconds, in the server's process. It writes each new post's files (its bytes, its summary and its meta file) and each new comment's, each flushed to the disk, and then puts the posts and the likes in feeds, and the comments in their posts' lists. None of that is in a write's time, and all of it is in the server's CPUs. The loads run one straight after another, in the order of the tables, so a load of writes may leave the compactor work that it does during the load after it.
+- **The compactor writes them out, and its work is in every load.** It runs every few seconds, in a process of its own beside the server's, in the same container. It writes each new post's files (its bytes, its summary and its meta file) and each new comment's, each flushed to the disk, and then puts the posts and the likes in feeds, and the comments in their posts' lists. None of that is in a write's time, and all of it is in the server's CPUs. The loads run one straight after another, in the order of the tables, so a load of writes may leave the compactor work that it does during the load after it.

@@ -120,7 +120,7 @@ pub async fn reindex(deps: &Deps, progress: &dyn Fn(Reindexed)) -> Result<Reinde
             if row.opt_str("username_folded")? == Some(folded.as_str()) {
                 continue;
             }
-            // Only while the name is the one that was folded: a user who was renamed since has the new name's.
+            // Only while the name is the one that was folded. No request renames a user, so it is: this holds whatever else writes the row.
             usernames += db
                 .execute(
                     "UPDATE users SET username_folded = ? WHERE id = ? AND username = ?",

@@ -826,7 +826,7 @@ export const COMMANDS: Command[] = [
     request: ({ positionals: [tag, userId] }) => ({ method: 'DELETE', path: path`/tags/${tag!}/muted/${userId!}` }),
     text: (d) => (d.wasMuted ? `${d.userId} is no longer muted on #${d.tag}.` : `${d.userId} wasn't muted on #${d.tag}.`),
   }),
-  endpoint<{ nextCursor: string | null; tags: Record<string, PostRecord[]> }>({
+  endpoint<{ nextCursor: string | null; records: PostRecord[] }>({
     name: 'tag queue',
     positionals: ['tag'],
     options: PAGE_OPTIONS,
@@ -839,10 +839,8 @@ export const COMMANDS: Command[] = [
       method: 'GET',
       path: `/feed${pageQuery(args, new URLSearchParams({ tags: args.positionals[0]!, moderated: 'false', hours: '2160' }))}`,
     }),
-    text: (d, { positionals: [tag] }) => {
-      const posts = Object.values(d.tags).flat();
-      return (posts.length ? table(posts.map((p) => [p.contentId, p.publisher.username, p.createdAt, snippet(p)])) : `Nothing under #${tag!.replace(/^#/, '')} waits for a moderator.`) + more(d.nextCursor);
-    },
+    text: (d, { positionals: [tag] }) =>
+      (d.records.length ? table(d.records.map((p) => [p.contentId, p.publisher.username, p.createdAt, snippet(p)])) : `Nothing under #${tag!.replace(/^#/, '')} waits for a moderator.`) + more(d.nextCursor),
   }),
   endpoint<{ contentId: string; tag: string; alreadyApproved: boolean }>({
     name: 'tag approve',

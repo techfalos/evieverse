@@ -4,7 +4,7 @@
  */
 export interface EnsuredAdmin {
   userId: string;
-  /** The account's name now, which is `username` only if this created it: it may have been renamed since. */
+  /** The account's name, which is the one it was created with, whatever BOOTSTRAP_ADMIN names it since: a username can't be changed, and a deploy renames nobody. */
   username: string;
   created: boolean;
   /** Whether the key was added, or other keys of the account revoked. */

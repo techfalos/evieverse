@@ -122,6 +122,15 @@ npm run check    # the conventions of src that the compiler doesn't check: where
 
 Optionally add `--no-file-parallelism` to run the tests one at a time.
 
+The Rust code (the compactor, the trust plugins and the addon the API loads, all under `compactor/`) has tests of its own. They need Rust, which [rustup](https://rustup.rs) installs at the version `compactor/rust-toolchain.toml` pins, and a Redis or Valkey at `redis://127.0.0.1:6379`, which `docker compose up -d redis` starts:
+
+```bash
+cd compactor
+cargo test --locked --workspace --features compactor/harness,evieverse-node/test-plugin    # every Rust test, as CI runs them
+cargo test -p evieverse-trust                                                              # one crate's: evieverse-core, evieverse-trust, evieverse-node or compactor
+cargo test -p evieverse-trust blocked_words                                                # the tests whose names have a word in them
+```
+
 ## Benchmarks
 
 Running the benchmarks:

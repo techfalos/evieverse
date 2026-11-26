@@ -122,7 +122,7 @@ variable "force_destroy" {
 }
 
 variable "admin_username" {
-  description = "Username of the admin account the deployment creates. It names the account when it's created: to rename it afterwards, use PATCH /users/:userId."
+  description = "Username of the admin account the deployment creates. It names the account when it's created, for good: a username can't be changed, and changing this afterwards renames nothing."
   type        = string
   default     = "admin"
   validation {

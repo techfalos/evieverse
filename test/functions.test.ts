@@ -124,7 +124,7 @@ describe('functions', () => {
     const { contentId } = stored.json();
 
     // In the feed once the compactor has run: stored by one function, queued in the database, indexed by another.
-    const inFeed = async () => ((await d.call('feed', 'GET', '/feed?tags=news')).json().tags.news ?? []).map((r: { contentId: string }) => r.contentId);
+    const inFeed = async () => ((await d.call('feed', 'GET', '/feed?tags=news')).json().records as { contentId: string }[]).map((r) => r.contentId);
     expect(await inFeed()).toEqual([]);
     expect(await d.compact()).toEqual({ tags: [`@${alice.userId}`, 'news'], deleted: [], skipped: false });
     expect(await inFeed()).toEqual([contentId]);

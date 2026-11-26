@@ -4,7 +4,7 @@ import { sql } from 'kysely';
 import { z } from 'zod';
 import { authenticate } from '../auth/apiKey.js';
 import type { AuthUser } from '../auth/apiKey.types.js';
-import { creditOf, summaryOf, type Credit } from '../content.js';
+import { creditOf, rowCounts, summaryOf, type Credit } from '../content.js';
 import { lockUser } from '../db/index.js';
 import type { RouteDeps } from '../deps.types.js';
 import { badRequest, conflict, forbidden, HttpError, notFound } from '../http/errors.js';
@@ -238,13 +238,17 @@ export function profileRoutes(app: FastifyInstance, { db, config, content, summa
 
   /**
    * The feed records of `rows`, which are posts of `publisher`'s, in their order: each as a feed
-   * gives a post (see toFeedRecord), with all of its likes, and with `publisher` as its credit,
-   * which says where their avatar is read (see creditOf). Each is shown with its summary, as in
+   * gives a post (see toFeedRecord), with its counts as the database has them now (see
+   * rowCounts), all of its likes among them, and with `publisher` as its credit, which says
+   * where their avatar is read (see creditOf). Each is shown with its summary, as in
    * a feed. A post older than summaries are kept (`feed.tagRetentionDays`) has none, and is shown
    * with the one its meta file makes. One with neither is left out: the compactor hasn't written
    * it yet, or has deleted it since the rows were read.
    */
-  async function records(rows: { id: string; user_id: string; created_at: number; ai_generated: number; like_count: number }[], publisher: Credit): Promise<FeedRecord[]> {
+  async function records(
+    rows: { id: string; user_id: string; created_at: number; ai_generated: number; like_count: number; view_count: number; dislike_count: number }[],
+    publisher: Credit,
+  ): Promise<FeedRecord[]> {
     const shown: (Summary | null)[] = await summaries.getMany(rows.map((row) => ({ contentId: row.id, createdAt: Number(row.created_at) })));
     await mapLimit(
       [...rows.keys()].filter((i) => !shown[i]),
@@ -257,7 +261,7 @@ export function profileRoutes(app: FastifyInstance, { db, config, content, summa
     );
     return rows.flatMap((row, i) => {
       const summary = shown[i];
-      return summary ? [toFeedRecord(summary, row.like_count, publisher)] : [];
+      return summary ? [toFeedRecord(summary, rowCounts(row, config.dislikes), publisher)] : [];
     });
   }
 
@@ -299,7 +303,7 @@ export function profileRoutes(app: FastifyInstance, { db, config, content, summa
     let query = db
       .selectFrom('content')
       .leftJoin('moderation_queue', 'moderation_queue.content_id', 'content.id')
-      .select(['content.id', 'content.user_id', 'content.created_at', 'content.ai_generated', 'content.like_count'])
+      .select(['content.id', 'content.user_id', 'content.created_at', 'content.ai_generated', 'content.like_count', 'content.view_count', 'content.dislike_count'])
       .where('content.user_id', '=', userId)
       .where('content.delete_requested_at', 'is', null)
       .where('content.origin_gone_at', 'is', null)

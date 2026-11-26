@@ -9,8 +9,9 @@ import type { Mention, Mentioning } from './mentions.types.js';
  * comment's text. A mention does two things. It tells the user, by a notice in their inbox, once
  * the text is published; and it is shown as a link to their profile.
  *
- * A username is a display name: any characters, spaces among them, and its user can change it.
- * So a text alone doesn't say where a name in it ends, nor whose it is for good. The server
+ * A username is a display name: any characters, spaces among them. It is its user's for as long
+ * as they have an account, as nobody changes theirs, and is anyone's to register once that
+ * account is gone. So a text alone doesn't say where a name in it ends, nor whose it is. The server
  * finds that out once, when the text is written (resolveMentions): it looks for the users whose
  * names are written after an `@` of the text, and keeps the ones it finds beside the text, each
  * as the name and the id of the user who had it then: `mentions`, in a post's meta file and in a
@@ -49,8 +50,10 @@ const NAMES_PER_QUERY = 500;
  *
  * `previous` is the mentions of the text this one replaces: an update of a post, or an edit of
  * a comment. A name that was a mention there is still the same user's here, as long as that
- * user has an account, whatever they are called by now and whoever has the name since: a text
- * that is edited goes on mentioning whom it mentioned.
+ * user has an account: a text that is edited goes on mentioning whom it mentioned. That is who
+ * the name finds anyway, now that a username can't be changed. It differs only for a user who
+ * was renamed while one could be, and whose old name another user took: the text goes on
+ * mentioning them, by the name it has them by.
  */
 export async function resolveMentions(db: Db, text: string | undefined, previous: readonly Mention[] = []): Promise<Mention[]> {
   if (!text?.includes('@')) return [];

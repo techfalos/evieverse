@@ -230,13 +230,13 @@ for (const target of TARGETS) {
       // Her requests are answered in her language, whatever language they ask for...
       const bob: User = (await register({ username: 'bob' })).done.json();
       expect(await whoami(bob)).toMatchObject({ language: 'en' });
-      const refused = await patch(ana, bob.userId, { username: 'roberto' }, { 'accept-language': 'en' });
+      const refused = await patch(ana, bob.userId, { messages: false }, { 'accept-language': 'en' });
       expect([refused.statusCode, refused.json().error]).toEqual([403, 'solo puedes actualizar tu propio perfil']);
       // ...in the default language where hers lacks the words...
       const own = await ctx.app.inject({ method: 'PUT', url: `/users/${ana.userId}/following/${ana.userId}`, headers: as(ana) });
       expect([own.statusCode, own.json().error]).toEqual([400, "you can't follow yourself"]);
       // ...and bob's in his.
-      expect((await patch(bob, ana.userId, { username: 'anna' }, SPANISH_FIRST)).json()).toEqual({ error: 'you can only update your own profile' });
+      expect((await patch(bob, ana.userId, { messages: false }, SPANISH_FIRST)).json()).toEqual({ error: 'you can only update your own profile' });
     });
 
     it('registers a user who names no language in the one the request asks for, and refuses a language it does not speak', async () => {
@@ -280,20 +280,21 @@ for (const target of TARGETS) {
       // The language is no part of her credit, so nothing tells the compactor to write that again.
       expect(await stored(ana.userId)).toEqual({ language: 'en', updated_at: before.updated_at });
       expect(await whoami(ana)).toMatchObject({ language: 'en' });
-      expect((await patch(ana, bob.userId, { username: 'roberto' }, SPANISH_FIRST)).json()).toEqual({ error: 'you can only update your own profile' });
+      expect((await patch(ana, bob.userId, { messages: false }, SPANISH_FIRST)).json()).toEqual({ error: 'you can only update your own profile' });
 
-      // A language the server doesn't speak changes nothing, the name sent with it included.
-      const unknown = await patch(ana, ana.userId, { username: 'anna', language: 'fr' });
+      // A language the server doesn't speak changes nothing, what is sent with it included.
+      const unknown = await patch(ana, ana.userId, { messages: false, language: 'fr' });
       expect([unknown.statusCode, unknown.json()]).toEqual([400, { error: '"fr" is not one of this server\'s languages: en, es' }]);
-      expect(await whoami(ana)).toMatchObject({ username: 'ana', language: 'en' });
-      // Nor does a name that is taken change the language sent with it.
-      expect((await patch(ana, ana.userId, { username: 'bob', language: 'es' })).statusCode).toBe(409);
+      expect(await whoami(ana)).toMatchObject({ username: 'ana', language: 'en', messages: true });
+      // Nor does a language sent with a username, which is nobody's to change: the request is refused, in the language she has.
+      const renamed = await patch(ana, ana.userId, { username: 'anna', language: 'es' });
+      expect([renamed.statusCode, renamed.json()]).toEqual([400, { error: "a username can't be changed: an account keeps the name it was registered with" }]);
       expect(await whoami(ana)).toMatchObject({ username: 'ana', language: 'en' });
 
-      // Both at once, and each alone leaves the other as it is.
-      expect((await patch(ana, ana.userId, { username: 'anna', language: 'es' })).json()).toEqual({ userId: ana.userId, username: 'anna', language: 'es', messages: true, showFollowing: false, showFollowers: false, bio: null, links: [], avatarUrl: null });
-      expect((await patch(ana, ana.userId, { username: 'ana' })).json()).toEqual({ userId: ana.userId, username: 'ana', language: 'es', messages: true, showFollowing: false, showFollowers: false, bio: null, links: [], avatarUrl: null });
-      expect(await whoami(ana)).toMatchObject({ username: 'ana', language: 'es' });
+      // With something else at once, and each alone leaves the other as it is.
+      expect((await patch(ana, ana.userId, { messages: false, language: 'es' })).json()).toEqual({ userId: ana.userId, username: 'ana', language: 'es', messages: false, showFollowing: false, showFollowers: false, bio: null, links: [], avatarUrl: null });
+      expect((await patch(ana, ana.userId, { messages: true })).json()).toEqual({ userId: ana.userId, username: 'ana', language: 'es', messages: true, showFollowing: false, showFollowers: false, bio: null, links: [], avatarUrl: null });
+      expect(await whoami(ana)).toMatchObject({ username: 'ana', language: 'es', messages: true });
 
       // Nobody else can, and the refusal is in the language of whoever tried.
       const other = await patch(bob, ana.userId, { language: 'en' });

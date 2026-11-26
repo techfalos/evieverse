@@ -362,7 +362,7 @@ for (const target of TARGETS) {
       // One ad for three places: it takes each of them.
       expect(page.ads).toEqual([shown, { ...shown, position: 10 }, { ...shown, position: 17 }]);
       // The records are the ones the feed has without ads.
-      expect(page.tags.news).toHaveLength(20);
+      expect(page.records).toHaveLength(20);
 
       // A page has the places it has posts for.
       expect(await adsOf('tags=news&limit=2')).toEqual([]);
@@ -380,6 +380,17 @@ for (const target of TARGETS) {
       const second = await feed(`tags=news&limit=12&algorithm=chronological&cursor=${first.nextCursor}`);
       expect(second.count).toBe(8);
       expect(second.ads?.map((a) => a.position)).toEqual([3]);
+
+      // As RSS, the page's ads are items among its records': each before the record its position names.
+      const rss = await ctx.app.inject({ method: 'GET', url: '/feed?tags=news&limit=12&algorithm=chronological&format=rss' });
+      expect(rss.statusCode, rss.body).toBe(200);
+      const guids = [...rss.body.matchAll(/<guid isPermaLink="false">([^<]*)<\/guid>/g)].map((m) => m[1]!);
+      expect(guids).toHaveLength(14);
+      expect(guids.flatMap((guid, i) => (guid === `ad:${ad.adId}` ? [i] : []))).toEqual([2, 10]);
+      expect(guids.filter((guid) => !guid.startsWith('ad:'))).toEqual(first.records.map((r) => r.contentId));
+      expect(rss.body).toContain(
+        `<item><title>Sponsored</title><link>${clickUrl(ad.adId)}</link><guid isPermaLink="false">ad:${ad.adId}</guid><description>&lt;p&gt;Fresh coffee&lt;/p&gt;</description></item>`,
+      );
 
       // The following feed has none.
       ok(await req(alice, 'PUT', `/users/${alice.userId}/following/${root.userId}`), 201);

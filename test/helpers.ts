@@ -128,6 +128,7 @@ export const TABLES = [
   'tag_moderators',
   'follows',
   'likes',
+  'dislikes',
   'repost_removals',
   'reposts',
   'staged_removals',
@@ -272,6 +273,8 @@ export async function createTestContext(
     keyFetcher?: KeyFetcher;
     /** What answers for the other servers this one asks for the attestations of their posts (see `sweep`). Nothing does unless given. */
     attestationFetcher?: Fetchers['attestation'];
+    /** Whether posts can be disliked, and say how many dislike them (`dislikes` in the configuration). They can't, unless given. */
+    dislikes?: boolean;
     /** Requests to GET /content/:id from one address in a minute. No limit, unless given. */
     contentRateLimitPerMinute?: number;
     /** Requests to GET /users/:userId/posts from one address in a minute. No limit, unless given. */
@@ -309,6 +312,7 @@ export async function createTestContext(
     tagging: { logRateLimitPerMinute: 0, ...opts.tagging },
     ...(opts.postTypes && { postTypes: opts.postTypes }),
     reposts: { attestationRateLimitPerMinute: 0, ...opts.reposts },
+    ...(opts.dislikes !== undefined && { dislikes: opts.dislikes }),
     ...(opts.trust && { trust: opts.trust }),
     ...(opts.urlhaus && { urlhaus: opts.urlhaus }),
     ...(opts.pdq && { pdq: opts.pdq }),
@@ -543,6 +547,10 @@ export type FeedItem = {
   preview: { kind: string; text?: string; url?: string; imageCount?: number; alt?: string[]; video?: { id: string; width: number; height: number; duration: number; poster: string; hls: string } };
   tags: string[];
   likes: number;
+  /** How many times the post was viewed by a user account. */
+  views: number;
+  /** How many users dislike the post, on a server that has dislikes on; null on one that has them off. */
+  dislikes: number | null;
   /** On a hashtag's feed: whether one of its moderators approved the record there. */
   moderated?: boolean;
   createdAt: string;
@@ -551,6 +559,8 @@ export type FeedItem = {
   repost?: { at: string; by?: { userId: string; username: string } };
   /** On a repost of a post on another server: the original. */
   origin?: { url: string; publisher: { userId: string; username: string } };
+  /** On a hashtag's feed: the hashtag the record is listed under, of those the feed reads. */
+  listedUnder?: string;
 };
 
 export type Feed = {
@@ -563,9 +573,12 @@ export type Feed = {
   related?: string[];
   /** Where the server shows ads in feeds: the page's ads, each with the record of the page it goes before, counted from 1. */
   ads?: FeedAdItem[];
-  /** Each hashtag's records, in the feed's order; a hashtag with none is left out. */
-  tags: Record<string, FeedItem[]>;
+  /** The page's records as one list, in the feed's order, each naming the hashtag it is listed under. */
+  records: FeedItem[];
 };
+
+/** The records of a feed's page that are listed under `tag`, in the page's order. */
+export const listedUnder = (f: Feed, tag: string) => f.records.filter((r) => r.listedUnder === tag);
 
 /** An ad of a feed's page, as far as tests read it. */
 export type FeedAdItem = { adId: string; label: string; kind: 'text' | 'image'; imageUrl?: string; text?: string; url?: string; position: number };
@@ -595,6 +608,15 @@ export const like = (ctx: App, user: User, contentId: string) => ctx.app.inject(
 /** DELETE /like as `user`: takes their like of a post back. */
 export const unlike = (ctx: App, user: User, contentId: string) => ctx.app.inject({ method: 'DELETE', url: '/like', payload: { ...user, contentId } });
 
+/** POST /dislike as `user`. */
+export const dislike = (ctx: App, user: User, contentId: string) => ctx.app.inject({ method: 'POST', url: '/dislike', payload: { ...user, contentId } });
+
+/** DELETE /dislike as `user`: takes their dislike of a post back. */
+export const undislike = (ctx: App, user: User, contentId: string) => ctx.app.inject({ method: 'DELETE', url: '/dislike', payload: { ...user, contentId } });
+
+/** GET /content/:contentId, as `user` where one is given, which is what counts a view of the post, and with no credentials otherwise. */
+export const read = (ctx: App, contentId: string, user?: User) => ctx.app.inject({ method: 'GET', url: `/content/${contentId}`, headers: user ? as(user) : {} });
+
 /** GET /feed?<query>, which must succeed. */
 export async function feed(ctx: App, query: string): Promise<Feed> {
   const res = await ctx.app.inject({ method: 'GET', url: `/feed?${query}` });
@@ -603,7 +625,7 @@ export async function feed(ctx: App, query: string): Promise<Feed> {
 }
 
 /** The records of a hashtag's feed. */
-export const feedItems = async (ctx: App, tag: string) => (await feed(ctx, `tags=${tag}`)).tags[tag] ?? [];
+export const feedItems = async (ctx: App, tag: string) => (await feed(ctx, `tags=${tag}`)).records;
 
 /** The requests above on whichever context a test is running with, so its calls needn't pass it. */
 export const requests = (ctx: () => App) => ({
@@ -612,6 +634,9 @@ export const requests = (ctx: () => App) => ({
   post: (user: User, text: string, extra?: Record<string, unknown>) => post(ctx(), user, text, extra),
   like: (user: User, contentId: string) => like(ctx(), user, contentId),
   unlike: (user: User, contentId: string) => unlike(ctx(), user, contentId),
+  dislike: (user: User, contentId: string) => dislike(ctx(), user, contentId),
+  undislike: (user: User, contentId: string) => undislike(ctx(), user, contentId),
+  read: (contentId: string, user?: User) => read(ctx(), contentId, user),
   feed: (query: string) => feed(ctx(), query),
   feedItems: (tag: string) => feedItems(ctx(), tag),
 });

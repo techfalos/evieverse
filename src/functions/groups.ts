@@ -4,6 +4,7 @@ import { challengeRoutes } from '../routes/challenges.js';
 import { cliRoutes } from '../routes/cli.js';
 import { commentReadRoutes, commentWriteRoutes } from '../routes/comments.js';
 import { contentRoutes, deletionRoutes } from '../routes/content.js';
+import { dislikeRoutes } from '../routes/dislike.js';
 import { exportRoutes } from '../routes/export.js';
 import { feedRoutes, followingFeedRoutes } from '../routes/feed.js';
 import { followRoutes } from '../routes/follow.js';
@@ -53,7 +54,8 @@ interface WithoutDatabase {
  *            /users/:id/avatar; the list of their posts, GET /users/:id/posts, which reads the
  *            database; the posts they pinned, /users/:id/pinned/:contentId), a user's export of
  *            their own data (GET /users/:id/export, a page at a time), its challenges read out
- *            (/challenges/:id/audio), languages, likes (of posts and of comments),
+ *            (/challenges/:id/audio), languages, likes (of posts and of comments), dislikes
+ *            (of posts, on a server that has them on: POST and DELETE /dislike),
  *            reposts (POST /repost, which writes database rows, and a link to the original for a
  *            post on another server, whose keys it asks that server for; POST /repost/refresh,
  *            which brings such a link up to what its original is now; GET /repost/keys, this
@@ -70,8 +72,8 @@ export const GROUPS = {
   feed: {
     database: false,
     // Only what hashtag feeds read is passed on: they never touch the database.
-    register: (app, { config, feedReader, summaries, publishers, relatedTags, ads, now }) =>
-      feedRoutes(app, { config, feedReader, summaries, publishers, relatedTags, ads, now }),
+    register: (app, { config, feedReader, authorReader, summaries, publishers, relatedTags, ads, now }) =>
+      feedRoutes(app, { config, feedReader, authorReader, summaries, publishers, relatedTags, ads, now }),
   },
   content: {
     database: true,
@@ -96,6 +98,7 @@ export const GROUPS = {
       challengeRoutes(app, deps);
       languageRoutes(app);
       likeRoutes(app, deps);
+      dislikeRoutes(app, deps);
       repostRoutes(app, deps);
       followRoutes(app, deps);
       followingFeedRoutes(app, deps);

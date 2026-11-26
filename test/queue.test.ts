@@ -6,7 +6,7 @@ import { newCommentId } from '../src/comments.js';
 import { loadConfig } from '../src/config.js';
 import { setAdmin } from '../src/moderation/policy.js';
 import { commentIndexKey, commentKey } from '../src/storage/commentStore.js';
-import { as, BASE_ENV, createTestContext, type Feed, multipart, PNG, queued, requests, TARGETS, type TestContext, type User } from './helpers.js';
+import { as, BASE_ENV, createTestContext, type Feed, listedUnder, multipart, PNG, queued, requests, TARGETS, type TestContext, type User } from './helpers.js';
 
 const NO_CONTENT = '00000000-0000-4000-8000-000000000000';
 const REFUSED = "the post contains a word or phrase this server doesn't allow, so it wasn't published";
@@ -46,7 +46,7 @@ for (const target of TARGETS) {
       return u;
     };
     const ids = (items: { contentId: string }[]) => items.map((i) => i.contentId);
-    const records = (f: Feed, tag: string) => f.tags[tag] ?? [];
+    const records = (f: Feed, tag: string) => listedUnder(f, tag);
     /** The server's moderation queue, as an admin reads it. */
     const queue = async (u: User, query = '') => ok(await req(u, 'GET', `/moderation/queue${query}`), 200);
     const decide = (u: User | null, contentId: string, decision: 'accept' | 'reject') => req(u, 'POST', `/moderation/queue/${contentId}/${decision}`);
@@ -112,6 +112,9 @@ for (const target of TARGETS) {
         preview: { kind: 'text', text },
         tags: ['news', 'deals'],
         likes: 0,
+        // Its publisher and an admin read it above, and a read of a post that waits is no view.
+        views: 0,
+        dislikes: null,
         createdAt: queuedAt,
         updatedAt: queuedAt,
         text,
@@ -166,7 +169,10 @@ for (const target of TARGETS) {
           preview: { kind: 'text', text: updated },
           tags: ['news', 'deals'],
           likes: 0,
+          views: 0,
+          dislikes: null,
           moderated: false,
+          listedUnder: 'deals',
           createdAt: queuedAt,
           updatedAt,
         },
@@ -893,7 +899,7 @@ for (const target of TARGETS) {
 
       // The queue is what is left to decide, to the session under way as to one that starts now.
       const rest = async () => {
-        const seen: Feed['tags'][string] = [];
+        const seen: Feed['records'] = [];
         for (let cursor = first.nextCursor; cursor; ) {
           const page = await feed(`tags=news&moderated=false&cursor=${cursor}`);
           seen.push(...records(page, 'news'));

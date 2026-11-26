@@ -1,11 +1,11 @@
 import type { Publisher, Summary } from '../storage/index.js';
 import { iso, wholeSeconds } from '../time.js';
-import type { FeedRecord, Head, IndexEntry, RepostMark } from './layout.types.js';
+import type { Counts, FeedRecord, Head, IndexEntry, RepostMark } from './layout.types.js';
 
 /**
  * Feed index layout in Redis, per hashtag (keys are relative to REDIS_KEY_PREFIX):
  *
- *   head:<tag>                { v: 5, manifest, compactedAt } - the only overwritten index key
+ *   head:<tag>                { v: 6, manifest, compactedAt } - the only overwritten index key
  *   man:<tag>:<id>            immutable: every UTC day's index key and quota
  *   day:<tag>:<gen>           immutable: one UTC day's packed index, DAY_ENTRY_BYTES per post, best first
  *
@@ -13,7 +13,8 @@ import type { FeedRecord, Head, IndexEntry, RepostMark } from './layout.types.js
  * reaches the index when the compactor's next run swaps the head.
  *
  * Index entries hold what the planner needs (id, likes, creation time, and the flags feeds filter
- * on: AI-generated, and moderated); the record bodies are summaries shared by every tag (SummaryStore) plus
+ * on: AI-generated, and moderated) and the post's other counts, which a feed shows and plans
+ * nothing by (views, dislikes); the record bodies are summaries shared by every tag (SummaryStore) plus
  * publisher credits (PublisherStore). Each day index holds the best posts of that UTC day (by likes,
  * then creation time) up to a quota that shrinks with age, so popular content stays for the whole
  * retention period.
@@ -25,11 +26,20 @@ import type { FeedRecord, Head, IndexEntry, RepostMark } from './layout.types.js
  * reposter's own, as a new post: the entry's time is the repost's, which is the day it is in and
  * where feeds order it, and its likes are those since the repost. Such an entry is flagged as a
  * repost. It is still the one piece of content: the entry names it, and its summary is the same.
+ *
+ * A manifest says which version its day indexes are of (`v`). An index the compactor wrote
+ * before entries had views and dislikes is version 5, of shorter entries (`dayEntryBytes`), and
+ * is read as it is, with no views and no dislikes, until the compactor next compacts its tag,
+ * which writes all of its days again as this version's.
  */
 
-/** contentId (16 bytes) | likes u32 | createdAt seconds u32 | flags u8, big-endian. */
-export const DAY_ENTRY_BYTES = 25;
-/** The most a u32 field of a day index entry holds: likes and creation seconds above it are stored as this. */
+/** The version of the index's layout that the compactor writes, and that heads and manifests say they are of. */
+export const LAYOUT_VERSION = 6;
+/** contentId (16 bytes) | likes u32 | createdAt seconds u32 | flags u8 | views u32 | dislikes u32, big-endian. */
+export const DAY_ENTRY_BYTES = 33;
+/** What an entry took in version 5 of the layout, which had neither views nor dislikes: the first bytes of an entry of this one. */
+const DAY_ENTRY_BYTES_V5 = 25;
+/** The most a u32 field of a day index entry holds: counts and creation seconds above it are stored as this. */
 const U32 = 0xffffffff;
 
 /** Flag bit of a day index entry: its publisher declared the content as created with AI. */
@@ -40,15 +50,33 @@ const MODERATED = 2;
 const REPOST = 4;
 
 /** What a tag that was never compacted has for a head: no manifest, so no day index, and the tag reads as empty. */
-export const EMPTY_HEAD: Head = { v: 5, manifest: null, compactedAt: 0 };
+export const EMPTY_HEAD: Head = { v: LAYOUT_VERSION, manifest: null, compactedAt: 0 };
 
 /** A publisher's own index, named so no hashtag (letters, digits and _) can be the same. */
 export const authorIndex = (userId: string) => `@${userId}`;
 /** The publisher whose own index this is; null for a hashtag. */
 export const indexAuthor = (name: string) => (name.startsWith('@') ? name.slice(1) : null);
 
-/** `moderated` is the record's flag in the hashtag's index it was read from; omitted where it wasn't read from one. */
-export const toFeedRecord = (s: Summary, likes: number, publisher: Publisher, moderated?: boolean, repost?: RepostMark): FeedRecord => ({
+/** How many bytes an entry takes in a day index of version `v` of the layout (a manifest's `v`). */
+export const dayEntryBytes = (v: number) => (v >= LAYOUT_VERSION ? DAY_ENTRY_BYTES : DAY_ENTRY_BYTES_V5);
+
+/**
+ * A post's counts as a response gives them, on a server that has dislikes on (`dislikes` in the
+ * configuration) or off: `dislikes` is the post's count where they are on, 0 for a post nobody
+ * dislikes, and null where they are off, which is what tells a client not to show dislikes at all.
+ */
+export const countsOf = (c: { likes: number; views: number; dislikes: number }, dislikesOn: boolean): Counts => ({
+  likes: c.likes,
+  views: c.views,
+  dislikes: dislikesOn ? c.dislikes : null,
+});
+
+/**
+ * A feed record of a post: its summary, its counts (see `countsOf`) and its publisher's credit.
+ * `moderated` is the record's flag in the hashtag's index it was read from; omitted where it
+ * wasn't read from one.
+ */
+export const toFeedRecord = (s: Summary, counts: Counts, publisher: Publisher, moderated?: boolean, repost?: RepostMark): FeedRecord => ({
   contentId: s.contentId,
   publisher,
   mimeType: s.mimeType,
@@ -57,7 +85,9 @@ export const toFeedRecord = (s: Summary, likes: number, publisher: Publisher, mo
   preview: s.preview,
   ...(s.mentions?.length && { mentions: s.mentions }),
   tags: s.tags,
-  likes,
+  likes: counts.likes,
+  views: counts.views,
+  dislikes: counts.dislikes,
   ...(moderated !== undefined && { moderated }),
   createdAt: iso(s.createdAt),
   updatedAt: iso(s.updatedAt),
@@ -85,23 +115,31 @@ export function packDay(entries: IndexEntry[]): Buffer {
     buf.writeUInt32BE(clamp(e.likes, U32), o + 16);
     buf.writeUInt32BE(clamp(e.createdAt / 1000, U32), o + 20);
     buf.writeUInt8((e.aiGenerated ? AI_GENERATED : 0) | (e.moderated ? MODERATED : 0) | (e.repost ? REPOST : 0), o + 24);
+    buf.writeUInt32BE(clamp(e.views, U32), o + 25);
+    buf.writeUInt32BE(clamp(e.dislikes, U32), o + 29);
   });
   return buf;
 }
 
 /**
  * The entries `packDay` packed, in the same order, their times in ms again (of whole seconds).
- * Bytes at the end that don't make a whole entry are ignored.
+ * Bytes at the end that don't make a whole entry are ignored. `v` is the version of the layout
+ * the day index is of, which its manifest says: an entry of version 5 has no views and no
+ * dislikes, and reads as having 0 of each.
  */
-export function unpackDay(buf: Buffer): IndexEntry[] {
+export function unpackDay(buf: Buffer, v: number = LAYOUT_VERSION): IndexEntry[] {
   const out: IndexEntry[] = [];
-  for (let o = 0; o + DAY_ENTRY_BYTES <= buf.length; o += DAY_ENTRY_BYTES) {
+  const bytes = dayEntryBytes(v);
+  const counted = bytes >= DAY_ENTRY_BYTES;
+  for (let o = 0; o + bytes <= buf.length; o += bytes) {
     const h = buf.toString('hex', o, o + 16);
     out.push({
       contentId: `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`,
       likes: buf.readUInt32BE(o + 16),
       createdAt: buf.readUInt32BE(o + 20) * 1000,
       ...flagged(buf.readUInt8(o + 24)),
+      views: counted ? buf.readUInt32BE(o + 25) : 0,
+      dislikes: counted ? buf.readUInt32BE(o + 29) : 0,
     });
   }
   return out;
