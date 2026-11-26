@@ -20,7 +20,20 @@ jobs:
   # The name of the status check to require: "test".
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The Rust is what takes the time, the first time: a run that finds what an earlier one built takes a few minutes.
+    timeout-minutes: 45
+    # The Redis every server needs, and so every test: the suite reaches it at TEST_REDIS_URL.
+    services:
+      valkey:
+        image: valkey/valkey:8
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      TEST_REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -31,7 +44,34 @@ jobs:
       - run: npm run typecheck
       # The conventions of src that the compiler doesn't check (scripts/check-conventions.mjs).
       - run: npm run check
-      # SQLite with the in-process store: the suite as `npm test` runs it with no TEST_*_URL set.
+      # The Rust, all of which is under compactor/: the compactor's program and the addon the API loads. What
+      # cargo downloaded and built is kept from one run to the next, for as long as the toolchain and the
+      # dependencies are the same.
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            compactor/target
+          key: rust-${{ runner.os }}-${{ hashFiles('compactor/rust-toolchain.toml', 'compactor/Cargo.lock') }}
+      # The toolchain compactor/rust-toolchain.toml pins, with rustfmt and clippy: what rustup installs when it is named none, there.
+      - run: rustup toolchain install --no-self-update
+        working-directory: compactor
+      - run: cargo fmt --all --check
+        working-directory: compactor
+      # As the tests build it, with the command they drive the compactor by and the plugin they configure, and as a server is built: no warning in either.
+      - run: cargo clippy --locked --workspace --all-targets --features compactor/harness,evieverse-node/test-plugin -- -D warnings
+        working-directory: compactor
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        working-directory: compactor
+      # The Rust code's own tests, which read the formats both sides keep from fixtures/ and reach the Valkey above.
+      - run: cargo test --locked --workspace --features compactor/harness,evieverse-node/test-plugin
+        working-directory: compactor
+      # What `npm test` runs: the compactor's binary and the addon, which it would build itself (test/globalSetup.ts).
+      - run: cargo build --locked -p compactor -p evieverse-node --features compactor/harness,evieverse-node/test-plugin
+        working-directory: compactor
+      # SQLite, with the feed index in the Valkey above: the suite as `npm test` runs it with no database's TEST_*_URL set.
+      # It drives the compactor built above, and the API loads the addon.
       - run: npm test
       # What a deployment runs: the server compiled without its tests, and the CLI bundled.
       - run: npm run build
