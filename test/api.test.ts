@@ -406,7 +406,7 @@ for (const target of TARGETS) {
       const allowedTags = ['local', 'austin', ...serverTags.slice(2)];
       // Needs no key, and lists them all as configured, before any post has used one.
       expect(await tagging()).toEqual({ mode: 'server', allowedTags, maxTags: 10 });
-      expect((await ctx.app.inject({ method: 'GET', url: '/tags' })).json()).toEqual({ tags: [] });
+      expect((await ctx.app.inject({ method: 'GET', url: '/tags' })).json()).toEqual({ tags: [], nextCursor: null });
 
       // Every one of them is accepted on a post, and a post still takes at most 10.
       const alice = await ctx.register('alice');
@@ -771,6 +771,7 @@ for (const target of TARGETS) {
         mimeType: 'text/plain',
         aiGenerated: false,
         comments: false,
+        commentCount: 0,
         preview: { kind: 'text', text: 'popular mumbai #news #mumbai' },
         tags: ['news', 'mumbai'],
         likes: 1,

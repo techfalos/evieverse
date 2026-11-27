@@ -192,7 +192,7 @@ The server only writes records. Moving them to cold storage is the bucket's own 
 ### Post types
 
 
-Which [types of post](API.md#post-store) the server takes: all five by default. `false` turns one off, and at least one must stay on, or the server doesn't start: a server of pictures alone sets every one but `POST_TYPE_IMAGE` to `false`. A type that's off takes no new post and no update of one (`400`), and `POST /uploads` gives no link for its files. Posts of it the server already holds stay, to read, like and delete.
+Which [types of post](API.md#post-store) the server takes: all five by default. `false` turns one off, and at least one must stay on, or the server doesn't start: a server of pictures alone sets every one but `POST_TYPE_IMAGE` to `false`. A type that's off takes no new post and no update of one (`400`), and `POST /uploads` gives no link for its files. Posts of it the server already holds stay, to read, like and delete. [`GET /rules`](API.md#get-rules) gives the types that are on to anyone who asks, as `postTypes`, so a client knows which to offer before it sends a post.
 
 | Variable          | File key          | Format     | Default | What it does                                                                                                              |
 | ----------------- | ----------------- | ---------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
@@ -306,7 +306,7 @@ Views have no setting. Every server counts them: a post's `views` goes up by one
 
 ### Search
 
-[`GET /search`](API.md#search) finds users by the start of their username, and posts by the words of their text and by their hashtags. It's always on. A server that had posts before it had search indexes them once, with `npm run reindex` ([IAC.md](IAC.md#upgrading-to-search)), and so does one that had posts before its compactor was the Rust program ([IAC.md](IAC.md#upgrading-to-the-rust-compactor)).
+[`GET /search`](API.md#search) finds users by the start of their username, and posts by the words of their text and by their hashtags. It's always on. A server that had posts before it had search indexes them once, with `npm run reindex` ([IAC.md](IAC.md#upgrading-to-search)), and so does one that had posts before its compactor was the Rust program ([IAC.md](IAC.md#upgrading-to-the-rust-compactor)). The same command counts the posts that were there before the server counted its posts and each hashtag's, which [`GET /rules`](API.md#get-rules) and [`GET /tags`](API.md#get-tags) give ([IAC.md](IAC.md#upgrading-to-post-counts)). Those counts have no setting.
 
 | Variable                       | File key                    | Format | Default | What it does |
 | ------------------------------ | --------------------------- | ------ | ------- | ------------ |
@@ -397,7 +397,7 @@ The [trust score](API.md#moderation) of a post or comment runs from 0 to 100. Th
 | -------------------------- | ----------------------- | ------ | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `TRUST_SCORE_DELETE_BELOW` | `trust.deleteBelow`     | number | `25`    | A post that scores less than this is refused (`422`) and nothing of it is kept. 0: no post is, so posts with a blocked word wait in the moderation queue instead.                  |
 | `TRUST_SCORE_ALLOW_FROM`   | `trust.allowFrom`       | number | `75`    | A post that scores at least this is published. One that scores less, and isn't refused, waits in the moderation queue. 101: every post waits. At least `TRUST_SCORE_DELETE_BELOW`. |
-| `TRUST_OPTIONAL_PLUGINS`   | `trust.optionalPlugins` | list   | empty   | The optional trust plugins the server runs, by the names of their folders in `compactor/crates/trust/src/plugins`, separated by commas or spaces (a list of names in the file). The server comes with two, `urlhaus` and `pdq`. Empty: no optional plugin runs. Plugins that aren't optional, such as `blocked_words`, run whatever this says. A name that isn't one of the plugins the server was built with stops the API from starting, and the compactor, which takes the same value. |
+| `TRUST_OPTIONAL_PLUGINS`   | `trust.optionalPlugins` | list   | empty   | The optional trust plugins the server runs, by the names of their folders in `compactor/crates/trust/src/plugins`, separated by commas or spaces (a list of names in the file). The server comes with three, `urlhaus`, `pdq` and `synthid`. Empty: no optional plugin runs. Plugins that aren't optional, such as `blocked_words`, run whatever this says. A name that isn't one of the plugins the server was built with stops the API from starting, and the compactor, which takes the same value. |
 
 
 ### Links that spread malware
@@ -447,6 +447,25 @@ The quarantine is where the server keeps the files that matched the `pdq` plugin
 - Changing these doesn't move the files. The database goes on naming the items that were kept, and their files are then in a store the server no longer reads: move them first.
 - A year is the default because that's how long United States law has a provider preserve what it reported to the CyberTipline (18 U.S.C. 2258A(h)). The law elsewhere may ask for another time: this isn't legal advice.
 - A server that starts with `pdq` on and no quarantine says so in its log.
+
+
+### Images made with AI
+
+These are the settings of the `synthid` trust plugin, which has posts and comments with an image that carries a SynthID watermark wait for a moderator, or refuses them ([Trust plugins](TRUST_PLUGINS.md#images-made-with-ai)). The plugin is optional: it runs only with `TRUST_OPTIONAL_PLUGINS=synthid`, and the settings aren't used otherwise.
+
+With the plugin on, the server sends each image it's sent to a detector outside it, as it would store the image: without its metadata, and without the name it was sent with. The default detector is OpenAI's, which finds the watermarks of images made with OpenAI's models, and of no other maker's.
+
+
+| Variable                  | File key                 | Format     | Default                                               | What it does |
+| ------------------------- | ------------------------ | ---------- | ----------------------------------------------------- | ------------ |
+| `SYNTHID_API_KEY`         | `synthid.apiKey`         | text       | unset                                                 | The API key the detector is asked with: for the default detector, an OpenAI API key whose account has access to its Content Provenance API. Required when `TRUST_OPTIONAL_PLUGINS` names `synthid`: the server doesn't start without it, and neither does the compactor, which takes the same value. It's a credential, so on a deployment it belongs in `secrets`. |
+| `SYNTHID_URL`             | `synthid.url`            | URL        | `https://api.openai.com/v1/content_provenance_checks` | The detector's address, `http` or `https`: OpenAI's [Content Provenance API](https://developers.openai.com/api/docs/guides/content-provenance) unless you name another that takes the same request and answers the same way. Each image is sent to it as the `file` of a form, with the key as a Bearer token. The server must be able to reach its host. |
+| `SYNTHID_ACTION`          | `synthid.action`         | choice     | `hold`                                                | What becomes of a post or a comment with an image that carries a watermark. `hold`: it scores one less than `TRUST_SCORE_ALLOW_FROM`, so it waits in the moderation queue for a person to look at, or is refused where the two thresholds are the same. `refuse`: it scores 0, which is refused (`422`) unless `TRUST_SCORE_DELETE_BELOW` is 0. An avatar with one is refused either way, since a profile has no queue. The server doesn't start if it's neither. |
+| `SYNTHID_UNCHECKED`       | `synthid.unchecked`      | choice     | `hold`                                                | What becomes of one with an image the detector couldn't check: it couldn't be reached, took more than 15 seconds, refused the key, took no more requests, or didn't read the file. `hold`: as `SYNTHID_ACTION`'s `hold`, so no image is published unchecked: while the detector is down, every image post and every comment with an image waits for a person, and no avatar can be set. `allow`: the image counts as one without a watermark. The log has each one either way. The server doesn't start if it's neither. |
+| `SYNTHID_ALLOW_DISCLOSED` | `synthid.allowDisclosed` | true/false | `false`                                               | `true`: a post or a comment its sender declares as created with AI (`aiGenerated`) is left as it is. The plugin lowers no score for it, whatever its images carry, and sends none of them to the detector. What is held or refused is then an image with a watermark that comes without the declaration. An update that takes a post's declaration back is checked as a post without one; a comment's image isn't checked again when an edit takes its declaration back. An avatar comes with no declaration, and is checked either way. `false`: a watermark counts the same with the declaration and without it. |
+
+- `GEN_AI` changes nothing of this: the plugin doesn't read it.
+- OpenAI limits how often its API is asked, and strictly. A busy server will have images that couldn't be checked, which is what `SYNTHID_UNCHECKED` is for.
 
 
 
@@ -595,7 +614,7 @@ Updating a function doesn't start it, so a setting the server refuses wouldn't s
 - The step's log says which setting, and why, for example "the functions would not start with these settings, so nothing was changed: TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't one of the trust plugins this server was built with…". The step is named after the deployment, `<name>-migrate`: on AWS its log group is `/aws/lambda/<name>-migrate`, and on GCP and Azure it's the job's log.
 - Fix the value and apply again. The step runs again on every apply until it passes.
 
-What the check catches is what stops the server from starting: a value in the wrong format, a name that isn't one (a plugin in `TRUST_OPTIONAL_PLUGINS`, a `CONTENT_SCHEME`, a `DEFAULT_LANGUAGE` with no file), and settings that need each other (`TAGGING_MODE=server` without `TAGGING_SERVER_TAGS`, `urlhaus` without `URLHAUS_AUTH_KEY`, `pdq` without `PDQ_HASH_LIST`). The last two of these fail sooner, in the plan. What it doesn't catch is a value the server starts with but that is wrong: a bucket that doesn't exist, or a key a service refuses, shows when it's used.
+What the check catches is what stops the server from starting: a value in the wrong format, a name that isn't one (a plugin in `TRUST_OPTIONAL_PLUGINS`, a `CONTENT_SCHEME`, a `DEFAULT_LANGUAGE` with no file), and settings that need each other (`TAGGING_MODE=server` without `TAGGING_SERVER_TAGS`, `urlhaus` without `URLHAUS_AUTH_KEY`, `pdq` without `PDQ_HASH_LIST`, `synthid` without `SYNTHID_API_KEY`). The last three of these fail sooner, in the plan. What it doesn't catch is a value the server starts with but that is wrong: a bucket that doesn't exist, or a key a service refuses, shows when it's used.
 
 Things to know:
 

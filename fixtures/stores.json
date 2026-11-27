@@ -127,6 +127,10 @@
       "mimeType": "image/png"
     },
     {
+      "op": "comments.counting",
+      "postId": "0198c0de-1111-4000-8000-000000000001"
+    },
+    {
       "op": "comments.put",
       "comment": {
         "commentId": "0198c0de-aaaa-7000-8000-000000000001",
@@ -142,6 +146,11 @@
         "createdAt": 1793966397000
       },
       "held": false
+    },
+    {
+      "op": "comments.counted",
+      "postId": "0198c0de-1111-4000-8000-000000000001",
+      "recount": false
     },
     {
       "op": "comments.put",
@@ -317,6 +326,10 @@
     {
       "op": "snapshot",
       "name": "written"
+    },
+    {
+      "op": "comments.counting",
+      "postId": "0198c0de-1111-4000-8000-000000000001"
     },
     {
       "op": "comments.publish",
@@ -737,6 +750,10 @@
           "making": false,
           "expires": true
         },
+        "cmtn:0198c0de-1111-4000-8000-000000000001": {
+          "text": "2",
+          "expires": false
+        },
         "sum:0198c0de-1111-4000-8000-000000000001": {
           "brotli": "1793880000000 1793880000000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews world\ntext\nhello #news\nand a second line, with \"quotes\" and ünïcödé 🎉",
           "expires": true
@@ -937,6 +954,14 @@
         "cmtlm:0198c0de-aaaa-7000-8000-000000000002": {
           "making": false,
           "expires": true
+        },
+        "cmtn:0198c0de-1111-4000-8000-000000000001": {
+          "text": "2",
+          "expires": false
+        },
+        "cmtnc:0198c0de-1111-4000-8000-000000000001": {
+          "text": "1",
+          "expires": false
         },
         "sum:0198c0de-1111-4000-8000-000000000001": {
           "brotli": "1793880000000 1793880000000 0 1\n0198c0de-0000-4000-8000-0000000000a1\ntext/plain\nnews world\ntext\nhello #news\nand a second line, with \"quotes\" and ünïcödé 🎉",

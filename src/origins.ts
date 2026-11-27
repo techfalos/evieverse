@@ -195,7 +195,7 @@ export function originEntries({ db, config, content, writer, trust, originKeys, 
     const taken = await removedRepostTags(db, row.id);
     const moderated = await moderatePost(
       { trust, now, log },
-      { userId: row.user_id, contentId: row.id, tags: [...meta.tags.filter((tag) => !given.includes(tag) && !taken.includes(tag)), ...given], texts },
+      { userId: row.user_id, contentId: row.id, tags: [...meta.tags.filter((tag) => !given.includes(tag) && !taken.includes(tag)), ...given], texts, aiGenerated },
     );
     const queued = moderated.route === 'queue';
     const ts = now();

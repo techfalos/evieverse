@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use evieverse_core::content::ContentMeta;
+use evieverse_core::counts::{count_post, uncount_post};
 use evieverse_core::db::{Dialect, Queries, Value, places};
 use evieverse_core::layout::{COMPACTOR_STATE_KEY, author_index, index_author};
 use evieverse_core::log;
@@ -43,6 +44,10 @@ const TAG_BATCH: usize = 200;
 /// Things a run writes at once where each is one small write: a credit, a user's follows, a
 /// post's hashtags.
 const SMALL_WRITES: usize = 16;
+
+/// Posts whose comments a rebuild counts at once: each count reads the post's comments
+/// several at a time already.
+const COMMENT_COUNTS: usize = 4;
 
 /// The most images a post can have (MAX_POST_IMAGES of src/posts.ts): what a run deletes of a
 /// post whose meta file it can't read.
@@ -357,8 +362,11 @@ impl<'a> Run<'a> {
         let unplaced = self.apply_removals(&removals).await?;
         let decisions = self.apply_decisions().await?;
         let unapplied = self.apply_reposts(&queue).await?;
+        // Once every meta file of this run is written: what the queued content counts for is read from them.
+        self.count_queued(&queue).await?;
         if opts.rebuild {
             self.mark_everything().await?;
+            self.recount_comments().await?;
         }
         self.mark_new_likes(state.through).await?;
         self.mark_new_counts(state.through).await?;
@@ -455,6 +463,8 @@ impl<'a> Run<'a> {
                     tx.commit().await?;
                     continue;
                 }
+                // What the post counted for, among the server's posts and those of its hashtags, goes with its row.
+                uncount_post(&mut tx, id).await?;
                 // Likes, feed_queue rows, pending writes and the places of reposts cascade, and so do the rows of the
                 // comments that waited in a queue.
                 tx.execute("DELETE FROM content WHERE id = ? AND delete_requested_at IS NOT NULL", params![id])
@@ -637,6 +647,26 @@ impl<'a> Run<'a> {
         let users = db.fetch("SELECT id, username FROM users WHERE deleted_at IS NULL", &[]).await?;
         self.put_credits(&users).await?;
         self.sync_following(&strings(&users, "id")?).await
+    }
+
+    /// `--rebuild`: every post's number of comments is counted again from the comment store
+    /// (see `CommentStore::recount`), which is what gives Redis back the numbers it lost: a
+    /// post with comments and no number reads as having none. It reads every comment there
+    /// is, a post at a time. After the run's pending writes are applied, so no write of a
+    /// comment is under way.
+    async fn recount_comments(&self) -> Result<()> {
+        let comments = &self.deps.comments;
+        let posts = comments.posts().await?;
+        for batch in posts.chunks(BATCH) {
+            self.lease.check().await?;
+            map_limit(batch, COMMENT_COUNTS, |post_id| async move { comments.recount(post_id).await.map(|_| ()) }).await?;
+        }
+        if !posts.is_empty() {
+            self.deps
+                .log
+                .info(json!({ "posts": posts.len() }), "counted the comments of every post that has any");
+        }
+        Ok(())
     }
 
     /// (tag, day) of content liked in [since, the run's start), and of content that lost a
@@ -1132,9 +1162,11 @@ impl<'a> Run<'a> {
     }
 
     /// Writes a piece of content again as `next` has it: its summary, unless it is withheld,
-    /// when it has none and gets none here; the terms a search finds it by; and its meta file,
-    /// last, as for any write: what it says is there. The terms before the meta file, so a run
-    /// that stops between the two writes both again.
+    /// when it has none and gets none here; the terms a search finds it by; what it counts for
+    /// among the server's posts and those of each of its hashtags (see `count_post`), which is
+    /// nothing while it is withheld; and its meta file, last, as for any write: what it says
+    /// is there. The terms and the counts before the meta file, so a run that stops between
+    /// them writes them all again.
     async fn rewrite(&self, row: &ContentRow, next: ContentMeta, reposted_at: &[i64]) -> Result<()> {
         let Deps {
             db,
@@ -1147,9 +1179,55 @@ impl<'a> Run<'a> {
             summaries.put(&summary_of(row.posted(), &next, &config.public_base_url, reposted_at)).await?;
         }
         index_content(db, &row.id, row.created_at, &next, max_keywords(self.deps)).await?;
+        count_post(db, &row.id, (!row.withheld()).then_some(next.tags.as_slice()), self.deps.now()).await?;
         content.put_meta(&next).await?;
         self.set_meta(&row.id, next);
         Ok(())
+    }
+
+    /// Has the content of the queue's rows counted for what it now is, among the server's
+    /// posts and those of each of its hashtags (see `count_post`): by its row as it is now,
+    /// and its meta file as this run left it.
+    ///
+    /// Whatever writes a meta file counts the post as it does, so most of these are found
+    /// counted already. This is for what changes whether a post counts and writes no meta
+    /// file: content that an admin accepted from the moderation queue, which queues its
+    /// entries and nothing else, and has its meta file from the run that applied the write
+    /// that was held. It is also what counts, the next time anything queues it, a post that
+    /// was there before posts were counted.
+    ///
+    /// Content set for deletion keeps what it has until it goes, and content with no meta
+    /// file yet is counted by the run that writes it. Content that can't be counted is
+    /// logged and left as it is: whatever writes it next counts it, and so does a reindex.
+    async fn count_queued(&self, queue: &[QueueRow]) -> Result<()> {
+        let Deps { db, log, .. } = self.deps;
+        let ids: Vec<String> = queue.iter().map(|row| &row.id).collect::<IndexSet<_>>().into_iter().cloned().collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let rows = content_rows(db, &ids).await?;
+        self.lease.check().await?;
+        map_limit(&ids, SMALL_WRITES, |id| {
+            let rows = &rows;
+            async move {
+                let Some(row) = rows.get(id).filter(|row| !row.deleting()) else {
+                    return Ok(());
+                };
+                let counting = async {
+                    let Some(meta) = self.meta(id).await? else { return Ok(()) };
+                    count_post(db, id, (!row.withheld()).then_some(meta.tags.as_slice()), self.deps.now()).await
+                }
+                .await;
+                if let Err(err) = counting {
+                    log.error(
+                        json!({ "err": log::err(&err), "contentId": id }),
+                        "could not count the content among the posts of the server and of its hashtags",
+                    );
+                }
+                Ok(())
+            }
+        })
+        .await
     }
 
     /// Takes off a piece of content the hashtags that removed reposts gave it (`places`, see

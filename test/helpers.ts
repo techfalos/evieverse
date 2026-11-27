@@ -140,6 +140,7 @@ export const TABLES = [
   'pending_writes_keyed',
   'feed_queue',
   'compactor_lease',
+  'server_counts',
   'tag_pairs',
   'tags',
   'content',
@@ -218,6 +219,8 @@ export async function createTestContext(
     urlhaus?: Partial<Config['urlhaus']>;
     /** Where the pdq trust plugin reads its list of hashes, and how it matches. No list, so the plugin is off, unless given. */
     pdq?: Partial<Config['pdq']>;
+    /** What the synthid trust plugin asks its detector with, and what it does with what the detector says. No key, so the plugin is off, unless given. */
+    synthid?: Partial<Config['synthid']>;
     /** Keeps the files that match the pdq plugin's list, in `quarantine/` in the test's directory: with true, or with how long a reported file is kept. Off unless asked for. */
     quarantine?: boolean | Pick<Config['quarantine'], 'retentionDays'>;
     /** Requests to /register from one address in an hour, of which a registration takes two. More than any test makes, unless given. */
@@ -325,6 +328,7 @@ export async function createTestContext(
     ...(opts.trust && { trust: opts.trust }),
     ...(opts.urlhaus && { urlhaus: opts.urlhaus }),
     ...(opts.pdq && { pdq: opts.pdq }),
+    ...(opts.synthid && { synthid: opts.synthid }),
     ...(opts.quarantine && { quarantine: { scheme: 'fs', options: { root: join(dir, 'quarantine') }, ...(opts.quarantine !== true && opts.quarantine) } }),
     registerRateLimitPerHour: opts.registerRateLimitPerHour ?? 1_000_000,
     postRateLimitPerMinute: opts.postRateLimitPerMinute ?? 0,
@@ -554,6 +558,8 @@ export type FeedItem = {
   aiGenerated: boolean;
   /** Whether the post takes comments. */
   comments: boolean;
+  /** How many comments the post has that are there to read. */
+  commentCount: number;
   /** The post's title, on one that has one, where the server's titles are on. */
   title?: string;
   preview: { kind: string; text?: string; url?: string; imageCount?: number; alt?: string[]; video?: { id: string; width: number; height: number; duration: number; poster: string; hls: string } };

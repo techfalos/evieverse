@@ -406,7 +406,7 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
       const { route, trustScore } = await moderateComment(
         { trust, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } },
         // Its image is given to the trust plugins that look at pictures, as a post's are (see trustImage). A video isn't.
-        { userId: user.id, contentId, text, filename: file?.filename, alt: file?.alt, ...(file?.kind === 'image' && { image: trustImage(file) }) },
+        { userId: user.id, contentId, text, filename: file?.filename, alt: file?.alt, ...(file?.kind === 'image' && { image: trustImage(file) }), aiGenerated: body.aiGenerated === true },
       );
       const held = route === 'queue';
       const attached = file;
@@ -521,7 +521,7 @@ export function commentWriteRoutes(app: FastifyInstance, deps: RouteDeps) {
 
     const { route, trustScore } = await moderateComment(
       { trust, now, log: req.log, client: { ip: req.ip, userAgent: req.headers['user-agent'] ?? null } },
-      { userId: user.id, contentId, text: body.text },
+      { userId: user.id, contentId, text: body.text, aiGenerated: body.aiGenerated ?? (comment.aiGenerated === true) },
     );
     const held = route === 'queue';
     // Whom the new text mentions: it goes on mentioning whom the text it replaces did (see resolveMentions).

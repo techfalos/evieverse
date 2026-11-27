@@ -93,18 +93,25 @@ function settled<T>(answer: Moderation<T>): T {
  * is of it to read is its text, the name of the image or video it comes with (`filename`) and
  * what describes that image (`alt`), as a post's caption, filename and alternative texts are;
  * `image` is the image it comes with, if it is one, as a post's
- * are given. Throws 422 for a comment whose score has it deleted: nothing of it is stored.
+ * are given, and `aiGenerated` whether its author declares that it was created with AI, which
+ * the plugins are told. Throws 422 for a comment whose score has it deleted: nothing of it is stored.
  *
  * That is all of it. A comment has no hashtags, so what a hashtag's moderators keep (its blocked
  * words, its mutes) doesn't reach the comments on posts under it: they have no say over comments.
  */
 export async function moderateComment(
   { trust, now = Date.now, log, client }: ModerationDeps,
-  comment: { userId: string; contentId: string; text: string; filename?: string | null; alt?: string; image?: TrustImage },
+  comment: { userId: string; contentId: string; text: string; filename?: string | null; alt?: string; image?: TrustImage; aiGenerated?: boolean },
 ): Promise<{ trustScore: number; route: Exclude<TrustRoute, 'delete'> }> {
   const [image] = await read(trust, [comment.image]);
   // Its text as its readers read it: without its formatting, with where its links lead (format.ts).
-  const sent = { userId: comment.userId, contentId: comment.contentId, texts: said([plainText(comment.text, true), comment.filename, comment.alt]), ...(image && { image }) };
+  const sent = {
+    userId: comment.userId,
+    contentId: comment.contentId,
+    texts: said([plainText(comment.text, true), comment.filename, comment.alt]),
+    ...(image && { image }),
+    ...(comment.aiGenerated && { aiGenerated: true }),
+  };
   return settled(await trust.ask('moderateComment', now(), { client, sent }, log));
 }
 
@@ -141,7 +148,8 @@ export async function moderateProfile(
 /**
  * Moderation of a new post, or of an update of `contentId`, by `userId` with `tags`. `texts` is what
  * there is of it to read: its text or caption, link, and filename. `images` is an image post's
- * images, for the plugins that look at pictures (see trustImage).
+ * images, for the plugins that look at pictures (see trustImage). `aiGenerated` is whether the
+ * post is declared as created with AI, which the plugins are told.
  *
  * The post is given a trust score by the trust plugins, each of which may lower it,
  * and the score says where the post goes (`config.trust` holds the thresholds). Throws
@@ -155,10 +163,17 @@ export async function moderateProfile(
  */
 export async function moderatePost(
   { trust, now = Date.now, log, client }: ModerationDeps,
-  post: { userId: string; contentId?: string; tags: string[]; texts: (string | null | undefined)[]; images?: TrustImage[] },
+  post: { userId: string; contentId?: string; tags: string[]; texts: (string | null | undefined)[]; images?: TrustImage[]; aiGenerated?: boolean },
 ): Promise<Moderated> {
   const images = await read(trust, post.images ?? []);
-  const sent = { userId: post.userId, contentId: post.contentId, tags: post.tags, texts: said(post.texts), ...(images.length && { images }) };
+  const sent = {
+    userId: post.userId,
+    contentId: post.contentId,
+    tags: post.tags,
+    texts: said(post.texts),
+    ...(images.length && { images }),
+    ...(post.aiGenerated && { aiGenerated: true }),
+  };
   return settled(await trust.ask('moderatePost', now(), { client, sent }, log));
 }
 

@@ -114,7 +114,7 @@ function decodePostCursor(cursor: string): { createdAt: number; id: string } {
  * PATCH /users/:userId, and the profile itself is GET /users/:userId (routes/register.ts).
  * Nothing of it is shown of a user who is banned.
  */
-export function profileRoutes(app: FastifyInstance, { db, config, content, summaries, trust, now = Date.now }: RouteDeps) {
+export function profileRoutes(app: FastifyInstance, { db, config, content, summaries, comments, trust, now = Date.now }: RouteDeps) {
   const { dialect } = config.db;
   /** The image an avatar is made of is held to what an image post's image is (see readPost), and to a size of its own. */
   const avatarLimits = { tmpPath: config.storage.tmpPath, maxUploadBytes: Math.min(config.storage.maxUploadBytes, MAX_AVATAR_BYTES) };
@@ -353,7 +353,8 @@ export function profileRoutes(app: FastifyInstance, { db, config, content, summa
   /**
    * The feed records of `rows`, which are posts of `publisher`'s, in their order: each as a feed
    * gives a post (see toFeedRecord), with its counts as the database has them now (see
-   * rowCounts), all of its likes among them, and with `publisher` as its credit, which says
+   * rowCounts), all of its likes among them, with how many comments it has (see
+   * CommentStore.liveCounts), and with `publisher` as its credit, which says
    * where their avatar is read (see creditOf). Each is shown with its summary, as in
    * a feed. A post older than summaries are kept (`feed.tagRetentionDays`) has none, and is shown
    * with the one its meta file makes. One with neither is left out: the compactor hasn't written
@@ -373,9 +374,10 @@ export function profileRoutes(app: FastifyInstance, { db, config, content, summa
         if (meta) shown[i] = summaryOf(row, meta, config.publicBaseUrl, config.postTitles);
       },
     );
+    const commentCounts = await comments.liveCounts(rows.map((row) => row.id));
     return rows.flatMap((row, i) => {
       const summary = shown[i];
-      return summary ? [toFeedRecord(summary, rowCounts(row, config.dislikes), publisher)] : [];
+      return summary ? [toFeedRecord(summary, rowCounts(row, config.dislikes), commentCounts[i]!, publisher)] : [];
     });
   }
 

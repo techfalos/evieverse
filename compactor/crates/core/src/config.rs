@@ -88,6 +88,11 @@ const ENV_MAP: &[(&str, &str)] = &[
     ("PDQ_MAX_DISTANCE", "pdq.maxDistance"),
     ("PDQ_MIN_QUALITY", "pdq.minQuality"),
     ("PDQ_REFRESH_MINUTES", "pdq.refreshMinutes"),
+    ("SYNTHID_API_KEY", "synthid.apiKey"),
+    ("SYNTHID_URL", "synthid.url"),
+    ("SYNTHID_ACTION", "synthid.action"),
+    ("SYNTHID_UNCHECKED", "synthid.unchecked"),
+    ("SYNTHID_ALLOW_DISCLOSED", "synthid.allowDisclosed"),
     ("QUARANTINE_SCHEME", "quarantine.scheme"),
     ("QUARANTINE_OPTIONS", "quarantine.options"),
     ("QUARANTINE_RETENTION_DAYS", "quarantine.retentionDays"),
@@ -323,6 +328,24 @@ pub struct PdqConfig {
     pub refresh_minutes: i64,
 }
 
+/// The settings of the synthid trust plugin.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SynthidConfig {
+    /// The API key the detector is asked with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// The detector's address: where each image is sent to be checked.
+    pub url: String,
+    /// What becomes of what has an image with a watermark: `hold` or `refuse`.
+    pub action: String,
+    /// What becomes of what has an image the detector couldn't check: `hold` or `allow`.
+    pub unchecked: String,
+    /// Whether a post or a comment its sender declares as created with AI is left as it is,
+    /// its images unchecked.
+    pub allow_disclosed: bool,
+}
+
 /// Where the files that matched the pdq plugin's list are kept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -384,6 +407,7 @@ pub struct Config {
     pub trust: TrustConfig,
     pub urlhaus: UrlhausConfig,
     pub pdq: PdqConfig,
+    pub synthid: SynthidConfig,
     pub quarantine: QuarantineConfig,
     pub comments: CommentsConfig,
     pub inbox: InboxConfig,
@@ -761,6 +785,21 @@ fn resolve(merged: &Value) -> Result<Config> {
             String::new()
         }
     };
+    let synthid_url = match r.at("synthid.url") {
+        None => "https://api.openai.com/v1/content_provenance_checks".to_owned(),
+        Some(Value::String(url)) => {
+            let url = url.trim().to_owned();
+            let scheme = url.get(..8).unwrap_or(&url).to_ascii_lowercase();
+            if !(scheme.starts_with("http://") || scheme.starts_with("https://")) || url::Url::parse(&url).is_err() {
+                r.refuse("synthid.url", "SYNTHID_URL is an http or https URL");
+            }
+            url
+        }
+        Some(_) => {
+            r.refuse("synthid.url", "expected a string");
+            String::new()
+        }
+    };
 
     // The audit log's store is not this side's to write, and is read for one thing: the quarantine may not share it.
     let audit = OptionalStoreConfig {
@@ -865,6 +904,13 @@ fn resolve(merged: &Value) -> Result<Config> {
             min_quality: r.int("pdq.minQuality", 50, 0, 100),
             refresh_minutes: r.int("pdq.refreshMinutes", 60, 1, MAX_SAFE_INTEGER),
         },
+        synthid: SynthidConfig {
+            api_key: r.optional("synthid.apiKey", true),
+            url: synthid_url,
+            action: r.one_of("synthid.action", &["hold", "refuse"], "hold"),
+            unchecked: r.one_of("synthid.unchecked", &["hold", "allow"], "hold"),
+            allow_disclosed: r.boolean("synthid.allowDisclosed", false),
+        },
         quarantine: QuarantineConfig {
             scheme: r.optional("quarantine.scheme", false),
             options: r.options("quarantine.options"),
@@ -911,6 +957,12 @@ fn resolve(merged: &Value) -> Result<Config> {
         r.refuse(
             "trust.allowFrom",
             "TRUST_OPTIONAL_PLUGINS turns on pdq, which needs TRUST_SCORE_ALLOW_FROM above 0: at 0 every post is published whatever its score, an image that matches the list too",
+        );
+    }
+    if config.runs_plugin("synthid") && config.synthid.api_key.is_none() {
+        r.refuse(
+            "synthid.apiKey",
+            "TRUST_OPTIONAL_PLUGINS turns on synthid, which needs SYNTHID_API_KEY: the API key of the detector it sends images to, which is OpenAI's unless SYNTHID_URL names another",
         );
     }
     if config.quarantine.scheme.is_some() {
@@ -1028,6 +1080,8 @@ mod tests {
         assert!(refused(&[redis, ("COMPACT_LEASE_SECONDS", "29")]).contains("compact.leaseSeconds"));
         assert!(refused(&[redis, ("DB_DIALECT", "oracle")]).contains("db.dialect"));
         assert!(refused(&[redis, ("TRUST_OPTIONAL_PLUGINS", "pdq")]).contains("PDQ_HASH_LIST"));
+        assert!(refused(&[redis, ("TRUST_OPTIONAL_PLUGINS", "synthid")]).contains("SYNTHID_API_KEY"));
+        assert!(refused(&[redis, ("SYNTHID_ACTION", "delete")]).contains("synthid.action"));
         assert!(refused(&[redis, ("QUARANTINE_SCHEME", "fs"), ("QUARANTINE_OPTIONS", r#"{"root":"./data/content/"}"#)]).contains("QUARANTINE_SCHEME"));
         assert!(refused(&[redis, ("REPOSTS_SIGNING_KEYS", "abc")]).contains("key 1 of REPOSTS_SIGNING_KEYS"));
         assert!(refused(&[redis, ("VIDEO_HEIGHTS", "100")]).contains("video.heights"));

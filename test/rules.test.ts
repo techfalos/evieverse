@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { DEFAULT_GEN_AI, DEFAULT_POST_TITLES, DEFAULT_SUPPORT_EMAIL, GEN_AI_SETTINGS, loadConfig, MAX_MINIMUM_AGE, POST_TITLES_SETTINGS } from '../src/config.js';
 import { loadLanguages } from '../src/language.js';
 import { setAdmin } from '../src/moderation/policy.js';
+import { POST_TYPES } from '../src/posts.js';
 import { RELEASE } from '../src/release.js';
 import { MAX_RULE_CHARS, MAX_RULES } from '../src/routes/rules.js';
 import { as, BASE_ENV, createTestContext, readAudit, TARGETS, type TestContext, type User } from './helpers.js';
@@ -22,6 +23,8 @@ const AS_RELEASED = { modified: false, release: RELEASE, sourceUrl: null };
 const ALL_AGES = 'All Legal Ages Allowed';
 /** What the tests' server does with post titles unless a test says otherwise (see createTestContext): not the server's default. */
 const TEST_TITLES = 'on_optional';
+/** The types of post a server says it takes where its operator turned none off, as every server does unless it is told otherwise: all five, in the order of POST_TYPES. */
+const ALL_TYPES = ['image', 'video', 'audio', 'text', 'link'];
 
 type Rule = { ruleId: string; position: number; text: string; createdAt: string; updatedAt: string };
 type Rules = {
@@ -30,6 +33,8 @@ type Rules = {
   minimumAge: number | string;
   genAi: string;
   postTitles: string;
+  postTypes: string[];
+  postCount: number;
   rules: Rule[];
 };
 
@@ -65,7 +70,7 @@ for (const target of TARGETS) {
 
     it('gives the rules and the modification disclosure to anyone, with a key or without', async () => {
       const { root, alice } = await setup();
-      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, postTypes: ALL_TYPES, postCount: 0, rules: [] });
 
       const at = now();
       const first = await add(root, '  Be kind.  ');
@@ -73,7 +78,7 @@ for (const target of TARGETS) {
       const second = await add(root, 'No spam.\nNot even a little.');
       expect(second).toMatchObject({ position: 2, text: 'No spam.\nNot even a little.' });
 
-      const expected = { modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, rules: [first, second] };
+      const expected = { modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, postTypes: ALL_TYPES, postCount: 0, rules: [first, second] };
       expect(await published()).toEqual(expected);
       expect(ok(await req(alice, 'GET', '/rules'))).toEqual(expected);
       // The body's credentials are as good as the headers', as on every route.
@@ -83,9 +88,9 @@ for (const target of TARGETS) {
     it('says it runs a modified version, the release that is based on and where its source is, on a server whose operator says so', async () => {
       const { root } = await setup({ modified: true, sourceUrl: SOURCE });
       const modificationDisclosure = { modified: true, release: RELEASE, sourceUrl: SOURCE };
-      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, postTypes: ALL_TYPES, postCount: 0, rules: [] });
       const rule = await add(root, 'Be kind.');
-      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, rules: [rule] });
+      expect(await published()).toEqual({ modificationDisclosure, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, postTypes: ALL_TYPES, postCount: 0, rules: [rule] });
       // No request changes it: not an admin's, and not one that names it.
       ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', modified: false, modificationDisclosure: AS_RELEASED }));
       expect((await published()).modificationDisclosure).toEqual(modificationDisclosure);
@@ -93,7 +98,7 @@ for (const target of TARGETS) {
 
     it('says where its source is on a server that runs a release, if its operator says', async () => {
       await setup({ sourceUrl: SOURCE });
-      expect(await published()).toEqual({ modificationDisclosure: { ...AS_RELEASED, sourceUrl: SOURCE }, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: { ...AS_RELEASED, sourceUrl: SOURCE }, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, postTypes: ALL_TYPES, postCount: 0, rules: [] });
     });
 
     it('gives the address to write to for support: the one its operator set, and a placeholder until they do', async () => {
@@ -120,7 +125,7 @@ for (const target of TARGETS) {
       expect(ok(await req(alice, 'GET', '/rules')).minimumAge).toBe(13);
       // It comes with the rest, and beside the rules, not among them.
       const rule = await add(root, 'Be kind.');
-      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: 13, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, rules: [rule] });
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: 13, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, postTypes: ALL_TYPES, postCount: 0, rules: [rule] });
       // No request changes it: not an admin's, and not one that names it.
       ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', minimumAge: 21 }));
       ok(await req(root, 'POST', '/rules', { text: 'Be older.', minimumAge: 21 }), 201);
@@ -161,7 +166,7 @@ for (const target of TARGETS) {
         expect(ok(await ctx.app.inject({ method: 'GET', url: '/rules', headers: { 'accept-language': 'es-MX' } })).genAi).toBe(genAi);
         // It comes with the rest, and beside the rules, not among them.
         const rule = await add(root, 'Be kind.');
-        expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi, postTitles: TEST_TITLES, rules: [rule] });
+        expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi, postTitles: TEST_TITLES, postTypes: ALL_TYPES, postCount: 0, rules: [rule] });
         // No request changes it: not an admin's, and not one that names it.
         ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', genAi: 'not_allowed' }));
         ok(await req(root, 'POST', '/rules', { text: 'Be human.', genAi: 'disclosure_optional' }), 201);
@@ -178,7 +183,7 @@ for (const target of TARGETS) {
         expect(ok(await ctx.app.inject({ method: 'GET', url: '/rules', headers: { 'accept-language': 'es-MX' } })).postTitles).toBe(postTitles);
         // It comes with the rest, and beside the rules, not among them.
         const rule = await add(root, 'Be kind.');
-        expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles, rules: [rule] });
+        expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles, postTypes: ALL_TYPES, postCount: 0, rules: [rule] });
         // No request changes it: not an admin's, and not one that names it.
         ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', postTitles: 'off' }));
         ok(await req(root, 'POST', '/rules', { text: 'Be brief.', postTitles: 'on_required' }), 201);
@@ -187,6 +192,38 @@ for (const target of TARGETS) {
       }
       // The last one stays open for the test's end to close.
       await setup();
+    });
+
+    it('says which types of post it takes: all five, or the ones its operator left on', async () => {
+      await setup();
+      expect((await published()).postTypes).toEqual(['image', 'video', 'audio', 'text', 'link']);
+      expect((await published()).postTypes).toEqual([...POST_TYPES]);
+      await ctx.close();
+
+      // A server of pictures and links.
+      const taken = ['image', 'link'];
+      const { root, alice } = await setup({ postTypes: { text: false, video: false, audio: false } });
+      expect((await published()).postTypes).toEqual(taken);
+      expect(ok(await req(alice, 'GET', '/rules')).postTypes).toEqual(taken);
+      // The types as a post names its own, whatever language the request asks for.
+      expect(ok(await ctx.app.inject({ method: 'GET', url: '/rules', headers: { 'accept-language': 'es-MX' } })).postTypes).toEqual(taken);
+      // It comes with the rest, and beside the rules, not among them.
+      const rule = await add(root, 'Be kind.');
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, postTypes: taken, postCount: 0, rules: [rule] });
+      // No request changes it: not an admin's, and not one that names it.
+      ok(await req(root, 'PATCH', `/rules/${rule.ruleId}`, { text: 'Be kinder.', postTypes: ['text'] }));
+      ok(await req(root, 'POST', '/rules', { text: 'Be seen.', postTypes: { video: true } }), 201);
+      expect((await published()).postTypes).toEqual(taken);
+
+      // They are the types POST /store goes by: a post of one that is left out is refused for its type, in words that list
+      // the same ones, and a post of one that is listed isn't. These have neither a file nor the fields of their type, so
+      // the ones that get past the type are refused for something else.
+      for (const type of POST_TYPES) {
+        const res = await req(alice, 'POST', '/store', { type, tags: ['news'] });
+        const typeOff = `this server doesn't take ${type} posts: the types it takes are ${taken.join(', ')}`;
+        if (taken.includes(type)) expect(res.json().error, type).not.toBe(typeOff);
+        else expect([res.statusCode, res.json().error], type).toEqual([400, typeOff]);
+      }
     });
 
     it('has only an admin add, change and remove rules', async () => {
@@ -277,7 +314,7 @@ for (const target of TARGETS) {
       expect(await add(root, 'E', 2)).toMatchObject({ position: 2 });
       expect(await texts()).toEqual(['A', 'E', 'C', 'D']);
       for (const rule of (await published()).rules) ok(await req(root, 'DELETE', `/rules/${rule.ruleId}`));
-      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, rules: [] });
+      expect(await published()).toEqual({ modificationDisclosure: AS_RELEASED, supportEmail: DEFAULT_SUPPORT_EMAIL, minimumAge: ALL_AGES, genAi: DEFAULT_GEN_AI, postTitles: TEST_TITLES, postTypes: ALL_TYPES, postCount: 0, rules: [] });
     });
 
     it(`has at most ${MAX_RULES} rules`, async () => {

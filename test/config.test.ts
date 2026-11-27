@@ -91,6 +91,11 @@ const EVERYTHING: Env = {
   PDQ_MAX_DISTANCE: '20',
   PDQ_MIN_QUALITY: '60',
   PDQ_REFRESH_MINUTES: '10',
+  SYNTHID_API_KEY: ' synthid-secret ',
+  SYNTHID_URL: ' https://detector.example/v1/checks ',
+  SYNTHID_ACTION: 'refuse',
+  SYNTHID_UNCHECKED: 'allow',
+  SYNTHID_ALLOW_DISCLOSED: 'yes',
   QUARANTINE_SCHEME: 's3',
   QUARANTINE_OPTIONS: '{"bucket":"quarantine","secret_access_key":"quarantine-secret"}',
   QUARANTINE_RETENTION_DAYS: '100',
@@ -104,7 +109,7 @@ const EVERYTHING: Env = {
 };
 
 /** The secrets among them: what the binary prints only when it is asked to. */
-const SECRETS = ['db-secret', 'redis-secret', 'content-secret', 'summary-secret', 'urlhaus-secret', 'pdq-secret', 'quarantine-secret', HEX_KEY, BASE64_KEY];
+const SECRETS = ['db-secret', 'redis-secret', 'content-secret', 'summary-secret', 'urlhaus-secret', 'pdq-secret', 'synthid-secret', 'quarantine-secret', HEX_KEY, BASE64_KEY];
 
 /** A configuration file, with settings in the types of JSON, and the forms a file can give them in. */
 const FILE: Json = {
@@ -129,7 +134,7 @@ const FILE: Json = {
 const BESIDE_FILE: Env = { COMPACT_INTERVAL_SECONDS: '3', COMPACT_GRACE_SECONDS: '', REDIS_KEY_PREFIX: '' };
 
 /** The settings the binary leaves out where they aren't set, which the API then has none of either. */
-const OPTIONAL = ['db.idleTimeoutMs', 'storage.summaries.scheme', 'storage.summaries.options', 'storage.tmpPath', 'urlhaus.authKey', 'pdq.hashList', 'pdq.authorization', 'quarantine.scheme', 'quarantine.options'];
+const OPTIONAL = ['db.idleTimeoutMs', 'storage.summaries.scheme', 'storage.summaries.options', 'storage.tmpPath', 'urlhaus.authKey', 'pdq.hashList', 'pdq.authorization', 'synthid.apiKey', 'quarantine.scheme', 'quarantine.options'];
 
 const isObject = (value: unknown): value is Json => typeof value === 'object' && value !== null && !Array.isArray(value);
 const at = (config: Json, path: string): unknown => path.split('.').reduce<unknown>((node, key) => (isObject(node) ? node[key] : undefined), config);
@@ -237,6 +242,10 @@ describe('the configuration the compactor resolves', () => {
     'pdq with no list': { TRUST_OPTIONAL_PLUGINS: 'pdq' },
     'pdq where every post is published': { TRUST_OPTIONAL_PLUGINS: 'pdq', PDQ_HASH_LIST: '/lists/pdq.txt', TRUST_SCORE_ALLOW_FROM: '0', TRUST_SCORE_DELETE_BELOW: '0' },
     'a distance past the hash': { PDQ_MAX_DISTANCE: '64' },
+    'synthid with no key': { TRUST_OPTIONAL_PLUGINS: 'synthid' },
+    'a detector that is no address': { SYNTHID_URL: 'detector.example/v1/checks' },
+    'a watermark done with what is none of the two': { SYNTHID_ACTION: 'delete' },
+    'an unchecked image done with what is none of the two': { SYNTHID_UNCHECKED: 'fail' },
     'a quarantine in the content store': { QUARANTINE_SCHEME: 'fs', QUARANTINE_OPTIONS: '{"root":"./data/content/"}' },
     'a quarantine in the store of summaries': { SUMMARY_SCHEME: 's3', SUMMARY_OPTIONS: '{"bucket":"b"}', QUARANTINE_SCHEME: 's3', QUARANTINE_OPTIONS: '{"bucket":"b"}' },
     'a quarantine in the audit log\'s store': { AUDIT_SCHEME: 's3', AUDIT_OPTIONS: '{"bucket":"b"}', QUARANTINE_SCHEME: 's3', QUARANTINE_OPTIONS: '{"bucket":"b"}' },

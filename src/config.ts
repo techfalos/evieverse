@@ -143,6 +143,11 @@ const ENV_MAP: Record<string, string> = {
   PDQ_MAX_DISTANCE: 'pdq.maxDistance',
   PDQ_MIN_QUALITY: 'pdq.minQuality',
   PDQ_REFRESH_MINUTES: 'pdq.refreshMinutes',
+  SYNTHID_API_KEY: 'synthid.apiKey',
+  SYNTHID_URL: 'synthid.url',
+  SYNTHID_ACTION: 'synthid.action',
+  SYNTHID_UNCHECKED: 'synthid.unchecked',
+  SYNTHID_ALLOW_DISCLOSED: 'synthid.allowDisclosed',
   QUARANTINE_SCHEME: 'quarantine.scheme',
   QUARANTINE_OPTIONS: 'quarantine.options',
   QUARANTINE_RETENTION_DAYS: 'quarantine.retentionDays',
@@ -182,6 +187,7 @@ const EMPTY_SECTIONS: Json = {
   trust: {},
   urlhaus: {},
   pdq: {},
+  synthid: {},
   quarantine: {},
   comments: {},
   inbox: {},
@@ -854,6 +860,48 @@ const ConfigSchema = z.object({
   }),
 
   /**
+   * The synthid trust plugin (compactor/crates/trust/src/plugins/synthid), which lowers the trust
+   * score of a post, a comment or a profile with an image that carries a SynthID watermark: the
+   * mark some generators of images put in what they make, which can't be seen and stays through
+   * most edits. It has each image checked by a detector, which it sends the image to. It is
+   * optional: these are read only where `trust.optionalPlugins` names synthid.
+   */
+  synthid: z.object({
+    /** The API key the detector is asked with. A server that runs the plugin needs one. */
+    apiKey: z.string().trim().min(1).optional(),
+    /**
+     * The detector's address, which each image is sent to as a form's `file` and which answers
+     * as OpenAI's Content Provenance API does. That API is the default: it finds the SynthID
+     * watermarks of images made with OpenAI's models, and of no other maker's.
+     */
+    url: z
+      .string()
+      .trim()
+      .refine((url) => /^https?:\/\//i.test(url) && URL.canParse(url), { message: 'SYNTHID_URL is an http or https URL' })
+      .default('https://api.openai.com/v1/content_provenance_checks'),
+    /**
+     * What becomes of what has an image with a watermark. `hold`: it gets a score just under
+     * `trust.allowFrom`, so a post or a comment waits in the moderation queue for a person, and a
+     * profile, which has no queue, is refused. `refuse`: it gets a score of 0.
+     */
+    action: z.enum(['hold', 'refuse']).default('hold'),
+    /**
+     * What becomes of what has an image the detector couldn't check: it couldn't be reached, it
+     * took no more requests, or it didn't read the file. `hold`: as an image with a watermark is
+     * held. `allow`: the image counts as one without a watermark, and the log is told.
+     */
+    unchecked: z.enum(['hold', 'allow']).default('hold'),
+    /**
+     * Whether a post or a comment its sender declares as created with AI (`aiGenerated`) is left
+     * as it is: the plugin lowers no score for it, and sends none of its images to the detector,
+     * which would find out nothing the sender didn't say. Off, a watermark counts the same with
+     * the declaration and without it. A profile's images have no declaration, and are checked
+     * either way.
+     */
+    allowDisclosed: bool(false),
+  }),
+
+  /**
    * The quarantine (src/quarantine.ts): where the server keeps the files that matched the pdq
    * plugin's list, each as it was read, for the report the operator may have to make of it and
    * for as long as the law has a reported file kept afterwards. It is a store of its own, which
@@ -972,6 +1020,9 @@ const ConfigSchema = z.object({
 }).refine((c) => !c.trust.optionalPlugins.includes('pdq') || c.trust.allowFrom > 0, {
   path: ['trust', 'allowFrom'],
   message: 'TRUST_OPTIONAL_PLUGINS turns on pdq, which needs TRUST_SCORE_ALLOW_FROM above 0: at 0 every post is published whatever its score, an image that matches the list too',
+}).refine((c) => !c.trust.optionalPlugins.includes('synthid') || c.synthid.apiKey !== undefined, {
+  path: ['synthid', 'apiKey'],
+  message: "TRUST_OPTIONAL_PLUGINS turns on synthid, which needs SYNTHID_API_KEY: the API key of the detector it sends images to, which is OpenAI's unless SYNTHID_URL names another",
 }).refine((c) => c.quarantine.scheme === undefined || sharedStore(c) === null, {
   path: ['quarantine', 'scheme'],
   message:

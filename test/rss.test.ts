@@ -15,6 +15,7 @@ const record = (over: Partial<FeedRecord> = {}): FeedRecord => ({
   mimeType: 'text/plain',
   aiGenerated: false,
   comments: false,
+  commentCount: 0,
   preview: { kind: 'text', text: 'hello' },
   tags: ['news'],
   likes: 0,

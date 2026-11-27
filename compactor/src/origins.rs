@@ -332,6 +332,7 @@ impl Origins {
             tags: own.chain(given.iter().cloned()).collect(),
             texts,
             images: vec![],
+            ai_generated,
         };
         let moderated = match moderate_post(&moderation, sent).await {
             Ok(moderated) => moderated,

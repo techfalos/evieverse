@@ -73,8 +73,8 @@ export const GROUPS = {
   feed: {
     database: false,
     // Only what hashtag feeds read is passed on: they never touch the database.
-    register: (app, { config, feedReader, authorReader, summaries, publishers, relatedTags, ads, now }) =>
-      feedRoutes(app, { config, feedReader, authorReader, summaries, publishers, relatedTags, ads, now }),
+    register: (app, { config, feedReader, authorReader, summaries, publishers, comments, relatedTags, ads, now }) =>
+      feedRoutes(app, { config, feedReader, authorReader, summaries, publishers, comments, relatedTags, ads, now }),
   },
   content: {
     database: true,

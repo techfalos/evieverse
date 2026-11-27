@@ -393,6 +393,8 @@ export function storeRoutes(app: FastifyInstance, { db, config, content, hot, wr
           texts: [title, post.type === 'link' ? post.url : post.text && plainText(post.text, true), ...filesOf(post).flatMap(({ filename, alt }) => [filename, alt])],
           // An image post's images, which a trust plugin that looks at pictures reads (see trustImage).
           ...(post.type === 'image' && { images: filesOf(post).map(trustImage) }),
+          // The declaration the post will have: the one it is sent with, or the content's own.
+          aiGenerated,
         },
       );
       const queued = moderated.route === 'queue';

@@ -1,14 +1,16 @@
-//! `compactor reindex`: makes every post and every user findable by GET /search. Run it once
-//! after upgrading a server that had posts before it had search, and once after the upgrade
-//! that moved the compactor to this program, which cuts the words of some languages
-//! differently than the one before it did: until then those posts are found by the words they
-//! were given then. It can be run while the server and the compactor are up, and run again:
-//! it changes only what isn't right yet.
+//! `compactor reindex`: makes every post and every user findable by GET /search, and counts
+//! every post among the server's and those of each of its hashtags (GET /rules, GET /tags).
+//! Run it once after upgrading a server that had posts before it had search, or before it
+//! counted them, and once after the upgrade that moved the compactor to this program, which
+//! cuts the words of some languages differently than the one before it did: until then those
+//! posts are found by the words they were given then. It can be run while the server and the
+//! compactor are up, and run again: it changes only what isn't right yet.
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use evieverse_core::counts::count_post;
 use evieverse_core::params;
 use evieverse_core::search::{fold_username, index_content};
 use evieverse_core::util::map_limit;
@@ -16,6 +18,7 @@ use serde::Serialize;
 
 use crate::deps::Deps;
 use crate::lease::Lease;
+use crate::rows::{CONTENT_COLUMNS, CONTENT_FROM, ContentRow};
 
 /// The posts, or the users, one step of a reindex reads and brings up to date.
 const BATCH: usize = 500;
@@ -26,10 +29,10 @@ const LEASE_RETRY: Duration = Duration::from_millis(1000);
 /// What a reindex did, or has done so far.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Reindexed {
-    /// The posts whose terms were brought up to their meta files.
+    /// The posts whose terms, and what they count for, were brought up to their meta files.
     pub posts: u64,
     /// The posts that have no meta file yet: the compactor hasn't applied them, and gives
-    /// them their terms when it does.
+    /// them their terms, and counts them, when it does.
     pub pending: u64,
     /// The users whose folded name was wrong, and is now right.
     pub usernames: u64,
@@ -41,7 +44,10 @@ pub struct Reindexed {
 /// beside a server and a compactor that are up: what is already right is read and left.
 ///
 /// The posts are gone through by id, `BATCH` at a time, and the terms of each are made by
-/// what the compactor makes them with (see `index_content`). Each batch is read and written
+/// what the compactor makes them with (see `index_content`). Each is counted by what a run
+/// counts it with, too (see `count_post`): among the server's posts and those of each of its
+/// hashtags, or not at all while it is withheld, which is what counts the posts that were
+/// there before posts were counted. Each batch is read and written
 /// under the compactor's lease (see `Lease`), which is waited for while a run holds it and
 /// given back after the batch: so no run writes a meta file while its post's terms are made
 /// from the one before, and a post isn't deleted under the rows written for it. Between two
@@ -72,26 +78,33 @@ pub async fn reindex(deps: &Deps, progress: &dyn Fn(Reindexed)) -> Result<Reinde
             // Read under the lease: none of these is deleted, nor its meta file written, until it is given back.
             let rows = db
                 .fetch(
-                    &format!("SELECT id, created_at FROM content WHERE id > ? ORDER BY id LIMIT {BATCH}"),
+                    &format!("SELECT {CONTENT_COLUMNS} FROM {CONTENT_FROM} WHERE content.id > ? ORDER BY content.id LIMIT {BATCH}"),
                     params![&after],
                 )
-                .await?;
+                .await?
+                .iter()
+                .map(ContentRow::of)
+                .collect::<Result<Vec<ContentRow>>>()?;
             map_limit(&rows, deps.concurrency(), |row| {
                 let (lease, posts, pending) = (&lease, &posts, &pending);
                 async move {
-                    let id = row.str("id")?;
+                    let id = row.id.as_str();
                     let Some(meta) = content.get_meta(id).await? else {
                         pending.set(pending.get() + 1);
                         return Ok(());
                     };
                     lease.check().await?;
-                    index_content(db, id, row.i64("created_at")?, &meta, max).await?;
+                    index_content(db, id, row.created_at, &meta, max).await?;
+                    // Content set for deletion keeps what it counts for until it goes, as a run leaves it.
+                    if !row.deleting() {
+                        count_post(db, id, (!row.withheld()).then_some(meta.tags.as_slice()), deps.now()).await?;
+                    }
                     posts.set(posts.get() + 1);
                     Ok(())
                 }
             })
             .await?;
-            let last = rows.last().map(|row| row.string("id")).transpose()?;
+            let last = rows.last().map(|row| row.id.clone());
             anyhow::Ok((rows.len() == BATCH, last))
         }
         .await;

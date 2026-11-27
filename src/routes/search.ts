@@ -75,7 +75,7 @@ function decodePostCursor(cursor: string): { createdAt: number; id: string } {
  * open one (see functions/groups.ts), and one address gets `search.rateLimitPerMinute` requests
  * a minute, and is refused past that (429) before anything is read for it (see app.ts).
  */
-export function searchRoutes(app: FastifyInstance, { db, config, content, summaries }: AppDeps) {
+export function searchRoutes(app: FastifyInstance, { db, config, content, summaries, comments }: AppDeps) {
   const { dialect } = config.db;
 
   /**
@@ -129,7 +129,8 @@ export function searchRoutes(app: FastifyInstance, { db, config, content, summar
   /**
    * The posts that have every word of `q`, newest first: `results`, each as a feed gives a post
    * (see toFeedRecord), with its counts as the database has them now (see rowCounts), all of its
-   * likes among them, and `nextCursor` if there are more. A word of `q`
+   * likes among them, and with how many comments it has (see CommentStore.liveCounts), and
+   * `nextCursor` if there are more. A word of `q`
    * is one of a post's if it is among the post's keywords, which are the most frequent words of
    * its text or caption, or is one of its hashtags (see keywordsOf and queryTerms): whole words,
    * whatever their case and accents.
@@ -189,10 +190,11 @@ export function searchRoutes(app: FastifyInstance, { db, config, content, summar
         if (meta) shown[i] = summaryOf(row, meta, config.publicBaseUrl, config.postTitles);
       },
     );
+    const commentCounts = await comments.liveCounts(rows.map((row) => row.id));
     const results: FeedRecord[] = rows.flatMap((row, i) => {
       const summary = shown[i];
       // Neither a summary nor a meta file: deleted since the rows were read.
-      return summary ? [toFeedRecord(summary, rowCounts(row, config.dislikes), { userId: row.user_id, username: row.username })] : [];
+      return summary ? [toFeedRecord(summary, rowCounts(row, config.dislikes), commentCounts[i]!, { userId: row.user_id, username: row.username })] : [];
     });
     return { results, nextCursor: found.length > limit && last ? encodeCursorJson([Number(last.created_at), last.id]) : null };
   }

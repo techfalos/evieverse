@@ -54,6 +54,13 @@ export interface TrustPost {
   profile?: true;
   /** True for a profile whose image (`images`) is its splash image. Absent for anything else: the image of any other profile is its avatar. */
   splash?: true;
+  /**
+   * True for a post or a comment that is declared as created with AI: by whoever sent it, an
+   * update's being the declaration the post will have, and for a repost of a post on another
+   * server, by the original's publisher. It is what was said, and nothing checked it. Absent
+   * for one that isn't, and for a profile, which has no such declaration.
+   */
+  aiGenerated?: true;
   /** The hashtags it was sent with, normalised, before moderation drops any. A comment has none, and neither has a profile. */
   tags: string[];
   /**

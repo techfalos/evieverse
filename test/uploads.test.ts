@@ -117,6 +117,8 @@ for (const target of TARGETS) {
         origin_gone_at: null,
         origin_check_at: null,
         seq: 1,
+        // What the compactor counted the post as, when it applied it: a post of the server's, and of its hashtag's.
+        counted_tags: 'clips',
       });
       expect(await meta(contentId)).toEqual({
         contentId,

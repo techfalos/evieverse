@@ -538,8 +538,8 @@ describe('the CLI', () => {
     await profile('alice', alice);
     const by = (name: string, ...args: string[]) => ran(...args, '--profile', name);
     const refused = (name: string, ...args: string[]) => cli([...args, '--profile', name]);
-    // What follows the rules: the minimum age, what the server says of generative AI, what it does with post titles, where to write for support, and the modification disclosure.
-    const MODIFIED = `Minimum age: 13\n\nGenerative AI: allowed, as long as content made with it says so\n\nPost titles: required: every post has one\n\nSupport: ${SUPPORT}\n\nModification disclosure: this server runs a modified version of Evieverse, based on release ${RELEASE}.\nIts source code: ${SOURCE}`;
+    // What follows the rules: the minimum age, what the server says of generative AI, what it does with post titles, the types of post it takes, how many posts it has, where to write for support, and the modification disclosure.
+    const MODIFIED = `Minimum age: 13\n\nGenerative AI: allowed, as long as content made with it says so\n\nPost titles: required: every post has one\n\nPost types: image, video, audio, text, link\n\nPosts: 0\n\nSupport: ${SUPPORT}\n\nModification disclosure: this server runs a modified version of Evieverse, based on release ${RELEASE}.\nIts source code: ${SOURCE}`;
     const ruleId = (out: string) => out.split(': ')[1]!;
 
     expect(await by('alice', 'rules', 'list')).toBe(`The server has no rules.\n\n${MODIFIED}`);
@@ -557,6 +557,7 @@ describe('the CLI', () => {
       minimumAge: 13,
       genAi: 'disclosure_required',
       postTitles: 'on_required',
+      postTypes: ['image', 'video', 'audio', 'text', 'link'],
       rules: [{ ruleId: first, position: 1 }, { ruleId: kind, position: 2, text: 'Be kind.' }, { ruleId: ruleId(spam), position: 3, text: 'No spam.\nNot even a little.' }],
     });
 
@@ -584,13 +585,13 @@ describe('the CLI', () => {
     expect(help).toMatch(/^  - rules update <ruleId> \[--text <text>\] \[--position <n>\] /m);
     expect(help).toMatch(/^  - rules remove <ruleId> /m);
 
-    // A server whose operator says nothing of the kind runs a release, names no source, has no minimum age, allows generative AI with no word needed of it, and gives the placeholder for a support address.
+    // A server whose operator says nothing of the kind runs a release, names no source, has no minimum age, allows generative AI with no word needed of it, takes every type of post, and gives the placeholder for a support address.
     // Its titles are optional, which is the tests' server's setting and not a server's default (see createTestContext).
     await ctx.close();
     ctx = await createTestContext(TARGETS[0]!);
     await profile('alice', await ctx.register('alice'));
     expect(await by('alice', 'rules', 'list')).toBe(
-      `The server has no rules.\n\nMinimum age: All Legal Ages Allowed\n\nGenerative AI: allowed, and saying that content was made with it is optional\n\nPost titles: optional: a post has one or not\n\nSupport: noreply@yoururl.com\n\nModification disclosure: this server runs Evieverse ${RELEASE}, unmodified.`,
+      `The server has no rules.\n\nMinimum age: All Legal Ages Allowed\n\nGenerative AI: allowed, and saying that content was made with it is optional\n\nPost titles: optional: a post has one or not\n\nPost types: image, video, audio, text, link\n\nPosts: 0\n\nSupport: noreply@yoururl.com\n\nModification disclosure: this server runs Evieverse ${RELEASE}, unmodified.`,
     );
     // And one that doesn't allow it says that.
     await ctx.close();
@@ -602,6 +603,11 @@ describe('the CLI', () => {
     ctx = await createTestContext(TARGETS[0]!, { postTitles: 'off' });
     await profile('alice', await ctx.register('alice'));
     expect(await by('alice', 'rules', 'list')).toContain('\n\nPost titles: off: posts have none\n\n');
+    // And one that takes only some types of post lists those.
+    await ctx.close();
+    ctx = await createTestContext(TARGETS[0]!, { postTypes: { video: false, audio: false, link: false } });
+    await profile('alice', await ctx.register('alice'));
+    expect(await by('alice', 'rules', 'list')).toContain('\n\nPost types: image, text\n\n');
   });
 
   it("claims a hashtag, ends a claimant's time and bars them from claiming as an admin, keeps a hashtag's rules as its moderator, and says why a hashtag is removed", async () => {

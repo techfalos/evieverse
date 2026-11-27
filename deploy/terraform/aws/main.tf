@@ -875,6 +875,11 @@ resource "aws_lambda_invocation" "migrate" {
       condition     = !contains(local.optional_plugins, "pdq") || trimspace(lookup(local.settings, "PDQ_HASH_LIST", "")) != ""
       error_message = "TRUST_OPTIONAL_PLUGINS turns on pdq, which needs PDQ_HASH_LIST in `environment` or `secrets`: the address of the list of PDQ hashes it matches images against. Without it no function and no compactor would start."
     }
+    # And for synthid and the key of the detector it sends images to.
+    precondition {
+      condition     = !contains(local.optional_plugins, "synthid") || trimspace(lookup(local.settings, "SYNTHID_API_KEY", "")) != ""
+      error_message = "TRUST_OPTIONAL_PLUGINS turns on synthid, which needs SYNTHID_API_KEY in `secrets`: the API key of the detector it sends images to, which is OpenAI's unless SYNTHID_URL names another. Without it no function and no compactor would start."
+    }
   }
 }
 

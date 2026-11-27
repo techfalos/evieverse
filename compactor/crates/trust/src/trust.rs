@@ -101,6 +101,12 @@ pub struct TrustPost {
     /// profile is its avatar.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub splash: bool,
+    /// True for a post or a comment that is declared as created with AI (`aiGenerated`): by
+    /// whoever sent it, an update's being the declaration the post will have, and for a repost
+    /// of a post on another server, by the original's publisher. It is what was said, and
+    /// nothing checked it. A profile has no such declaration.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ai_generated: bool,
     /// The hashtags it was sent with, normalised, before moderation drops any. A comment has
     /// none, and neither has a profile.
     #[serde(default)]
@@ -419,12 +425,31 @@ pub(crate) mod tests {
                     tokio::spawn(async move {
                         let mut request = vec![];
                         let mut chunk = [0_u8; 4096];
-                        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let head = loop {
+                            if let Some(at) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                                break at + 4;
+                            }
+                            match socket.read(&mut chunk).await {
+                                Ok(read) if read > 0 => request.extend_from_slice(&chunk[..read]),
+                                _ => return,
+                            }
+                        };
+                        // The body it says it has, which is read before it is answered: a file that is sent.
+                        let length = String::from_utf8_lossy(&request[..head])
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|length| length.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        while request.len() < head + length {
                             match socket.read(&mut chunk).await {
                                 Ok(read) if read > 0 => request.extend_from_slice(&chunk[..read]),
                                 _ => return,
                             }
                         }
+                        asked.lock().unwrap().push(String::from_utf8_lossy(&request).into_owned());
                         let (status, body) = answers.lock().unwrap().clone();
                         let head = format!(
                             "HTTP/1.1 {status} Said\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -433,7 +458,6 @@ pub(crate) mod tests {
                         let _ = socket.write_all(head.as_bytes()).await;
                         let _ = socket.write_all(&body).await;
                         let _ = socket.shutdown().await;
-                        asked.lock().unwrap().push(String::from_utf8_lossy(&request).into_owned());
                     });
                 }
             });
@@ -445,7 +469,8 @@ pub(crate) mod tests {
             *self.answer.lock().unwrap() = (status, body.as_bytes().to_vec());
         }
 
-        /// The requests it answered so far, each as it was sent: its first line and headers.
+        /// The requests it got so far, each as it was sent: its first line, its headers, and
+        /// its body if it has one.
         pub(crate) fn requests(&self) -> Vec<String> {
             self.requests.lock().unwrap().clone()
         }
@@ -554,10 +579,11 @@ pub(crate) mod tests {
         let own = load_trust_plugins(&[]).unwrap();
         assert_eq!(own.names(), ["blocked_words"]);
         assert!(!own.read_images());
-        let all = load_trust_plugins(&["urlhaus".to_owned(), "pdq".to_owned()]).unwrap();
+        let all = load_trust_plugins(&["urlhaus".to_owned(), "synthid".to_owned(), "pdq".to_owned()]).unwrap();
         // In the order of their folders' names, whatever order they were named in.
-        assert_eq!(all.names(), ["blocked_words", "pdq", "urlhaus"]);
+        assert_eq!(all.names(), ["blocked_words", "pdq", "synthid", "urlhaus"]);
         assert!(all.read_images());
+        assert!(load_trust_plugins(&["synthid".to_owned()]).unwrap().read_images());
         let err = load_trust_plugins(&["nope".to_owned()]).err().unwrap();
         assert!(err.to_string().contains("TRUST_OPTIONAL_PLUGINS names nope"), "{err}");
     }

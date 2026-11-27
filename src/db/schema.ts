@@ -186,6 +186,15 @@ export interface ContentTable {
    * taking back, take none.
    */
   seq: Generated<number>;
+  /**
+   * What the post is counted for, in the number of posts each hashtag has (`tags.post_count`) and
+   * the server has (`server_counts`): the compactor's to write, in the transaction that changes
+   * those counts, so it is what a run takes away again when the post changes or goes. Null while
+   * the post isn't counted: no run has applied it yet, or it is kept from readers (see
+   * `withheld`). Else the hashtags it is counted under, in the order of their names, with a space
+   * between each two; '' for a post that is counted and has no hashtag.
+   */
+  counted_tags: Generated<string | null>;
 }
 
 /**
@@ -370,6 +379,12 @@ export interface TagsTable {
   created_at: number;
   /** When a post was last published or updated under the tag, which /tags lists hashtags by. */
   last_appended_at: number;
+  /**
+   * How many posts carry the hashtag, which /tags gives with it and can list hashtags by: the
+   * posts that are counted for it (see `content.counted_tags`). The compactor's to write, as its
+   * runs write the posts, and nothing else's. Always 0 on a user's own index.
+   */
+  post_count: Generated<number>;
 }
 
 /**
@@ -673,6 +688,16 @@ export interface CompactorLeaseTable {
   expires_at: number;
 }
 
+/**
+ * One row ('server'): what the compactor counts of the server as a whole, as its runs write the
+ * posts. No request writes it.
+ */
+export interface ServerCountsTable {
+  id: string;
+  /** How many posts the server has, which GET /rules gives: the rows of `content` that are counted (see `content.counted_tags`). */
+  post_count: Generated<number>;
+}
+
 /** The database's tables by name, each with the type of its rows: what Kysely checks every query against (`Db`). */
 export interface Database {
   users: UsersTable;
@@ -708,6 +733,7 @@ export interface Database {
   server_rules: ServerRulesTable;
   monetization: MonetizationTable;
   search_terms: SearchTermsTable;
+  server_counts: ServerCountsTable;
 }
 
 export type ContentRow = Selectable<ContentTable>;

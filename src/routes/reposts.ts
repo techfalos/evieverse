@@ -323,7 +323,7 @@ export function repostRoutes(app: FastifyInstance, deps: RouteDeps) {
    */
   async function repostFrom(req: FastifyRequest, reply: FastifyReply, user: AuthUser, sent: AttestedPost, hash: string, tags: string[]) {
     const { mimeType, origin, title, preview, texts } = summarised(sent);
-    const moderated = await moderatePost({ trust, now, log: req.log }, { userId: user.id, tags, texts });
+    const moderated = await moderatePost({ trust, now, log: req.log }, { userId: user.id, tags, texts, aiGenerated: sent.aiGenerated });
     const queued = moderated.route === 'queue';
 
     const contentId = randomUUID();

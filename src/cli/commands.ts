@@ -704,11 +704,11 @@ export const COMMANDS: Command[] = [
     request: ({ positionals: [tag] }) => ({ method: 'GET', path: path`/tags/${tag!}/rules` }),
     text: (d) => (d.rules.length ? table(d.rules.map((r) => [String(r.position), r.ruleId, r.text.replace(/\s+/g, ' ').trim()])) : `#${d.tag} has no rules.`),
   }),
-  endpoint<{ modificationDisclosure: ModificationDisclosure; supportEmail: string; minimumAge: number | string; genAi: string; postTitles?: string; rules: RuleRecord[] }>({
+  endpoint<{ modificationDisclosure: ModificationDisclosure; supportEmail: string; minimumAge: number | string; genAi: string; postTitles?: string; postTypes?: string[]; postCount?: number; rules: RuleRecord[] }>({
     name: 'rules list',
     role: 'anyone',
     summary:
-      "Lists the server's rules, in their order, its minimum age, whether it allows content made with generative AI, whether its posts have titles, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is.",
+      "Lists the server's rules, in their order, its minimum age, whether it allows content made with generative AI, whether its posts have titles, the types of post it takes, how many posts it has, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version, which release, and where its source code is.",
     request: () => ({ method: 'GET', path: '/rules' }),
     text: (d) =>
       [
@@ -722,6 +722,10 @@ export const COMMANDS: Command[] = [
         '',
         // Likewise. A server from before posts had titles says nothing of them, and the line is left out.
         ...(d.postTitles === undefined ? [] : [`Post titles: ${POST_TITLES[d.postTitles] ?? d.postTitles}`, '']),
+        // The types as the server names them, which are what a post is sent with. A server from before it listed them leaves the line out too.
+        ...(d.postTypes === undefined ? [] : [`Post types: ${d.postTypes.join(', ')}`, '']),
+        // How many posts the server has, as its compactor last counted them. A server from before it counted them leaves the line out as well.
+        ...(d.postCount === undefined ? [] : [`Posts: ${d.postCount}`, '']),
         `Support: ${d.supportEmail}`,
         '',
         [

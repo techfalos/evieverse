@@ -1,5 +1,5 @@
 import type { FeedAd } from '../monetization.types.js';
-import type { Publisher, PublisherStore, Summary, SummaryStore } from '../storage/index.js';
+import type { CommentStore, Publisher, PublisherStore, Summary, SummaryStore } from '../storage/index.js';
 import { countsOf, toFeedRecord } from '../tagfeed/layout.js';
 import type { FeedRecord } from '../tagfeed/layout.types.js';
 import type { Candidate } from '../tagfeed/reader.types.js';
@@ -12,13 +12,15 @@ const refKey = (c: { contentId: string }) => c.contentId;
 
 /**
  * What a page's picked records are shown with: their summaries, by content id, and the credits of
- * their publishers (and of those who reposted them, in a following feed), by user id. `loadBodies`
- * makes it, and `renderFeed` and `followingRecords` read it. Content whose summary wasn't found
- * isn't in `summaries`.
+ * their publishers (and of those who reposted them, in a following feed), by user id, and how
+ * many comments each has, by content id. `loadBodies` makes it, and `renderFeed` and
+ * `followingRecords` read it. Content whose summary wasn't found isn't in `summaries`, nor in
+ * `commentCounts`.
  */
 interface FeedBodies {
   summaries: Map<string, Summary>;
   publishers: Map<string, Publisher>;
+  commentCounts: Map<string, number>;
 }
 
 /** Every record a tag feed's plan picked. */
@@ -26,9 +28,15 @@ export const planned = (plan: FeedPlan) => plan.picks.flat();
 
 /**
  * The summary of every picked record (one MGET for posts younger than the hot window, parallel
- * object-store reads for older ones) and its publisher's credit (one more MGET).
+ * object-store reads for older ones), its publisher's credit (one more MGET) and how many
+ * comments it has (another, made alongside: see `CommentStore.liveCounts`).
  */
-export async function loadBodies(picked: (Candidate & { by?: string })[], summaries: SummaryStore, publishers: PublisherStore): Promise<FeedBodies> {
+export async function loadBodies(
+  picked: (Candidate & { by?: string })[],
+  summaries: SummaryStore,
+  publishers: PublisherStore,
+  comments: CommentStore,
+): Promise<FeedBodies> {
   // Content picked twice (as its publisher's post and as a repost, say) has one summary, kept under the day of each entry.
   const refs = [...new Map(picked.map((c) => [refKey(c), c])).values()];
   const found = await summaries.getMany(refs);
@@ -36,16 +44,18 @@ export async function loadBodies(picked: (Candidate & { by?: string })[], summar
   refs.forEach((c, i) => {
     if (found[i]) byRef.set(refKey(c), found[i]!);
   });
-  return {
-    summaries: byRef,
-    publishers: await publishers.getMany([
+  const ids = [...byRef.keys()];
+  const [credits, counts] = await Promise.all([
+    publishers.getMany([
       ...new Set([
         ...[...byRef.values()].map((s) => s.userId),
         // And the credits of those who reposted them, where a following feed says who did.
         ...picked.flatMap((c) => (c.by !== undefined && byRef.has(refKey(c)) ? [c.by] : [])),
       ]),
     ]),
-  };
+    comments.liveCounts(ids),
+  ]);
+  return { summaries: byRef, publishers: credits, commentCounts: new Map(ids.map((id, i) => [id, counts[i]!])) };
 }
 
 /**
@@ -72,7 +82,14 @@ function shown(bodies: FeedBodies, c: Candidate, tag: string): Summary | undefin
  * entry's count of them or null (see `countsOf`).
  */
 const recordOf = (bodies: FeedBodies, c: Candidate, s: Summary, tag: string, dislikesOn: boolean): FeedRecord => ({
-  ...toFeedRecord(s, countsOf(c, dislikesOn), bodies.publishers.get(s.userId)!, c.moderated, c.repost ? { at: c.createdAt } : undefined),
+  ...toFeedRecord(
+    s,
+    countsOf(c, dislikesOn),
+    bodies.commentCounts.get(refKey(c)) ?? 0,
+    bodies.publishers.get(s.userId)!,
+    c.moderated,
+    c.repost ? { at: c.createdAt } : undefined,
+  ),
   listedUnder: tag,
 });
 
@@ -148,6 +165,7 @@ export function followingRecords(picks: FollowingPick[], bodies: FeedBodies, dis
       toFeedRecord(
         s,
         countsOf(c, dislikesOn),
+        bodies.commentCounts.get(refKey(c)) ?? 0,
         bodies.publishers.get(s.userId)!,
         undefined,
         c.repost ? { at: c.createdAt, by: c.by === undefined ? undefined : bodies.publishers.get(c.by) } : undefined,

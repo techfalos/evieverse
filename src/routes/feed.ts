@@ -105,7 +105,7 @@ function pageLimit(config: Config, requested: number | undefined): number {
  * it can be served by a function that opens none (see functions/groups.ts). The following feed
  * does, and is a route of its own (followingFeedRoutes).
  */
-export function feedRoutes(app: FastifyInstance, { config, feedReader, authorReader, summaries, publishers, relatedTags, ads, now = Date.now }: FeedDeps) {
+export function feedRoutes(app: FastifyInstance, { config, feedReader, authorReader, summaries, publishers, comments, relatedTags, ads, now = Date.now }: FeedDeps) {
   const { rateLimitPerMinute, maxConcurrent } = config.feed;
 
   /**
@@ -234,7 +234,7 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, authorRea
         led: cursor?.engaged?.led,
       },
     });
-    const bodies = await loadBodies(planned(plan), summaries, publishers);
+    const bodies = await loadBodies(planned(plan), summaries, publishers, comments);
 
     // The ads this page chooses from, in the page's own order of them (see orderAds): the session's
     // seed and the cursor the page was asked with tell it from every other page.
@@ -291,7 +291,7 @@ export function feedRoutes(app: FastifyInstance, { config, feedReader, authorRea
  * The following feed, which is served apart from the hashtag feeds (see functions/groups.ts): its
  * records say whose posts a user follows, so it reads the database to learn who may read it.
  */
-export function followingFeedRoutes(app: FastifyInstance, { db, config, authorReader, summaries, publishers, follows, now = Date.now }: AppDeps) {
+export function followingFeedRoutes(app: FastifyInstance, { db, config, authorReader, summaries, publishers, comments, follows, now = Date.now }: AppDeps) {
   /**
    * The posts of the users `userId` follows, newest first, reaching back up to maxLookbackDays. Read
    * from each followed publisher's own index; a user who follows nobody gets none.
@@ -326,7 +326,7 @@ export function followingFeedRoutes(app: FastifyInstance, { db, config, authorRe
       oldest: t - config.feed.maxLookbackDays * DAY,
     });
     const last = plan.picks.at(-1);
-    const bodies = await loadBodies(plan.picks, summaries, publishers);
+    const bodies = await loadBodies(plan.picks, summaries, publishers, comments);
     // Who is reading, where the request says: the user the check above looked up, or whoever the headers name. Not asked for an empty page.
     const reader = bodies.publishers.size > 0 ? (owner ?? (await readerOf(db, req))) : null;
     // Its keys are the page's publishers, and those who reposted what it shows.

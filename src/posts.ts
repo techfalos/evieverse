@@ -59,6 +59,13 @@ export const titleLine = (sent: string | undefined): string | undefined => sent?
 export const shownTitle = (of: { title?: string }, postTitles: PostTitles): { title: string } | undefined =>
   postTitles !== 'off' && of.title ? { title: of.title } : undefined;
 
+/**
+ * The types of post a server takes, of POST_TYPES and in their order: the ones its settings have
+ * on (`postTypes` of the configuration). What GET /rules gives as `postTypes`, and what a post of
+ * a type that is off is told.
+ */
+export const takenPostTypes = (postTypes: Record<PostType, boolean>): PostType[] => POST_TYPES.filter((type) => postTypes[type]);
+
 /** The post type of files of `mimeType`, if they can be posted. */
 export function mediaType(mimeType: string): MediaType | null {
   const type = mimeType.slice(0, mimeType.indexOf('/'));

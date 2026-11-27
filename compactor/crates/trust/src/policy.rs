@@ -111,6 +111,8 @@ pub struct CommentSent {
     pub texts: Vec<String>,
     /// The image it comes with, if it is one.
     pub image: Option<TrustImage>,
+    /// Whether its author declares that it was created with AI.
+    pub ai_generated: bool,
 }
 
 /// Moderation of a new comment, or of an edit of one. It goes through the gate a post does:
@@ -126,6 +128,7 @@ pub async fn moderate_comment(deps: &Moderation<'_>, comment: CommentSent) -> Re
         comment_on: Some(comment.content_id),
         texts: comment.texts.into_iter().filter(|text| !text.is_empty()).collect(),
         images: comment.image.into_iter().collect(),
+        ai_generated: comment.ai_generated,
         ..TrustPost::default()
     };
     let trust = trust_of(deps.plugins, &post, &deps.ctx()).await?;
@@ -183,6 +186,9 @@ pub struct PostSent {
     pub texts: Vec<String>,
     /// An image post's images.
     pub images: Vec<TrustImage>,
+    /// Whether the post is declared as created with AI: as it is sent, or for an update that
+    /// doesn't say, as the content is.
+    pub ai_generated: bool,
 }
 
 /// Moderation of a new post, or of an update.
@@ -204,6 +210,7 @@ pub async fn moderate_post(deps: &Moderation<'_>, post: PostSent) -> Result<Mode
         tags: post.tags.clone(),
         texts: texts.clone(),
         images: post.images,
+        ai_generated: post.ai_generated,
         ..TrustPost::default()
     };
     let ctx = deps.ctx();
@@ -595,6 +602,7 @@ mod tests {
             content_id: "p1".into(),
             texts: strings(&[text]),
             image: None,
+            ai_generated: false,
         };
         assert_eq!(moderate_comment(&deps, comment("fine")).await.unwrap(), (100, TrustRoute::Allow));
         // Held, where nothing is deleted on arrival.

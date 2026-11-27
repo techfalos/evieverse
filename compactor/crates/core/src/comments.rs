@@ -18,6 +18,13 @@
 //! published comment; `cmt:<commentId>` a comment's JSON; `cmtl:<commentId>` the number of its
 //! likes. All expire `hot_ms` after they were written.
 //!
+//! `cmtn:<postId>` is how many comments the post has, which is what feeds give with it: the
+//! published ones that are there to read, and no placeholder. It is no cache, and never
+//! expires: a write that publishes a comment adds one to it, and one that takes a published
+//! comment away takes one from it. It is counted from the store, which reads every comment of
+//! the post, only where Redis has no number or may have a wrong one (see
+//! `CommentStore::counting`), and for every post when Redis is rebuilt.
+//!
 //! Only the compactor writes any of it, as it applies the writes requests committed: `put`,
 //! `publish`, `hold`, `add_like`, `remove_like`, `remove` and `remove_all` are its own. The
 //! pages and counts of likes that requests read (src/storage/commentStore.ts) have no part here.
@@ -45,6 +52,11 @@ const MARK: &[u8] = b"1";
 const COMPLETE: &str = "~";
 /// What `cmtlm:<commentId>` begins with while the comment's likes are being made.
 const MAKING: &str = "making:";
+/// What `cmtnc:<postId>` holds while writes that may change the post's number of comments are
+/// being made.
+const COUNTING: &str = "1";
+/// How many of a post's comments one read asks Redis for, of a count that reads them all.
+const COUNT_BATCH: usize = 1000;
 /// How many characters of a comment's id name the part of a user's index its mark is in. A
 /// comment's id starts with the time it was sent at, so a part holds some three days.
 const SPAN_CHARS: usize = 5;
@@ -203,11 +215,24 @@ pub fn comment_likes_key(comment_id: &str) -> String {
 pub fn comment_likes_made_key(comment_id: &str) -> String {
     format!("cmtlm:{comment_id}")
 }
+/// How many comments a post has: the published ones, without the placeholders.
+pub fn comment_count_key(post_id: &str) -> String {
+    format!("cmtn:{post_id}")
+}
+/// There while writes that may change a post's number of comments are being made, and after a
+/// run that stopped before they were over (see `CommentStore::counting`).
+pub fn comment_counting_key(post_id: &str) -> String {
+    format!("cmtnc:{post_id}")
+}
 
 /// A comment in its post's index: the id of the comment it replies to (nothing, for a comment
 /// on the post itself), a colon, and its own id.
 fn member(parent_id: Option<&str>, comment_id: &str) -> String {
     format!("{}:{comment_id}", parent_id.unwrap_or_default())
+}
+/// The id of the comment a member of a post's index is of: what follows its colon.
+fn id_of(m: &str) -> &str {
+    m.split_once(':').map_or(m, |(_, id)| id)
 }
 /// The bounds of the members that reply to a comment, or without one, of those on the post
 /// itself: ';' is what follows ':'.
@@ -427,6 +452,10 @@ impl CommentStore {
         }
         // It has no likes yet, which saves its first readers the list that would say so.
         let _ = self.hot.set_if_absent(&comment_likes_key(comment_id), b"0", self.hot_ms).await;
+        // One more comment of its post; a placeholder that is put is none.
+        if comment.gone.is_none() {
+            self.adjust(post_id, 1).await?;
+        }
         Ok(())
     }
 
@@ -434,17 +463,26 @@ impl CommentStore {
     /// the post's published comments are, over the placeholder an edit left there, and into
     /// the index. One that stops half way has published the comment or not, and has lost
     /// nothing: calling it again completes it.
+    ///
+    /// It is one more comment of its post, unless it is published over itself: an edit of a
+    /// comment that is there to read, or a call made again.
     pub async fn publish(&self, comment: &Comment) -> Result<()> {
         let shown = || fields!({ "comment": comment });
         self.probes.call("comments.publish", shown, self.publish_now(comment)).await
     }
 
     async fn publish_now(&self, comment: &Comment) -> Result<()> {
+        let (post_id, comment_id) = (&comment.content_id, &comment.comment_id);
+        let there = self.get(post_id, comment_id).await?.is_some();
         // It has its mark already, unless it is older than the index and still waits for its own.
         self.sign(comment).await?;
         self.store(comment).await?;
         self.index(comment).await?;
-        self.objects.delete(&held_comment_object_key(&comment.content_id, &comment.comment_id)).await
+        self.objects.delete(&held_comment_object_key(post_id, comment_id)).await?;
+        if !there && comment.gone.is_none() {
+            self.adjust(post_id, 1).await?;
+        }
+        Ok(())
     }
 
     /// Takes a published comment back to where comments wait in the moderation queue, as it is
@@ -452,16 +490,23 @@ impl CommentStore {
     /// store and in Redis. Redis first, so that no reader finds the comment there once the
     /// store says it waits. If the store then can't be written, Redis is left nothing of the
     /// comment, to be read from the store again, where it still is.
+    ///
+    /// It is one comment fewer of its post, if it was there to read: not one whose place a
+    /// placeholder had already.
     pub async fn hold(&self, comment: &Comment) -> Result<()> {
         let (post_id, comment_id) = (&comment.content_id, &comment.comment_id);
+        let there = self.get(post_id, comment_id).await?.is_some();
         let left = placeholder(comment, Gone::Held);
         self.sign(comment).await?;
         self.write(&held_comment_object_key(post_id, comment_id), comment).await?;
         self.hot.set(&comment_key(comment_id), &json(&left)?, Some(self.hot_ms)).await?;
-        match self.write(&comment_object_key(post_id, comment_id), &left).await {
-            Ok(()) => Ok(()),
-            Err(err) => Err(self.forget(comment_id, err).await),
+        if let Err(err) = self.write(&comment_object_key(post_id, comment_id), &left).await {
+            return Err(self.forget(comment_id, err).await);
         }
+        if there {
+            self.adjust(post_id, -1).await?;
+        }
+        Ok(())
     }
 
     /// Takes what Redis has of a comment out of it, after a write to the store that failed,
@@ -495,6 +540,12 @@ impl CommentStore {
     /// Redis, and from the store those it doesn't have, which are then kept there. None for
     /// one that is gone.
     pub async fn load(&self, post_id: &str, ids: &[String]) -> Result<Vec<Option<Comment>>> {
+        self.read(post_id, ids, true).await
+    }
+
+    /// What `load` gives, and with `keep` false, without keeping in Redis what was read from
+    /// the store: for a count of every comment of a post, most of which nobody may read again.
+    async fn read(&self, post_id: &str, ids: &[String], keep: bool) -> Result<Vec<Option<Comment>>> {
         if ids.is_empty() {
             return Ok(vec![]);
         }
@@ -509,7 +560,9 @@ impl CommentStore {
                             return Ok(None);
                         };
                         // Only where Redis has nothing, so a comment read just before it was deleted never replaces what its deletion left there.
-                        let _ = self.hot.set_if_absent(&comment_key(id), &blob, self.hot_ms).await;
+                        if keep {
+                            let _ = self.hot.set_if_absent(&comment_key(id), &blob, self.hot_ms).await;
+                        }
                         blob
                     }
                 };
@@ -606,6 +659,67 @@ impl CommentStore {
         self.counts(post_id, &ranges).await
     }
 
+    /// Adds `by` to the post's number of comments, which takes from it if it is negative,
+    /// where Redis has the number. One it doesn't have is left missing, and counted from the
+    /// store once the post's writes are over (see `counted`): a count made while they are
+    /// under way could miss one of them, or have it twice.
+    async fn adjust(&self, post_id: &str, by: i64) -> Result<()> {
+        self.hot.bump(&comment_count_key(post_id), by).await?;
+        Ok(())
+    }
+
+    /// Says that writes which may change how many comments the post has are about to be made,
+    /// until `counted` is called: the puts and the removals of a run. Returns whether that was
+    /// said already, by a run that stopped before its writes were over. The number Redis has
+    /// may then lack what one of them did: a write changes the store first and the number
+    /// after, and made again, finds the store as it left it and has nothing to add.
+    pub async fn counting(&self, post_id: &str) -> Result<bool> {
+        let said = self.hot.swap(&comment_counting_key(post_id), None, Some(COUNTING), None).await?;
+        Ok(!said)
+    }
+
+    /// Ends what `counting` began, once the writes it was called before are over, and none is
+    /// under way. With `recount`, the post's number of comments is counted from the store:
+    /// one of the writes failed, or `counting` found that an earlier run had stopped. So is a
+    /// number Redis doesn't have: the post's first comments, or what a Redis that lost data is
+    /// missing. If the count can't be made, what `counting` said stays said, for the next run.
+    pub async fn counted(&self, post_id: &str, recount: bool) -> Result<()> {
+        if recount || self.hot.get(&comment_count_key(post_id)).await?.is_none() {
+            self.recount(post_id).await?;
+        }
+        self.hot.del(&[comment_counting_key(post_id)]).await
+    }
+
+    /// Counts the post's comments from the store, and has Redis hold the number: the
+    /// published ones, without the placeholders, which only what a comment's object holds
+    /// tells apart. So it lists the post's comments and reads each, from Redis where it is
+    /// there. Not to be called while a write of the post's comments is under way.
+    pub async fn recount(&self, post_id: &str) -> Result<i64> {
+        let ids: Vec<String> = self.list(post_id).await?.iter().map(|m| id_of(m).to_owned()).collect();
+        let mut live = 0;
+        for batch in ids.chunks(COUNT_BATCH) {
+            let comments = self.read(post_id, batch, false).await?;
+            live += comments.iter().flatten().filter(|comment| comment.gone.is_none()).count();
+        }
+        let live = i64::try_from(live).unwrap_or(i64::MAX);
+        self.hot.set(&comment_count_key(post_id), live.to_string().as_bytes(), None).await?;
+        Ok(live)
+    }
+
+    /// The posts that have anything under their comments, in the order of their ids.
+    pub async fn posts(&self) -> Result<Vec<String>> {
+        let mut posts: Vec<String> = self
+            .objects
+            .names(COMMENTS_DIR, false)
+            .await?
+            .iter()
+            .filter_map(|name| name.strip_suffix('/').filter(|id| is_id(id)))
+            .map(str::to_owned)
+            .collect();
+        posts.sort();
+        Ok(posts)
+    }
+
     /// Whether the store has the user's like of the comment: one that was applied, and not
     /// taken back since.
     pub async fn liked(&self, post_id: &str, comment_id: &str, user_id: &str) -> Result<bool> {
@@ -688,18 +802,22 @@ impl CommentStore {
     /// place of the comment's JSON. An empty value says the comment is gone to whoever still
     /// finds it in the index. If the store then can't be written, Redis is left nothing of the
     /// comment, to be read from the store again: a removal that failed can be made again.
+    ///
+    /// It is one comment fewer of its post, if it was there to read: not one that waited, nor
+    /// one whose place a placeholder had already.
     pub async fn remove(&self, post_id: &str, comment_id: &str, removal: Removal) -> Result<()> {
         let shown = || fields!({ "postId": post_id, "commentId": comment_id });
         self.probes.call("comments.remove", shown, self.remove_now(post_id, comment_id, removal)).await
     }
 
     async fn remove_now(&self, post_id: &str, comment_id: &str, removal: Removal) -> Result<()> {
-        let was = match removal.comment {
-            Some(comment) => Some(comment),
-            None => match self.find(post_id, comment_id).await? {
-                Some(found) => Some(found),
-                None => self.get_held(post_id, comment_id).await?,
-            },
+        // What is where the post's published comments are, whatever the caller read: that is what is counted.
+        let there = self.find(post_id, comment_id).await?;
+        let live = there.as_ref().is_some_and(|found| found.gone.is_none());
+        let was = match (removal.comment, there) {
+            (Some(comment), _) => Some(comment),
+            (None, Some(found)) => Some(found),
+            (None, None) => self.get_held(post_id, comment_id).await?,
         };
         let left = was.as_ref().filter(|_| removal.keep_place).map(|was| placeholder(was, Gone::Deleted));
         let key = comment_index_key(post_id);
@@ -732,18 +850,25 @@ impl CommentStore {
         if left.is_none() {
             self.hot.lex_rem(&key, &[member(parent_id, comment_id)]).await?;
         }
-        self.hot.del(&[comment_likes_key(comment_id)]).await
+        self.hot.del(&[comment_likes_key(comment_id)]).await?;
+        if live {
+            self.adjust(post_id, -1).await?;
+        }
+        Ok(())
     }
 
     /// Removes every comment of a post, published and held, their likes, their images and
-    /// videos, and its index: the post is being deleted. What Redis has of each expires. Their
-    /// marks in users' indexes go first, while the comments and likes are there to say whose
-    /// they are, so a removal that stops is made again from what is left.
+    /// videos, its index and its number of comments: the post is being deleted. What Redis
+    /// has of each comment expires. Their marks in users' indexes go first, while the comments
+    /// and likes are there to say whose they are, so a removal that stops is made again from
+    /// what is left.
     pub async fn remove_all(&self, post_id: &str) -> Result<()> {
         let marks = self.marks_of(post_id).await?;
         self.delete_all(marks).await?;
         self.objects.remove_all(&comment_dir(post_id)).await?;
-        self.hot.del(&[comment_index_key(post_id)]).await
+        self.hot
+            .del(&[comment_index_key(post_id), comment_count_key(post_id), comment_counting_key(post_id)])
+            .await
     }
 
     /// Whether users' indexes hold everything: every comment and like in the store has its mark.
@@ -767,16 +892,7 @@ impl CommentStore {
             .await?
             .map(|blob| String::from_utf8_lossy(&blob).into_owned())
             .unwrap_or_default();
-        let mut posts: Vec<String> = self
-            .objects
-            .names(COMMENTS_DIR, false)
-            .await?
-            .iter()
-            .filter_map(|name| name.strip_suffix('/').filter(|id| is_id(id)))
-            .filter(|post_id| *post_id > last.as_str())
-            .map(str::to_owned)
-            .collect();
-        posts.sort();
+        let posts: Vec<String> = self.posts().await?.into_iter().filter(|post_id| post_id.as_str() > last.as_str()).collect();
         for (i, post_id) in posts.iter().enumerate() {
             if stopped() {
                 if i > 0 {

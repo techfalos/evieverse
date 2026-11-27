@@ -2,13 +2,14 @@
 
 A trust plugin is an algorithm that looks at a post and may lower its trust score, which [decides where the post goes](API.md#moderation). Each folder of `compactor/crates/trust/src/plugins` is one plugin, named after the folder and written in Rust. New posts and comments pass through all trust algorithms the server runs: every plugin it was built with, except the [optional ones](#optional-plugins) it didn't turn on. So does what a user puts on their [profile](#profiles): a bio, links and an avatar.
 
-The base instance comes with three:
+The base instance comes with four:
 
 | Plugin | Runs | What it does |
 | --- | --- | --- |
 | `blocked_words` | Always | Gives a post, a comment or a profile with a word or phrase on the server's list of blocked words a score of 0. |
 | `urlhaus` | Only if turned on: it's [optional](#optional-plugins) | Gives a post, a comment or a profile with a link on [URLhaus](https://urlhaus.abuse.ch)'s list of malware URLs a score of 0. See [Links that spread malware](#links-that-spread-malware). |
 | `pdq` | Only if turned on: it's [optional](#optional-plugins) | Gives a post or a comment with an image, or an avatar, whose [PDQ](https://github.com/facebook/ThreatExchange/tree/main/pdq) hash is on the server's list of hashes of known child sexual abuse material a score of 0, and tells the server's admins. Where the server processes videos, a video is checked against the same list before it's published, and where the server has a quarantine, the file that matched is kept there. See [Images of known child sexual abuse material](#images-of-known-child-sexual-abuse-material). |
+| `synthid` | Only if turned on: it's [optional](#optional-plugins) | Gives a post or a comment with an image that carries a SynthID watermark, which says the image was made with AI, a score just under the one that publishes, so it waits for a moderator, or a score of 0 where the server says so. An avatar with one is refused. Each image is sent to a detector outside the server to be checked. See [Images made with AI](#images-made-with-ai). |
 
 ## Adding a plugin
 
@@ -161,12 +162,12 @@ What a user puts on their [profile](API.md#a-users-profile) is scored as a post 
 - A profile has no moderation queue. A score of `TRUST_SCORE_ALLOW_FROM` or more saves it, and anything less refuses it with `422`: what would hold a post refuses a profile, on a server that deletes nothing on arrival too.
 - Only what the request sets is scored. A request that sets a bio is scored on the bio, not on the links and the avatar the user already has. Taking something away isn't scored.
 - The avatar is the image as the user sent it, without its metadata. The server makes the avatar it stores of that image afterwards: a square of 400 pixels a side, as WebP.
-- A plugin written for posts sees profiles too. One whose rule is about posts returns early for them, as the examples above do. A `reason` is sent as the plugin wrote it, so one that scores profiles gives them a reason that fits: the three plugins here say "so it wasn't saved" where a post's reason says "so it wasn't published".
+- A plugin written for posts sees profiles too. One whose rule is about posts returns early for them, as the examples above do. A `reason` is sent as the plugin wrote it, so one that scores profiles gives them a reason that fits: the plugins here say "so it wasn't saved" where a post's reason says "so it wasn't published".
 - A refusal with no `reason` gets the general message, "this server doesn't trust this enough to show it on a profile, so it wasn't saved".
 
 ## Links that spread malware
 
-`urlhaus` is one of the two optional plugins the server comes with. It checks every link of a post or a comment (a link post's URL, and the links written in a text, a caption or a comment) against the list of malware URLs that [URLhaus](https://urlhaus.abuse.ch) publishes, and gives a post with a listed link a score of 0. With the default thresholds that post is refused with `422`. A [profile](#profiles)'s links are checked the same way, with the links written in its bio.
+`urlhaus` is one of the three optional plugins the server comes with. It checks every link of a post or a comment (a link post's URL, and the links written in a text, a caption or a comment) against the list of malware URLs that [URLhaus](https://urlhaus.abuse.ch) publishes, and gives a post with a listed link a score of 0. With the default thresholds that post is refused with `422`. A [profile](#profiles)'s links are checked the same way, with the links written in its bio.
 
 To turn it on:
 
@@ -184,7 +185,7 @@ What to know about it:
 
 ## Images of known child sexual abuse material
 
-`pdq` is the other optional plugin. It hashes every image of an image post, the image a comment comes with, and the image a user sends as their avatar, using [PDQ](https://github.com/facebook/ThreatExchange/tree/main/pdq): the perceptual hash Meta published for finding copies of a known picture, which stays nearly the same when the picture is resized, compressed again or lightly edited. It looks the hash up in a list of hashes of known child sexual abuse material. A post or a comment with an image that matches, or an avatar that does, gets a score of 0, and every admin of the server is told, with what a report to the authorities is written from.
+`pdq` is the second optional plugin. It hashes every image of an image post, the image a comment comes with, and the image a user sends as their avatar, using [PDQ](https://github.com/facebook/ThreatExchange/tree/main/pdq): the perceptual hash Meta published for finding copies of a known picture, which stays nearly the same when the picture is resized, compressed again or lightly edited. It looks the hash up in a list of hashes of known child sexual abuse material. A post or a comment with an image that matches, or an avatar that does, gets a score of 0, and every admin of the server is told, with what a report to the authorities is written from.
 
 Two things go with it. Where the server processes videos, each video is checked against the same list before it's published ([Videos](#videos)). And where the server has a quarantine, which is off unless its operator sets one up, the file that matched is kept for the report and after it ([The quarantine](#the-quarantine)).
 
@@ -240,6 +241,35 @@ To turn it on, set `QUARANTINE_SCHEME` and `QUARANTINE_OPTIONS` ([configuration]
 - A file that can't be kept (a store that can't be reached, say) is logged as an error. The post is refused and the admins are told all the same, by a notice with no `quarantineId`.
 - An item outlives the account that sent the file, and is no part of that user's [export](API.md#get-usersuseridexport).
 
+## Images made with AI
+
+`synthid` is the third optional plugin. It checks every image of an image post, the image a comment comes with, and the image a user sends as their avatar for a SynthID watermark: the mark some generators of images put in what they make, which can't be seen, is part of the picture and not of the file's metadata, and stays through most edits. A post or a comment with an image that carries one waits for a moderator, or is refused where the server says so, and an avatar that carries one is refused.
+
+The server can't read the watermark itself, so it sends each image to a detector that can: by default OpenAI's [Content Provenance API](https://developers.openai.com/api/docs/guides/content-provenance). That one finds the watermarks of images made with OpenAI's models, and of no other maker's. Google, whose watermark SynthID is, has no detector a server can ask.
+
+To turn it on:
+
+1. Get an API key for the detector: for the default one, an OpenAI API key whose account has access to the Content Provenance API.
+2. Set `TRUST_OPTIONAL_PLUGINS=synthid` and `SYNTHID_API_KEY` to the key. A server that names `synthid` without a key doesn't start.
+3. Make sure the server can reach the detector over HTTPS: `api.openai.com`, unless `SYNTHID_URL` names another.
+4. Say so where your users are told what becomes of what they send: their images go to the detector.
+
+What to know about it:
+
+- What is sent is the image as the server would store it, which is without its metadata, in a form, with the key as a Bearer token. The file is named after its type (`image.png`), not as its sender named it, and nothing else of the post goes with it: not its text, and not who sent it. A redirect isn't followed, so an image goes to the address you named and no further.
+- What a watermark leads to is yours to say, with `SYNTHID_ACTION`. `hold`, which is the default, gives a score one under `TRUST_SCORE_ALLOW_FROM`: the post or comment is stored and waits in the moderation queue for a person to look at (`202`), or is refused where the two thresholds are the same and there is no queue. `refuse` gives a score of 0, which the default thresholds refuse with `422`. An avatar is refused either way, since a profile has no queue to wait in.
+- A watermark isn't proof, and neither is an image without one. That is why the default holds: the detector's makers ask that what is decided by its answer be looked at by a person.
+- Whoever sent the image is told why where it's refused: "an image of the post carries a watermark that says it was made with AI, so it wasn't published", for a comment "the comment's image carries a watermark that says it was made with AI, so it wasn't published", and for an avatar "the image carries a watermark that says it was made with AI, so it wasn't saved". The log has each watermark that was found, with the user, the image's name, type and SHA-256, and the model and time the detector gave, if it gave any. The admins get no notice.
+- An image the detector couldn't check is yours to say too, with `SYNTHID_UNCHECKED`: the detector couldn't be reached, took more than 15 seconds, refused the key, took no more requests, or didn't read the file. `hold`, the default, holds it as a watermark is held, whatever `SYNTHID_ACTION` says, so that no image is published unchecked. Where that refuses it, the reason is "an image of the post couldn't be checked for a watermark that says it was made with AI, so it wasn't published", with "the comment's image…" for a comment, and for an avatar "the image couldn't be checked for a watermark that says it was made with AI, so it wasn't saved". `allow` lets it through as an image without a watermark.
+- So with the defaults, while the detector is down or refuses the key, every image post and every comment with an image waits for a moderator, and no avatar can be set. The log has each image that wasn't checked, with the detector's status: as an error, or as a warning where the detector took no more requests. The key is in none of it. Unlike `urlhaus` and `pdq` without a list, the plugin doesn't fail a post with `500`.
+- The request that sent the image waits for the detector: up to 15 seconds an image. The images of an album are asked about four at a time, in their order, and the first watermark is the answer. An image isn't asked about a second time when the detector fails, and nothing is kept between two posts: the same image sent twice is asked about twice.
+- OpenAI limits how often this API is asked, and strictly. On a server with many image posts, count on images it couldn't check, and decide what `SYNTHID_UNCHECKED` should do with them.
+- What a sender declares of their own post ([`aiGenerated`](API.md#post-store)) changes nothing, unless you say it does, with `SYNTHID_ALLOW_DISCLOSED=true`: by default a watermark counts the same on a post declared as created with AI as on one that isn't. With it on, a post or a comment declared as created with AI is left as it is: the plugin lowers no score for it, whatever its images carry, and sends none of them to the detector, which would find out nothing the sender didn't say. What is held or refused is then an image with a watermark that comes without the declaration. What the server says of generative AI (`GEN_AI`) changes nothing either way.
+- With `SYNTHID_ALLOW_DISCLOSED=true`, an update that takes a post's declaration back is checked as a post without one is. A comment isn't: an edit keeps the comment's file, which isn't checked again, so a comment declared when it was sent stays unchecked if its author takes the declaration back. An avatar comes with no declaration, and is checked either way.
+- What it doesn't catch: an image made by a generator that leaves no SynthID watermark, or whose watermark the detector doesn't read, which with the default detector is every maker's but OpenAI's; an image whose watermark was worn away; text, a video and an audio file; an ad's image; a repost of a post on another server, whose image this server never holds; and the image of a comment that is edited, since an edit keeps the file. Images stored before the plugin was turned on aren't looked at again.
+- Another detector can stand in for the default one (`SYNTHID_URL`), if it takes the same request and answers as OpenAI's does: a `POST` whose form has the image as its `file`, answered with `{"results":[{"type":"synthid","outcome":"detected"}]}`, or `"not_detected"`. Any other answer counts as an image that couldn't be checked.
+- The process that runs the compactor sends no image: what it scores has none. It takes the same `TRUST_OPTIONAL_PLUGINS` as the server, though, and so needs `SYNTHID_API_KEY` to start.
+
 ## Parameters of `assess`
 
 `assess(&self, post, ctx)` is called with two structs, both of `crate::trust`.
@@ -252,6 +282,7 @@ To turn it on, set `QUARANTINE_SCHEME` and `QUARANTINE_OPTIONS` ([configuration]
 | `content_id` | `Option<String>` | Only there for an update: the id of the post being updated. `None` for a new post, for a comment and for a profile. |
 | `comment_on` | `Option<String>` | Only there for a comment: the id of the post the comment is on. `None` for a post and for a profile. |
 | `profile` | `bool` | `true` only for a profile: a bio, links or an avatar, whichever the request sets. `false` for a post and for a comment, so with `comment_on` it tells the three apart. |
+| `ai_generated` | `bool` | `true` for a post or a comment that is declared as created with AI ([`aiGenerated`](API.md#post-store)): by whoever sent it, an update's being the declaration the post will have, and for a repost of a post on another server, by the original's publisher. It's what was said, and nothing checked it. Always `false` for a profile. |
 | `tags` | `Vec<String>` | The hashtags the post was sent with, normalised, before moderation drops any. Always empty for a comment and for a profile. |
 | `texts` | `Vec<String>` | Everything there is to read. For a post: its text, caption or link, and its filename, or the filename of each image of an album, with each image's [alt text](API.md#alt-text). For a comment: its text, the name of its image or video, and its image's alt text. For a profile: the bio, each link, and the avatar's filename, whichever the request sets. Parts that are missing are left out. A text, a caption, a comment's text and a bio are as their readers read them: without their [formatting](TEXT_EDITORS.md), and with each link's address after its label, so `[here](https://example.com)` is `here https://example.com`. |
 | `images` | `Vec<TrustImage>` | The images of an image post, in their order, the one image a comment comes with, or the image a user sends as their avatar. Empty for anything else: a post of another type, a comment with a video or with no file, an edit of a comment (which keeps its file), a profile whose avatar isn't what's being set, and a repost of a post on another server. Also empty on a server none of whose plugins [reads images](#plugins-that-read-images). |

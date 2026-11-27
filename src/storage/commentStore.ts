@@ -23,6 +23,10 @@ const MAKING = 'making:';
 const LIKE_COUNTS = 3;
 /** How long the first of those counts waits for the next, in milliseconds; the second waits twice as long. */
 const LIKE_RECOUNT_MS = 25;
+/** What `cmtnc:<postId>` holds while writes that may change the post's number of comments are being made (see CommentStore.counting). */
+const COUNTING = '1';
+/** How many of a post's comments one read asks Redis for, of a count that reads them all (see CommentStore.recount). */
+const COUNT_BATCH = 1000;
 
 /**
  * What matches an id in an object's name, a comment's or a user's: 36 characters, each a lowercase
@@ -133,6 +137,10 @@ export const commentKey = (commentId: string) => `cmt:${commentId}`;
 export const commentLikesKey = (commentId: string) => `cmtl:${commentId}`;
 /** Which making of a comment's likes was the last, and whether it is still under way (see CommentStore.makingLikes). */
 export const commentLikesMadeKey = (commentId: string) => `cmtlm:${commentId}`;
+/** How many comments a post has: the published ones, without the placeholders (see CommentStore.liveCounts). */
+export const commentCountKey = (postId: string) => `cmtn:${postId}`;
+/** There while writes that may change a post's number of comments are being made, and after a run that stopped before they were over (see CommentStore.counting). */
+export const commentCountingKey = (postId: string) => `cmtnc:${postId}`;
 
 /**
  * A comment in its post's index: the id of the comment it replies to (nothing, for a comment on
@@ -217,6 +225,18 @@ function parse(blob: Buffer): Comment | null {
  * requests that count them with the likes that still wait (see makingLikes). One that is evicted
  * costs such a request its check, and nothing else.
  *
+ * `cmtn:<postId>` is no cache either: it is how many comments the post has, which is what feeds
+ * give with it (see liveCounts): the published ones that are there to read, and no placeholder.
+ * It never expires, so a feed reads it with the page's others in one MGET, and never from the
+ * store. A write that publishes a comment adds one to it, and one that takes a published
+ * comment away takes one from it (see adjust). Telling a placeholder from a comment takes
+ * reading it, so the number is counted from the store, which reads every comment of the post,
+ * only where that can't be helped (see recount): where Redis has no number, which is before a
+ * post's first comments are written and after a Redis that lost data; where a write failed, or a
+ * run was killed, between changing the store and changing the number (see counting); and for
+ * every post that has comments, when the compactor rebuilds what Redis holds (`--rebuild`). A
+ * post with no number has no comments, as far as a feed is told.
+ *
  * A comment that waits in the moderation queue is under `held/` instead, in no index and no cache,
  * until it is published (moved to where the others are) or removed.
  *
@@ -227,8 +247,8 @@ function parse(blob: Buffer): Comment | null {
  * until it is published again; a removed comment leaves one where its caller says so, which is
  * where something replies to it.
  *
- * Only the compactor writes any of it: `put`, `publish`, `hold`, `addLike`, `removeLike`, `remove`
- * and `removeAll` are its own, called as it applies the writes requests committed (`pending_writes`,
+ * Only the compactor writes any of it: `put`, `publish`, `hold`, `addLike`, `removeLike`, `remove`,
+ * `removeAll`, `counting`, `counted` and `recount` are its own, called as it applies the writes requests committed (`pending_writes`,
  * see applyPending): all the writes of one comment together, a reply after the comment it
  * replies to, and removals one after another. Different comments are written at once. So no two
  * writes of a comment's own objects are ever under way at once (its likes, which are an object
@@ -371,6 +391,8 @@ export class CommentStore {
     }
     // It has no likes yet, which saves its first readers the list that would say so.
     await this.hot.setIfAbsent(commentLikesKey(commentId), Buffer.from('0'), this.opts.hotMs).catch(() => {});
+    // One more comment of its post; a placeholder that is put is none.
+    if (!comment.gone) await this.adjust(postId, 1);
   }
 
   /**
@@ -379,13 +401,19 @@ export class CommentStore {
    * under the comment it replies to. One that stops half way has published the comment or not,
    * and has lost nothing: calling it again completes it. The replies a comment had when an edit of
    * it was held are still its replies.
+   *
+   * It is one more comment of its post, unless it is published over itself: an edit of a comment
+   * that is there to read, or a call made again.
    */
   async publish(comment: Comment): Promise<void> {
+    const { contentId: postId, commentId } = comment;
+    const there = (await this.get(postId, commentId)) !== null;
     // It has its mark already, unless it is older than the index and still waits for its own (see indexAuthors).
     await this.sign(comment);
     await this.store(comment);
     await this.index(comment);
-    await this.op.delete(heldCommentObjectKey(comment.contentId, comment.commentId));
+    await this.op.delete(heldCommentObjectKey(postId, commentId));
+    if (!there && !comment.gone) await this.adjust(postId, 1);
   }
 
   /**
@@ -398,14 +426,19 @@ export class CommentStore {
    * Redis first, so that no reader finds the comment there once the store says it waits. If the
    * store then can't be written, Redis is left nothing of the comment, to be read from the store
    * again, where it still is.
+   *
+   * It is one comment fewer of its post, if it was there to read: not one whose place a
+   * placeholder had already.
    */
   async hold(comment: Comment): Promise<void> {
     const { contentId: postId, commentId } = comment;
+    const there = (await this.get(postId, commentId)) !== null;
     const left = placeholder(comment, 'held');
     await this.sign(comment);
     await this.write(heldCommentObjectKey(postId, commentId), comment);
     await this.hot.set(commentKey(commentId), JSON.stringify(left), this.opts.hotMs);
     await this.write(commentObjectKey(postId, commentId), left).catch((err) => this.forget(commentId, err));
+    if (there) await this.adjust(postId, -1);
   }
 
   /** Takes what Redis has of a comment out of it, after a write to the store that failed, and throws that failure: Redis says nothing the store doesn't. */
@@ -449,8 +482,10 @@ export class CommentStore {
   /**
    * The post's published comments by id, placeholders among them, in the order given: from Redis,
    * and from the store those it doesn't have, which are then kept there. Null for one that is gone.
+   * With `keep` false, what was read from the store isn't kept in Redis: for a count of every
+   * comment of a post (see recount), most of which nobody may read again.
    */
-  private async load(postId: string, ids: string[]): Promise<(Comment | null)[]> {
+  private async load(postId: string, ids: string[], keep = true): Promise<(Comment | null)[]> {
     if (!ids.length) return [];
     const cached = await this.hot.mget(ids.map(commentKey));
     const out: (Comment | null)[] = ids.map(() => null);
@@ -463,7 +498,7 @@ export class CommentStore {
         if (!blob) {
           blob = await readObject(this.op, commentObjectKey(postId, id));
           // Only where Redis has nothing, so a comment read just before it was deleted never replaces what its deletion left there.
-          if (blob) await this.hot.setIfAbsent(commentKey(id), blob, this.opts.hotMs).catch(() => {});
+          if (blob && keep) await this.hot.setIfAbsent(commentKey(id), blob, this.opts.hotMs).catch(() => {});
         }
         // Gone: nothing in the store, or what `remove` left in Redis.
         if (!blob || blob.length === 0) return;
@@ -560,6 +595,68 @@ export class CommentStore {
   /** How many comments reply to each of these, in the order given: to it, not to its replies. */
   async replyCounts(postId: string, commentIds: string[]): Promise<number[]> {
     return commentIds.length ? this.counts(postId, commentIds.map(under)) : [];
+  }
+
+  /**
+   * How many comments each of these posts has, in the order given: the published ones that are
+   * there to read, without the placeholders (so fewer than `count` gives, of a post that has
+   * any). What a feed gives with each of a page's posts: one MGET, and nothing read from the
+   * store. A post Redis has no number of has none, as far as this says: it never had a comment
+   * written, or Redis lost the number, which the post's next comment or a rebuild counts again.
+   * As the compactor last left it: a comment that waits for the compactor isn't counted yet.
+   */
+  async liveCounts(postIds: string[]): Promise<number[]> {
+    if (!postIds.length) return [];
+    return (await this.hot.mget(postIds.map(commentCountKey))).map((blob) => Math.max(0, Number(blob?.toString('utf8') ?? 0) || 0));
+  }
+
+  /**
+   * Adds `by` to the post's number of comments, which takes from it if it is negative, where
+   * Redis has the number. One it doesn't have is left missing, and counted from the store once
+   * the post's writes are over (see counted): a count made while they are under way could miss
+   * one of them, or have it twice.
+   */
+  private async adjust(postId: string, by: number): Promise<void> {
+    await this.hot.bump(commentCountKey(postId), by);
+  }
+
+  /**
+   * Says that writes which may change how many comments the post has are about to be made, until
+   * `counted` is called: the puts and the removals of a compactor run. Returns whether that was
+   * said already, by a run that stopped before its writes were over. The number Redis has may
+   * then lack what one of them did: a write changes the store first and the number after, and
+   * made again, finds the store as it left it and has nothing to add.
+   */
+  async counting(postId: string): Promise<boolean> {
+    return !(await this.hot.swap(commentCountingKey(postId), null, COUNTING));
+  }
+
+  /**
+   * Ends what `counting` began, once the writes it was called before are over, and none is under
+   * way. With `recount`, the post's number of comments is counted from the store: one of the
+   * writes failed, or `counting` found that an earlier run had stopped. So is a number Redis
+   * doesn't have: the post's first comments, or what a Redis that lost data is missing. If the
+   * count can't be made, what `counting` said stays said, for the next run.
+   */
+  async counted(postId: string, recount: boolean): Promise<void> {
+    if (recount || (await this.hot.get(commentCountKey(postId))) === null) await this.recount(postId);
+    await this.hot.del([commentCountingKey(postId)]);
+  }
+
+  /**
+   * Counts the post's comments from the store, and has Redis hold the number: the published
+   * ones, without the placeholders, which only what a comment's object holds tells apart. So it
+   * lists the post's comments and reads each, from Redis where it is there. Not to be called
+   * while a write of the post's comments is under way.
+   */
+  async recount(postId: string): Promise<number> {
+    const ids = (await this.list(postId)).map(idOf);
+    let live = 0;
+    for (let i = 0; i < ids.length; i += COUNT_BATCH) {
+      live += (await this.load(postId, ids.slice(i, i + COUNT_BATCH), false)).filter((comment) => comment !== null && !comment.gone).length;
+    }
+    await this.hot.set(commentCountKey(postId), String(live));
+    return live;
   }
 
   /**
@@ -685,9 +782,15 @@ export class CommentStore {
    * index. A reader that had just read the comment from the store writes over neither. If the
    * store then can't be written, Redis is left nothing of the comment, to be read from the store
    * again: a removal that failed can be made again.
+   *
+   * It is one comment fewer of its post, if it was there to read: not one that waited, nor one
+   * whose place a placeholder had already.
    */
   async remove(postId: string, commentId: string, { keepPlace = false, comment }: { keepPlace?: boolean; comment?: Comment | null } = {}): Promise<void> {
-    const was = comment ?? (await this.find(postId, commentId)) ?? (await this.getHeld(postId, commentId));
+    // What is where the post's published comments are, whatever the caller read: that is what is counted.
+    const there = await this.find(postId, commentId);
+    const live = there !== null && !there.gone;
+    const was = comment ?? there ?? (await this.getHeld(postId, commentId));
     const left = keepPlace && was ? placeholder(was, 'deleted') : null;
     const key = commentIndexKey(postId);
     // Its marks first, while its likes are there to say whose they are. Who wrote a comment that an edit took back to the
@@ -705,10 +808,11 @@ export class CommentStore {
     await this.op.delete(heldCommentObjectKey(postId, commentId));
     if (!left) await this.hot.lexRem(key, [member(was?.parentId, commentId)]);
     await this.hot.del([commentLikesKey(commentId)]);
+    if (live) await this.adjust(postId, -1);
   }
 
   /**
-   * Removes every comment of a post, published and held, their likes, their images and videos, and its index: the post is being deleted. What Redis has of each expires.
+   * Removes every comment of a post, published and held, their likes, their images and videos, its index and its number of comments: the post is being deleted. What Redis has of each comment expires.
    *
    * Their marks in users' indexes go first, while the comments and likes are there to say whose
    * they are (see marksOf), so a removal that stops is made again from what is left.
@@ -718,7 +822,7 @@ export class CommentStore {
     await this.op.removeAll(commentDir(postId)).catch((err) => {
       if (!isNotFound(err)) throw err;
     });
-    await this.hot.del([commentIndexKey(postId)]);
+    await this.hot.del([commentIndexKey(postId), commentCountKey(postId), commentCountingKey(postId)]);
   }
 
   /**

@@ -48,6 +48,8 @@ const state = {
   allowedTags: null,
   /** What the server does with post titles (`postTitles` of GET /rules): on_required, on_optional or off. Required until the server says. */
   postTitles: 'on_required',
+  /** The types of post the server takes (`postTypes` of GET /rules). Null until the server says, and for one that doesn't: every type is offered. */
+  postTypes: null,
   pages: [],
   cursor: null,
   query: null,
@@ -679,6 +681,17 @@ function setKind(k) {
   if (k !== 'text' && isSample($('#content').value)) $('#content').value = '';
   if (k === 'text' && !$('#content').value.trim()) fillSample();
 }
+/** Offers the types of post the server takes (`postTypes` of GET /rules): the others can't be chosen, and the form starts on one that can. */
+function renderKinds() {
+  const taken = state.postTypes;
+  if (!taken) return;
+  for (const radio of document.querySelectorAll('input[name="kind"]')) {
+    radio.disabled = !taken.includes(radio.value);
+    radio.closest('label').title = radio.disabled ? `This server doesn't take ${radio.value} posts.` : '';
+  }
+  const offered = document.querySelector('input[name="kind"]:not(:disabled)');
+  if (offered && !taken.includes(kind())) setKind(offered.value);
+}
 
 const SAMPLE_MARK = 'Testbed post from';
 const isSample = (s) => !s.trim() || s.startsWith(SAMPLE_MARK);
@@ -850,16 +863,20 @@ async function init() {
       : `Any hashtags will do (TAGGING_MODE=user), up to ${data.maxTags} a post.`;
     if (data.allowedTags) $('#post-tags').placeholder = data.allowedTags.slice(0, 2).join(', ');
   } catch {}
-  // Whether a post has a title, and whether it has to (POST_TITLES): the server's rules say, beside the rules themselves.
+  // Whether a post has a title, and whether it has to (POST_TITLES), and which types of post the server takes
+  // (POST_TYPE_TEXT and the rest): the server's rules say, beside the rules themselves.
   try {
     const { data } = await api('GET', '/rules', undefined, { auth: false });
     if (data.postTitles) state.postTitles = data.postTitles;
+    if (Array.isArray(data.postTypes)) state.postTypes = data.postTypes;
   } catch {}
 
   renderActorSelect();
   const fromHash = readHash();
   setActor(fromHash ?? store.get('actor'), { reload: false });
   if (!$('#content').value) fillSample();
+  // After the sample, which is a text post's: a server that takes none starts on another type, without it.
+  renderKinds();
   renderTitleField();
 
   $('#actor').addEventListener('change', (e) => setActor(e.target.value));

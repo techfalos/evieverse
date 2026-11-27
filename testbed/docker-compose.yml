@@ -55,6 +55,16 @@ x-app-env: &app-env
   # operator gets (see .env.example): an http(s) address, or the path of a file mounted into the containers.
   PDQ_HASH_LIST: ${PDQ_HASH_LIST:-}
   PDQ_HASH_LIST_AUTHORIZATION: ${PDQ_HASH_LIST_AUTHORIZATION:-}
+  # TRUST_OPTIONAL_PLUGINS=synthid holds posts and comments with an image that carries a SynthID
+  # watermark, which says it was made with AI, for a person to look at, or refuses them with
+  # SYNTHID_ACTION=refuse. It sends each image to a detector, which is OpenAI's unless SYNTHID_URL
+  # names another, and then needs that detector's API key (see .env.example).
+  SYNTHID_API_KEY: ${SYNTHID_API_KEY:-}
+  SYNTHID_URL: ${SYNTHID_URL:-}
+  SYNTHID_ACTION: ${SYNTHID_ACTION:-hold}
+  SYNTHID_UNCHECKED: ${SYNTHID_UNCHECKED:-hold}
+  # true: what its sender declares as created with AI is left as it is, its images unchecked.
+  SYNTHID_ALLOW_DISCLOSED: ${SYNTHID_ALLOW_DISCLOSED:-false}
   # Where the files that matched are kept for the report and after it (see .env.example): a store of its
   # own, which the app and the compactor both reach. Unset: nothing of a file that matches is kept.
   QUARANTINE_SCHEME: ${QUARANTINE_SCHEME:-}

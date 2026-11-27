@@ -37,7 +37,7 @@ describe('trust plugins', () => {
 
   it("stop the server that names an optional plugin it doesn't have", () => {
     const config = loadConfig({ trust: { optionalPlugins: ['urlhouse'] } }, BASE_ENV);
-    expect(() => openTrust(config)).toThrow(/TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't one of the trust plugins this server was built with: it has blocked_words, pdq, urlhaus/);
+    expect(() => openTrust(config)).toThrow(/TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't one of the trust plugins this server was built with: it has blocked_words, pdq, synthid, urlhaus/);
   });
 });
 

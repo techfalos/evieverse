@@ -107,6 +107,18 @@ secrets     = { PDQ_HASH_LIST_AUTHORIZATION = "Bearer ..." }
 - Videos are checked too, by the [compactor](#videos)'s container, before they're published. It gets `environment` and `secrets` as the functions do, so there is nothing more to set, and it reads the list itself: count the list in `compactor_memory` as well.
 - The file that matched is kept only if you set up a [quarantine](#quarantine), which the modules don't do for you.
 
+For `synthid`, which holds or refuses posts and comments with an [image that carries a SynthID watermark](TRUST_PLUGINS.md#images-made-with-ai), which says it was made with AI, name it in `environment` and put the detector's API key in `secrets`:
+
+```hcl
+environment = { TRUST_OPTIONAL_PLUGINS = "synthid" }
+secrets     = { SYNTHID_API_KEY = "..." }
+```
+
+- Set both in the same `apply`. The server doesn't start with `synthid` named and no key, so the modules check for it as they do for `urlhaus`: the plan fails if `TRUST_OPTIONAL_PLUGINS` names `synthid` and `SYNTHID_API_KEY` is missing or empty. The check is on the key being there, not on the detector accepting it: with a key it refuses, images wait in the moderation queue unchecked, and the function's log has an error for each.
+- Each image is sent to the detector while its post waits, so the functions need a way out to it (`api.openai.com`, unless `SYNTHID_URL` names another), which the three modules give them as they do for URLhaus. If it can't be reached, posts and comments with an image are held for a moderator, unless `SYNTHID_UNCHECKED = "allow"` lets them through.
+- The request that sent an image waits for the detector, up to 15 seconds an image, with the images of an album asked about four at a time. `request_timeout` on GCP (300) and Azure (240) leaves room for that. On AWS a request has 30 seconds, so while the detector answers slowly, an album of more than four images can run past it.
+- The [compactor](#compactor)'s container gets `environment` and `secrets` as the functions do, so there is nothing more to set. It sends no image itself.
+
 **The signing key for reposts**
 
 Each module makes the key the instance signs its posts with, which is what lets them be [reposted on other servers](API.md#a-post-on-another-server): 32 random bytes, kept with the instance's other secrets as `REPOSTS_SIGNING_KEYS`. There's nothing to set.
@@ -244,7 +256,7 @@ Updating a function doesn't start it, so a setting the server refuses wouldn't s
 - The step's log says which setting, and why, for example "the functions would not start with these settings, so nothing was changed: TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't one of the trust plugins this server was built with…". The step is named after the deployment, `<name>-migrate`: on AWS its log group is `/aws/lambda/<name>-migrate`, and on GCP and Azure it's the job's log.
 - Fix the value and apply again. The step runs again on every apply until it passes.
 
-What the check catches is what stops the server from starting: a value in the wrong format, a name that isn't one (a plugin in `TRUST_OPTIONAL_PLUGINS`, a `CONTENT_SCHEME`, a `DEFAULT_LANGUAGE` with no file), and settings that need each other (`TAGGING_MODE=server` without `TAGGING_SERVER_TAGS`, `urlhaus` without `URLHAUS_AUTH_KEY`, `pdq` without `PDQ_HASH_LIST`). The last two of these fail sooner, in the plan. What it doesn't catch is a value the server starts with but that is wrong: a bucket that doesn't exist, or a key a service refuses, shows when it's used.
+What the check catches is what stops the server from starting: a value in the wrong format, a name that isn't one (a plugin in `TRUST_OPTIONAL_PLUGINS`, a `CONTENT_SCHEME`, a `DEFAULT_LANGUAGE` with no file), and settings that need each other (`TAGGING_MODE=server` without `TAGGING_SERVER_TAGS`, `urlhaus` without `URLHAUS_AUTH_KEY`, `pdq` without `PDQ_HASH_LIST`, `synthid` without `SYNTHID_API_KEY`). The last three of these fail sooner, in the plan. What it doesn't catch is a value the server starts with but that is wrong: a bucket that doesn't exist, or a key a service refuses, shows when it's used.
 
 ### Without the Terraform modules
 
@@ -346,6 +358,7 @@ compactor reindex
 - Where you run the server yourself, it's `npm run reindex` from the built source, or `compactor reindex` in a container, with the compactor's settings.
 - A new deployment needs none of this: it has no post or name from before.
 - A deployment whose compactor was the JavaScript one runs it once more, after [the upgrade to the Rust compactor](#upgrading-to-the-rust-compactor).
+- A deployment that had posts before the server counted them runs it once more as well, after [the upgrade to post counts](#upgrading-to-post-counts): the same command counts them.
 
 What search costs from then on:
 
@@ -433,6 +446,54 @@ What to expect afterwards:
 - Where you run it yourself: migrate, then start every API node on the new version, and only then the compactor. The compactor of the new version waits for the migration, and doesn't wait for the API nodes.
 
 This upgrade wasn't applied to a live deployment either, and the two-step apply above wasn't run on one: that the functions and the compactor are updated in no order is read from the modules, where both wait for the migration step and neither waits for the other. The migration, the two layouts and the upgrade of an index from one to the other are covered by the server's tests, on SQLite.
+
+## Upgrading to post counts
+
+The server now counts its posts, and each hashtag's. [`GET /rules`](API.md#get-rules) gives how many posts the server has, as `postCount`, and [`GET /tags`](API.md#get-tags) gives each hashtag's, can list the hashtags by it (`sort=popular`), and comes a page at a time. The compactor keeps both counts in the database as it writes posts out, and requests only read them. The first `apply` of a version that has them needs nothing set, and leaves one thing to do by hand: the posts that were there before are counted by the reindex, run once after the apply.
+
+What the apply does:
+
+- It runs migration `0020_post_counts`, in its [first step](#deploy): a column on `tags` for how many posts a hashtag has (`post_count`), with an index, a column on `content` for what a post is counted as (`counted_tags`), and a table of one row for the server's own count (`server_counts`). Every count starts at 0, and no post is counted yet.
+- The gateways get no new route. `GET /tags` and `GET /rules` are in the `api` [group](#route-groups), as they were.
+- The compactor counts what it writes out from then on: new posts, updates, and the posts whose hashtags a repost or a moderator changed. It takes a post out of the counts as it deletes it.
+
+What that leaves, until the reindex has run:
+
+- A post from before the upgrade is in neither count, unless it has been written out again since. So `postCount` is short of those posts, and so is each hashtag's count: a hashtag whose posts are all from before is listed with `0`.
+- `sort=popular` orders the hashtags by those counts, so by the posts since the upgrade alone.
+
+Run the reindex once, as for [search](#upgrading-to-search): `compactor reindex`, with the same task, job or container, and the same commands as there.
+
+- Run it once the compactor is of the new version. A compactor of the version before counts nothing: a post it writes out after the reindex has passed it stays uncounted until something writes it again, or the reindex is run again.
+- It counts each post it reads by what the compactor counts it with: once for the server, and once for each hashtag the post's meta file has. A post that waits in the moderation queue isn't counted, and is when it's accepted.
+- It can be run again, at any time: a post that's counted for what it should be costs one more read, and is left as it is. Its log and what it ends with are as they were, since it has no line of its own for the counts.
+- Where you run the server yourself, it's `npm run reindex` from the built source, or `compactor reindex` in a container.
+- A new deployment needs none of this: it has no post from before.
+
+The functions and the compactor can be updated in either order, and the version before runs on the migrated database:
+
+- New functions beside the old compactor: `GET /rules` and `GET /tags` give the counts as they are, which nothing changes until the new compactor runs.
+- Old functions beside the new compactor: the counts are kept, and those functions show none.
+- The version before writes neither count. A post its compactor deletes stays in the counts it was in, since only the new compactor takes one out. That's what going back to the version before leaves behind, and what an old compactor that's still up beside the new one for a moment can.
+- To count from nothing after that, set the counts back in one transaction, then run the reindex:
+
+```sql
+BEGIN;
+UPDATE content SET counted_tags = NULL;
+UPDATE tags SET post_count = 0;
+UPDATE server_counts SET post_count = 0;
+COMMIT;
+```
+
+  The first statement writes every row of `content`, and a request that writes a post waits for it, so run it when the server is quiet. The counts are 0 from the commit until the reindex has passed each post.
+
+What to expect afterwards:
+
+- One small transaction in the database for each post whose count changes: when it's first written out, when its hashtags change, and when it's deleted. A post that's written again with the hashtags it had costs one read.
+- `GET /rules` reads one more row. `GET /tags` reads one page of hashtags, as it did, and one hashtag more, to know whether there's a next page.
+- Clients that read `GET /tags` before read it as they did: the most recently active first, 200 hashtags unless they ask for more.
+
+This upgrade wasn't applied to a live deployment either, and neither the reindex nor the statements above were run on one. The migration, the counts and the reindex are covered by the server's tests, which were run on SQLite, PostgreSQL and MySQL. The tests set the counts back with the same three statements, one by one and with no compactor running beside them, before they reindex.
 
 ## Uploads
 
@@ -599,7 +660,7 @@ Every module sets the eviction policy to `volatile-lru`. Only keys with a TTL (h
 
 Size it for about 33 bytes per indexed post per hashtag (10,000 busy hashtags take about 1.5 GB) plus about 0.4 KB per post of the last 8 days (about 0.3 GB at 100,000 posts a day). Comments are kept for a day (`COMMENTS_HOT_HOURS`), and a million a day need about 0.5 GB. The defaults have about 1 GB; raise `redis_node_type`, `redis_memory_gb` or `redis_sku` as you grow. [APP.md](APP.md#12-performance-and-scale) has the details.
 
-If Redis loses its data, run the compactor once with `--rebuild` (`compactor --once --rebuild`). It rebuilds the feed index, the hot summaries and the publisher credits from the database and the content bucket. Comments need no rebuild: each post's are read from the bucket again the first time they're asked for. A rebuild reads every post, so it's a container task or job of its own rather than a pass of the running compactor. Each module keeps one for it, and prints the command that starts it:
+If Redis loses its data, run the compactor once with `--rebuild` (`compactor --once --rebuild`). It rebuilds the feed index, the hot summaries and the publisher credits from the database and the content bucket. Comments themselves need no rebuild: each post's are read from the bucket again the first time they're asked for. The number of comments a feed gives with each post (`commentCount`) does: Redis alone holds it, so a post reads as having `0` until the rebuild counts its comments from the bucket, or until a comment of it is next written or removed. The same goes for an instance that had comments before the upgrade that added the number: run the rebuild once after it. A rebuild reads every post, and every comment of each post that has any, so it's a container task or job of its own rather than a pass of the running compactor. Each module keeps one for it, and prints the command that starts it:
 
 ```sh
 terraform output -raw rebuild_command   # then run what it prints

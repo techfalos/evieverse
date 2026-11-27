@@ -7,7 +7,7 @@ import { resetDatabase, TARGETS } from './helpers.js';
 
 describe('SQL migrations', () => {
   it('has the portable schema migrations, in order', () => {
-    expect(Object.keys(sqlMigrations())).toEqual(['0001_initial', '0002_pending_writes', '0003_staged_removals', '0004_unnumbered_writes', '0005_origin_gone', '0006_export_indexes', '0007_media', '0008_mention_notices', '0009_search', '0010_unlikes', '0011_tag_moderation', '0012_profiles', '0013_repost_removals', '0014_tag_log', '0015_moderator_activity', '0016_quarantine', '0017_claims_at_once', '0018_views_dislikes', '0019_splash']);
+    expect(Object.keys(sqlMigrations())).toEqual(['0001_initial', '0002_pending_writes', '0003_staged_removals', '0004_unnumbered_writes', '0005_origin_gone', '0006_export_indexes', '0007_media', '0008_mention_notices', '0009_search', '0010_unlikes', '0011_tag_moderation', '0012_profiles', '0013_repost_removals', '0014_tag_log', '0015_moderator_activity', '0016_quarantine', '0017_claims_at_once', '0018_views_dislikes', '0019_splash', '0020_post_counts']);
   });
 
   it('splits scripts into statements, ignoring comment lines', () => {
@@ -43,6 +43,7 @@ describe('SQL migrations', () => {
         'repost_removals',
         'reposts',
         'search_terms',
+        'server_counts',
         'server_rules',
         'staged_removals',
         'tag_moderation',
@@ -88,7 +89,7 @@ describe('SQL migrations', () => {
       expect(await columns('user_blocks')).toEqual(['blocked_id', 'created_at', 'user_id']);
       expect(await columns('pinned_posts')).toEqual(['content_id', 'created_at', 'user_id']);
       expect(await columns('server_rules')).toEqual(['body', 'created_at', 'id', 'sort_order', 'updated_at']);
-      expect(await columns('content')).toEqual(['ai_generated', 'created_at', 'delete_requested_at', 'dislike_count', 'disliked_at', 'id', 'like_count', 'origin_check_at', 'origin_gone_at', 'origin_hash', 'seq', 'unliked_at', 'user_id', 'view_count', 'viewed_at']);
+      expect(await columns('content')).toEqual(['ai_generated', 'counted_tags', 'created_at', 'delete_requested_at', 'dislike_count', 'disliked_at', 'id', 'like_count', 'origin_check_at', 'origin_gone_at', 'origin_hash', 'seq', 'unliked_at', 'user_id', 'view_count', 'viewed_at']);
       expect(await columns('dislikes')).toEqual(['content_id', 'created_at', 'user_id']);
       expect(await columns('pending_writes')).toEqual(['comment_id', 'content_id', 'created_at', 'kind', 'net', 'payload', 'seq', 'staged_key', 'write_key']);
       expect(await columns('staged_removals')).toEqual(['content_id', 'remove_at', 'staged_key']);
@@ -96,7 +97,8 @@ describe('SQL migrations', () => {
       expect(await columns('repost_removals')).toEqual(['content_id', 'created_at', 'id', 'reposted_at', 'tag']);
       expect(await columns('api_keys')).toEqual(['created_at', 'id', 'key_hash', 'revoked_at', 'user_id']);
       expect(await columns('feed_queue')).toEqual(['content_id', 'created_at', 'tag', 'token']);
-      expect(await columns('tags')).toEqual(['created_at', 'last_appended_at', 'name']);
+      expect(await columns('tags')).toEqual(['created_at', 'last_appended_at', 'name', 'post_count']);
+      expect(await columns('server_counts')).toEqual(['id', 'post_count']);
       expect(await columns('tag_pairs')).toEqual(['posts', 'tag_a', 'tag_b', 'updated_at']);
       expect(await columns('moderation_queue')).toEqual(['content_id', 'created_at', 'trust_score']);
       expect(await columns('tag_moderation')).toEqual(['applied_at', 'content_id', 'decided_at', 'decision', 'moderator_id', 'tag']);
@@ -149,6 +151,11 @@ describe('SQL migrations', () => {
       expect(await db.selectFrom('content').select(['id', 'seq']).orderBy('id').execute()).toEqual(['c1', 'c2', 'c3'].map((id) => ({ id, seq: 0 })));
       // A post starts with no views and no dislikes, and was never viewed or disliked.
       expect(await db.selectFrom('content').select(['view_count', 'viewed_at', 'dislike_count', 'disliked_at']).where('id', '=', 'c1').execute()).toEqual([{ view_count: 0, viewed_at: null, dislike_count: 0, disliked_at: null }]);
+      // A post is counted for nothing until the compactor counts it, a hashtag starts with no posts, and so does the server, whose one row is there.
+      expect(await db.selectFrom('content').select('counted_tags').where('id', '=', 'c1').execute()).toEqual([{ counted_tags: null }]);
+      await sql`INSERT INTO tags (name, created_at, last_appended_at) VALUES ('news', 1, 1)`.execute(db);
+      expect(await db.selectFrom('tags').select(['name', 'post_count']).execute()).toEqual([{ name: 'news', post_count: 0 }]);
+      expect(await db.selectFrom('server_counts').selectAll().execute()).toEqual([{ id: 'server', post_count: 0 }]);
       // A user dislikes a post once, and may like it too. A dislike goes with its post, and with its user.
       await sql`INSERT INTO dislikes (user_id, content_id, created_at) VALUES ('u1', 'c1', 5), ('u3', 'c1', 5), ('u3', 'c2', 5)`.execute(db);
       await sql`INSERT INTO likes (user_id, content_id, created_at) VALUES ('u1', 'c1', 5)`.execute(db);
@@ -251,6 +258,32 @@ describe('SQL migrations', () => {
         // A moderator made from then on has the time with them.
         await db.insertInto('tag_moderators').values({ tag: 'news', user_id: 'u2', created_at: 8, acted_at: 8 }).execute();
         expect((await rows()).at(-1)).toEqual({ tag: 'news', user_id: 'u2', created_at: 8, acted_at: 8 });
+      } finally {
+        await db.destroy();
+      }
+    });
+
+    it(`counts no post for the hashtags and the posts there were when the server starts to count them, nor for the server (${target.name})`, async () => {
+      const db = await createDb({ dialect: target.dialect, url: target.url, poolSize: 1 });
+      try {
+        await resetDatabase(db, target.dialect);
+        const { error } = await new Migrator({ db, provider: { getMigrations: async () => sqlMigrations() } }).migrateTo('0019_splash');
+        expect(error).toBeUndefined();
+        await sql`INSERT INTO users (id, username, created_at, updated_at) VALUES ('u1', 'alice', 0, 0)`.execute(db);
+        await sql`INSERT INTO content (id, user_id, created_at) VALUES ('c1', 'u1', 0)`.execute(db);
+        await sql`INSERT INTO tags (name, created_at, last_appended_at) VALUES ('news', 5, 6), ('cars', 5, 6)`.execute(db);
+
+        await migrateToLatest(db);
+        // Nothing is counted until the compactor counts it: each post the next time a run writes it, or all of them with a reindex.
+        expect((await db.selectFrom('tags').select(['name', 'last_appended_at', 'post_count']).orderBy('name').execute()).map((r) => ({ ...r, last_appended_at: Number(r.last_appended_at), post_count: Number(r.post_count) }))).toEqual([
+          { name: 'cars', last_appended_at: 6, post_count: 0 },
+          { name: 'news', last_appended_at: 6, post_count: 0 },
+        ]);
+        expect(await db.selectFrom('content').select(['id', 'counted_tags']).execute()).toEqual([{ id: 'c1', counted_tags: null }]);
+        expect((await db.selectFrom('server_counts').selectAll().execute()).map((r) => ({ ...r, post_count: Number(r.post_count) }))).toEqual([{ id: 'server', post_count: 0 }]);
+        // What a count is written as, and read back as: the hashtags of a post, and none for a post that has none.
+        await db.updateTable('content').set({ counted_tags: '' }).where('id', '=', 'c1').execute();
+        expect(await db.selectFrom('content').select('counted_tags').execute()).toEqual([{ counted_tags: '' }]);
       } finally {
         await db.destroy();
       }

@@ -118,7 +118,7 @@ fn without_secrets(config: &Config) -> Result<Value> {
     if let Some(keys) = shown["reposts"]["signingKeys"].as_array_mut() {
         keys.iter_mut().for_each(|key| *key = set.clone());
     }
-    for secret in ["/urlhaus/authKey", "/pdq/authorization", "/pdq/hashList"] {
+    for secret in ["/urlhaus/authKey", "/pdq/authorization", "/pdq/hashList", "/synthid/apiKey"] {
         if let Some(value) = shown.pointer_mut(secret) {
             *value = set.clone();
         }

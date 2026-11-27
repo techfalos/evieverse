@@ -13,6 +13,7 @@ import { msg } from '../language.js';
 import type { Message } from '../language.types.js';
 import { recordAction } from '../moderation/activity.js';
 import { moderates } from '../moderation/policy.js';
+import { takenPostTypes } from '../posts.js';
 import { RELEASE } from '../release.js';
 import { iso } from '../time.js';
 
@@ -151,8 +152,21 @@ function changeRule(db: Db, list: RuleList, ruleId: string, body: { text?: strin
 }
 
 /**
- * The server's rules, its minimum age, what it says of generative AI, its support address and
- * its modification disclosure; and each hashtag's rules.
+ * How many posts the server has, as the compactor last counted them (the one row of
+ * `server_counts`): the posts anyone can read, each once it is in feeds, and until the run that
+ * deletes it. Not one that waits in the moderation queue, nor an entry for a post that is gone
+ * from its own server. The server's entries for posts on other servers are among them. 0 on a
+ * server whose compactor has counted none.
+ */
+async function postCount(db: Db): Promise<number> {
+  const row = await db.selectFrom('server_counts').select('post_count').where('id', '=', 'server').executeTakeFirst();
+  return Number(row?.post_count ?? 0);
+}
+
+/**
+ * The server's rules, its minimum age, what it says of generative AI, what it does with post
+ * titles, the types of post it takes, its support address and its modification disclosure; and
+ * each hashtag's rules.
  *
  * The rules are what the operator asks of the people who use the server, a list its admins keep
  * (`server_rules`): they add a rule, change its text or its place among the others, and remove
@@ -188,8 +202,17 @@ function changeRule(db: Db, list: RuleList, ruleId: string, body: { text?: strin
  * posts to (POST /store), so a client reads it to know whether to ask for a title, and whether
  * to send a post without one.
  *
- * GET /rules gives all six to anyone, with a key or without, so a client can show them to
+ * The types of post the server takes are the ones its operator left on, of the five there are
+ * (`POST_TYPE_TEXT`, `POST_TYPE_IMAGE`, `POST_TYPE_VIDEO`, `POST_TYPE_AUDIO`, `POST_TYPE_LINK`):
+ * all of them unless told otherwise, and at least one. The server holds posts to this too (POST
+ * /store, POST /uploads), and a comment's image or video, so a client reads it to know which
+ * types to offer.
+ *
+ * GET /rules gives all seven to anyone, with a key or without, so a client can show them to
  * someone before they register. GET /tags/:tag/rules gives a hashtag's the same way.
+ *
+ * GET /rules also says how large the server is: how many posts it has (`postCount`), which is
+ * nobody's to set. The compactor counts them as its runs write the posts (see postCount).
  */
 export function rulesRoutes(app: FastifyInstance, deps: AppDeps) {
   const { db, config, now = Date.now } = deps;
@@ -212,11 +235,14 @@ export function rulesRoutes(app: FastifyInstance, deps: AppDeps) {
 
   /**
    * The rules, in their order, the minimum age, what the server says of generative AI, what it
-   * does with post titles, the support address and the modification disclosure. For anyone: it needs no key, and reads
-   * none. The minimum age is the number of years the operator set, or where they set none, the
-   * words that say so, in the language the request asks for. `genAi` is the setting as it is
-   * written (GEN_AI_SETTINGS in src/config.ts), the same in every language, and so is
-   * `postTitles` (POST_TITLES_SETTINGS): `on_required`, `on_optional` or `off`.
+   * does with post titles, the types of post it takes, the support address and the modification
+   * disclosure. For anyone: it needs no key, and reads none. The minimum age is the number of
+   * years the operator set, or where they set none, the words that say so, in the language the
+   * request asks for. `genAi` is the setting as it is written (GEN_AI_SETTINGS in src/config.ts),
+   * the same in every language, and so is `postTitles` (POST_TITLES_SETTINGS): `on_required`,
+   * `on_optional` or `off`. `postTypes` is the types that are on, as a post names its own
+   * (POST_TYPES in src/posts.ts) and in that order: never empty, since a server takes one at least.
+   * `postCount` is how many posts the server has (see postCount).
    */
   app.get('/rules', async (req) => ({
     modificationDisclosure: { modified: config.modified, release: RELEASE, sourceUrl: config.sourceUrl },
@@ -224,6 +250,8 @@ export function rulesRoutes(app: FastifyInstance, deps: AppDeps) {
     minimumAge: config.minimumAge ?? say(req, msg('rule.all_ages')),
     genAi: config.genAi,
     postTitles: config.postTitles,
+    postTypes: takenPostTypes(config.postTypes),
+    postCount: await postCount(db),
     rules: (await serverRules.inOrder(db)).map(record),
   }));
 

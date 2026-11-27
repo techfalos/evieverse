@@ -35,7 +35,7 @@ export async function queueItems(
 ): Promise<(QueuedPost | QueuedComment | null)[]> {
   const { db, config, content, comments } = deps;
   const postIds = rows.filter((r) => r.kind === 'post').map((r) => r.id);
-  const [posts, found] = await Promise.all([
+  const [posts, commentCounts, found] = await Promise.all([
     postIds.length
       ? db
           .selectFrom('content')
@@ -44,6 +44,7 @@ export async function queueItems(
           .where('content.id', 'in', postIds)
           .execute()
       : [],
+    comments.liveCounts(postIds),
     Promise.all(
       rows.map(async (r) => {
         if (r.kind === 'post') return { meta: await effectiveMeta(db, content, r.id), comment: null };
@@ -56,6 +57,7 @@ export async function queueItems(
     ),
   ]);
   const postsById = new Map(posts.map((p) => [p.id, p]));
+  const commentCountOf = new Map(postIds.map((id, i) => [id, commentCounts[i]!]));
   const records = new Map((await toCommentRecords(deps, found.flatMap(({ comment }) => (comment ? [comment] : [])))).map((record) => [record.commentId, record]));
   return rows.map((r, i) => {
     if (r.kind === 'comment') {
@@ -67,7 +69,7 @@ export async function queueItems(
     if (!post || !meta) return null;
     return {
       kind: 'post' as const,
-      ...toFeedRecord(summaryOf(post, meta, config.publicBaseUrl, config.postTitles), rowCounts(post, config.dislikes), publisherOf(post)),
+      ...toFeedRecord(summaryOf(post, meta, config.publicBaseUrl, config.postTitles), rowCounts(post, config.dislikes), commentCountOf.get(post.id) ?? 0, publisherOf(post)),
       ...(meta.text !== undefined && { text: meta.text }),
       // All of them, as the whole text is read with them: the record's own are those of its preview.
       ...(meta.mentions?.length && { mentions: meta.mentions }),

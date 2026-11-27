@@ -10,6 +10,7 @@ pub mod azure;
 pub mod comments;
 pub mod config;
 pub mod content;
+pub mod counts;
 pub mod db;
 pub mod format;
 pub mod hot;

@@ -438,6 +438,8 @@ type Op =
   | { op: 'comments.removeLike'; postId: string; commentId: string; userId: string }
   | { op: 'comments.makingLikes'; commentId: string; done: boolean }
   | { op: 'comments.removeAll'; postId: string }
+  | { op: 'comments.counting'; postId: string }
+  | { op: 'comments.counted'; postId: string; recount: boolean }
   | { op: 'summaries.put'; summary: Summary }
   | { op: 'summaries.ensureMany'; summaries: Summary[] }
   | { op: 'summaries.erase'; ref: SummaryRef }
@@ -468,8 +470,11 @@ const OPS: Op[] = [
   { op: 'content.putBytes', of: { contentId: P3, video: V1, file: 'poster.jpg' }, text: 'JPG', mimeType: 'image/jpeg' },
   { op: 'content.putBytes', of: { contentId: P3, video: V1, file: '720p_00001.ts' }, text: 'TS', mimeType: 'video/mp2t' },
   { op: 'content.putBytes', of: { postId: P1, commentId: C2 }, text: 'IMG', mimeType: 'image/png' },
-  // Comments: one on the post, a reply with an image, one that waits, and likes.
+  // Comments: one on the post, a reply with an image, one that waits, and likes. The post's number of comments is
+  // counted from the store once the first is written, as after a run's writes, and the reply is added to it.
+  { op: 'comments.counting', postId: P1 },
   { op: 'comments.put', comment: COMMENTS.first!, held: false },
+  { op: 'comments.counted', postId: P1, recount: false },
   { op: 'comments.put', comment: COMMENTS.reply!, held: false },
   { op: 'comments.put', comment: COMMENTS.held!, held: true },
   { op: 'comments.makingLikes', commentId: C1, done: false },
@@ -487,6 +492,8 @@ const OPS: Op[] = [
   { op: 'snapshot', name: 'written' },
 
   // The comment that waited is published, edited; the first is edited into the queue; the reply is removed, and then the first.
+  // Each adds to the post's number of comments or takes from it, and the writes are not said to be over: as a run that stopped leaves it.
+  { op: 'comments.counting', postId: P1 },
   { op: 'comments.publish', comment: { ...COMMENTS.held!, text: 'this one waited', editedAt: NOW } as Comment },
   { op: 'comments.put', comment: COMMENTS.later!, held: false },
   { op: 'comments.hold', comment: { ...COMMENTS.first!, text: 'the first, edited', editedAt: NOW } as Comment },
@@ -576,6 +583,8 @@ async function run(ops: Op[]): Promise<Record<string, Snapshot>> {
         const done = await comments.makingLikes(o.commentId);
         if (o.done) await done();
       } else if (o.op === 'comments.removeAll') await comments.removeAll(o.postId);
+      else if (o.op === 'comments.counting') await comments.counting(o.postId);
+      else if (o.op === 'comments.counted') await comments.counted(o.postId, o.recount);
       else if (o.op === 'summaries.put') await summaries.put(o.summary);
       else if (o.op === 'summaries.ensureMany') expect(await summaries.ensureMany(o.summaries)).toEqual(o.summaries.map(() => null));
       else if (o.op === 'summaries.erase') await summaries.erase(o.ref);

@@ -23,6 +23,13 @@ export interface FeedRecord {
   /** Whether the post takes comments, which are read at /content/:contentId/comments. */
   comments: boolean;
   /**
+   * How many comments the post has, replies among them: those that are there to read, so not one
+   * that was deleted or waits in the moderation queue, whose place the list of comments still
+   * shows. As the compactor last left it, so a comment made a moment ago may not be counted yet.
+   * 0 on a post that takes no comments and never had any.
+   */
+  commentCount: number;
+  /**
    * The post's title: one line of plain text. Absent on a post that has none, and on every post
    * of a server whose titles are off (`postTitles` of GET /rules).
    */

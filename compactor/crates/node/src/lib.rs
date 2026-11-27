@@ -187,6 +187,8 @@ struct Post {
     texts: Vec<String>,
     #[serde(default)]
     images: Vec<TrustImage>,
+    #[serde(default)]
+    ai_generated: bool,
 }
 
 #[derive(Deserialize)]
@@ -198,6 +200,8 @@ struct Comment {
     texts: Vec<String>,
     #[serde(default)]
     image: Option<TrustImage>,
+    #[serde(default)]
+    ai_generated: bool,
 }
 
 #[derive(Deserialize)]
@@ -310,6 +314,7 @@ async fn run(server: &Server, method: &str, now: f64, asked: Asked, log: &Logger
                         tags: post.tags,
                         texts: post.texts,
                         images: post.images,
+                        ai_generated: post.ai_generated,
                     },
                 )
                 .await,
@@ -324,6 +329,7 @@ async fn run(server: &Server, method: &str, now: f64, asked: Asked, log: &Logger
                     content_id: comment.content_id,
                     texts: comment.texts,
                     image: comment.image,
+                    ai_generated: comment.ai_generated,
                 },
             )
             .await;

@@ -7,7 +7,7 @@ import { IMAGE_HEAD_BYTES, ImageError, imageType, stripImage } from './image.js'
 import { resolveMimeType } from './http/mime.js';
 import { msg } from './language.js';
 import type { TrustImage } from './moderation/trust.types.js';
-import { LINK_MIME, MAX_ALT_CHARS, MAX_POST_IMAGES, mediaType, POST_TYPES, TEXT_MIME, type MediaType, type PostType } from './posts.js';
+import { LINK_MIME, MAX_ALT_CHARS, MAX_POST_IMAGES, mediaType, takenPostTypes, TEXT_MIME, type MediaType, type PostType } from './posts.js';
 import { hashFile, spoolToTemp, UploadTooLargeError, type ContentStore, type SpooledFile } from './storage/index.js';
 import type { CommentFile, PostBytes, PostFields, PostFile, SentFile, Upload, UploadLimits } from './upload.types.js';
 import { allDone } from './util.js';
@@ -164,7 +164,7 @@ export const trustImage = ({ file, filename, mimeType }: PostFile): TrustImage =
  */
 export function requirePostType(postTypes: Record<PostType, boolean>, type: PostType) {
   if (postTypes[type]) return;
-  throw badRequest(msg('post.type_off', { type, types: POST_TYPES.filter((taken) => postTypes[taken]).join(', ') }));
+  throw badRequest(msg('post.type_off', { type, types: takenPostTypes(postTypes).join(', ') }));
 }
 
 /** 400 for a file that isn't of the type its post is: an image post takes image/* files, and so on. */

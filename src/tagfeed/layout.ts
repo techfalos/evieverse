@@ -72,16 +72,17 @@ export const countsOf = (c: { likes: number; views: number; dislikes: number }, 
 });
 
 /**
- * A feed record of a post: its summary, its counts (see `countsOf`) and its publisher's credit.
- * `moderated` is the record's flag in the hashtag's index it was read from; omitted where it
- * wasn't read from one.
+ * A feed record of a post: its summary, its counts (see `countsOf`), how many comments it has
+ * (see `CommentStore.liveCounts`) and its publisher's credit. `moderated` is the record's flag in
+ * the hashtag's index it was read from; omitted where it wasn't read from one.
  */
-export const toFeedRecord = (s: Summary, counts: Counts, publisher: Publisher, moderated?: boolean, repost?: RepostMark): FeedRecord => ({
+export const toFeedRecord = (s: Summary, counts: Counts, commentCount: number, publisher: Publisher, moderated?: boolean, repost?: RepostMark): FeedRecord => ({
   contentId: s.contentId,
   publisher,
   mimeType: s.mimeType,
   aiGenerated: s.aiGenerated,
   comments: s.comments,
+  commentCount,
   ...(s.title && { title: s.title }),
   preview: s.preview,
   ...(s.mentions?.length && { mentions: s.mentions }),

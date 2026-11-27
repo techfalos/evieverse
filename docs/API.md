@@ -71,7 +71,7 @@ Every Evieverse instance serves the same HTTP API.
 | [`GET /feed`](#get-feed) | Anyone | A feed of one or more hashtags. |
 | [`GET /feed/following`](#get-feedfollowing) | The user, or anyone if the user shows whom they follow | The posts of the users a user follows. |
 | [`GET /tagging`](#get-tagging) | Anyone | Which hashtags a post can have: any, or the ones the instance lists. |
-| [`GET /tags`](#get-tags) | Anyone | Lists the hashtags posts have used, most recently active first. |
+| [`GET /tags`](#get-tags) | Anyone | Lists the hashtags posts have used, each with how many posts it has, a page at a time: most recently active first, or the most popular first. |
 | [`GET /search`](#search) | Anyone | Finds users by the start of their username, or posts by the words of their text and by their hashtags. |
 | [`GET /monetization/ads/:adId/click`](#get-monetizationadsadidclick) | Anyone | An ad's link: counts a click on the ad, and redirects to where the ad leads. |
 | [`GET /monetization/ads/:adId/image`](#get-monetizationadsadidimage) | Anyone | An image ad's image. |
@@ -80,7 +80,7 @@ Every Evieverse instance serves the same HTTP API.
 | [`GET /monetization/ads/:adId`](#keeping-the-ads) | Admins | One ad. |
 | [`PATCH /monetization/ads/:adId`](#keeping-the-ads) | Admins | Changes an ad. |
 | [`DELETE /monetization/ads/:adId`](#keeping-the-ads) | Admins | Deletes an ad, and its image. |
-| [`GET /rules`](#get-rules) | Anyone | The server's rules, its minimum age, what it says of content made with generative AI, what it does with post titles, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version. |
+| [`GET /rules`](#get-rules) | Anyone | The server's rules, its minimum age, what it says of content made with generative AI, what it does with post titles, the types of post it takes, how many posts it has, the email address to write to for support, and its modification disclosure: whether it runs a release of Evieverse or a modified version. |
 | [`POST /rules`](#keeping-the-rules) | Admins | Adds a rule. |
 | [`PATCH /rules/:ruleId`](#keeping-the-rules) | Admins | Changes a rule's text, or its place among the others. |
 | [`DELETE /rules/:ruleId`](#keeping-the-rules) | Admins | Removes a rule. |
@@ -348,7 +348,7 @@ It takes:
 - `cursor`: the previous page's `nextCursor`. It's `null` on the last page.
 
 What it returns:
-- `posts` is the page. Each post is a record as a [feed](#get-feed) gives one, with all of its likes, its `views` and its `dislikes` as they are now, and without `moderated` and `listedUnder`, which are a hashtag feed's. Being listed here isn't a [view](#views) of a post. Its `publisher` also has `avatarUrl`, if the user has an avatar.
+- `posts` is the page. Each post is a record as a [feed](#get-feed) gives one, with all of its likes, its `views` and its `dislikes` as they are now, and without `moderated` and `listedUnder`, which are a hashtag feed's. Its `commentCount` is as a feed gives it: as of the compactor's last run. Being listed here isn't a [view](#views) of a post. Its `publisher` also has `avatarUrl`, if the user has an avatar.
 - `pinned` is the posts the user [pinned](#pinned-posts), the one pinned last first, as records like the others, and `[]` if they pinned none. Only the first page has it. A pinned post keeps its place among `posts` too.
 - Only what anyone can read is listed: no post set for deletion, none that waits in the [moderation queue](#the-moderation-queue), and no repost of a post on another server that is [gone there](#refreshing-a-repost).
 - The user's own posts, not what they [reposted](#post-repost), which are other users' posts.
@@ -533,7 +533,7 @@ Every post has a `type`:
 | `text` | Its `text`. |
 | `link` | Its `url` alone. Any other file, such as a PDF or a web page, is posted as a link to it. |
 
-A server takes all five types unless its operator turned some off (`POST_TYPE_TEXT`, `POST_TYPE_IMAGE`, `POST_TYPE_VIDEO`, `POST_TYPE_AUDIO`, `POST_TYPE_LINK`). A post of a type that's off is refused with `400`, as a new post and as an update, and the error names the types the server takes. The posts of that type the server already holds can still be read, liked and deleted. No endpoint lists the types: a server says which it takes in its [rules](#get-rules).
+A server takes all five types unless its operator turned some off (`POST_TYPE_TEXT`, `POST_TYPE_IMAGE`, `POST_TYPE_VIDEO`, `POST_TYPE_AUDIO`, `POST_TYPE_LINK`). A post of a type that's off is refused with `400`, as a new post and as an update, and the error names the types the server takes. The posts of that type the server already holds can still be read, liked and deleted. [`GET /rules`](#get-rules) gives the types a server takes as `postTypes`, so a client knows which to offer before it sends a post.
 
 A post can have a [title](#titles), and whether it can, and whether it has to, is the server's setting, which [`GET /rules`](#get-rules) gives as `postTitles`. Unless its operator says otherwise, every post needs one.
 
@@ -1242,7 +1242,7 @@ It returns `{ contentId, commentId, reportedAt, alreadyReported }`, and everythi
 
 ## Comments
 
-A post takes comments if its publisher turned them on: the `comments` field of [`POST /store`](#post-store), which is off unless they say, and which they can change with an update. `GET /content/:contentId` and every feed record say whether a post takes them, as `comments`.
+A post takes comments if its publisher turned them on: the `comments` field of [`POST /store`](#post-store), which is off unless they say, and which they can change with an update. `GET /content/:contentId` and every feed record say whether a post takes them, as `comments`. A feed record also says how many it has, as [`commentCount`](#get-feed); `GET /content/:contentId` doesn't.
 
 - A comment is a text of up to 2,000 characters, an image or a video, or a text with one of the two. Its text can be formatted, as a post's can ([TEXT_EDITORS.md](TEXT_EDITORS.md)).
 - A comment is on the post itself, or replies to another comment on it, at any depth. So a post's comments are a tree, which is read a level at a time: the comments on the post, then the replies to whichever of them a reader opens.
@@ -1320,7 +1320,7 @@ Both take:
 - `cursor`: the previous page's `nextCursor`, which is the `commentId` of the last comment on that page. The next page starts just after it, so pages never repeat a comment or skip one, whatever is added or deleted meanwhile. A cursor doesn't expire.
 
 What they count and list:
-- A post's `count` is every published comment on it, replies included, not just the ones on the page or at that level. A reply list's `count` is the replies to that comment alone, not the replies to those.
+- A post's `count` is every published comment on it, replies included, not just the ones on the page or at that level. A reply list's `count` is the replies to that comment alone, not the replies to those. Both count [placeholders](#placeholders), which a feed record's [`commentCount`](#get-feed) leaves out.
 - A placeholder is listed, and counted, as the comment it stands for.
 - A comment that waits in the moderation queue is in neither a list nor a count, unless it was published before: then its placeholder is.
 - The lists and the counts show what the compactor has written. A new comment, an edit, a like or its taking back, a deletion and a moderator's decision are in the lists, in `count` and `replies`, and in a listed record's `likes`, after the [compactor](APP.md#8-the-compactor)'s next run: `COMPACT_INTERVAL_SECONDS` later at most (5 by default), plus the time the run takes. Until then they show the comments as they were. A client that wants a new comment in the list at once puts the record the request returned there itself.
@@ -1668,14 +1668,18 @@ The response shape is:
 - `records` holds the page's records as one list, in the feed's order, whatever their hashtags: most liked first in a `popular` feed, newest first in a `chronological` one, and in the order they were picked in an `engaged` one. The server has ordered the page, so show the list as it is: there's nothing to merge or to sort. Each record names the hashtag it's listed under, in `listedUnder`.
 - `ads` holds the page's [ads](#ads), each `{ adId, label, kind, imageUrl?, imageAlt?, text?, url?, position }`. Show an ad before the page's `position`th post (3, 10 or 17, counted from 1), with its `label` ("Sponsored"). `kind` is `text` or `image`, `imageUrl` an image ad's [image](#get-monetizationadsadidimage), `imageAlt` that image's [alt text](#alt-text) where the ad has one, and `url` the [link](#get-monetizationadsadidclick) to follow. Ads aren't counted in `count`.
 
-Each record is `{ contentId, publisher: { userId, username }, mimeType, aiGenerated, comments, preview, tags, likes, views, dislikes, moderated, listedUnder, createdAt, updatedAt }`:
+Each record is `{ contentId, publisher: { userId, username }, mimeType, aiGenerated, comments, commentCount, preview, tags, likes, views, dislikes, moderated, listedUnder, createdAt, updatedAt }`:
 - `aiGenerated` is the publisher's declaration of whether the content was created with AI.
 - `likes`, `views` and `dislikes` are the post's three counts, as of the compactor's last run:
   - `likes` is how many users like it ([`POST /like`](#post-like)).
   - `views` is how many times user accounts have read it ([`GET /content/:contentId`](#views)), from 0. Being returned in a feed isn't a view.
   - `dislikes` is how many users dislike it ([`POST /dislike`](#post-dislike)), from 0, on an instance that has dislikes on. On one that has them off, which is what an instance is unless its operator says otherwise, it's `null` on every record. That's how a client knows whether to show dislikes at all: `null` means show none, and `0` is a post nobody dislikes.
   - No feed is ordered by views or by dislikes, whichever its algorithm. They're there to be shown.
-- `comments` is whether the post takes [comments](#comments). A record doesn't say how many it has: [`GET /content/:contentId/comments`](#reading-comments) does.
+- `comments` is whether the post takes [comments](#comments).
+- `commentCount` is how many comments the post has, replies included, as of the compactor's last run:
+  - It counts the comments that are there to read. One that was deleted, or that waits in the [moderation queue](#the-moderation-queue), isn't counted, even where its [placeholder](#placeholders) is still listed. So it can be less than the `count` of [`GET /content/:contentId/comments`](#reading-comments), which counts placeholders too.
+  - It's `0` on a post with no comments, and on one that never took any. A post whose publisher turned comments off keeps the number it had, though its comments can't be read meanwhile.
+  - No feed is ordered by it.
 - `listedUnder` is the hashtag the record is listed under, of those the feed reads: the ones asked for and, with `addRelated`, the ones it added. A post under several of them is in the page once, under one of them.
 - `moderated` is whether a moderator of that hashtag has [approved](#a-hashtags-queue) the post there. It's per hashtag, so the same post can be `true` under one and `false` under another.
 - `preview` follows the post's type, as [previews](#previews) lists.
@@ -1856,11 +1860,38 @@ What it shows:
 
 ### `GET /tags`
 
-Lists the hashtags posts have used, most recently active first: `{ tags: [{ tag, lastActiveAt }] }`. `prefix` (letters, digits and `_`, with or without `#`) keeps those that start with it, and `limit` sets how many (200 by default, at most 1,000). The hashtags a post can have are another matter: [`GET /tagging`](#get-tagging) says those.
+Lists the hashtags posts have used, each with how many posts it has, a page at a time: `{ tags: [{ tag, postCount, lastActiveAt }], nextCursor }`. It needs no key. The hashtags a post can have are another matter: [`GET /tagging`](#get-tagging) says those.
 
 ```bash
 curl "localhost:3000/tags?prefix=mum"
+curl "localhost:3000/tags?sort=popular&limit=20"
 ```
+
+```json
+{ "tags": [
+    { "tag": "mumbai", "postCount": 412, "lastActiveAt": "2026-11-26T09:14:02.000Z" },
+    { "tag": "mumbaifloods", "postCount": 37, "lastActiveAt": "2026-11-25T18:40:11.000Z" }
+  ], "nextCursor": null }
+```
+
+It takes:
+- `prefix`: optional. Letters, digits and `_`, with or without `#`, in any case: only the hashtags that start with it.
+- `sort`: optional. `recent`, the most recently active first, which is what it is when left out, or `popular`, the one with the most posts first. Anything else gets `400`.
+- `limit`: the most hashtags in the page, from 1 to 1,000. Left out, 200.
+- `cursor`: optional, taken from the previous page's `nextCursor`.
+
+| field | notes |
+| --- | --- |
+| `tags[].tag` | The hashtag, normalised, without `#`. |
+| `tags[].postCount` | How many posts have the hashtag now: a whole number, which is how popular the hashtag is, and what `sort=popular` orders by. It counts the posts anyone can read, each once: one a [repost](#post-repost) gave the hashtag counts, and one a moderator took the hashtag off doesn't. A post that waits in the [moderation queue](#moderation) isn't counted until it's accepted. It's as of the compactor's last run, as feeds are: a new post is counted when it's in feeds, and a deleted one is out of the count by the run that deletes it. A hashtag whose posts are all gone stays in the list, with `0`. |
+| `tags[].lastActiveAt` | When a post was last published or updated under the hashtag, which is what `sort=recent` orders by. |
+| `nextCursor` | What the next request sends as `cursor`, for the page after this one. `null` on the last page. |
+
+Two hashtags that are level, with as many posts or active at the same moment, come in the reverse order of their names.
+
+**Pagination:** the cursor names the last hashtag the page returned, and the next page starts just after it in the order. Send it with the same `sort` and `prefix` as the page it came from. The list is read as it is when each page is asked for, and it changes meanwhile, as posts are published and deleted: a hashtag that moved in the order between two requests can be on both pages, or on neither. A cursor doesn't expire. One that isn't valid, or that came from the list in the other order, gets `400`.
+
+On an instance that had posts before it counted them, the counts are short of those posts until its operator has run the reindex once ([IAC.md](IAC.md#upgrading-to-post-counts)).
 
 ## Search
 
@@ -1902,7 +1933,7 @@ Whatever is compared is put in lowercase first, and its accents are taken off, i
 `type=content` returns the posts that have every word of `q`, newest first, by when they were created: `{ results: [record, ...], nextCursor }`. Each record is shaped as in [`/feed`](#get-feed), with two differences:
 
 - It has no `moderated`, no `listedUnder` and no `repost`. The first two are per hashtag, and a search lists a post under none. A post is found once, as itself and at its own time, however often it was reposted.
-- Its `likes`, `views` and `dislikes` are all the post has now. A feed's are as of the compactor's last run. Being found by a search isn't a [view](#views) of a post.
+- Its `likes`, `views` and `dislikes` are all the post has now. A feed's are as of the compactor's last run, and so is its `commentCount` here as there. Being found by a search isn't a [view](#views) of a post.
 
 What a post is found by:
 
@@ -2031,7 +2062,7 @@ What else to know:
 
 ### `GET /rules`
 
-Gives the server's rules, its minimum age, what it says of content made with generative AI, what it does with post titles, the email address to write to for support, and its modification disclosure. It needs no key, so a client can show all six to someone before they register.
+Gives the server's rules, its minimum age, what it says of content made with generative AI, what it does with post titles, the types of post it takes, how many posts it has, the email address to write to for support, and its modification disclosure. It needs no key, so a client can show all eight to someone before they register.
 
 ```bash
 curl localhost:3000/rules
@@ -2044,6 +2075,8 @@ curl localhost:3000/rules
   "minimumAge": 13,
   "genAi": "disclosure_required",
   "postTitles": "on_required",
+  "postTypes": ["image", "video", "audio", "text", "link"],
+  "postCount": 1284,
   "rules": [
     { "ruleId": "0b7c0f5e-…", "position": 1, "text": "Be kind.", "createdAt": "2026-11-15T14:02:00.000Z", "updatedAt": "2026-11-15T14:02:00.000Z" },
     { "ruleId": "5e1a9d42-…", "position": 2, "text": "No spam.", "createdAt": "2026-11-15T14:03:00.000Z", "updatedAt": "2026-11-15T14:03:00.000Z" }
@@ -2060,6 +2093,8 @@ curl localhost:3000/rules
 | `minimumAge` | The youngest a person may be to use the server, which the server's operator sets (`MINIMUM_AGE`): a number of years, such as `13`. A server whose operator set none gives the string `"All Legal Ages Allowed"` in its place, in the language the request's `Accept-Language` header asks for, so it's always there: a number is an age, and a string is what to show where there is none. The server asks nobody's age and holds nobody to it, and no request changes it. |
 | `genAi` | What the server says of content made with generative AI, which the server's operator sets (`GEN_AI`). It's always there, and one of three: `"disclosure_optional"` (it's allowed, and its author may declare that it was created with AI), which is what a server whose operator set none gives; `"disclosure_required"` (it's allowed, and its author has to declare it); `"not_allowed"` (it isn't allowed). It's the same word in every language, for a client to show in its own. The declaration is the `aiGenerated` a post is sent with ([`POST /store`](#post-store)), and a comment. The server doesn't hold anyone to it yet: whatever it says, a post or a comment is taken with the declaration or without it. No request changes it. |
 | `postTitles` | What the server does with post [titles](#titles), which the server's operator sets (`POST_TITLES`). It's always there, and one of three: `"on_required"` (every post has a title, and one sent without is refused), which is what a server whose operator set none gives; `"on_optional"` (a post has a title or not); `"off"` (no post has a title, and one sent with a title is refused). It's the same word in every language, for a client to show in its own, and to go by before it sends a post. Unlike `genAi`, the server holds every post to it ([`POST /store`](#post-store)). A title is at most 200 characters on every server. No request changes it. |
+| `postTypes` | The [types of post](#post-store) the server takes, which the server's operator sets (`POST_TYPE_TEXT`, `POST_TYPE_IMAGE`, `POST_TYPE_VIDEO`, `POST_TYPE_AUDIO`, `POST_TYPE_LINK`): a list of the ones that are on, of `"image"`, `"video"`, `"audio"`, `"text"` and `"link"`, always in that order. It's always there, and never empty: a server whose operator turned none off gives all five, and one that takes only pictures and links gives `["image", "link"]`. Each is the word a post is sent with as its `type`, the same in every language, for a client to show in its own, and to go by before it sends a post. Like `postTitles`, the server holds every post to it: a post of a type that isn't in the list is refused ([`POST /store`](#post-store)), and a comment comes with an image or a video only where the list has that type. No request changes it. |
+| `postCount` | How many posts the server has: a whole number, and `0` on a server with none. It's always there, and nobody sets it: the server counts them. It counts the posts anyone can read, each once, whatever its type and however many hashtags it has: a [repost](#post-repost) is no post of its own, and the server's entry for a [post on another server](#a-post-on-another-server) is one. A post that waits in the [moderation queue](#moderation) isn't counted until it's accepted. It's as of the compactor's last run, as feeds are: a new post is counted when it's in feeds, and a deleted one is out of the count by the run that deletes it. Each hashtag's own count is in [`GET /tags`](#get-tags). On a server that had posts before it counted them, it's short of those posts until its operator has run the reindex once ([IAC.md](IAC.md#upgrading-to-post-counts)). |
 | `rules` | Every rule, in the order the admins gave them. It's the whole list: there are no pages, and a server has at most 100. `[]` where there are none. |
 | `rules[].createdAt`, `rules[].updatedAt` | When the rule was added, and when its text or its place was last changed. A rule that moved only because another was added, moved or removed keeps its `updatedAt`. |
 
@@ -2253,10 +2288,11 @@ Nothing of it is deleted: it's all shown again when the ban ends. The posts them
 **The user is told.** When a moderator or an admin removes a hashtag from a post, accepts or rejects it in the moderation queue, or deletes it, its publisher gets a [notice](#notices) in their [inbox](#inbox). So does a user who is muted on a hashtag, or whose mute ends, and the author of a comment that is accepted or rejected in the moderation queue, or that someone else deletes.
 
 **What happens to a post.** Every new post and update is checked before the [limit on posts a minute](#limits-on-posts-and-comments). A refused post isn't a post: nothing is stored, and it doesn't count towards the limit.
-1. The post gets a **trust score**, from 0 (not trusted at all) to 100. It starts at 100 and goes through each of the [trust plugins](TRUST_PLUGINS.md) the server runs, which can only lower it. The server comes with three:
+1. The post gets a **trust score**, from 0 (not trusted at all) to 100. It starts at 100 and goes through each of the [trust plugins](TRUST_PLUGINS.md) the server runs, which can only lower it. The server comes with four:
    - `blocked_words`, which every server runs: a post containing a word or phrase on the server's list, or matching one of its patterns, scores 0.
    - `urlhaus`, which is optional and runs only on a server that turns it on (`TRUST_OPTIONAL_PLUGINS=urlhaus`): a post with a link on [URLhaus](https://urlhaus.abuse.ch)'s list of malware URLs scores 0. Every link counts: a link post's URL, and the links written in a text or a caption. The server never follows a link; it looks it up in its own copy of the list.
    - `pdq`, which is optional too (`TRUST_OPTIONAL_PLUGINS=pdq`): an image post with an image whose [PDQ](https://github.com/facebook/ThreatExchange/tree/main/pdq) hash is on the server's list of hashes of known child sexual abuse material scores 0, and the server's admins get a [notice](#an-image-that-matches-the-servers-list). Every image of an [album](#albums) counts, and each frame of an animated one, up to the 32nd. An image the server can't decode, and so can't check, scores one less than `TRUST_SCORE_ALLOW_FROM`. A video has no score from it: where the server [processes videos](#videos), each is checked against the same list once it's decoded, and one that matches is refused then, whatever the thresholds are.
+   - `synthid`, which is optional too (`TRUST_OPTIONAL_PLUGINS=synthid`): an image post with an image that carries a SynthID watermark, which says the image was made with AI, scores one less than `TRUST_SCORE_ALLOW_FROM`, or 0 on a server set to refuse them (`SYNTHID_ACTION=refuse`). Every image of an [album](#albums) counts. The server sends each image to a detector to be checked, and an image the detector couldn't check scores one less than `TRUST_SCORE_ALLOW_FROM` too, unless the server lets those through (`SYNTHID_UNCHECKED=allow`). What the post was sent with as `aiGenerated` changes nothing, unless the server says it does (`SYNTHID_ALLOW_DISCLOSED=true`): on such a server a post declared as created with AI isn't checked, and loses no score for a watermark. A video and an audio file aren't checked.
 2. The score says where the post goes, by two thresholds:
 
    | Score | Where the post goes |
@@ -2273,6 +2309,8 @@ Nothing of it is deleted: it's all shown again when the ban ends. The posts them
 
    With `pdq` turned on, a post with an image that matches its list is refused as well, and the `422` doesn't say why: it has the general message, "this server doesn't trust the post enough to keep it, so it wasn't published". A post with an image the server can't decode is held in the queue (`202`). On a server whose two thresholds are the same, which has no queue, it's refused instead, with "an image of the post couldn't be read to check it, so it wasn't published". While a server that runs `pdq` has no list to check with, because it couldn't read one yet, a post with an image gets `500`.
 
+   With `synthid` turned on, a post with an image that carries a watermark is held in the queue (`202`), and so is one with an image that couldn't be checked for one. On a server whose two thresholds are the same, they're refused instead, and the `422` says which it was: "an image of the post carries a watermark that says it was made with AI, so it wasn't published", or "an image of the post couldn't be checked for a watermark that says it was made with AI, so it wasn't published". A server set to refuse watermarked images answers `422` with the first of the two, as it refuses anything that scores 0.
+
    `TRUST_SCORE_DELETE_BELOW=0` holds posts with a blocked word in the queue instead of refusing them, and `TRUST_SCORE_ALLOW_FROM=101` holds every post. The score is used for this and nothing else, and is kept nowhere but beside a post in the moderation queue.
 3. Each of its hashtags is dropped if its publisher is muted on that hashtag, if a moderator removed that hashtag from this content, or if the post contains a word or phrase on that hashtag's list, or matches one of its patterns.
 4. A post with no hashtag left is refused with `422`, since a post can't go live without one. The response says why each hashtag was dropped:
@@ -2285,7 +2323,7 @@ Nothing of it is deleted: it's all shown again when the ban ends. The posts them
 
 If what's left is exactly the content's hashtags, on a text or link post that's otherwise the same and going where the content already is, nothing is stored and the response is `unchanged: true` (with `removedTags`).
 
-**What happens to a comment.** A [comment](#post-contentcontentidcomments) goes through steps 1 and 2 as a post does: the same plugins score it, and the same two thresholds refuse it (`422`), hold it in the moderation queue (`202`) or publish it (`201`). An [edit](#patch-contentcontentidcommentscommentid) of a comment is scored the same way, on its new text (`200` where a new comment gets `201`). A plugin is told that it's looking at a comment, and on which post ([TRUST_PLUGINS.md](TRUST_PLUGINS.md)), so its refusal can say so: with `urlhaus` turned on, a comment with a listed link gets "the comment has a link that is known to spread malware, so it wasn't published". With `pdq` turned on, the image a comment comes with is checked as a post's images are, when the comment is sent: an edit keeps the comment's file, which isn't checked again. Steps 3 to 5 are about hashtags, which a comment doesn't have: a hashtag's blocked words and mutes don't apply to it. It's checked before the [limit on comments a minute](#limits-on-posts-and-comments), so a refused comment doesn't count towards it.
+**What happens to a comment.** A [comment](#post-contentcontentidcomments) goes through steps 1 and 2 as a post does: the same plugins score it, and the same two thresholds refuse it (`422`), hold it in the moderation queue (`202`) or publish it (`201`). An [edit](#patch-contentcontentidcommentscommentid) of a comment is scored the same way, on its new text (`200` where a new comment gets `201`). A plugin is told that it's looking at a comment, and on which post ([TRUST_PLUGINS.md](TRUST_PLUGINS.md)), so its refusal can say so: with `urlhaus` turned on, a comment with a listed link gets "the comment has a link that is known to spread malware, so it wasn't published". With `pdq` turned on, the image a comment comes with is checked as a post's images are, when the comment is sent: an edit keeps the comment's file, which isn't checked again. With `synthid` turned on it's checked for a watermark the same way, and what holds or refuses the comment says "the comment's image" where a post's says "an image of the post". On a server that leaves alone what is declared as created with AI (`SYNTHID_ALLOW_DISCLOSED=true`), a comment sent with `aiGenerated` isn't checked. Steps 3 to 5 are about hashtags, which a comment doesn't have: a hashtag's blocked words and mutes don't apply to it. It's checked before the [limit on comments a minute](#limits-on-posts-and-comments), so a refused comment doesn't count towards it.
 
 **What happens to a profile.** A bio, links and an avatar go through step 1 as a post does, when the user sets them ([above](#a-users-profile)): the same plugins score them, each told that it's looking at a profile. There's no queue for a profile to wait in, so step 2 has two outcomes: a score of `TRUST_SCORE_ALLOW_FROM` or more saves it, and anything less refuses it (`422`), with nothing saved. A plugin's refusal says it's a profile:
 
@@ -2295,6 +2333,8 @@ If what's left is exactly the content's hashtags, on a text or link post that's 
 | With `urlhaus` turned on, a link, or a bio with a link, that's on its list | "it has a link that is known to spread malware, so it wasn't saved" |
 | With `pdq` turned on, an avatar that matches its list | "this server doesn't trust this enough to show it on a profile, so it wasn't saved", which doesn't say why. The admins get the [notice](#an-image-that-matches-the-servers-list). |
 | With `pdq` turned on, an avatar it can't decode | "the image couldn't be read to check it, so it wasn't saved" |
+| With `synthid` turned on, an avatar that carries a SynthID watermark | "the image carries a watermark that says it was made with AI, so it wasn't saved" |
+| With `synthid` turned on, an avatar that couldn't be checked for one, unless the server lets those through | "the image couldn't be checked for a watermark that says it was made with AI, so it wasn't saved" |
 
 A server that deletes nothing on arrival (`TRUST_SCORE_DELETE_BELOW=0`) refuses these too: what it would hold of a post, it refuses of a profile. Steps 3 to 5 are about hashtags, which a profile doesn't have.
 
@@ -2525,7 +2565,7 @@ An item of either queue looks like this, a post and then a comment (of the moder
 ```json
 { "queue": [
   { "kind": "post", "contentId": "...", "publisher": { "userId": "...", "username": "alice" },
-    "mimeType": "text/plain", "aiGenerated": false, "comments": true,
+    "mimeType": "text/plain", "aiGenerated": false, "comments": true, "commentCount": 0,
     "preview": { "kind": "text", "text": "Free things inside #news" }, "tags": ["news"], "likes": 0, "views": 0, "dislikes": null,
     "createdAt": "2026-11-10T14:02:00.000Z", "updatedAt": "2026-11-10T14:02:00.000Z",
     "text": "Free things inside #news", "trustScore": 40, "queuedAt": "2026-11-10T14:02:00.000Z" },

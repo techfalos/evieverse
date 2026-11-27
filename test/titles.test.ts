@@ -93,6 +93,7 @@ describe('a title', () => {
       mimeType: 'text/plain',
       aiGenerated: false,
       comments: false,
+      commentCount: 0,
       preview: { kind: 'text', text: 'A quiet morning in #news' },
       tags: ['news'],
       likes: 0,

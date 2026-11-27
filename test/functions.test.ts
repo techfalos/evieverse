@@ -431,7 +431,7 @@ describe('Lambda adapter', () => {
     expect(runtime.calls).toEqual([
       {
         path: '/invocation/req-1/error',
-        body: expect.objectContaining({ errorMessage: expect.stringMatching(/^the functions would not start with these settings, so nothing was changed: TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't one of the trust plugins this server was built with: it has blocked_words, pdq, urlhaus/) }),
+        body: expect.objectContaining({ errorMessage: expect.stringMatching(/^the functions would not start with these settings, so nothing was changed: TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't one of the trust plugins this server was built with: it has blocked_words, pdq, synthid, urlhaus/) }),
         errorType: 'Unhandled',
       },
       { path: '/invocation/req-2/response', body: { migrated: true, dialect: 'sqlite' }, errorType: undefined },
@@ -489,7 +489,7 @@ describe('the deploy step', () => {
   it('refuses settings a function would not start with, by name, and changes nothing', async () => {
     const refused: [Record<string, string>, RegExp][] = [
       // A typo in a plugin's name, which only loading the plugins finds.
-      [{ TRUST_OPTIONAL_PLUGINS: 'urlhouse' }, /TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't one of the trust plugins this server was built with: it has blocked_words, pdq, urlhaus/],
+      [{ TRUST_OPTIONAL_PLUGINS: 'urlhouse' }, /TRUST_OPTIONAL_PLUGINS names urlhouse, which isn't one of the trust plugins this server was built with: it has blocked_words, pdq, synthid, urlhaus/],
       [{ TRUST_OPTIONAL_PLUGINS: 'urlhaus' }, /TRUST_OPTIONAL_PLUGINS turns on urlhaus, which needs URLHAUS_AUTH_KEY/],
       // Settings that are refused when they are read.
       [{ TRUST_SCORE_DELETE_BELOW: '80' }, /TRUST_SCORE_DELETE_BELOW can be at most TRUST_SCORE_ALLOW_FROM/],

@@ -40,7 +40,7 @@ curl http://localhost:3000/health         # {"ok":true}
 - It publishes port 3000 and nothing else. The container's Valkey listens inside the container alone, with no password, and the database is a file.
 - The three programs start and end together: Valkey first, then the API, then the compactor. If one of them ends, the container stops the other two and exits with `1`, so a restart policy starts all three again (`restart: unless-stopped`, which this file doesn't set). `docker compose stop` gives them 30 seconds to finish: the requests under way, the compactor's pass, and Valkey writing what it holds.
 - All three write to the container's log: `docker compose -f docker-compose.server.yml logs -f app`.
-- The compactor is also a command inside the container, for what is run by hand: `docker compose -f docker-compose.server.yml exec app compactor --rebuild --once` makes the feed index again from the database and the content store, and `exec app compactor reindex` writes again what search reads.
+- The compactor is also a command inside the container, for what is run by hand: `docker compose -f docker-compose.server.yml exec app compactor --rebuild --once` makes the feed index again from the database and the content store, and `exec app compactor reindex` writes again what search reads, and counts the posts that aren't counted yet.
 - To start over, `docker compose -f docker-compose.server.yml down -v` removes the container and its data.
 
 Without Compose, it's the same image and one volume:
@@ -192,6 +192,16 @@ Every post now counts its views, and its dislikes on an instance that turns them
 - Going back to the version before takes the index made again by that version's compactor (`compactor --rebuild --once`), which writes the old layout. The counts stay in the database.
 - Valkey holds about a third more for the index, 33 bytes for each post under each hashtag where it was 25 ([how much it needs](IAC.md#redis)).
 - Dislikes stay off until `DISLIKES` says otherwise. Views have no setting.
+
+### Upgrading to post counts
+
+The instance now counts its posts, and each hashtag's: [`GET /rules`](API.md#get-rules) gives the first as `postCount`, and [`GET /tags`](API.md#get-tags) gives each hashtag's, can list the hashtags by it, and comes a page at a time. The upgrade is the usual one, `git pull` and `up -d --build`, with nothing to set and one thing to run by hand afterwards:
+
+- The API adds the columns and the table as it starts (migration `0020_post_counts`). Every count starts at 0, whatever posts are there.
+- The compactor counts each post as it writes it out from then on: a new post, an update, and a post whose hashtags a repost or a moderator changed. The posts from before aren't counted until something writes them again.
+- So count those once, after the new containers are up: `exec app compactor reindex`, or `docker compose -f docker-compose.prod.yml exec compactor compactor reindex` in the stack above. It runs beside the API and the compactor, and can be run again: a post that's counted already is left as it is. Until it has run, the counts are short of the posts from before.
+- A client that read `GET /tags` before reads it as it did: the most recently active first, 200 hashtags unless it asks for more. What's new is each hashtag's `postCount` and the list's `nextCursor`.
+- The counts are the new compactor's to keep. A compactor of the version before, run on this database, counts nothing, and a post it deletes stays in the counts ([IAC.md](IAC.md#upgrading-to-post-counts) says how to count again from nothing).
 
 ## Where the files go
 

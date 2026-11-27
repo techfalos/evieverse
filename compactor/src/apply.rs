@@ -1,12 +1,13 @@
 //! Applying the writes that requests committed (`pending_writes`): what writes a post's
 //! bytes, meta file and summary, and a comment, its likes and its image or video.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use evieverse_core::comments::{Comment, Gone, Removal, placeholder};
 use evieverse_core::content::{BytesOwner, ContentMeta};
+use evieverse_core::counts::count_post;
 use evieverse_core::db::{Queries, Value, places};
 use evieverse_core::log;
 use evieverse_core::object::is_not_found;
@@ -132,7 +133,9 @@ struct Applying<'a> {
 ///    what takes a held update out of the feeds, and an entry whose original is gone from its
 ///    own server;
 /// 3. the terms a search finds it by, which are rows of `search_terms` (see `index_content`):
-///    those of the meta file as it is about to be written, withheld or not;
+///    those of the meta file as it is about to be written, withheld or not; and what it
+///    counts for among the server's posts and those of each of its hashtags (see
+///    `count_post`), which is nothing while it is withheld;
 /// 4. its meta file, last, as what it says is there, with its hashtags settled: without the
 ///    ones moderators removed from the content, without the ones of a repost that was removed
 ///    and is yet to be taken off it, and with the ones reposts gave it, whatever the write
@@ -491,6 +494,9 @@ impl Applying<'_> {
         // stops between the two applies the write again. Withheld content has its terms too, and a search leaves it
         // out by its row.
         index_content(db, &post.id, post.created_at, &next, max_keywords(self.deps)).await?;
+        // And what it counts for, among the server's posts and those of each of its hashtags (see `count_post`), as
+        // of the same meta file. Withheld content counts for nothing.
+        count_post(db, &post.id, (!post.withheld()).then_some(next.tags.as_slice()), self.deps.now()).await?;
 
         // The meta file last, as for any write: what it says is there.
         content.put_meta(&next).await?;
@@ -542,7 +548,34 @@ impl Applying<'_> {
     /// as it is: the bucket expired the file, after a week, or somebody deleted it. It is then
     /// published with its text alone, or if the file was all of it, removed as a removal would
     /// remove it, so that nothing waits behind it for good. Either is logged as an error.
+    ///
+    /// The post's number of comments, which feeds give with it, is kept up by the writes
+    /// themselves: each adds to it or takes from it as it changes the store (see
+    /// `CommentStore`). A write that fails, or a run that is killed, may have changed the
+    /// store and not the number, and applied again it finds nothing to add. So the run says
+    /// before the first of a post's puts and removals that they are being made
+    /// (`CommentStore::counting`), and once they are over, counts the post's comments from the
+    /// store if one of them failed, or if a run before it said so and never got this far
+    /// (`CommentStore::counted`). By then no write of the post's comments is under way: they
+    /// are applied here and nowhere else, a post at a time. Likes change nothing of the number.
     async fn apply_comments(&self, post_id: &str, rows: Vec<PendingRow>) -> Result<()> {
+        let comments = &self.deps.comments;
+        let by_comment = self.comment_writes(post_id, rows)?;
+        if !by_comment.values().any(|of| !of.puts.is_empty() || of.removal.is_some()) {
+            return self.write_comments(post_id, &by_comment).await.map(|_| ());
+        }
+        self.lease.check().await?;
+        let stopped = comments.counting(post_id).await?;
+        // A run that fails here leaves what it said, with the rows of what failed: the next run counts.
+        let applied = self.write_comments(post_id, &by_comment).await?;
+        self.lease.check().await?;
+        comments.counted(post_id, stopped || !applied).await
+    }
+
+    /// The pending writes of a post's comments, by comment, in the order the first of each is
+    /// in `rows`. One that names no comment, or is of a kind this compactor doesn't know, is
+    /// logged and left out.
+    fn comment_writes(&self, post_id: &str, rows: Vec<PendingRow>) -> Result<IndexMap<String, CommentWrites>> {
         let log = &self.deps.log;
         let mut by_comment: IndexMap<String, CommentWrites> = IndexMap::new();
         for row in rows {
@@ -576,7 +609,16 @@ impl Applying<'_> {
                 ),
             }
         }
+        Ok(by_comment)
+    }
 
+    /// Makes the writes of a post's comments, in the two passes of `apply_comments`. Returns
+    /// whether every write it made was applied: false if one failed, which may have left the
+    /// store changed and the post's number of comments as it was.
+    async fn write_comments(&self, post_id: &str, by_comment: &IndexMap<String, CommentWrites>) -> Result<bool> {
+        let log = &self.deps.log;
+        // Whether a write failed: of a put, a like or a removal.
+        let failed = Cell::new(false);
         // The comments with a put that isn't written yet: what their replies wait for.
         let unwritten: RefCell<HashSet<&str>> = RefCell::new(HashSet::new());
         // The comments with a write that wasn't applied: their removal waits for the next run, as nothing of a comment
@@ -617,7 +659,7 @@ impl Applying<'_> {
             }
             waiting = rest;
             all_done(ready.into_iter().map(|of| {
-                let (unwritten, stuck, over, lost) = (&unwritten, &stuck, &over, &lost);
+                let (unwritten, stuck, over, lost, failed) = (&unwritten, &stuck, &over, &lost, &failed);
                 async move {
                     let comment_id = of.comment_id.as_str();
                     let outcome = async {
@@ -649,6 +691,7 @@ impl Applying<'_> {
                     match outcome {
                         Err(err) if is_lease_lost(&err) => Err(err),
                         Err(err) => {
+                            failed.set(true);
                             stuck.borrow_mut().insert(comment_id);
                             log.error(
                                 json!({ "err": log::err(&err), "contentId": post_id, "commentId": comment_id }),
@@ -676,7 +719,7 @@ impl Applying<'_> {
             .collect();
         removals.sort_by_key(|of| at(of));
         if removals.is_empty() {
-            return Ok(());
+            return Ok(!failed.get());
         }
         // A reply takes no lock on its post, so one may be under way that read a comment before its removal committed.
         // Once for the post's removals, the run waits for those: each has then committed, and keeps its comment's
@@ -692,14 +735,17 @@ impl Applying<'_> {
             .await;
             match outcome {
                 Err(err) if is_lease_lost(&err) => return Err(err),
-                Err(err) => log.error(
-                    json!({ "err": log::err(&err), "contentId": post_id, "commentId": of.comment_id }),
-                    "could not remove a comment; the next run tries again",
-                ),
+                Err(err) => {
+                    failed.set(true);
+                    log.error(
+                        json!({ "err": log::err(&err), "contentId": post_id, "commentId": of.comment_id }),
+                        "could not remove a comment; the next run tries again",
+                    );
+                }
                 Ok(()) => {}
             }
         }
-        Ok(())
+        Ok(!failed.get())
     }
 
     /// Applies a comment's puts (see `apply_comments`) as one write, of the comment as the

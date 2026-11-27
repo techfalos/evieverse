@@ -31,6 +31,8 @@
     "user.profile_blocked_word": "it contains a word or phrase this server doesn't allow, so it wasn't saved",
     "user.profile_malware_link": "it has a link that is known to spread malware, so it wasn't saved",
     "user.avatar_unreadable": "the image couldn't be read to check it, so it wasn't saved",
+    "user.profile_ai_watermark": "the image carries a watermark that says it was made with AI, so it wasn't saved",
+    "user.profile_image_unchecked": "the image couldn't be checked for a watermark that says it was made with AI, so it wasn't saved",
     "user.avatar_own_only": "you can only change your own avatar",
     "user.avatar_required": "content is required: the image of the avatar",
     "user.avatar_unsupported": "avatars are JPEG, PNG, GIF and WebP images, and the file is none of them",
@@ -238,6 +240,8 @@
     "comment.blocked_word": "the comment contains a word or phrase this server doesn't allow, so it wasn't published",
     "comment.malware_link": "the comment has a link that is known to spread malware, so it wasn't published",
     "comment.image_unreadable": "the comment's image couldn't be read to check it, so it wasn't published",
+    "comment.ai_watermark": "the comment's image carries a watermark that says it was made with AI, so it wasn't published",
+    "comment.image_unchecked": "the comment's image couldn't be checked for a watermark that says it was made with AI, so it wasn't published",
     "comment.rate_limited": {
       "one": "too many comments; try again in {count} second",
       "other": "too many comments; try again in {count} seconds"
@@ -264,6 +268,8 @@
     "moderation.blocked_word": "the post contains a word or phrase this server doesn't allow, so it wasn't published",
     "moderation.malware_link": "the post has a link that is known to spread malware, so it wasn't published",
     "moderation.image_unreadable": "an image of the post couldn't be read to check it, so it wasn't published",
+    "moderation.ai_watermark": "an image of the post carries a watermark that says it was made with AI, so it wasn't published",
+    "moderation.image_unchecked": "an image of the post couldn't be checked for a watermark that says it was made with AI, so it wasn't published",
     "moderation.no_tags_left": "none of the post's hashtags is allowed on it, and a post needs one, so it wasn't published",
     "moderation.not_queued": "the content is not in the moderation queue",
     "moderation.admin_only": "only an admin can do this",

@@ -297,6 +297,10 @@ enum Op {
     MakingLikes { comment_id: String, done: bool },
     #[serde(rename = "comments.removeAll")]
     RemoveAll { post_id: String },
+    #[serde(rename = "comments.counting")]
+    Counting { post_id: String },
+    #[serde(rename = "comments.counted")]
+    Counted { post_id: String, recount: bool },
     #[serde(rename = "summaries.put")]
     PutSummary { summary: Summary },
     #[serde(rename = "summaries.ensureMany")]
@@ -409,6 +413,10 @@ async fn the_stores_hold_what_the_fixture_has_once_they_are_written() {
                 }
             }
             Op::RemoveAll { post_id } => comments.remove_all(&post_id).await.unwrap(),
+            Op::Counting { post_id } => {
+                comments.counting(&post_id).await.unwrap();
+            }
+            Op::Counted { post_id, recount } => comments.counted(&post_id, recount).await.unwrap(),
             Op::PutSummary { summary } => summaries.put(&summary).await.unwrap(),
             Op::EnsureMany { summaries: list } => {
                 let errors = summaries.ensure_many(&list).await.unwrap();
